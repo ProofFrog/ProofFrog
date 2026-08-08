@@ -6802,6 +6802,13 @@ def export_proof_file(proof_path: str) -> str:
         deterministic derivation chain, so that generator's field-walk
         declines here and only the expansion field itself is ev-characterized.
         """
+        if ro_holder_modules:
+            # ROM (_T) cells: strengthening these pairs makes the delegate
+            # FGd init route newly fire on the Random-side mirror with a leg
+            # whose closing smt fails over the RO-carrying bodies (measured:
+            # CG/UG_seedbased_INDCCA_T regress to EC-reject). The _T variants
+            # get their own derivation on the _T front.
+            return None
         if step_a.reduction is None and step_b.reduction is not None:
             game_step, red_step, gtag, rtag = step_a, step_b, "1", "2"
         elif step_b.reduction is None and step_a.reduction is not None:
@@ -6980,6 +6987,435 @@ def export_proof_file(proof_path: str) -> str:
         globs = glob_invariant_conj
         body = " /\\ ".join(conj)
         return f"{globs} /\\ {body}" if globs else body
+
+    def _pe_orient(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> tuple[frog_ast.Step, frog_ast.Step, int] | None:
+        """(game_step, red_step, game_index) for a game~reduction pair."""
+        if step_a.reduction is None and step_b.reduction is not None:
+            return step_a, step_b, 0
+        if step_b.reduction is None and step_a.reduction is not None:
+            return step_b, step_a, 1
+        return None
+
+    def _pe_fresh(name: str, taken: set[str]) -> str:
+        if name not in taken:
+            return name
+        i = 0
+        while f"{name}{i}" in taken:
+            i += 1
+        return f"{name}{i}"
+
+    def _pe_scheme_pmap(game_step: frog_ast.Step) -> dict[str, str]:
+        """The concrete scheme's FORMAL params -> applied instances."""
+        if ec_scheme is None:
+            return {}
+        expr = pt.last_module_arg(resolver.resolve(game_step).module_expr)
+        inner = expr[expr.find("(") + 1 : expr.rfind(")")] if "(" in expr else ""
+        return {
+            p.name: pt.module_base_name(a)
+            for p, a in zip(ec_scheme.params, cc_split_args(inner))
+        }
+
+    def _pe_flatten_scheme(
+        proc_name: str, depth: int = 0
+    ) -> list[ec_ast.EcStmt] | None:
+        """The rendered concrete scheme proc's exec statements with same-module
+        calls spliced in (one proc body per call; depth-capped)."""
+        if ec_scheme is None or depth > 3:
+            return None
+        proc = next((p for p in ec_scheme.procs if p.name == proc_name), None)
+        if proc is None:
+            return None
+        out: list[ec_ast.EcStmt] = []
+        for st in proc.body:
+            if isinstance(st, (ec_ast.VarDecl, ec_ast.Return)):
+                continue
+            if isinstance(st, ec_ast.Call) and "." not in st.callee:
+                sub = _pe_flatten_scheme(st.callee, depth + 1)
+                if sub is None:
+                    return None
+                out.extend(sub)
+            else:
+                out.append(st)
+        return out
+
+    def _pe_backbone(
+        stmts: Sequence[ec_ast.EcStmt], pmap: dict[str, str]
+    ) -> list[tuple[str, ...]] | None:
+        out: list[tuple[str, ...]] = []
+        for st in stmts:
+            if isinstance(st, ec_ast.Sample):
+                out.append(("rnd",))
+            elif isinstance(st, ec_ast.Call):
+                mod, dot, meth = st.callee.partition(".")
+                if not dot:
+                    return None
+                out.append(("call", pmap.get(mod, mod), meth))
+            elif not isinstance(st, ec_ast.Assign):
+                return None
+        return out
+
+    def _pe_wrapper_module(game_step: frog_ast.Step) -> ec_ast.Module | None:
+        """The RENDERED theory-wrapper module the lemma actually runs on
+        (``engine._get_game_ast`` returns the INLINED flat game, whose locals
+        and statement shape are the canonicalized ones -- wrong for a tactic
+        against the raw wrapper)."""
+        base = pt.module_base_name(resolver.resolve(game_step).module_expr)
+        wname = base.rpartition(".")[2]
+        return next(
+            (
+                d
+                for lst in (theory_game_decls, foreign_game_decls)
+                for d in lst
+                if isinstance(d, ec_ast.Module) and d.name == wname
+            ),
+            None,
+        )
+
+    def _prg_expansion_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> list[str] | None:
+        """The COMPLETE init tactic for the PRG-expansion game~R_PRG(Real)
+        pair (seedbased ``hop_0_initialize``), or ``None`` off-shape.
+
+        Validated on the real CG export (probe ``c303_h0i``, EXIT 0): identity
+        ``rnd`` on the two seed draws, a two-sided ``G.evaluate`` det seam
+        whose invariant carries the PARAM-BIND equality (``seed0 = seed`` --
+        the game's derive param is renamed by ``inline *`` and the absorbed
+        bind must be restated or the final ``/#`` cannot chain the dk field
+        back to the ev facts), then the matched call/sample ladder. The
+        Random-side mirror (hop_23) declines on the backbone gate: its
+        reduction dropped the dead KDF chain the game still runs.
+        """
+        if _prg_expansion_game_coupling(step_a, step_b) is None:
+            return None
+        orient = _pe_orient(step_a, step_b)
+        if orient is None or orient[2] != 0 or ec_scheme is None:
+            return None  # game on the right is the (declining) Random mirror
+        game_step, red_step, _gi = orient
+        assert red_step.reduction is not None
+        red_mod = next(
+            (
+                d
+                for d in ec_reductions
+                if isinstance(d, ec_ast.Module) and d.name == red_step.reduction.name
+            ),
+            None,
+        )
+        if red_mod is None:
+            return None
+        red_init = next((p for p in red_mod.procs if p.name == "initialize"), None)
+        if red_init is None:
+            return None
+        red_exec = [
+            st
+            for st in red_init.body
+            if not isinstance(st, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+        # -- challenger / det names (the coupling generator already gated) ----
+        r_call = cast(ec_ast.Call, red_exec[0])
+        # pylint: disable=protected-access
+        chal_ast = engine._get_game_ast(red_step.challenger, None)
+        # pylint: enable=protected-access
+        if chal_ast is None:
+            return None
+        meth_name = r_call.callee.partition(".")[2]
+        cm = next(
+            (
+                x
+                for x in chal_ast.methods
+                if x.signature.name.lower() == meth_name.lower()
+            ),
+            None,
+        )
+        if cm is None:
+            return None
+        csts = list(cm.block.statements)
+        ret = cast(frog_ast.ReturnStatement, csts[1]).expression
+        det_meth = cast(
+            frog_ast.FieldAccess, cast(frog_ast.FuncCall, ret).func
+        ).name.lower()
+        chal_expr = pt.last_module_arg(resolver.resolve(red_step).module_expr)
+        det_mod = pt.module_base_name(pt.last_module_arg(chal_expr))
+        det_alias = clone_alias_by_module.get(det_mod)
+        if det_alias is None:
+            return None
+        # -- backbone match: flattened game init vs the reduction's replay ----
+        pmap_s = _pe_scheme_pmap(game_step)
+        pmap_r = _module_pmap(red_mod, resolver.resolve(red_step).module_expr)
+        wmod = _pe_wrapper_module(game_step)
+        if wmod is None or not wmod.params:
+            return None
+        w_init = next((pr for pr in wmod.procs if pr.name == "initialize"), None)
+        if w_init is None:
+            return None
+        scheme_formal = wmod.params[0].name
+        g_flat: list[ec_ast.EcStmt] = []
+        g_locals = {d.name for d in w_init.body if isinstance(d, ec_ast.VarDecl)}
+        for stmt in w_init.body:
+            if isinstance(stmt, (ec_ast.VarDecl, ec_ast.Return, ec_ast.Assign)):
+                continue
+            if isinstance(stmt, ec_ast.Sample):
+                g_flat.append(stmt)
+            elif isinstance(stmt, ec_ast.Call):
+                mod, dot, meth = stmt.callee.partition(".")
+                if not dot or mod != scheme_formal:
+                    return None
+                sub = _pe_flatten_scheme(meth)
+                if sub is None:
+                    return None
+                g_flat.extend(sub)
+            else:
+                return None
+        gb = _pe_backbone(g_flat, pmap_s)
+        r_tail_bb = _pe_backbone(red_exec[1:], pmap_r)
+        if gb is None or r_tail_bb is None:
+            return None
+        # the reduction's chal call expands to [rnd; evaluate-call]
+        rb = [("rnd",), ("call", det_mod, det_meth)] + r_tail_bb
+        if gb != rb:
+            return None
+        # -- inline names ----------------------------------------------------
+        # the wrapper's FIRST scheme call names the keygen-role proc
+        first_call = next(
+            (st for st in w_init.body if isinstance(st, ec_ast.Call)), None
+        )
+        if first_call is None:
+            return None
+        kg_proc = next(
+            (
+                p
+                for p in ec_scheme.procs
+                if p.name == first_call.callee.partition(".")[2]
+            ),
+            None,
+        )
+        # the derive-role proc = the target of keygen's same-module call
+        inner_call = (
+            next(
+                (
+                    st
+                    for st in kg_proc.body
+                    if isinstance(st, ec_ast.Call) and "." not in st.callee
+                ),
+                None,
+            )
+            if kg_proc is not None
+            else None
+        )
+        dkp_proc = (
+            next((p for p in ec_scheme.procs if p.name == inner_call.callee), None)
+            if inner_call is not None
+            else None
+        )
+        if kg_proc is None or dkp_proc is None:
+            return None
+        g_seed_raw = next(
+            (s.var for s in kg_proc.body if isinstance(s, ec_ast.Sample)), None
+        )
+        if g_seed_raw is None or len(dkp_proc.params) != 1:
+            return None
+        kg_locals = {d.name for d in kg_proc.body if isinstance(d, ec_ast.VarDecl)}
+        g_seed = _pe_fresh(g_seed_raw, g_locals)
+        seed0 = _pe_fresh(dkp_proc.params[0].name, g_locals | kg_locals | {g_seed})
+        dkp_exec = [
+            st
+            for st in dkp_proc.body
+            if not isinstance(st, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+        if not isinstance(dkp_exec[0], ec_ast.Call) or dkp_exec[0].args.strip() != (
+            dkp_proc.params[0].name
+        ):
+            return None
+        g_sf = _pe_fresh(dkp_exec[0].var, g_locals | kg_locals | {g_seed, seed0})
+        r_locals = {d.name for d in red_init.body if isinstance(d, ec_ast.VarDecl)}
+        r_s = _pe_fresh(
+            cast(frog_ast.Variable, cast(frog_ast.Sample, csts[0]).var).name, r_locals
+        )
+        red_base = red_mod.name
+        r_field = r_call.var
+        ev = f"{det_alias}.ev_{det_meth}"
+        det_ax = f"{det_mod}_{det_meth}_det"
+        globs = glob_invariant_conj
+        lines = [
+            "inline *.",
+            f"seq 1 1 : ({globs} /\\ {g_seed}{{1}} = {r_s}{{2}}).",
+            "+ by rnd; skip => />.",
+            f"seq 2 2 : ({globs} /\\ {g_sf}{{1}} = {ev} ({g_seed}{{1}})"
+            f" /\\ {red_base}.{r_field}{{2}} = {ev} ({g_seed}{{1}})"
+            f" /\\ {seed0}{{1}} = {g_seed}{{1}}"
+            f" /\\ {g_seed}{{1}} = {r_s}{{2}}).",
+            "+ wp.",
+            f"  exists* (glob {det_mod}){{1}}, {g_seed}{{1}}; elim* => gg1 t1.",
+            f"  call{{1}} ({det_ax} gg1 t1).",
+            f"  exists* (glob {det_mod}){{2}}, {r_s}{{2}}; elim* => gg2 t2.",
+            f"  call{{2}} ({det_ax} gg2 t2).",
+            "  wp; skip => /#.",
+        ]
+        for st in reversed(red_exec[1:]):
+            if isinstance(st, ec_ast.Call):
+                lines.append("wp; call (_: true).")
+            elif isinstance(st, ec_ast.Sample):
+                lines.append("wp; rnd.")
+        lines.append("wp; skip => /#.")
+        return lines
+
+    def _prg_expansion_decaps_walk(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> dict[str, list[str]] | None:
+        """The PRG-expansion ``decaps`` consumer: an ALL-ONE-SIDED det walk on
+        the raw inlined bodies (validated: probe ``c303_h0d``, EXIT 0; deleted
+        det step REJECTED). Every call in both bodies is det-licensed, so each
+        gets a forward one-sided ``seq`` with its ``ev_`` fact and the final
+        ``/#`` closes the two pure ev-term chains -- order-independent, which
+        is what dissolves the canonicalization-moved same-module NG pair no
+        EC ``swap`` could align. Works for BOTH orientations (hop_0 and the
+        hop_23 Random mirror share the decaps bodies)."""
+        if _prg_expansion_game_coupling(step_a, step_b) is None:
+            return None
+        orient = _pe_orient(step_a, step_b)
+        if orient is None or ec_scheme is None:
+            return None
+        game_step, red_step, gi = orient
+        g_side, r_side = gi + 1, 2 - gi
+        assert red_step.reduction is not None
+        red_mod = next(
+            (
+                d
+                for d in ec_reductions
+                if isinstance(d, ec_ast.Module) and d.name == red_step.reduction.name
+            ),
+            None,
+        )
+        if red_mod is None:
+            return None
+        # -- the game side: rendered scheme decaps with inline renames --------
+        wmod = _pe_wrapper_module(game_step)
+        if wmod is None:
+            return None
+        w_dec = next((pr for pr in wmod.procs if pr.name == "decaps"), None)
+        sd = next((p for p in ec_scheme.procs if p.name == "decaps"), None)
+        if w_dec is None or sd is None:
+            return None
+        caller: set[str] = {p.name for p in w_dec.params}
+        caller |= {d.name for d in w_dec.body if isinstance(d, ec_ast.VarDecl)}
+        ren: dict[str, str] = {}
+        taken = set(caller)
+        for prm in sd.params:
+            ren[prm.name] = _pe_fresh(prm.name, taken)
+            taken.add(ren[prm.name])
+        for d in sd.body:
+            if isinstance(d, ec_ast.VarDecl):
+                ren[d.name] = _pe_fresh(d.name, taken)
+                taken.add(ren[d.name])
+
+        def _r(text: str) -> str:
+            return re.sub(
+                r"[A-Za-z_]\w*", lambda m: ren.get(m.group(0), m.group(0)), text
+            )
+
+        g_stmts: list[ec_ast.EcStmt] = []
+        for st in sd.body:
+            if isinstance(st, (ec_ast.VarDecl, ec_ast.Return)):
+                continue
+            if isinstance(st, ec_ast.Call):
+                g_stmts.append(ec_ast.Call(_r(st.var), st.callee, _r(st.args)))
+            elif isinstance(st, ec_ast.Assign):
+                g_stmts.append(ec_ast.Assign(_r(st.var), _r(st.rhs)))
+            else:
+                return None
+        # -- the reduction side: rendered else-branch minus its re-slices -----
+        rd = next((p for p in red_mod.procs if p.name == "decaps"), None)
+        if rd is None:
+            return None
+        rbody = [
+            st for st in rd.body if not isinstance(st, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+        if len(rbody) != 1 or not isinstance(rbody[0], ec_ast.If):
+            return None
+        r_else = [st for st in rbody[0].else_body if not isinstance(st, ec_ast.VarDecl)]
+        n_slice = 0
+        for st in r_else:
+            if (
+                isinstance(st, ec_ast.Assign)
+                and st.rhs.split()[:1]
+                and st.rhs.split()[0].startswith("slice_")
+            ):
+                n_slice += 1
+            else:
+                break
+        r_stmts = r_else[n_slice:]
+        # drop the trailing Some-wrap assigns (handled by the final wp)
+        while r_stmts and isinstance(r_stmts[-1], ec_ast.Assign):
+            r_stmts = r_stmts[:-1]
+        while g_stmts and isinstance(g_stmts[-1], ec_ast.Assign):
+            g_stmts = g_stmts[:-1]
+        # -- emit the walk ---------------------------------------------------
+        pmap_s = _pe_scheme_pmap(game_step)
+        pmap_r = _module_pmap(red_mod, resolver.resolve(red_step).module_expr)
+        all_vars = {ren.get(k, k) for k in ren} | set(taken)
+        r_vars = {d.name for d in rd.body if isinstance(d, ec_ast.VarDecl)} | {
+            p.name for p in rd.params
+        }
+
+        def _tag(expr: str, side: int, vs: set[str]) -> str:
+            return re.sub(
+                r"[A-Za-z_]\w*",
+                lambda m: (
+                    f"{m.group(0)}{{{side}}}" if m.group(0) in vs else m.group(0)
+                ),
+                expr,
+            )
+
+        lines = [
+            "inline *.",
+            "if.",
+            "+ move => &1 &2 /#.",
+            "+ by wp; skip => /#.",
+            "sp.",
+        ]
+        ctr = 0
+        for side, stmts, pmap, vs in (
+            (g_side, g_stmts, pmap_s, all_vars),
+            (r_side, r_stmts, pmap_r, r_vars),
+        ):
+            ga, gb2 = ("1", "0") if side == 1 else ("0", "1")
+            for st in stmts:
+                if isinstance(st, ec_ast.Assign):
+                    lines.append(
+                        f"seq {ga} {gb2} : (#pre /\\ {st.var}{{{side}}} ="
+                        f" ({_tag(st.rhs, side, vs)}))."
+                    )
+                    lines.append("+ wp; skip => /#.")
+                    continue
+                call = cast(ec_ast.Call, st)
+                mod, dot, meth = call.callee.partition(".")
+                if not dot:
+                    return None
+                inst = pmap.get(mod, mod)
+                alias = clone_alias_by_module.get(inst)
+                if alias is None or meth not in det_methods_by_module.get(inst, set()):
+                    return None
+                args = cc_split_args(call.args) if call.args.strip() else []
+                targs = [f"({_tag(a, side, vs)})" for a in args]
+                ev_expr = f"{alias}.ev_{meth}" + "".join(f" {a}" for a in targs)
+                binders = [f"pg{ctr}"] + [f"pa{ctr}_{k}" for k in range(len(args))]
+                cap = ", ".join(
+                    [f"(glob {inst}){{{side}}}"]
+                    + [f"{_tag(a, side, vs)}" for a in args]
+                )
+                lines.append(
+                    f"seq {ga} {gb2} : (#pre /\\ {call.var}{{{side}}} = {ev_expr})."
+                )
+                lines.append(
+                    f"+ exists* {cap}; elim* => {' '.join(binders)}. "
+                    f"call{{{side}}} ({inst}_{meth}_det {' '.join(binders)});"
+                    " skip => /#."
+                )
+                ctr += 1
+        lines.append("wp; skip => /#.")
+        return {"decaps": lines}
 
     def _keygenequiv_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
         step_a: frog_ast.Step, step_b: frog_ast.Step
@@ -8757,6 +9193,13 @@ def export_proof_file(proof_path: str) -> str:
         # scheme key; the delegating reduction holds it decomposed under
         # different field names). Tried before the composite path, which would
         # otherwise emit ``Game.<reduction-field>`` (a nonexistent field).
+        # PRG-expansion game~R_PRG(Real) pair (seedbased hop_0/hop_23) --
+        # BEFORE the packed path, which otherwise claims these pairs with a
+        # ctStar-only coupling. Its gates exclude every pair packed serves
+        # elsewhere (challenger must be [Sample; Return F(it)]).
+        prg_expansion = _prg_expansion_game_coupling(step_a, step_b)
+        if prg_expansion is not None:
+            return prg_expansion
         packed_coupling = _packed_decomposition_coupling(step_a, step_b)
         if packed_coupling is not None:
             return packed_coupling
@@ -8772,10 +9215,6 @@ def export_proof_file(proof_path: str) -> str:
         seed_split_coupling = _seed_split_pair_coupling(step_a, step_b)
         if seed_split_coupling is not None:
             return seed_split_coupling
-        # PRG-expansion game~R_PRG(Real) pair (seedbased hop_0/hop_23).
-        prg_expansion = _prg_expansion_game_coupling(step_a, step_b)
-        if prg_expansion is not None:
-            return prg_expansion
 
         # Wall-7 composite coupling: when one side is a field-holding delegating
         # reduction, the single live-field equality cannot bridge the two
@@ -11843,6 +12282,10 @@ def export_proof_file(proof_path: str) -> str:
             # ``None`` off-shape, so every other init is byte-identical.
             if reprogram_override is None:
                 reprogram_override = _seed_split_pair_init_tac(step_a, step_b)
+            # PRG-expansion hop_0 initialize (seedbased): identity rnd +
+            # two-sided evaluate det seam. ``None`` off-shape.
+            if reprogram_override is None:
+                reprogram_override = _prg_expansion_init_tac(step_a, step_b)
             # Same-backbone / different-LAYOUT hop (HON_BIND hop_4 / hop_8
             # ``initialize``): batch the interleaved side, then peel. ``None``
             # off-shape, and it declines outright when both sides are already
@@ -11897,6 +12340,7 @@ def export_proof_file(proof_path: str) -> str:
                     or _kdf_substitution_decaps_walk_tacs(step_a, step_b)
                     or _keyed_reprogram_decaps_walk(step_a, step_b, _i)
                     or _seed_split_pair_decaps_walk(step_a, step_b)
+                    or _prg_expansion_decaps_walk(step_a, step_b)
                 ),
                 # The OUTER hop lemma's glob set (see ``glob_invariant_conj``).
                 # The chain coupling must match it exactly -- see the gparams

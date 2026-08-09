@@ -8338,7 +8338,7 @@ def export_proof_file(proof_path: str) -> str:
         for s in r_body[1 : 1 + spec["n_destr"]]:
             a = cast(ec_ast.Assign, s)
             k = int(a.rhs.split(".`")[1])
-            if a.var == spec["r_samp_field"] or k > len(ret_comps):
+            if a.var == spec.get("r_samp_field") or k > len(ret_comps):
                 continue
             src_local = rmapn.get(ret_comps[k - 1], ret_comps[k - 1])
             if src_local in c_trace:
@@ -8497,6 +8497,614 @@ def export_proof_file(proof_path: str) -> str:
             1 for s in r_tail[: r_tail.index(r_tc[-1])] if isinstance(s, ec_ast.Assign)
         )
         lines.append(f"sp {_prf_pair(g_a, r_a, gtag)}.")
+        lines += ["wp.", "call (_: true).", "skip => /#."]
+        return {"decaps": lines}
+
+    def _c2pri_seam_spec(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> dict[str, Any] | None:
+        """Detect the C2PRI (ciphertext-second-preimage) SEAM between a plain
+        hybrid game and a reduction over a submit-oracle challenger (CK's
+        hop_14/hop_21), or ``None`` off-shape.
+
+        The reduction's challenger runs the first KEM's keygen + encaps
+        (SAMPLE-FREE), holds its decaps key / challenge ciphertext / challenge
+        secret as own state, returns them as a 4-tuple the reduction
+        destructures, and exposes a ``submit`` oracle that RE-DECAPSULATES a
+        queried ciphertext and compares against the stored secret. Both
+        sides' ``decaps`` carry the implicit-rejection collision split; the
+        game tests the predicate directly where the reduction forwards to
+        ``submit``. Derivation: probe c337, EXIT 0."""
+        if step_a.reduction is None and step_b.reduction is not None:
+            gi, ri = 0, 1
+        elif step_b.reduction is None and step_a.reduction is not None:
+            gi, ri = 1, 0
+        else:
+            return None
+        steps = (step_a, step_b)
+        game_step, red_step = steps[gi], steps[ri]
+        assert red_step.reduction is not None
+        rmod = next(
+            (
+                d
+                for d in ec_reductions
+                if isinstance(d, ec_ast.Module) and d.name == red_step.reduction.name
+            ),
+            None,
+        )
+        if rmod is None:
+            return None
+        g_expr = resolver.resolve(game_step).module_expr
+        gmod = _prf_rendered_game(pt.module_base_name(g_expr).rpartition(".")[2])
+        if gmod is None:
+            return None
+        red_expr = resolver.resolve(red_step).module_expr
+        chal_expr = pt.last_module_arg(red_expr)
+        chal_path = pt.module_base_name(chal_expr)
+        if chal_expr == red_expr or "." not in chal_path:
+            return None
+        cmod = next(
+            (
+                d
+                for lst in (theory_game_decls, foreign_game_decls)
+                for d in lst
+                if isinstance(d, ec_ast.Module)
+                and d.name == chal_path.rpartition(".")[2]
+            ),
+            None,
+        )
+        if cmod is None or not cmod.module_vars:
+            return None
+        c_init = next((p for p in cmod.procs if p.name == "initialize"), None)
+        c_sub = next((p for p in cmod.procs if p.name == "submit"), None)
+        if c_init is None or c_sub is None:
+            return None
+        c_body = [
+            s for s in c_init.body if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+        if any(isinstance(s, ec_ast.Sample) for s in c_body) or (
+            len([s for s in c_body if isinstance(s, ec_ast.Call)]) != 2
+        ):
+            return None
+        r_init = next((p for p in rmod.procs if p.name == "initialize"), None)
+        if r_init is None:
+            return None
+        r_body = [
+            s for s in r_init.body if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+        r_chal = rmod.params[-1].name if rmod.params else None
+        if (
+            not r_body
+            or r_chal is None
+            or not isinstance(r_body[0], ec_ast.Call)
+            or r_body[0].callee != f"{r_chal}.initialize"
+            or r_body[0].args.strip()
+        ):
+            return None
+        tup = r_body[0].var
+        r_fields = {v.name: v.type.text for v in rmod.module_vars}
+        n_destr = 0
+        for s in r_body[1:]:
+            if (
+                isinstance(s, ec_ast.Assign)
+                and s.rhs.startswith(f"{tup}.`")
+                and s.var in r_fields
+            ):
+                n_destr += 1
+            else:
+                break
+        if n_destr == 0:
+            return None
+        # the submit body: refusal + a re-decapsulation compared to the
+        # stored secret (the walk's rcondf + det-pin depend on this shape)
+        s_body = [
+            s for s in c_sub.body if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+        if (
+            len(s_body) != 1
+            or not isinstance(s_body[0], ec_ast.If)
+            or not any(isinstance(s, ec_ast.Call) for s in s_body[0].else_body)
+        ):
+            return None
+
+        # both sides' decaps must carry the collision split with a fresh draw
+        def _has_collision_split(mod: ec_ast.Module) -> bool:
+            dec = next((p for p in mod.procs if p.name == "decaps"), None)
+            if dec is None:
+                return False
+            body = [
+                s
+                for s in dec.body
+                if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+            ]
+            if len(body) != 1 or not isinstance(body[0], ec_ast.If):
+                return False
+            inner = next(
+                (s for s in body[0].else_body if isinstance(s, ec_ast.If)), None
+            )
+            if inner is None:
+                return False
+            deep = next((s for s in inner.then_body if isinstance(s, ec_ast.If)), None)
+            return deep is not None and any(
+                isinstance(s, ec_ast.Sample) for s in deep.then_body
+            )
+
+        if not _has_collision_split(gmod) or not _has_collision_split(rmod):
+            return None
+        g_fields = {v.name: v.type.text for v in gmod.module_vars}
+        return {
+            "gi": gi,
+            "gmod": gmod,
+            "rmod": rmod,
+            "r_chal": r_chal,
+            "chal_expr": chal_expr,
+            "chal_path": chal_path,
+            "cmod": cmod,
+            "c_body": c_body,
+            "c_sub": c_sub,
+            "n_destr": n_destr,
+            "r_fields": r_fields,
+            "g_fields": g_fields,
+            "g_body": [
+                s
+                for s in next(p for p in gmod.procs if p.name == "initialize").body
+                if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+            ],
+            "r_body": r_body,
+        }
+
+    def _c2pri_pair_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
+        """The cross-side conjuncts the C2PRI seam needs (probe c337): every
+        reduction field paired to the game's SAME-NAME field, or -- for the
+        challenger-destructured split key -- to the same-typed component of a
+        game product field (declaration-ordered occurrence allocation, fail
+        closed on exhaustion). ``""`` off-shape."""
+        spec = _c2pri_seam_spec(step_a, step_b)
+        if spec is None:
+            return ""
+        gtag, rtag = str(spec["gi"] + 1), str(2 - spec["gi"])
+        g_base, r_base = spec["gmod"].name, spec["rmod"].name
+        g_fields: dict[str, str] = spec["g_fields"]
+        conj: list[str] = []
+        used: set[tuple[str, int]] = set()
+        for rf, rty in spec["r_fields"].items():
+            if rf in g_fields and g_fields[rf] == rty:
+                conj.append(f"{r_base}.{rf}{{{rtag}}} = {g_base}.{rf}{{{gtag}}}")
+                continue
+            hit = None
+            for gf, gty in g_fields.items():
+                parts = [p.strip() for p in gty.split(" * ")]
+                if len(parts) < 2:
+                    continue
+                for k, p in enumerate(parts, start=1):
+                    if p == rty and (gf, k) not in used:
+                        hit = (gf, k)
+                        break
+                if hit:
+                    break
+            if hit is not None:
+                used.add(hit)
+                conj.append(
+                    f"{r_base}.{rf}{{{rtag}}} ="
+                    f" {g_base}.{hit[0]}{{{gtag}}}.`{hit[1]}"
+                )
+        return " /\\ ".join(conj)
+
+    def _c2pri_seam_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> list[str] | None:
+        """The C2PRI seam ``initialize``: like the INDCCA-Random init but the
+        challenger is SAMPLE-FREE (kg + encaps only) and the paired challenge
+        draw is a plain identity ``rnd`` on both sides; the tail is the 1:1
+        encode/KDF couple (identical chains)."""
+        spec = _c2pri_seam_spec(step_a, step_b)
+        if spec is None:
+            return None
+        gi = spec["gi"]
+        gtag, rtag = str(gi + 1), str(2 - gi)
+        gmod, rmod = spec["gmod"], spec["rmod"]
+        qg, qr = _prf_qualify(gmod, gtag), _prf_qualify(rmod, rtag)
+        g_body = spec["g_body"]
+        g_flds = {v.name for v in gmod.module_vars}
+        gs_i = next(
+            (
+                i
+                for i, s in enumerate(g_body)
+                if isinstance(s, ec_ast.Sample) and s.var in g_flds
+            ),
+            None,
+        )
+        if gs_i is None:
+            return None
+        n_inl = len(spec["c_body"]) + 1
+        n_destr = spec["n_destr"]
+        rest = spec["r_body"][1 + n_destr :]
+        r_flds = {v.name for v in rmod.module_vars}
+        rs_i = next(
+            (
+                i
+                for i, s in enumerate(rest)
+                if isinstance(s, ec_ast.Sample) and s.var in r_flds
+            ),
+            None,
+        )
+        if rs_i is None:
+            return None
+        # rename the challenger body against the reduction's locals; resolve
+        # its callees through its own param map
+        formals = [p.name for p in spec["cmod"].params]
+        inner = spec["chal_expr"]
+        oi = inner.find("(")
+        actuals = (
+            [a.strip() for a in inner[oi + 1 : inner.rfind(")")].split(",")]
+            if oi != -1
+            else []
+        )
+        pmap = dict(zip(formals, actuals))
+        cf = {v.name for v in spec["cmod"].module_vars}
+        chal_ref = spec["chal_path"]
+        taken = {
+            d.name for p in rmod.procs for d in p.body if isinstance(d, ec_ast.VarDecl)
+        }
+
+        def _qc(v: str) -> str:
+            return f"{chal_ref}.{v}{{{rtag}}}" if v in cf else f"{v}{{{rtag}}}"
+
+        c_renamed: list[ec_ast.EcStmt] = []
+        ren: dict[str, str] = {}
+
+        def _rn(txt: str) -> str:
+            return re.sub(r"\b(\w+)\b", lambda m: ren.get(m.group(1), m.group(1)), txt)
+
+        for s in spec["c_body"]:
+            v = getattr(s, "var", "")
+            nv = v if v in cf else _irs_fresh(v, taken)
+            if nv != v:
+                taken.add(nv)
+            if isinstance(s, ec_ast.Call):
+                head, _, meth = s.callee.partition(".")
+                c_renamed.append(
+                    ec_ast.Call(nv, f"{pmap.get(head, head)}.{meth}", _rn(s.args))
+                )
+            elif isinstance(s, ec_ast.Assign):
+                c_renamed.append(ec_ast.Assign(nv, _rn(s.rhs)))
+            else:
+                return None
+            if v and nv != v:
+                ren[v] = nv
+        # the reduction's own block before its sample (the second-KEM keygen/
+        # encaps run), swapped ABOVE the inlined challenger material so both
+        # sides interleave the same way -- computed like the IRS init
+        # the challenger wraps the FIRST KEM here, so the game's
+        # interleaving is [chal-kg, own-kg, chal-enc, own-enc]: ONE block
+        # swap moves the reduction's own keygen run (the call plus its
+        # projections) up between the challenger's keygen run and its encaps
+        chal_kg_run = 1
+        for s in spec["c_body"][1:]:
+            if isinstance(s, ec_ast.Assign):
+                chal_kg_run += 1
+            else:
+                break
+        own_start = n_inl + n_destr + 1
+        own_kg_len = 1
+        for s in rest[1:rs_i]:
+            if isinstance(s, ec_ast.Assign):
+                own_kg_len += 1
+            else:
+                break
+        lines = [
+            "inline *.",
+            f"inline{{{rtag}}} {spec['chal_expr']}.initialize.",
+            f"swap{{{rtag}}} [{own_start}..{own_start + own_kg_len - 1}]"
+            f" -{own_start - chal_kg_run - 1}.",
+        ]
+        # pair game calls against [own-block calls + chal calls] in the
+        # game's interleaving
+        rk = [s for s in rest[:rs_i] if isinstance(s, ec_ast.Call)]
+        ck = [s for s in c_renamed if isinstance(s, ec_ast.Call)]
+        conj = [glob_invariant_conj] if glob_invariant_conj else []
+        for gc in (s for s in g_body[:gs_i] if isinstance(s, ec_ast.Call)):
+            if rk and rk[0].callee == gc.callee:
+                conj.append(f"{qg(gc.var)} = {qr(rk.pop(0).var)}")
+            elif ck and ck[0].callee == gc.callee:
+                conj.append(f"{qg(gc.var)} = {_qc(ck.pop(0).var)}")
+            else:
+                return None
+        if rk or ck:
+            return None
+        for s in g_body[:gs_i]:
+            if isinstance(s, ec_ast.Assign) and s.var not in g_flds:
+                rhs = re.sub(
+                    r"\b(\w+)\b",
+                    lambda m: (
+                        f"{gmod.name}.{m.group(1)}"
+                        if m.group(1) in g_flds
+                        else m.group(1)
+                    ),
+                    s.rhs,
+                )
+                conj.append(f"{s.var}{{{gtag}}} = {rhs}{{{gtag}}}")
+        for s in rest[:rs_i]:
+            if isinstance(s, ec_ast.Assign) and s.var not in r_flds:
+                rhs = re.sub(
+                    r"\b(\w+)\b",
+                    lambda m: (
+                        f"{rmod.name}.{m.group(1)}"
+                        if m.group(1) in r_flds
+                        else m.group(1)
+                    ),
+                    s.rhs,
+                )
+                conj.append(f"{s.var}{{{rtag}}} = {rhs}{{{rtag}}}")
+        conj.append(
+            f"{qg(cast(ec_ast.Sample, g_body[gs_i]).var)} ="
+            f" {qr(cast(ec_ast.Sample, rest[rs_i]).var)}"
+        )
+        for k, v in _irs_field_pairs(spec, g_body[: gs_i + 1], c_renamed, ren, qg, _qc):
+            conj.append(f"{k} = {v}")
+        # only the coupling conjuncts whose module fields are ASSIGNED by the
+        # seq boundary (ctStar is written after the challenge draw on both
+        # sides -- stating it mid-seq is unprovable, measured)
+        g_written = {
+            s.var
+            for s in g_body[: gs_i + 1]
+            if isinstance(s, (ec_ast.Assign, ec_ast.Sample, ec_ast.Call))
+            and s.var in g_flds
+        }
+        r_written = {
+            s.var
+            for s in spec["r_body"][: 1 + n_destr] + rest[: rs_i + 1]
+            if isinstance(s, (ec_ast.Assign, ec_ast.Sample, ec_ast.Call))
+            and s.var in r_flds
+        }
+
+        def _cpl_ok(part: str) -> bool:
+            for base, written in (
+                (gmod.name, g_written),
+                (rmod.name, r_written),
+            ):
+                for m in re.finditer(rf"{re.escape(base)}\.(\w+)", part):
+                    if m.group(1) not in written:
+                        return False
+            return True
+
+        cpl = _c2pri_pair_coupling(step_a, step_b)
+        have = set(conj)
+        for part in cpl.split(" /\\ "):
+            if part and part not in have and _cpl_ok(part):
+                conj.append(part)
+        # a wp before EVERY call: the two sides' assign runs interleave
+        # differently (the challenger's projections sit between ITS calls),
+        # and wp is a no-op when there is nothing to absorb
+        ladder = ["rnd."]
+        for s in reversed(g_body[:gs_i]):
+            if isinstance(s, ec_ast.Call):
+                ladder.append("wp.")
+                ladder.append("call (_: true).")
+        ladder.append("wp.")
+        ladder.append("skip => /#.")
+        seq_r = n_inl + n_destr + rs_i + 1
+        lines.append(
+            f"seq {_prf_pair(gs_i + 1, seq_r, gtag)} : ({' /\\ '.join(conj)})."
+        )
+        lines.append("+ wp. " + " ".join(ladder))
+        # tail: identical encode/KDF runs, 1:1
+        g_rest = g_body[gs_i + 1 :]
+        r_rest = rest[rs_i + 1 :]
+        g_tc = [s for s in g_rest if isinstance(s, ec_ast.Call)]
+        r_tc = [s for s in r_rest if isinstance(s, ec_ast.Call)]
+        if not g_tc or [c.callee for c in g_tc] != [c.callee for c in r_tc]:
+            return None
+        for gc, rc in zip(g_tc[:-1], r_tc[:-1]):
+            lines.append(f"seq 1 1 : (#pre /\\ {qg(gc.var)} = {qr(rc.var)}).")
+            lines.append("+ call (_: true); skip => /#.")
+        g_a = sum(
+            1 for s in g_rest[: g_rest.index(g_tc[-1])] if isinstance(s, ec_ast.Assign)
+        )
+        r_a = sum(
+            1 for s in r_rest[: r_rest.index(r_tc[-1])] if isinstance(s, ec_ast.Assign)
+        )
+        lines.append(f"sp {_prf_pair(g_a, r_a, gtag)}.")
+        lines += ["wp.", "call (_: true).", "skip => /#."]
+        return lines
+
+    def _c2pri_seam_decaps_walk(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> dict[str, list[str]] | None:
+        """The C2PRI seam ``decaps`` (probe c337, EXIT 0 first try): DOUBLE
+        det-pin of the shared first-KEM decapsulation (both sides to their
+        ``ev_`` forms, making the later guard equivalence arithmetic), the
+        challenge-T split, the submit inline with its refusal killed
+        (``rcondf`` -- the outer refusal plus the T-match force the queried
+        ciphertext off the challenge), the pin of the submit's
+        re-decapsulation, the collision split by smt, the fresh-draw identity
+        ``rnd``, and 1:1 tails."""
+        spec = _c2pri_seam_spec(step_a, step_b)
+        if spec is None:
+            return None
+        gi = spec["gi"]
+        gtag, rtag = str(gi + 1), str(2 - gi)
+        gmod, rmod = spec["gmod"], spec["rmod"]
+        qg, qr = _prf_qualify(gmod, gtag), _prf_qualify(rmod, rtag)
+        g_dec = next(p for p in gmod.procs if p.name == "decaps")
+        r_dec = next(p for p in rmod.procs if p.name == "decaps")
+
+        def _outer(proc: ec_ast.Proc) -> ec_ast.If | None:
+            body = [
+                s
+                for s in proc.body
+                if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+            ]
+            return (
+                body[0] if len(body) == 1 and isinstance(body[0], ec_ast.If) else None
+            )
+
+        g_if, r_if = _outer(g_dec), _outer(r_dec)
+        if g_if is None or r_if is None:
+            return None
+        g_else = [s for s in g_if.else_body if not isinstance(s, ec_ast.VarDecl)]
+        r_else = [s for s in r_if.else_body if not isinstance(s, ec_ast.VarDecl)]
+        g_in = next((i for i, s in enumerate(g_else) if isinstance(s, ec_ast.If)), None)
+        r_in = next((i for i, s in enumerate(r_else) if isinstance(s, ec_ast.If)), None)
+        if g_in is None or r_in is None:
+            return None
+        g_sp = sum(1 for s in g_else[:g_in] if isinstance(s, ec_ast.Assign))
+        r_sp = sum(1 for s in r_else[:r_in] if isinstance(s, ec_ast.Assign))
+        g_lead = [s for s in g_else[:g_in] if isinstance(s, ec_ast.Call)]
+        r_lead = [s for s in r_else[:r_in] if isinstance(s, ec_ast.Call)]
+        # the shared first-KEM decapsulation, det-pinned on BOTH sides
+        if len(g_lead) != 1 or len(r_lead) != 1:
+            return None
+        g_d, r_d = g_lead[0], r_lead[0]
+        mod_g, _, meth_g = g_d.callee.partition(".")
+        if g_d.callee != r_d.callee or meth_g not in det_methods_by_module.get(
+            mod_g, set()
+        ):
+            return None
+        alias_g = clone_alias_by_module.get(mod_g)
+        if alias_g is None:
+            return None
+        g_args = [a.strip() for a in g_d.args.split(",")]
+        r_args = [a.strip() for a in r_d.args.split(",")]
+        if len(g_args) != 2 or len(r_args) != 2:
+            return None
+
+        def _qual(argl: list[str], q: Callable[[str], str]) -> list[str]:
+            out = []
+            for a in argl:
+                base, _, comp = a.partition(".`")
+                qq = q(base)
+                out.append(f"({qq}.`{comp})" if comp else f"({qq})")
+            return out
+
+        ga, ra = _qual(g_args, qg), _qual(r_args, qr)
+        lines = [
+            "if; 1: smt().",
+            "+ auto.",
+            f"sp {_prf_pair(g_sp, r_sp, gtag)}.",
+            f"seq 1 1 : (#pre /\\ {qg(g_d.var)} = {qr(r_d.var)} /\\"
+            f" {qr(r_d.var)} = {alias_g}.ev_{meth_g} {ra[0]} {ra[1]}).",
+            f"+ exists* (glob {mod_g}){{{rtag}}}, {ra[0]}, {ra[1]};"
+            f" elim* => gr a0 a1."
+            f" call{{{rtag}}} ({mod_g}_{meth_g}_det gr a0 a1).",
+            f"  exists* (glob {mod_g}){{{gtag}}}, {ga[0]}, {ga[1]};"
+            f" elim* => gg b0 b1."
+            f" call{{{gtag}}} ({mod_g}_{meth_g}_det gg b0 b1).",
+            "  skip => /#.",
+        ]
+        g_split = cast(ec_ast.If, g_else[g_in])
+        r_split = cast(ec_ast.If, r_else[r_in])
+        g_then = [s for s in g_split.then_body if not isinstance(s, ec_ast.VarDecl)]
+        r_then = [s for s in r_split.then_body if not isinstance(s, ec_ast.VarDecl)]
+        # the reduction's match branch: submit call, then the collision If;
+        # the game's: the collision If directly
+        r_sub = next((s for s in r_then if isinstance(s, ec_ast.Call)), None)
+        if r_sub is None or r_sub.callee != f"{spec['r_chal']}.submit":
+            return None
+        g_ci = next((s for s in g_then if isinstance(s, ec_ast.If)), None)
+        r_ci = next((s for s in r_then if isinstance(s, ec_ast.If)), None)
+        if g_ci is None or r_ci is None:
+            return None
+        # the submit's internals for the pin: its else branch's re-decapsulation
+        s_if = cast(
+            ec_ast.If,
+            next(
+                s
+                for s in spec["c_sub"].body
+                if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+            ),
+        )
+        s_call = next(s for s in s_if.else_body if isinstance(s, ec_ast.Call))
+        sm, _, smeth = s_call.callee.partition(".")
+        formals = [p.name for p in spec["cmod"].params]
+        inner = spec["chal_expr"]
+        oi = inner.find("(")
+        actuals = (
+            [a.strip() for a in inner[oi + 1 : inner.rfind(")")].split(",")]
+            if oi != -1
+            else []
+        )
+        pmap = dict(zip(formals, actuals))
+        sm_actual = pmap.get(sm, sm)
+        # inline-fresh names against the reduction's decaps locals AND its
+        # parameters (the submit's own ``ct`` collides with the proc param)
+        taken = {d.name for d in r_dec.body if isinstance(d, ec_ast.VarDecl)} | {
+            p.name for p in r_dec.params
+        }
+        fresh: dict[str, str] = {}
+        for nm in [p.name for p in spec["c_sub"].params] + [
+            d.name for d in spec["c_sub"].body if isinstance(d, ec_ast.VarDecl)
+        ]:
+            fv = _irs_fresh(nm, taken)
+            fresh[nm] = fv
+            taken.add(fv)
+        s_res = fresh.get(s_call.var, s_call.var)
+        s_par = fresh.get(spec["c_sub"].params[0].name, spec["c_sub"].params[0].name)
+        cf = {v.name for v in spec["cmod"].module_vars}
+        chal_ref = spec["chal_path"]
+
+        def _qcd(v: str) -> str:
+            base, _, comp = v.partition(".`")
+            r = f"{chal_ref}.{base}{{{rtag}}}" if base in cf else f"{base}{{{rtag}}}"
+            return f"({r}.`{comp})" if comp else f"({r})"
+
+        s_dargs = [a.strip() for a in s_call.args.split(",")]
+        if len(s_dargs) != 2:
+            return None
+        sp1 = _prf_pair(0, 1, gtag)
+        sp2 = _prf_pair(0, 2, gtag)
+        lines.append("if; 1: smt().")
+        lines.append(f"+ inline{{{rtag}}} {spec['chal_expr']}.submit.")
+        lines.append(f"  sp {sp1}.")
+        lines.append(f"  rcondf{{{rtag}}} 1; first by auto => /#.")
+        lines.append(
+            f"  seq {sp1} : (#pre /\\ {s_res}{{{rtag}}} ="
+            f" {clone_alias_by_module.get(pmap.get(sm, sm), '')}"
+            f".ev_{smeth} {_qcd(s_dargs[0])} ({s_par}{{{rtag}}}))."
+        )
+        lines.append(
+            f"  + exists* (glob {sm_actual}){{{rtag}}}, {_qcd(s_dargs[0])},"
+            f" ({s_par}{{{rtag}}}); elim* => gs c0 c1."
+            f" call{{{rtag}}} ({sm_actual}_{smeth}_det gs c0 c1). skip => /#."
+        )
+        lines.append(f"  sp {sp2}.")
+        lines.append("  if; 1: smt().")
+        lines.append("  + wp; rnd; skip => /#.")
+        # the collision-else 1:1 tail
+        g_ce = [s for s in g_ci.else_body if not isinstance(s, ec_ast.VarDecl)]
+        r_ce = [s for s in r_ci.else_body if not isinstance(s, ec_ast.VarDecl)]
+        g_tc = [s for s in g_ce if isinstance(s, ec_ast.Call)]
+        r_tc = [s for s in r_ce if isinstance(s, ec_ast.Call)]
+        if not g_tc or [c.callee for c in g_tc] != [c.callee for c in r_tc]:
+            return None
+        for gc, rc in zip(g_tc[:-1], r_tc[:-1]):
+            lines.append(f"  seq 1 1 : (#pre /\\ {qg(gc.var)} = {qr(rc.var)}).")
+            lines.append("  + call (_: true); skip => /#.")
+        g_a = sum(
+            1 for s in g_ce[: g_ce.index(g_tc[-1])] if isinstance(s, ec_ast.Assign)
+        )
+        r_a = sum(
+            1 for s in r_ce[: r_ce.index(r_tc[-1])] if isinstance(s, ec_ast.Assign)
+        )
+        lines.append(f"  sp {_prf_pair(g_a, r_a, gtag)}.")
+        lines += ["  wp.", "  call (_: true).", "  skip => /#."]
+        # the T-else identical tail
+        g_eb = [s for s in g_split.else_body if not isinstance(s, ec_ast.VarDecl)]
+        r_eb = [s for s in r_split.else_body if not isinstance(s, ec_ast.VarDecl)]
+        g_ec = [s for s in g_eb if isinstance(s, ec_ast.Call)]
+        r_ec = [s for s in r_eb if isinstance(s, ec_ast.Call)]
+        if not g_ec or [c.callee for c in g_ec] != [c.callee for c in r_ec]:
+            return None
+        for gc, rc in zip(g_ec[:-1], r_ec[:-1]):
+            lines.append(f"seq 1 1 : (#pre /\\ {qg(gc.var)} = {qr(rc.var)}).")
+            lines.append("+ call (_: true); skip => /#.")
+        g_a2 = sum(
+            1 for s in g_eb[: g_eb.index(g_ec[-1])] if isinstance(s, ec_ast.Assign)
+        )
+        r_a2 = sum(
+            1 for s in r_eb[: r_eb.index(r_ec[-1])] if isinstance(s, ec_ast.Assign)
+        )
+        lines.append(f"sp {_prf_pair(g_a2, r_a2, gtag)}.")
         lines += ["wp.", "call (_: true).", "skip => /#."]
         return {"decaps": lines}
 
@@ -13930,6 +14538,14 @@ def export_proof_file(proof_path: str) -> str:
         irs_fixed = _irs_seam_coupling_fix(step_a, step_b, coupled)
         if irs_fixed is not None:
             coupled = irs_fixed
+        # C2PRI seam: the packed path claims this pair ctStar-only; append
+        # the cross-pairs its consumers need. Empty off-shape.
+        c2c = _c2pri_pair_coupling(step_a, step_b)
+        if c2c:
+            have2 = set(coupled.split(" /\\ "))
+            fresh_c2 = [c for c in c2c.split(" /\\ ") if c not in have2]
+            if fresh_c2:
+                coupled = f"{coupled} /\\ " + " /\\ ".join(fresh_c2)
         lzk = _lazyro_derived_key_coupling(step_a, step_b)
         if lzk:
             coupled = f"{coupled} /\\ {lzk}"
@@ -14099,6 +14715,9 @@ def export_proof_file(proof_path: str) -> str:
             # INDCCA-Random seam (the _T hop_11/hop_18 family).
             if reprogram_override is None:
                 reprogram_override = _irs_seam_init_tac(step_a, step_b)
+            # C2PRI seam (CK's hop_14/hop_21 family).
+            if reprogram_override is None:
+                reprogram_override = _c2pri_seam_init_tac(step_a, step_b)
             # Same-backbone / different-LAYOUT hop (HON_BIND hop_4 / hop_8
             # ``initialize``): batch the interleaved side, then peel. ``None``
             # off-shape, and it declines outright when both sides are already
@@ -14157,6 +14776,7 @@ def export_proof_file(proof_path: str) -> str:
                     or _ident_seed_pair_decaps_walk(step_a, step_b)
                     or _prf_seam_decaps_walk(step_a, step_b)
                     or _irs_seam_decaps_walk(step_a, step_b)
+                    or _c2pri_seam_decaps_walk(step_a, step_b)
                 ),
                 # The OUTER hop lemma's glob set (see ``glob_invariant_conj``).
                 # The chain coupling must match it exactly -- see the gparams

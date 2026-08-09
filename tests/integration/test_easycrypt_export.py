@@ -491,10 +491,17 @@ def test_export_hoisted_field_reference_is_typed() -> None:
     module's field declarations -- not only from in-method locals -- so the
     expression translator can resolve the field's type. Before the fix this
     whole A-type class (11 cfrg-hybrid-kems + 2 GHP18 proofs) failed to export.
+
+    Since the dead-state suppression, this proof's flat states (where the
+    ``var _hoisted_0`` declaration surfaced) are rendered but no longer
+    emitted -- the typed-field path still runs during rendering, so a
+    regression in it fails this test as a ``KeyError`` from the export call
+    itself rather than as missing output text.
     """
     output = exporter.export_proof_file(str(CG_HON_BIND_K_PK_PROOF))
-    # The hoisted field surfaces as a module-level state var in the flat games.
-    assert "var _hoisted_0 :" in output
+    # Export completed (the rendering pass, where the KeyError class lived,
+    # ran over every flat state); the hop lemmas made it into the output.
+    assert "lemma hop_0_" in output
 
 
 def test_export_kemprf_indcca_init_synth_backbone_peel() -> None:
@@ -976,13 +983,24 @@ def test_export_kemprf_flat_state_field_names_are_ec_identifiers() -> None:
     whose field names contain ``@`` (``challenger@pk``). EC rejects ``@`` in a
     ``var`` declaration. The normalizer must sanitize the field *declaration*
     names (not just their in-body references) so the module parses.
+
+    Since the dead-state suppression, KEMPRF_INDCPA's flat states are no
+    longer emitted (its hops close whole-oracle), so the positive
+    declaration-site assertion moved to the Generic LEAK=>HON proof, whose
+    chain states are live and carry the same inlined ``challenger@`` fields.
     """
     output = exporter.export_proof_file(str(KEMPRF_INDCPA_PROOF))
     # The mangled field name must not survive into any declaration/reference.
     assert "challenger@pk" not in output
     assert "challenger@sk" not in output
+    generic = REPO_ROOT / (
+        "examples/applications/cfrg-hybrid-kems/proofs/Generic/"
+        "LEAK_implies_HON_BIND_K_PK.proof"
+    )
+    generic_out = exporter.export_proof_file(str(generic))
+    assert "challenger@" not in generic_out
     # The sanitized form is used consistently (declared as a module var).
-    assert "var challenger_pk :" in output
+    assert "var challenger_dk0 :" in generic_out
 
 
 def test_export_kemprf_abstract_footprint_restriction_and_section_order() -> None:

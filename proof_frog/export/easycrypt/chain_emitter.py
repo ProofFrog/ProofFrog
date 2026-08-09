@@ -5792,11 +5792,12 @@ def emit_multi_oracle_chain_for_hop(
     # correctness proofs pass False, keeping stable names byte-identical.
     use_canonical = use_canonical_fields
 
-    # Shared flat-state modules (full multi-oracle games) emitted ONCE. Record
+    # Shared flat-state modules (full multi-oracle games), rendered ONCE but
+    # emitted only if referenced (see the filter before the return). Record
     # each module's rendered text so the field-aware coupling can read its EC
     # ``glob`` signature (field name+type shape + actually-used params) off the
     # authoritative source (ROM only; empty otherwise -> old behavior).
-    chunks: list[str] = []
+    state_chunks: list[tuple[str, str]] = []
     glob_info_by_base: dict[str, tuple[tuple[tuple[str, str], ...], frozenset[str]]] = (
         {}
     )
@@ -5822,7 +5823,7 @@ def emit_multi_oracle_chain_for_hop(
             emit_state_vars=True,
             use_canonical_fields=use_canonical,
         )
-        chunks.append(rendered)
+        state_chunks.append((mod_name, rendered))
         if use_canonical:
             glob_info_by_base[_ref_base(mod_ref(mod_name))] = _glob_signature(
                 rendered, param_names
@@ -5856,6 +5857,7 @@ def emit_multi_oracle_chain_for_hop(
     decaps_val_schemes: set[str] = set()
     state_modules: set[str] = set()
     aux_lemma_lines: list[str] = []
+    oracle_chunks_all: list[str] = []
     for oracle_name, is_init in oracles:
         eq_args = oracle_eq_args.get(oracle_name, "true")
         oracle_chunks, outer_body, oracle_pres = _emit_one_oracle_chain(
@@ -5901,9 +5903,29 @@ def emit_multi_oracle_chain_for_hop(
             both_reductions=both_reductions,
             outer_globs=outer_globs,
         )
-        chunks.extend(oracle_chunks)
+        oracle_chunks_all.extend(oracle_chunks)
         tactic_body_by_oracle[oracle_name] = outer_body
         pres_methods |= oracle_pres
+
+    # Emit only the flat states some emitted artifact of THIS hop references.
+    # When every oracle closes through an endpoint route or a whole-oracle
+    # override, the per-transform chain is dead weight: hundreds of
+    # unreferenced ``Step_*`` modules per security export (most of a
+    # 40-70k-line file, and most of its EC compile time). A state is kept iff
+    # its module name occurs in an oracle chunk, an outer tactic body, or an
+    # aux lemma. A consumed chain references every state (each micro names its
+    # adjacent pair), so chain-carried hops emit byte-identically.
+    consumer_text = "\n".join(
+        oracle_chunks_all
+        + ["\n".join(body) for body in tactic_body_by_oracle.values()]
+        + aux_lemma_lines
+    )
+    chunks: list[str] = [
+        rendered
+        for mod_name, rendered in state_chunks
+        if re.search(rf"\b{re.escape(mod_name)}\b", consumer_text)
+    ]
+    chunks.extend(oracle_chunks_all)
 
     return MultiOracleHopChainInfo(
         extra_decls=chunks,

@@ -2353,6 +2353,10 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     flat_params: list[ec_ast.ModuleParam],
     det_methods: dict[str, set[str]],
     micro_pre_text: str = "true",
+    left_ref: str = "",
+    right_ref: str = "",
+    clone_alias: dict[str, str] | None = None,
+    inj_methods_by_module: dict[str, set[str]] | None = None,
 ) -> tuple[list[str], MicroRequests, str] | None:
     """Tactic for one chain step's micro lemma, restricted to ``oracle_name``.
 
@@ -2360,7 +2364,11 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     this micro's lemma (``micro_pre(lref, rref)``); Move 2's guard-site
     closer restates it inside its ``seq`` invariant, and declines when it is
     ``"true"`` (an init leg -- nothing to re-establish the guard equality
-    from).
+    from). ``left_ref``/``right_ref`` are the emitted lemma's two module
+    reference texts (for field pins); ``clone_alias`` maps a declared module
+    to its per-module theory alias (``KEM_T`` -> ``KEM_T_c``, for ``ev_*``
+    qualification); ``inj_methods_by_module`` lists the declared-injective
+    methods (the only ones whose ``_inj`` axioms may be hinted).
 
     Returns ``(tactic, requests, rung)`` where ``requests`` is the
     :class:`MicroRequests` record of axiom families the tactic references
@@ -2453,9 +2461,8 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         return dead
     # Move 2 (Phase-2): the two bodies are identical except at exactly ONE
     # pure expression site (an if-guard or the return expression) whose
-    # rewrite matches one of the fact-free row schemas. Last, so every
-    # existing route stays byte-identical.
-    return _single_site_rewrite_step(
+    # rewrite matches one of the fact-free row schemas.
+    single = _single_site_rewrite_step(
         pb,
         pa,
         reversed_dir,
@@ -2464,6 +2471,26 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         modules,
         flat_params,
         micro_pre_text,
+    )
+    if single is not None:
+        return single
+    # Move 3a (Phase-2): the delta-det guard-site walk -- the Injective
+    # Equality Simplify class (Q1 probe ``leg_injective_eq_simplify``). Last
+    # in the dispatch, so every existing route stays byte-identical.
+    return _ies_delta_walk_step(
+        pb,
+        pa,
+        reversed_dir,
+        modules,
+        external_module_types,
+        method_return_types,
+        flat_params,
+        det_methods,
+        micro_pre_text,
+        left_ref,
+        right_ref,
+        clone_alias or {},
+        inj_methods_by_module or {},
     )
 
 
@@ -2834,6 +2861,415 @@ def _single_site_rewrite_step(  # pylint: disable=too-many-arguments,too-many-po
         tac.append("if; [smt() | sim | sim].")
         return tac, MicroRequests(), SYNTH_PARAM
     return None
+
+
+_EC_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _frog_det_call_assign(
+    stmt: frog_ast.Statement, det_methods: dict[str, set[str]]
+) -> bool:
+    """True for a raw ``T v = M.m(...)`` where ``M.m`` is a declared det method."""
+    if not isinstance(stmt, frog_ast.Assignment) or not isinstance(
+        stmt.value, frog_ast.FuncCall
+    ):
+        return False
+    func = stmt.value.func
+    if not isinstance(func, frog_ast.FieldAccess) or not isinstance(
+        func.the_object, frog_ast.Variable
+    ):
+        return False
+    mod = func.the_object.name.split("@", 1)[0]
+    return func.name.lower() in det_methods.get(mod, set())
+
+
+def _raw_guard_delta_site(
+    mb: frog_ast.Method, ma: frog_ast.Method, det_methods: dict[str, set[str]]
+) -> bool:
+    """True when the two raw bodies are identical except (a) det-call
+    assignments present on one side only and (b) exactly one ``if``
+    statement's (single) condition. The IES-class raw shape: the transform's
+    Gap-D binding resolution inlines det calls into the rewritten guard,
+    which the renderer re-hoists -- so the sides genuinely differ by whole
+    det-call statements plus the guard."""
+    sb, sa = list(mb.block.statements), list(ma.block.statements)
+    i = j = 0
+    guard_diffs = 0
+    delta = 0
+    while i < len(sb) and j < len(sa):
+        x, y = sb[i], sa[j]
+        if x == y:
+            i += 1
+            j += 1
+            continue
+        if (
+            isinstance(x, frog_ast.IfStatement)
+            and isinstance(y, frog_ast.IfStatement)
+            and len(x.conditions) == 1
+            and len(y.conditions) == 1
+            and x.blocks == y.blocks
+        ):
+            guard_diffs += 1
+            i += 1
+            j += 1
+            continue
+        if _frog_det_call_assign(x, det_methods):
+            delta += 1
+            i += 1
+            continue
+        if _frog_det_call_assign(y, det_methods):
+            delta += 1
+            j += 1
+            continue
+        return False
+    for stmt in sb[i:] + sa[j:]:
+        if not _frog_det_call_assign(stmt, det_methods):
+            return False
+        delta += 1
+    return guard_diffs == 1 and delta > 0
+
+
+class _EvEnv:  # pylint: disable=too-many-instance-attributes
+    """Symbolic ev-term environment over one rendered oracle prefix.
+
+    Maps every prefix-assigned local to a closed EC term over ``exists*``
+    pins (fields/params) and ``ev_*`` ops -- the Q1 probe's invariant shape.
+    Shared pin registry across both sides so identical statements produce
+    identical terms.
+    """
+
+    def __init__(
+        self,
+        det_methods: dict[str, set[str]],
+        clone_alias: dict[str, str],
+        param_names: set[str],
+        global_names: set[str],
+        side_ref: str,
+        pins: dict[str, str],
+        glob_pins: dict[str, str],
+    ) -> None:
+        self.det_methods = det_methods
+        self.clone_alias = clone_alias
+        self.param_names = param_names
+        self.global_names = global_names
+        self.side_ref = side_ref
+        self.pins = pins  # pin expression text -> pin name (shared)
+        self.glob_pins = glob_pins  # module -> pin name (shared)
+        self.env: dict[str, str] = {}
+        self.conjuncts: list[tuple[str, str]] = []  # (local, term)
+        # Per-statement drain payload in forward order: a det-axiom
+        # application text ``(<M>_<m>_det gv <args>).`` for a call (the
+        # caller prefixes ``call{side}``), or None for an assign (collapsed
+        # into a ``wp.`` per run at emission).
+        self.drains: list[str | None] = []
+        self.det_used: set[tuple[str, str]] = set()
+
+    def _pin(self, expr: str) -> str:
+        if expr not in self.pins:
+            self.pins[expr] = f"kv{len(self.pins)}"
+        return self.pins[expr]
+
+    def _glob_pin(self, module: str) -> str:
+        if module not in self.glob_pins:
+            self.glob_pins[module] = f"gv{len(self.glob_pins)}"
+        return self.glob_pins[module]
+
+    def _subst(self, text: str) -> str | None:
+        """Rewrite locals to their terms and fields/params to pins."""
+        out: list[str] = []
+        pos = 0
+        for m in _EC_IDENT_RE.finditer(text):
+            out.append(text[pos : m.start()])
+            tok = m.group(0)
+            if tok in self.env:
+                out.append(f"({self.env[tok]})")
+            elif tok in self.param_names:
+                out.append(self._pin(f"{tok}{{2}}"))
+            elif tok in self.global_names:
+                out.append(self._pin(f"{self.side_ref}.{tok}{{2}}"))
+            else:
+                out.append(tok)
+            pos = m.end()
+        out.append(text[pos:])
+        return "".join(out)
+
+    def feed(self, stmt: ec_ast.EcStmt) -> bool:
+        """Absorb one prefix statement; False = shape outside the row."""
+        if isinstance(stmt, ec_ast.Assign):
+            term = self._subst(stmt.rhs)
+            if term is None:
+                return False
+            self.env[stmt.var] = term
+            self.conjuncts.append((stmt.var, term))
+            self.drains.append(None)  # an assign run collapses into one wp
+            return True
+        if isinstance(stmt, ec_ast.Call):
+            mod, _, meth = stmt.callee.partition(".")
+            if meth.lower() not in self.det_methods.get(mod, set()):
+                return False
+            alias = self.clone_alias.get(mod, f"{mod}_c")
+            arg_terms: list[str] = []
+            for arg in cc_split_top_args(stmt.args):
+                term = self._subst(arg.strip())
+                if term is None:
+                    return False
+                arg_terms.append(term)
+            applied = " ".join(f"({t})" for t in arg_terms)
+            ev_term = f"{alias}.ev_{meth}" + (f" {applied}" if applied else "")
+            self.env[stmt.var] = ev_term
+            self.conjuncts.append((stmt.var, ev_term))
+            gpin = self._glob_pin(mod)
+            self.drains.append(
+                f"({mod}_{meth}_det {gpin}" + (f" {applied}" if applied else "") + ")."
+            )
+            self.det_used.add((mod, meth.lower()))
+            return True
+        return False
+
+
+def _ies_delta_walk_step(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements,too-many-branches,too-many-locals,too-many-statements
+    pb: frog_ast.Game,
+    pa: frog_ast.Game,
+    reversed_dir: bool,
+    modules: mt.ModuleTranslator,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    det_methods: dict[str, set[str]],
+    micro_pre_text: str,
+    left_ref: str,
+    right_ref: str,
+    clone_alias: dict[str, str],
+    inj_methods_by_module: dict[str, set[str]],
+) -> tuple[list[str], MicroRequests, str] | None:
+    """Move 3a: the delta-det guard-site walk (Injective Equality Simplify).
+
+    Q1-probed shape (``leg_injective_eq_simplify``, EC-verified first-try
+    batch): the two bodies share an all-deterministic prefix, one side
+    carries extra det calls (the transform's binding resolution inlined det
+    calls into the rewritten guard; the renderer re-hoisted them), and the
+    single differing ``if`` guard is the rewrite site. Tactic: ``exists*``
+    pins over every field/param the prefix reads + one glob pin per drained
+    module; ``seq n m`` whose invariant carries the shared-local equalities
+    plus per-side ``local = <ev-term>`` conjuncts; tail-to-front one-sided
+    det drains (``call{s} (<M>_<m>_det gv <args>)``) with ``wp.`` at assign
+    runs and ``auto => /#``; closer ``if; [smt(<inj axioms>) | sim | sim]``.
+    EC-gated like the purity collapse: a firing that cannot close is
+    rejected by EasyCrypt at compile, never silently accepted. Declines on:
+    init legs, any sample or non-det call before the site, deltas on both
+    sides, a delta run splitting an assign run (would desynchronize the
+    maximal-eating ``wp``), or no licensed ``_inj`` hint in the prefix.
+    """
+    if micro_pre_text == "true" or not left_ref or not right_ref:
+        return None
+    if not _raw_guard_delta_site(pb.methods[0], pa.methods[0], det_methods):
+        return None
+    bmod = _flat_state_module(
+        modules,
+        "Step_iw_b",
+        pb,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    amod = _flat_state_module(
+        modules,
+        "Step_iw_a",
+        pa,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not bmod.procs or not amod.procs:
+        return None
+    proc_1, proc_2 = (
+        (amod.procs[0], bmod.procs[0])
+        if reversed_dir
+        else (bmod.procs[0], amod.procs[0])
+    )
+    # Globals are pinned via the UNAPPLIED module name (`State21.dk0{2}`,
+    # never the functor application) -- the Q1 probe's pin shape.
+    ref_2 = _ref_base(right_ref)
+    exec1 = [s for s in proc_1.body if not isinstance(s, ec_ast.VarDecl)]
+    exec2 = [s for s in proc_2.body if not isinstance(s, ec_ast.VarDecl)]
+    # Two-pointer structural diff: matched pairs, one differing ``if``
+    # guard (the site), and det-call deltas confined to ONE side of the
+    # prefix. Any other mismatch declines.
+    i = j = 0
+    site: tuple[int, int] | None = None
+    delta_side = 0
+    delta_set: set[int] = set()
+    matched_prefix_vars: list[str] = []
+    while i < len(exec1) and j < len(exec2):
+        x, y = exec1[i], exec2[j]
+        if x == y:
+            if (
+                site is None
+                and isinstance(x, (ec_ast.Assign, ec_ast.Call))
+                and x.var
+                and x.var not in matched_prefix_vars
+            ):
+                matched_prefix_vars.append(x.var)
+            i += 1
+            j += 1
+            continue
+        if (
+            site is None
+            and isinstance(x, ec_ast.If)
+            and isinstance(y, ec_ast.If)
+            and x.guard != y.guard
+            and x.then_body == y.then_body
+            and x.else_body == y.else_body
+        ):
+            site = (i, j)
+            i += 1
+            j += 1
+            continue
+        if site is None and isinstance(x, ec_ast.Call) and delta_side in (0, 1):
+            delta_side = 1
+            delta_set.add(i)
+            i += 1
+            continue
+        if site is None and isinstance(y, ec_ast.Call) and delta_side in (0, 2):
+            delta_side = 2
+            delta_set.add(j)
+            j += 1
+            continue
+        return None
+    if i != len(exec1) or j != len(exec2) or site is None or not delta_set:
+        return None
+    pre1, pre2 = exec1[: site[0]], exec2[: site[1]]
+    # ``wp`` symmetry gate: a delta run splitting an assign run would make
+    # the (maximal-eating) wp desynchronize the two sides -- decline.
+    delta_exec = exec1 if delta_side == 1 else exec2
+    for k in sorted(delta_set):
+        if k - 1 in delta_set:
+            continue  # interior of a run; judged at its edges
+        run_end = k
+        while run_end + 1 in delta_set:
+            run_end += 1
+        before_is_assign = k > 0 and isinstance(delta_exec[k - 1], ec_ast.Assign)
+        after_is_assign = run_end + 1 < len(delta_exec) and isinstance(
+            delta_exec[run_end + 1], ec_ast.Assign
+        )
+        if before_is_assign and after_is_assign:
+            return None
+    # Build both sides' symbolic envs over a SHARED pin registry (identical
+    # shared statements then produce identical terms and pins). Module vars
+    # can be empty on some render paths -- the games' own field names are
+    # the fallback global set.
+    param_names = {p.name for p in proc_1.params}
+    global_names = (
+        {v.name for v in bmod.module_vars}
+        | {v.name for v in amod.module_vars}
+        | {
+            mt._ec_field_name(f.name)  # pylint: disable=protected-access
+            for g in (pb, pa)
+            for f in g.fields
+        }
+    )
+    pins: dict[str, str] = {}
+    glob_pins: dict[str, str] = {}
+    env1 = _EvEnv(
+        det_methods,
+        clone_alias,
+        param_names,
+        global_names,
+        ref_2,
+        pins,
+        glob_pins,
+    )
+    env2 = _EvEnv(
+        det_methods,
+        clone_alias,
+        param_names,
+        global_names,
+        ref_2,
+        pins,
+        glob_pins,
+    )
+    for stmt in pre1:
+        if not env1.feed(stmt):
+            return None
+    for stmt in pre2:
+        if not env2.feed(stmt):
+            return None
+    # Licensed inj hints: every drained det method that is also declared
+    # injective. No hint -> not the IES class -> decline.
+    inj_used = {
+        (mod, meth)
+        for mod, meth in env1.det_used | env2.det_used
+        if meth in {m.lower() for m in inj_methods_by_module.get(mod, set())}
+    }
+    if not inj_used:
+        return None
+    # Invariant: shared-local equalities, the micro pre, side-1 conjuncts
+    # for every side-1 local, and side-2 conjuncts for the side-2 locals
+    # with no side-1 counterpart (the probe's shape).
+    shared_set = set(matched_prefix_vars)
+    inv_parts = (
+        (["={" + ", ".join(matched_prefix_vars) + "}"] if matched_prefix_vars else [])
+        + [micro_pre_text]
+        + [f"{name}{{1}} = {term}" for name, term in env1.conjuncts]
+        + [
+            f"{name}{{2}} = {term}"
+            for name, term in env2.conjuncts
+            if name not in shared_set
+        ]
+    )
+    # Pins line (encounter order): value pins then glob pins.
+    pin_exprs = list(pins.keys()) + [f"(glob {mod}){{2}}" for mod in glob_pins]
+    pin_names = list(pins.values()) + list(glob_pins.values())
+    tac = ["proc."]
+    if pin_exprs:
+        tac.append(
+            "exists* "
+            + ", ".join(pin_exprs)
+            + "; elim* => "
+            + " ".join(pin_names)
+            + "."
+        )
+    tac.append(f"seq {site[0]} {site[1]} : ({' /\\ '.join(inv_parts)}).")
+    # Tail-to-front over both prefixes: delta calls drained one-sided,
+    # matched det calls drained per side, assign runs collapsed to one wp
+    # (symmetric by the split-run gate), leading assigns left to auto.
+    k1, k2 = site[0] - 1, site[1] - 1
+    while k1 >= 0 or k2 >= 0:
+        if delta_side == 1 and k1 >= 0 and k1 in delta_set:
+            drain = env1.drains[k1]
+            assert drain is not None
+            tac.append(f"call{{1}} {drain}")
+            k1 -= 1
+            continue
+        if delta_side == 2 and k2 >= 0 and k2 in delta_set:
+            drain = env2.drains[k2]
+            assert drain is not None
+            tac.append(f"call{{2}} {drain}")
+            k2 -= 1
+            continue
+        if k1 < 0 or k2 < 0:
+            return None  # desync -- cannot happen post-matching
+        if isinstance(exec1[k1], ec_ast.Assign):
+            tac.append("wp.")
+            while k1 >= 0 and isinstance(exec1[k1], ec_ast.Assign):
+                k1 -= 1
+            while k2 >= 0 and isinstance(exec2[k2], ec_ast.Assign):
+                k2 -= 1
+            continue
+        d1, d2 = env1.drains[k1], env2.drains[k2]
+        assert d1 is not None and d2 is not None
+        tac.append(f"call{{1}} {d1}")
+        tac.append(f"call{{2}} {d2}")
+        k1 -= 1
+        k2 -= 1
+    tac.append("auto => /#.")
+    hints = " ".join(sorted(f"{mod}_{meth}_inj" for mod, meth in inj_used))
+    tac.append(f"if; [ smt({hints}) | sim | sim ].")
+    return (
+        tac,
+        MicroRequests(inj=set(inj_used), det=env1.det_used | env2.det_used),
+        SYNTH_PARAM,
+    )
 
 
 def _oracle_pending_admit(hop_index: int, oracle_name: str) -> list[str]:
@@ -7405,6 +7841,10 @@ def _emit_one_oracle_chain(
             flat_params=flat_params,
             det_methods=det_methods,
             micro_pre_text=micro_pre(lref, rref),
+            left_ref=lref,
+            right_ref=rref,
+            clone_alias=clone_alias,
+            inj_methods_by_module=inj_methods_by_module,
         )
         if step is None:
             return _admit_fallback()
@@ -7444,6 +7884,10 @@ def _emit_one_oracle_chain(
             flat_params=flat_params,
             det_methods=det_methods,
             micro_pre_text=micro_pre(lref, rref),
+            left_ref=lref,
+            right_ref=rref,
+            clone_alias=clone_alias,
+            inj_methods_by_module=inj_methods_by_module,
         )
         if step is None:
             return _admit_fallback()

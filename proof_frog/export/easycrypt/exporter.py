@@ -9108,6 +9108,612 @@ def export_proof_file(proof_path: str) -> str:
         lines += ["wp.", "call (_: true).", "skip => /#."]
         return {"decaps": lines}
 
+    def _rom_subst(txt: str, m: dict[str, str]) -> str:
+        return re.sub(r"\b(\w+)\b", lambda x: m.get(x.group(1), x.group(1)), txt)
+
+    def _rom_split_functor(expr: str) -> tuple[str, list[str]]:
+        """``Head(a, b(c), d)`` -> (``Head``, [``a``, ``b(c)``, ``d``])."""
+        oi = expr.find("(")
+        if oi == -1:
+            return expr.strip(), []
+        head = expr[:oi].strip()
+        args: list[str] = []
+        depth = 0
+        cur = ""
+        for ch in expr[oi + 1 : expr.rfind(")")]:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            if ch == "," and depth == 0:
+                args.append(cur.strip())
+                cur = ""
+            else:
+                cur += ch
+        if cur.strip():
+            args.append(cur.strip())
+        return head, args
+
+    def _rom_find_module(name: str) -> ec_ast.Module | None:
+        base = name.rpartition(".")[2].partition("(")[0]
+        for lst in (theory_game_decls, foreign_game_decls, ec_reductions):
+            for d in lst:
+                if isinstance(d, ec_ast.Module) and d.name == base:
+                    return d
+        for m in foreign_concrete_modules.values():
+            if m.name == base:
+                return m
+        if ec_scheme is not None and ec_scheme.name == base:
+            return ec_scheme
+        return None
+
+    def _rom_inline_proc(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+        applied: str,
+        proc_name: str,
+        call_args: list[str],
+        ret_target: str | None,
+        taken: set[str],
+    ) -> list[ec_ast.EcStmt] | None:
+        """Simulate EasyCrypt's ``inline`` of ``applied.proc_name(call_args)``:
+        bind parameters, freshen locals (bindall smallest-suffix), substitute
+        the functor's formal module params with its applied arguments,
+        recursively inline nested calls into CONCRETE modules, and turn the
+        ``return`` into an assignment to ``ret_target``. ``None`` when any
+        piece is off-shape (a body statement kind the walk cannot carry)."""
+        head, actual_args = _rom_split_functor(applied)
+        mod = _rom_find_module(head)
+        if mod is None:
+            return None
+        proc = next((p for p in mod.procs if p.name == proc_name), None)
+        if proc is None:
+            return None
+        pmap = {p.name: a for p, a in zip(mod.params, actual_args)}
+        ren: dict[str, str] = {}
+        out: list[ec_ast.EcStmt] = []
+        for prm, arg in zip(proc.params, call_args):
+            nv = _irs_fresh(prm.name, taken)
+            taken.add(nv)
+            ren[prm.name] = nv
+            out.append(ec_ast.Assign(nv, arg))
+        for d in proc.body:
+            if isinstance(d, ec_ast.VarDecl):
+                nv = _irs_fresh(d.name, taken)
+                taken.add(nv)
+                ren[d.name] = nv
+
+        def _sub(t: str) -> str:
+            return _rom_subst(_rom_subst(t, ren), pmap)
+
+        for s in proc.body:
+            if isinstance(s, ec_ast.VarDecl):
+                continue
+            if isinstance(s, ec_ast.Assign):
+                out.append(ec_ast.Assign(ren.get(s.var, s.var), _sub(s.rhs)))
+            elif isinstance(s, ec_ast.Sample):
+                out.append(ec_ast.Sample(ren.get(s.var, s.var), _sub(s.distr)))
+            elif isinstance(s, ec_ast.Call):
+                chead, _, cmeth = s.callee.partition(".")
+                target_mod = pmap.get(chead, chead)
+                inner = _rom_find_module(target_mod)
+                inner_args = (
+                    [a.strip() for a in _split_call_args(s.args)]
+                    if s.args.strip()
+                    else []
+                )
+                if (
+                    inner is not None
+                    and "(" in target_mod
+                    or (
+                        inner is not None
+                        and target_mod == inner.name
+                        and inner.params == []
+                    )
+                ):
+                    nested = _rom_inline_proc(
+                        target_mod,
+                        cmeth,
+                        [_sub(a) for a in inner_args],
+                        ren.get(s.var, s.var),
+                        taken,
+                    )
+                    if nested is None:
+                        return None
+                    out += nested
+                else:
+                    out.append(
+                        ec_ast.Call(
+                            ren.get(s.var, s.var),
+                            f"{target_mod}.{cmeth}",
+                            ", ".join(_sub(a) for a in inner_args),
+                        )
+                    )
+            elif isinstance(s, ec_ast.Return):
+                if ret_target is not None and s.expr is not None:
+                    out.append(ec_ast.Assign(ret_target, _sub(s.expr)))
+            else:
+                return None
+        return out
+
+    def _split_call_args(args: str) -> list[str]:
+        out: list[str] = []
+        depth = 0
+        cur = ""
+        for ch in args:
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                depth -= 1
+            if ch == "," and depth == 0:
+                out.append(cur)
+                cur = ""
+            else:
+                cur += ch
+        if cur.strip():
+            out.append(cur)
+        return [a.strip() for a in out]
+
+    def _rom_game_inlined(
+        game_step: frog_ast.Step, proc_name: str
+    ) -> tuple[list[ec_ast.EcStmt], str, ec_ast.Module] | None:
+        """The ROM wrapper's ``proc_name`` with its concrete-scheme calls (and
+        their KDF submodule calls) inlined -- the statement list leg tactics
+        walk, plus the wrapper's qualified base and module."""
+        g_expr = resolver.resolve(game_step).module_expr
+        wrap_head, wrap_args = _rom_split_functor(g_expr)
+        wmod = _rom_find_module(wrap_head)
+        if wmod is None or len(wrap_args) != 1:
+            return None
+        scheme_expr = wrap_args[0]
+        proc = next((p for p in wmod.procs if p.name == proc_name), None)
+        if proc is None:
+            return None
+        scheme_param = wmod.params[0].name if wmod.params else None
+        if scheme_param is None:
+            return None
+        taken = {d.name for d in proc.body if isinstance(d, ec_ast.VarDecl)} | {
+            p.name for p in proc.params
+        }
+        out: list[ec_ast.EcStmt] = []
+        for s in proc.body:
+            if isinstance(s, ec_ast.VarDecl):
+                continue
+            if (
+                isinstance(s, ec_ast.Call)
+                and s.callee.partition(".")[0] == scheme_param
+            ):
+                nested = _rom_inline_proc(
+                    scheme_expr,
+                    s.callee.partition(".")[2],
+                    _split_call_args(s.args) if s.args.strip() else [],
+                    s.var,
+                    taken,
+                )
+                if nested is None:
+                    return None
+                out += nested
+            elif isinstance(s, (ec_ast.Assign, ec_ast.Sample, ec_ast.Call)):
+                out.append(s)
+            elif isinstance(s, ec_ast.Return):
+                continue
+            elif isinstance(s, ec_ast.If):
+                # inline scheme calls INSIDE the branches (the ROM wrapper's
+                # decaps runs the scheme's decaps in its else branch)
+                def _branch(body: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt] | None:
+                    bout: list[ec_ast.EcStmt] = []
+                    for b in body:
+                        if isinstance(b, ec_ast.VarDecl):
+                            continue
+                        if (
+                            isinstance(b, ec_ast.Call)
+                            and b.callee.partition(".")[0] == scheme_param
+                        ):
+                            nb = _rom_inline_proc(
+                                scheme_expr,
+                                b.callee.partition(".")[2],
+                                _split_call_args(b.args) if b.args.strip() else [],
+                                b.var,
+                                taken,
+                            )
+                            if nb is None:
+                                return None
+                            bout += nb
+                        else:
+                            bout.append(b)
+                    return bout
+
+                tb, eb = _branch(list(s.then_body)), _branch(list(s.else_body))
+                if tb is None or eb is None:
+                    return None
+                out.append(ec_ast.If(s.guard, tb, eb))
+            else:
+                return None
+        return out, wrap_head, wmod
+
+    def _rom_pin_lines(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements,too-many-arguments,too-many-positional-arguments
+        g_list: list[ec_ast.EcStmt],
+        r_list: list[ec_ast.EcStmt],
+        qg: Callable[[str], str],
+        qr: Callable[[str], str],
+        head_conj: str,
+        gtag: str = "1",
+        rtag: str = "2",
+    ) -> list[str] | None:
+        """The PIN-EVERYTHING walk over two fully-inlined statement lists
+        (validated: probes c348/c349, both EXIT 0 first try): couple samples
+        by identity rnd (game samples hoisted to the front to match the
+        other side's draw order), couple abstract calls two-sided in matched
+        order, pin every deterministic call one-sided through its ``_det``
+        axiom, fold assigns with sp, and close wp; skip => /#."""
+
+        def _is_det(c: ec_ast.Call) -> bool:
+            m, _, meth = c.callee.partition(".")
+            return (
+                meth in det_methods_by_module.get(m, set())
+                and m in clone_alias_by_module
+            )
+
+        def _two_sided(stmts: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
+            return [
+                s
+                for s in stmts
+                if isinstance(s, ec_ast.Sample)
+                or (isinstance(s, ec_ast.Call) and not _is_det(s))
+            ]
+
+        g_two, r_two = _two_sided(g_list), _two_sided(r_list)
+        if len(g_two) != len(r_two):
+            return None
+        g_samp = [s for s in g_two if isinstance(s, ec_ast.Sample)]
+        r_samp = [s for s in r_two if isinstance(s, ec_ast.Sample)]
+        # POSITIONAL sample pairing: the challenger's distributions carry
+        # theory-LOCAL names (dbs_Nseed_t) bound to the game's global ones by
+        # the clone, so distr TEXT never matches -- the c326 lesson. EC's rnd
+        # checks the actual distributions.
+        if len(g_samp) != len(r_samp):
+            return None
+        # place the game's samples to MATCH the other side's interleaving
+        # (samples commute freely; abstract calls anchor the pattern)
+        lines: list[str] = []
+        moved = list(g_list)
+        placed = 0
+        g_s_pool = [s for s in moved if isinstance(s, ec_ast.Sample)]
+        si_ = 0
+        for slot in r_two:
+            if isinstance(slot, ec_ast.Sample):
+                if si_ >= len(g_s_pool):
+                    return None
+                s = g_s_pool[si_]
+                si_ += 1
+                pos = moved.index(s)
+                if pos > placed and any(
+                    isinstance(t, ec_ast.Call) and not _is_det(t)
+                    for t in moved[placed:pos]
+                ):
+                    lines.append(f"swap{{{gtag}}} {pos + 1} -{pos - placed}.")
+                    moved.insert(placed, moved.pop(pos))
+                placed = moved.index(s) + 1
+            else:
+                cpos = next(
+                    (
+                        i
+                        for i in range(placed, len(moved))
+                        if isinstance(moved[i], ec_ast.Call)
+                        and not _is_det(cast(ec_ast.Call, moved[i]))
+                    ),
+                    None,
+                )
+                if cpos is None:
+                    return None
+                anchor = cast(ec_ast.Call, moved[cpos])
+                if not isinstance(slot, ec_ast.Call) or anchor.callee != slot.callee:
+                    return None
+                placed = cpos + 1
+        r_after = r_two
+        # ONE pattern-driven pass: drain each side's dets/assigns up to its
+        # next two-sided item, then couple it (rnd for a sample pair, call
+        # for an abstract pair) -- sample couples INTERLEAVE with the calls
+        # per the other side's order (hop_10's challenge draw sits after the
+        # abstract calls, measured)
+        first = True
+        gi_ = ri_ = 0
+
+        def _drain(
+            side: int,
+            stmts: list[ec_ast.EcStmt],
+            idx: int,
+            q: Callable[[str], str],
+        ) -> int:
+            nonlocal lines
+            pend_sp = 0
+            while idx < len(stmts):
+                s = stmts[idx]
+                if isinstance(s, ec_ast.Assign):
+                    pend_sp += 1
+                    idx += 1
+                    continue
+                if isinstance(s, ec_ast.Call) and _is_det(s):
+                    if pend_sp:
+                        lines.append(
+                            f"sp {pend_sp} 0." if side == 1 else f"sp 0 {pend_sp}."
+                        )
+                        pend_sp = 0
+                    m, _, meth = s.callee.partition(".")
+                    alias = clone_alias_by_module[m]
+                    args = _split_call_args(s.args) if s.args.strip() else []
+                    o = "1 0" if side == 1 else "0 1"
+                    binds = ", ".join(
+                        [f"(glob {m}){{{side}}}"] + [f"({q(a)})" for a in args]
+                    )
+                    names = " ".join(["g"] + [f"a{k}" for k in range(len(args))])
+                    evargs = "".join(f" ({q(a)})" for a in args)
+                    lines.append(
+                        f"seq {o} : (#pre /\\ {q(s.var)} = {alias}.ev_{meth}{evargs})."
+                    )
+                    lines.append(
+                        f"+ exists* {binds}; elim* => {names}."
+                        f" call{{{side}}} ({m}_{meth}_det {names}). skip => /#."
+                    )
+                    idx += 1
+                    continue
+                break
+            if pend_sp:
+                lines.append(f"sp {pend_sp} 0." if side == 1 else f"sp 0 {pend_sp}.")
+            return idx
+
+        for slot in r_after:
+            gi_ = _drain(int(gtag), moved, gi_, qg)
+            ri_ = _drain(int(rtag), r_list, ri_, qr)
+            if gi_ >= len(moved) or ri_ >= len(r_list):
+                return None
+            ga, rb = moved[gi_], r_list[ri_]
+            inv = head_conj if first else "#pre"
+            first = False
+            if isinstance(slot, ec_ast.Sample):
+                if not isinstance(ga, ec_ast.Sample) or not isinstance(
+                    rb, ec_ast.Sample
+                ):
+                    return None
+                lines.append(f"seq 1 1 : ({inv} /\\ {qg(ga.var)} = {qr(rb.var)}).")
+                lines.append("+ rnd; skip => /#.")
+            else:
+                if (
+                    not isinstance(ga, ec_ast.Call)
+                    or not isinstance(rb, ec_ast.Call)
+                    or ga.callee != rb.callee
+                ):
+                    return None
+                lines.append(f"seq 1 1 : ({inv} /\\ {qg(ga.var)} = {qr(rb.var)}).")
+                lines.append("+ call (_: true); skip => /#.")
+            gi_ += 1
+            ri_ += 1
+        gi_ = _drain(int(gtag), moved, gi_, qg)
+        ri_ = _drain(int(rtag), r_list, ri_, qr)
+        for idx, stmts in ((gi_, moved), (ri_, r_list)):
+            for tail_s in stmts[idx:]:
+                if isinstance(tail_s, ec_ast.Call) and not _is_det(tail_s):
+                    return None
+                if isinstance(tail_s, (ec_ast.If, ec_ast.Sample)):
+                    return None
+        lines += ["wp.", "skip => /#."]
+        return lines
+
+    def _rom_pin_init_tac(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> list[str] | None:
+        """The ROM pin-walk ``initialize`` (probes c348/c349): fires when one
+        side is a ROM theory wrapper over a concrete scheme functor (detected
+        by the shared random-oracle glob in the coupling) and the other a
+        reduction whose challenger, when present, is a concrete theory
+        module."""
+        coupling = _live_state_coupling(step_a, step_b)
+        if "RO_H" not in coupling:
+            return None
+        sides = (step_a, step_b)
+        gi = next(
+            (
+                k
+                for k, st in enumerate(sides)
+                if st.reduction is None and "(" in resolver.resolve(st).module_expr
+            ),
+            None,
+        )
+        if gi is None:
+            return None
+        ri = 1 - gi
+        red_step = sides[ri]
+        if red_step.reduction is None:
+            return None
+        rmod = next(
+            (
+                d
+                for d in ec_reductions
+                if isinstance(d, ec_ast.Module) and d.name == red_step.reduction.name
+            ),
+            None,
+        )
+        if rmod is None:
+            return None
+        g_res = _rom_game_inlined(sides[gi], "initialize")
+        if g_res is None:
+            return None
+        g_list, wrap_base, wmod = g_res
+        # the reduction side: its body with the challenger's initialize inlined
+        r_proc = next((p for p in rmod.procs if p.name == "initialize"), None)
+        if r_proc is None:
+            return None
+        r_chal = rmod.params[-1].name if rmod.params else None
+        chal_expr = pt.last_module_arg(resolver.resolve(red_step).module_expr)
+        taken_r = {d.name for d in r_proc.body if isinstance(d, ec_ast.VarDecl)}
+        r_list: list[ec_ast.EcStmt] = []
+        inline_chal = False
+        for s in r_proc.body:
+            if isinstance(s, (ec_ast.VarDecl, ec_ast.Return)):
+                continue
+            if (
+                isinstance(s, ec_ast.Call)
+                and r_chal is not None
+                and s.callee.partition(".")[0] == r_chal
+            ):
+                nested = _rom_inline_proc(
+                    chal_expr,
+                    s.callee.partition(".")[2],
+                    _split_call_args(s.args) if s.args.strip() else [],
+                    s.var if s.var else None,
+                    taken_r,
+                )
+                if nested is None:
+                    return None
+                r_list += nested
+                inline_chal = True
+            else:
+                r_list.append(s)
+        gtag, rtag = str(gi + 1), str(2 - gi)
+        qg0, qr0 = _prf_qualify(wmod, gtag), _prf_qualify(rmod, rtag)
+        wf = {v.name for v in wmod.module_vars}
+
+        def qg(v: str) -> str:
+            base, _, comp = v.partition(".`")
+            r = f"{wrap_base}.{base}{{{gtag}}}" if base in wf else f"{base}{{{gtag}}}"
+            return f"{r}.`{comp}" if comp else r
+
+        def qr(v: str) -> str:
+            base, _, comp = v.partition(".`")
+            r = qr0(base)
+            return f"{r}.`{comp}" if comp else r
+
+        del qg0
+        # the head invariant: the globs of the hop coupling
+        globs = " /\\ ".join(
+            c
+            for c in coupling.split(" /\\ ")
+            if c.strip().startswith("={glob") or "RO_H.h" in c
+        )
+        walk = _rom_pin_lines(
+            g_list, r_list, qg, qr, globs if globs else "true", gtag, rtag
+        )
+        if walk is None:
+            return None
+        g_expr = resolver.resolve(sides[gi]).module_expr
+        _, wargs = _rom_split_functor(g_expr)
+        scheme_expr = wargs[0]
+        smod = _rom_find_module(scheme_expr)
+        if smod is None:
+            return None
+        # the scheme's KDF-carrying submodule: any applied functor argument the
+        # scheme's procs call `.evaluate` on
+        s_head, s_args = _rom_split_functor(scheme_expr)
+        sub_evals = sorted(
+            {a for a in s_args if "(" in a and _rom_find_module(a) is not None}
+        )
+        inl1 = " ".join(f"{scheme_expr}.{m}" for m in ("keygen", "encaps")) + "".join(
+            f" {a}.evaluate" for a in sub_evals
+        )
+        lines = ["inline *.", f"inline{{{gtag}}} {inl1}."]
+        if inline_chal:
+            lines.append(f"inline{{{rtag}}} {chal_expr}.initialize.")
+        del s_head
+        return lines + walk
+
+    def _rom_pin_decaps_walk(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> dict[str, list[str]] | None:
+        """The ROM pin-walk ``decaps`` (probe c349): refusal + the same
+        pattern-driven pin walk over the two else bodies."""
+        coupling = _live_state_coupling(step_a, step_b)
+        if "RO_H" not in coupling:
+            return None
+        sides = (step_a, step_b)
+        gi = next(
+            (
+                k
+                for k, st in enumerate(sides)
+                if st.reduction is None and "(" in resolver.resolve(st).module_expr
+            ),
+            None,
+        )
+        if gi is None:
+            return None
+        ri = 1 - gi
+        red_step = sides[ri]
+        if red_step.reduction is None:
+            return None
+        rmod = next(
+            (
+                d
+                for d in ec_reductions
+                if isinstance(d, ec_ast.Module) and d.name == red_step.reduction.name
+            ),
+            None,
+        )
+        if rmod is None:
+            return None
+        g_res = _rom_game_inlined(sides[gi], "decaps")
+        if g_res is None:
+            return None
+        g_list, wrap_base, wmod = g_res
+        r_proc = next((p for p in rmod.procs if p.name == "decaps"), None)
+        if r_proc is None:
+            return None
+        r_body = [
+            s for s in r_proc.body if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+        ]
+        if (
+            len(g_list) != 1
+            or not isinstance(g_list[0], ec_ast.If)
+            or len(r_body) != 1
+            or not isinstance(r_body[0], ec_ast.If)
+        ):
+            return None
+        g_else: list[ec_ast.EcStmt] = [
+            s for s in g_list[0].else_body if not isinstance(s, ec_ast.VarDecl)
+        ]
+        r_else: list[ec_ast.EcStmt] = [
+            s for s in r_body[0].else_body if not isinstance(s, ec_ast.VarDecl)
+        ]
+        if any(isinstance(s, ec_ast.If) for s in g_else + r_else):
+            return None
+        # the SEEDBASED variants re-derive their decaps keys from seeds inside
+        # the scheme's decaps (slice-of-seed assigns); the walk's final /#
+        # cannot assemble that correspondence without an ev-conjunct the
+        # coupling does not yet carry -- decline (measured: UG_s/CG_s reject
+        # at the final skip while both expanded cells compile)
+        if any(isinstance(s, ec_ast.Assign) and "slice_" in s.rhs for s in g_else):
+            return None
+        gtag, rtag = str(gi + 1), str(2 - gi)
+        qr0 = _prf_qualify(rmod, rtag)
+        wf = {v.name for v in wmod.module_vars}
+
+        def qg(v: str) -> str:
+            base, _, comp = v.partition(".`")
+            r = f"{wrap_base}.{base}{{{gtag}}}" if base in wf else f"{base}{{{gtag}}}"
+            return f"{r}.`{comp}" if comp else r
+
+        def qr(v: str) -> str:
+            base, _, comp = v.partition(".`")
+            r = qr0(base)
+            return f"{r}.`{comp}" if comp else r
+
+        walk = _rom_pin_lines(g_else, r_else, qg, qr, "#pre", gtag, rtag)
+        if walk is None:
+            return None
+        g_expr = resolver.resolve(sides[gi]).module_expr
+        _, wargs = _rom_split_functor(g_expr)
+        scheme_expr = wargs[0]
+        _, s_args = _rom_split_functor(scheme_expr)
+        sub_evals = sorted(
+            {a for a in s_args if "(" in a and _rom_find_module(a) is not None}
+        )
+        inl = f"{scheme_expr}.decaps" + "".join(f" {a}.evaluate" for a in sub_evals)
+        return {
+            "decaps": [
+                "inline *.",
+                f"inline{{{gtag}}} {inl}.",
+                "if; 1: smt().",
+                "+ auto.",
+            ]
+            + walk
+        }
+
     def _prg_expansion_game_coupling(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> str | None:
@@ -14718,6 +15324,9 @@ def export_proof_file(proof_path: str) -> str:
             # C2PRI seam (CK's hop_14/hop_21 family).
             if reprogram_override is None:
                 reprogram_override = _c2pri_seam_init_tac(step_a, step_b)
+            # ROM pin-walk (the UG/CG _T chain's straight hops).
+            if reprogram_override is None:
+                reprogram_override = _rom_pin_init_tac(step_a, step_b)
             # Same-backbone / different-LAYOUT hop (HON_BIND hop_4 / hop_8
             # ``initialize``): batch the interleaved side, then peel. ``None``
             # off-shape, and it declines outright when both sides are already
@@ -14777,6 +15386,7 @@ def export_proof_file(proof_path: str) -> str:
                     or _prf_seam_decaps_walk(step_a, step_b)
                     or _irs_seam_decaps_walk(step_a, step_b)
                     or _c2pri_seam_decaps_walk(step_a, step_b)
+                    or _rom_pin_decaps_walk(step_a, step_b)
                 ),
                 # The OUTER hop lemma's glob set (see ``glob_invariant_conj``).
                 # The chain coupling must match it exactly -- see the gparams

@@ -9147,19 +9147,29 @@ def export_proof_file(proof_path: str) -> str:
             return ec_scheme
         return None
 
-    def _rom_inline_proc(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    def _rom_inline_proc(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements,too-many-arguments,too-many-positional-arguments
         applied: str,
         proc_name: str,
         call_args: list[str],
         ret_target: str | None,
         taken: set[str],
+        var_prefix: str | None = None,
     ) -> list[ec_ast.EcStmt] | None:
         """Simulate EasyCrypt's ``inline`` of ``applied.proc_name(call_args)``:
         bind parameters, freshen locals (bindall smallest-suffix), substitute
         the functor's formal module params with its applied arguments,
         recursively inline nested calls into CONCRETE modules, and turn the
         ``return`` into an assignment to ``ret_target``. ``None`` when any
-        piece is off-shape (a body statement kind the walk cannot carry)."""
+        piece is off-shape (a body statement kind the walk cannot carry).
+
+        ``var_prefix`` qualifies the inlined module's OWN module-var
+        references (``ctStar`` -> ``KEM_PQ_c.KEM_C2PRI_Ideal.ctStar``),
+        matching what EC's inline actually shows -- without it a stateful
+        challenger's field CAPTURES a same-named var of the enclosing
+        reduction (measured: R_C2PRI_L.ctStar vs KEM_C2PRI_Ideal.ctStar).
+        Top-level call only; nested concrete inlines stay unprefixed (all
+        stateless in the walked families -- a stateful nested module's
+        unqualified names surface as unrenderable values and decline)."""
         head, actual_args = _rom_split_functor(applied)
         mod = _rom_find_module(head)
         if mod is None:
@@ -9168,7 +9178,11 @@ def export_proof_file(proof_path: str) -> str:
         if proc is None:
             return None
         pmap = {p.name: a for p, a in zip(mod.params, actual_args)}
-        ren: dict[str, str] = {}
+        ren: dict[str, str] = (
+            {v.name: f"{var_prefix}.{v.name}" for v in mod.module_vars}
+            if var_prefix is not None
+            else {}
+        )
         out: list[ec_ast.EcStmt] = []
         for prm, arg in zip(proc.params, call_args):
             nv = _irs_fresh(prm.name, taken)
@@ -9741,11 +9755,11 @@ def export_proof_file(proof_path: str) -> str:
     # equiv cannot be stated per-oracle at all -- the pr lemma inlines both
     # inits, swaps the rF draw up next to the dead h, couples ``rnd`` cross
     # + drops the dead h one-sided, then runs the pin-everything walk.
-    _roh_cache: dict[tuple[int, int], dict | None] = {}
+    _roh_cache: dict[tuple[int, int], dict[str, object] | None] = {}
 
     def _roh_hop(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
         step_a: frog_ast.Step, step_b: frog_ast.Step
-    ) -> dict | None:
+    ) -> dict[str, object] | None:
         key = (id(step_a), id(step_b))
         if key in _roh_cache:
             return _roh_cache[key]
@@ -9808,49 +9822,64 @@ def export_proof_file(proof_path: str) -> str:
             return None
         wred = cast(ec_ast.Module, rmods[wi])
         ored = cast(ec_ast.Module, rmods[oi])
+        chal_bases = [pt.module_base_name(e) for e in chal_exprs]
 
-        def _inlined_init(
-            ri: int,
-        ) -> list[ec_ast.EcStmt] | None:
+        def _inlined_proc(ri: int, proc_name: str) -> list[ec_ast.EcStmt] | None:
+            """The reduction's ``proc_name`` body with its challenger calls
+            inlined (challenger module vars QUALIFIED, matching EC)."""
             rmod = cast(ec_ast.Module, rmods[ri])
-            proc = next((p for p in rmod.procs if p.name == "initialize"), None)
+            proc = next((p for p in rmod.procs if p.name == proc_name), None)
             if proc is None:
                 return None
             r_chal = rmod.params[-1].name if rmod.params else None
-            taken = {d.name for d in proc.body if isinstance(d, ec_ast.VarDecl)}
-            acc: list[ec_ast.EcStmt] = []
-            for s in proc.body:
-                if isinstance(s, (ec_ast.VarDecl, ec_ast.Return)):
-                    continue
-                if (
-                    isinstance(s, ec_ast.Call)
-                    and r_chal is not None
-                    and s.callee.partition(".")[0] == r_chal
-                ):
-                    nested = _rom_inline_proc(
-                        chal_exprs[ri],
-                        s.callee.partition(".")[2],
-                        _split_call_args(s.args) if s.args.strip() else [],
-                        s.var if s.var else None,
-                        taken,
-                    )
-                    if nested is None:
-                        return None
-                    acc += nested
-                else:
-                    acc.append(s)
-            return acc
+            taken = {d.name for d in proc.body if isinstance(d, ec_ast.VarDecl)} | {
+                p.name for p in proc.params
+            }
 
-        w_body = _inlined_init(wi)
-        o_body = _inlined_init(oi)
+            def _many(
+                stmts: list[ec_ast.EcStmt],
+            ) -> list[ec_ast.EcStmt] | None:
+                acc: list[ec_ast.EcStmt] = []
+                for s in stmts:
+                    if isinstance(s, (ec_ast.VarDecl, ec_ast.Return)):
+                        continue
+                    if (
+                        isinstance(s, ec_ast.Call)
+                        and r_chal is not None
+                        and s.callee.partition(".")[0] == r_chal
+                    ):
+                        nested = _rom_inline_proc(
+                            chal_exprs[ri],
+                            s.callee.partition(".")[2],
+                            _split_call_args(s.args) if s.args.strip() else [],
+                            s.var if s.var else None,
+                            taken,
+                            var_prefix=chal_bases[ri],
+                        )
+                        if nested is None:
+                            return None
+                        acc.extend(nested)
+                    elif isinstance(s, ec_ast.If):
+                        tb = _many(s.then_body)
+                        eb = _many(s.else_body)
+                        if tb is None or eb is None:
+                            return None
+                        acc.append(ec_ast.If(s.guard, tb, eb))
+                    else:
+                        acc.append(s)
+                return acc
+
+            return _many(proc.body)
+
+        w_body = _inlined_proc(wi, "initialize")
+        o_body = _inlined_proc(oi, "initialize")
         if w_body is None or o_body is None:
             return None
         # seedbased derivation chains (slice-of-seed assigns) need ev-chain
         # conjuncts this seam does not yet derive -- decline (the committed
         # ``slice_`` gate precedent; the expanded cells carry no slices)
         if any(
-            isinstance(s, ec_ast.Assign) and "slice_" in s.rhs
-            for s in w_body + o_body
+            isinstance(s, ec_ast.Assign) and "slice_" in s.rhs for s in w_body + o_body
         ):
             return None
 
@@ -9862,25 +9891,27 @@ def export_proof_file(proof_path: str) -> str:
             )
 
         # ---- symbolic value trace of one inlined body ----
-        def _symtrace(body: list[ec_ast.EcStmt], skip_var: str | None) -> dict | None:
-            env: dict[str, tuple] = {}
+        def _symtrace(
+            body: list[ec_ast.EcStmt], skip_var: str | None
+        ) -> "dict[str, tuple[Any, ...]] | None":
+            env: dict[str, tuple[Any, ...]] = {}
             counters = {"s": 0, "c": 0}
 
-            def ev(expr: str) -> tuple:
+            def ev(expr: str) -> "tuple[Any, ...]":
                 e = expr.strip()
                 if e.startswith("(") and e.endswith(")"):
                     parts = _split_call_args(e[1:-1])
                     if len(parts) > 1:
                         return ("tup", tuple(ev(a) for a in parts))
                     e = parts[0] if parts else e
-                m = re.fullmatch(r"([A-Za-z_]\w*)\.`(\d+)", e)
+                m = re.fullmatch(r"([A-Za-z_][\w.]*)\.`(\d+)", e)
                 if m:
                     base = ev(m.group(1))
                     k = int(m.group(2))
                     if base[0] == "tup" and k <= len(base[1]):
-                        return base[1][k - 1]
+                        return cast("tuple[Any, ...]", base[1][k - 1])
                     return ("proj", base, k)
-                if re.fullmatch(r"[A-Za-z_]\w*", e):
+                if re.fullmatch(r"[A-Za-z_][\w.]*", e):
                     return env.get(e, ("opaque", e))
                 return ("expr", e)
 
@@ -9897,9 +9928,7 @@ def export_proof_file(proof_path: str) -> str:
                     if _is_det(s):
                         alias = clone_alias_by_module[s.callee.partition(".")[0]]
                         meth = s.callee.partition(".")[2]
-                        args = (
-                            _split_call_args(s.args) if s.args.strip() else []
-                        )
+                        args = _split_call_args(s.args) if s.args.strip() else []
                         env[s.var] = (
                             "ev",
                             alias,
@@ -9913,22 +9942,35 @@ def export_proof_file(proof_path: str) -> str:
                     env[s.var] = ev(s.rhs)
             return env
 
-        w_env = _symtrace(w_body, rf_name)
+        rf_ref = f"{wchal_base}.{rf_name}"
+        w_env = _symtrace(w_body, rf_ref)
         o_env = _symtrace(o_body, None)
         if w_env is None or o_env is None:
             return None
+        # renderable o-side state: the reduction's own fields plus the o
+        # challenger's (qualified) fields -- both are real globals the
+        # invariant may name
         o_fields = {
-            v.name: o_env[v.name] for v in ored.module_vars if v.name in o_env
+            f"{ored.name}.{v.name}": o_env[v.name]
+            for v in ored.module_vars
+            if v.name in o_env
         }
+        o_fields.update(
+            {
+                f"{chal_bases[oi]}.{v.name}": o_env[f"{chal_bases[oi]}.{v.name}"]
+                for v in cast(ec_ast.Module, chal_mods[oi]).module_vars
+                if f"{chal_bases[oi]}.{v.name}" in o_env
+            }
+        )
 
-        def _render_o(v: tuple) -> str | None:
-            for fname, fval in o_fields.items():
+        def _render_o(v: "tuple[Any, ...]") -> str | None:
+            for fref, fval in o_fields.items():
                 if fval == v:
-                    return f"{ored.name}.{fname}{{{otag}}}"
+                    return f"{fref}{{{otag}}}"
                 # a field holding a TUPLE also renders its components
                 if fval[0] == "tup" and v in fval[1]:
                     k = fval[1].index(v) + 1
-                    return f"{ored.name}.{fname}{{{otag}}}.`{k}"
+                    return f"{fref}{{{otag}}}.`{k}"
             if v[0] == "proj":
                 inner = _render_o(v[1])
                 return None if inner is None else f"{inner}.`{v[2]}"
@@ -9951,7 +9993,7 @@ def export_proof_file(proof_path: str) -> str:
         for v in wchal.module_vars:
             if v.name == rf_name:
                 continue
-            val = w_env.get(v.name)
+            val = w_env.get(f"{wchal_base}.{v.name}")
             if val is None:
                 return None
             whole = _render_o(val)
@@ -9962,11 +10004,32 @@ def export_proof_file(proof_path: str) -> str:
                     rhs = _render_o(comp)
                     if rhs is None:
                         return None
-                    conj.append(
-                        f"{wchal_base}.{v.name}.`{k}{{{wtag}}} = {rhs}"
-                    )
+                    conj.append(f"{wchal_base}.{v.name}.`{k}{{{wtag}}} = {rhs}")
             else:
                 return None
+
+        # o-side INTERNAL consistency: an o reduction field whose traced
+        # tuple decomposes componentwise over OTHER o fields
+        # (R_C2PRI_L.ctStar = (ct_PQ_star, ct_T_star)) -- the outer
+        # refusal's guard equivalence needs it (validated: probe c361).
+        # Emitted only when every component renders; off-shape fields are
+        # simply skipped (supplementary conjuncts, not a decline).
+        for v in ored.module_vars:
+            val = o_env.get(v.name)
+            if val is None or val[0] != "tup":
+                continue
+            ref = f"{ored.name}.{v.name}"
+            comps: list[str] = []
+            for k, c in enumerate(val[1], start=1):
+                r = next(
+                    (fr for fr, fv in o_fields.items() if fv == c and fr != ref),
+                    None,
+                )
+                if r is None:
+                    comps = []
+                    break
+                comps.append(f"{ref}.`{k}{{{otag}}} = {r}{{{otag}}}")
+            conj += comps
 
         # ---- qualification: chal fields + each side's own module vars ----
         wf = {v.name for v in wred.module_vars}
@@ -9995,7 +10058,7 @@ def export_proof_file(proof_path: str) -> str:
             (
                 i
                 for i, s in enumerate(w_body)
-                if isinstance(s, ec_ast.Sample) and s.var == rf_name
+                if isinstance(s, ec_ast.Sample) and s.var == rf_ref
             ),
             None,
         )
@@ -10021,45 +10084,227 @@ def export_proof_file(proof_path: str) -> str:
         ]
 
         # ---- the decaps walk: refusal branch + det-drain of both elses ----
-        def _decaps_walk() -> list[str] | None:
-            w_proc = next((p for p in wred.procs if p.name == "decaps"), None)
-            o_proc = next((p for p in ored.procs if p.name == "decaps"), None)
-            if w_proc is None or o_proc is None:
-                return None
-            r_chal = wred.params[-1].name if wred.params else None
-            taken = {d.name for d in w_proc.body if isinstance(d, ec_ast.VarDecl)}
-            w_list: list[ec_ast.EcStmt] = []
-            for s in w_proc.body:
-                if isinstance(s, (ec_ast.VarDecl, ec_ast.Return)):
-                    continue
-                if (
-                    isinstance(s, ec_ast.Call)
-                    and r_chal is not None
-                    and s.callee.partition(".")[0] == r_chal
-                ):
-                    nested = _rom_inline_proc(
-                        chal_exprs[wi],
-                        s.callee.partition(".")[2],
-                        _split_call_args(s.args) if s.args.strip() else [],
-                        s.var if s.var else None,
-                        taken,
-                    )
-                    if nested is None:
-                        return None
-                    w_list += nested
-                else:
-                    w_list.append(s)
-            o_list = [
-                s
-                for s in o_proc.body
-                if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+        def _sp_one(side_tag: str, n: int) -> str:
+            return f"sp {n} 0." if side_tag == "1" else f"sp 0 {n}."
+
+        def _det_pin(
+            side_tag: str, s: ec_ast.Call, q: Callable[[str], str]
+        ) -> list[str]:
+            m, _, meth = s.callee.partition(".")
+            alias = clone_alias_by_module[m]
+            args = _split_call_args(s.args) if s.args.strip() else []
+            o_ = "1 0" if side_tag == "1" else "0 1"
+            binds = ", ".join(
+                [f"(glob {m}){{{side_tag}}}"] + [f"({q(a)})" for a in args]
+            )
+            names = " ".join(["g"] + [f"a{k}" for k in range(len(args))])
+            evargs = "".join(f" ({q(a)})" for a in args)
+            return [
+                f"seq {o_} : (#pre /\\ {q(s.var)} = {alias}.ev_{meth}{evargs}).",
+                f"+ exists* {binds}; elim* => {names}."
+                f" call{{{side_tag}}} ({m}_{meth}_det {names}). skip => /#.",
             ]
+
+        def _roh_drain(
+            side_tag: str, stmts: list[ec_ast.EcStmt], q: Callable[[str], str]
+        ) -> list[str] | None:
+            """One-sided drain of an all-det branch: ``_det`` pins in program
+            order with ``sp`` for interleaved assigns; trailing assigns are
+            left for the closing ``wp``. ``None`` on any other statement."""
+            lines: list[str] = []
+            pend = 0
+            for s in stmts:
+                if isinstance(s, ec_ast.Assign):
+                    pend += 1
+                    continue
+                if isinstance(s, ec_ast.Call) and _is_det(s):
+                    if pend:
+                        lines.append(_sp_one(side_tag, pend))
+                        pend = 0
+                    lines += _det_pin(side_tag, s, q)
+                    continue
+                return None
+            return lines
+
+        def _all_assigns(stmts: list[ec_ast.EcStmt]) -> bool:
+            return all(isinstance(s, ec_ast.Assign) for s in stmts)
+
+        def _roh_case_tree(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+            o_else: list[ec_ast.EcStmt], w_else: list[ec_ast.EcStmt]
+        ) -> list[str] | None:
+            """The C2PRI-Real three-level case tree (validated probe c361,
+            EXIT 0 first try): both sides carry a LIVE collision branch with a
+            fresh draw; the o side's guard comes from the Real challenger's
+            ``submit`` (an inlined refusal-or-re-decapsulate ``if``); the w
+            side's from an explicit recomputation. Emission: double det-pin of
+            the shared decapsulation, ``if{o}`` on the submit refusal; in each
+            case kill the branches forced dead (``rcondf`` -- the refusal-TRUE
+            case forces ct_PQ onto the challenge so BOTH collision guards are
+            false and the wrapper's indirect refusal is off-challenge; the
+            refusal-FALSE case decides the collision two-sidedly by smt over
+            the pinned re-decapsulation, couples the fresh draws with ``rnd``,
+            and kills the indirect refusal by contradiction), then det-drain
+            the surviving 1:1 tails."""
+
+            def _strip(b: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
+                return [t for t in b if not isinstance(t, ec_ast.VarDecl)]
+
+            # ---- o side decomposition ----
+            it = iter(enumerate(o_else))
+            oa1 = 0
+            o_dec: ec_ast.Call | None = None
+            for _i, s in it:
+                if isinstance(s, ec_ast.Assign):
+                    oa1 += 1
+                    continue
+                if isinstance(s, ec_ast.Call) and _is_det(s):
+                    o_dec = s
+                    break
+                return None
+            if o_dec is None:
+                return None
+            rest = o_else[oa1 + 1 :]
+            oa2 = 0
+            while rest and isinstance(rest[0], ec_ast.Assign):
+                oa2 += 1
+                rest = rest[1:]
+            if not rest or not isinstance(rest[0], ec_ast.If):
+                return None
+            if_sub = rest[0]
+            rest = rest[1:]
+            sub_then = _strip(if_sub.then_body)
+            sub_else = _strip(if_sub.else_body)
+            if not (
+                _all_assigns(sub_then)
+                and any(s.rhs.strip() == "false" for s in sub_then)  # type: ignore[union-attr]
+            ):
+                return None
+            if not (
+                sub_else
+                and isinstance(sub_else[0], ec_ast.Call)
+                and _is_det(sub_else[0])
+                and _all_assigns(sub_else[1:])
+            ):
+                return None
+            o_dec2 = sub_else[0]
+            oa3 = 0
+            while rest and isinstance(rest[0], ec_ast.Assign):
+                oa3 += 1
+                rest = rest[1:]
+            if not rest or not isinstance(rest[0], ec_ast.If):
+                return None
+            if_co = rest[0]
+            o_trail = rest[1:]
+            if not _all_assigns(o_trail):
+                return None
+            co_then = _strip(if_co.then_body)
+            if not (co_then and isinstance(co_then[0], ec_ast.Sample)):
+                return None
+            o_tail = _strip(if_co.else_body) + o_trail
+            # ---- w side decomposition ----
+            wa1 = 0
+            wrest = list(w_else)
+            while wrest and isinstance(wrest[0], ec_ast.Assign):
+                wa1 += 1
+                wrest = wrest[1:]
+            if not (
+                wrest
+                and isinstance(wrest[0], ec_ast.Call)
+                and _is_det(wrest[0])
+                and wrest[0].callee == o_dec.callee
+            ):
+                return None
+            w_dec = wrest[0]
+            wrest = wrest[1:]
+            if not wrest or not isinstance(wrest[0], ec_ast.If):
+                return None
+            if_cw = wrest[0]
+            w_trail = wrest[1:]
+            if not _all_assigns(w_trail):
+                return None
+            cw_then = _strip(if_cw.then_body)
+            if not (cw_then and isinstance(cw_then[0], ec_ast.Sample)):
+                return None
+            cw_else = _strip(if_cw.else_body)
+            wq = 0
+            while cw_else and isinstance(cw_else[0], ec_ast.Assign):
+                wq += 1
+                cw_else = cw_else[1:]
+            if not cw_else or not isinstance(cw_else[0], ec_ast.If):
+                return None
+            if_ref = cw_else[0]
+            if not _all_assigns(_strip(if_ref.then_body)):
+                return None
+            w_tail = _strip(if_ref.else_body) + cw_else[1:] + w_trail
+            # ---- drains ----
+            od = _roh_drain(otag, o_tail, qo)
+            wd = _roh_drain(wtag, w_tail, qw)
+            if od is None or wd is None:
+                return None
+            # ---- the double det-pin of the shared decapsulation ----
+            m, _, meth = o_dec.callee.partition(".")
+            alias = clone_alias_by_module[m]
+            o_args = _split_call_args(o_dec.args)
+            w_args = _split_call_args(w_dec.args)
+            oq = [f"({qo(a)})" for a in o_args]
+            wq_a = [f"({qw(a)})" for a in w_args]
+            names_o = " ".join(["g1"] + [f"a{k}" for k in range(len(o_args))])
+            names_w = " ".join(["g2"] + [f"b{k}" for k in range(len(w_args))])
+            pin2 = [
+                f"seq 1 1 : (#pre /\\ {qo(o_dec.var)} = {alias}.ev_{meth} "
+                + " ".join(oq)
+                + f" /\\ {qw(w_dec.var)} = {alias}.ev_{meth} "
+                + " ".join(wq_a)
+                + ").",
+                f"+ exists* (glob {m}){{{otag}}}, "
+                + ", ".join(oq)
+                + f"; elim* => {names_o}. call{{{otag}}} ({m}_{meth}_det {names_o}).",
+                f"  exists* (glob {m}){{{wtag}}}, "
+                + ", ".join(wq_a)
+                + f"; elim* => {names_w}. call{{{wtag}}} ({m}_{meth}_det {names_w}).",
+                "  skip => /#.",
+            ]
+            lines = [f"sp {_prf_pair(oa1, wa1, otag)}."]
+            lines += pin2
+            if oa2:
+                lines.append(_sp_one(otag, oa2))
+            lines.append(f"if{{{otag}}}.")
+            # refusal TRUE
+            lines.append("+ " + _sp_one(otag, len(sub_then) + oa3)[0:].lstrip())
+            lines.append(f"  rcondf{{{otag}}} 1; first by auto => /#.")
+            lines.append(f"  rcondf{{{wtag}}} 1; first by auto => /#.")
+            if wq:
+                lines.append("  " + _sp_one(wtag, wq))
+            lines.append(f"  rcondf{{{wtag}}} 1; first by auto => /#.")
+            lines += ["  " + l for l in od]
+            lines += ["  " + l for l in wd]
+            lines.append("  wp. skip => /#.")
+            # refusal FALSE
+            lines += _det_pin(otag, o_dec2, qo)
+            n_after = len(sub_else) - 1 + oa3
+            if n_after:
+                lines.append(_sp_one(otag, n_after))
+            lines.append("if; 1: smt().")
+            lines.append("+ wp; rnd; skip => /#.")
+            if wq:
+                lines.append(_sp_one(wtag, wq))
+            lines.append(f"rcondf{{{wtag}}} 1; first by auto => /#.")
+            lines += od
+            lines += wd
+            lines.append("wp. skip => /#.")
+            return lines
+
+        def _decaps_walk() -> list[str] | None:
+            w_list = _inlined_proc(wi, "decaps")
+            o_list = _inlined_proc(oi, "decaps")
+            if w_list is None or o_list is None:
+                return None
 
             def _split_if(
                 stmts: list[ec_ast.EcStmt],
             ) -> tuple[int, ec_ast.If, list[ec_ast.EcStmt]] | None:
                 ifs = [i for i, s in enumerate(stmts) if isinstance(s, ec_ast.If)]
-                if len(ifs) != 1:
+                if not ifs:
                     return None
                 i = ifs[0]
                 pre = stmts[:i]
@@ -10073,9 +10318,7 @@ def export_proof_file(proof_path: str) -> str:
                 return None
             w_pre, w_if, w_post = wsplit
             o_pre, o_if, o_post = osplit
-            if any(
-                not isinstance(s, ec_ast.Assign) for s in w_post + o_post
-            ):
+            if any(not isinstance(s, ec_ast.Assign) for s in w_post + o_post):
                 return None
             w_else = [
                 s for s in w_if.else_body if not isinstance(s, ec_ast.VarDecl)
@@ -10083,11 +10326,12 @@ def export_proof_file(proof_path: str) -> str:
             o_else = [
                 s for s in o_if.else_body if not isinstance(s, ec_ast.VarDecl)
             ] + o_post
-            if any(isinstance(s, ec_ast.If) for s in w_else + o_else):
-                return None
-            ewalk = _rom_pin_lines(w_else, o_else, qw, qo, "#pre", wtag, otag)
-            if ewalk is None:
-                ewalk = _rom_pin_lines(o_else, w_else, qo, qw, "#pre", otag, wtag)
+            if any(isinstance(s, ec_ast.If) for s in o_else + w_else):
+                ewalk = _roh_case_tree(o_else, w_else)
+            else:
+                ewalk = _rom_pin_lines(w_else, o_else, qw, qo, "#pre", wtag, otag)
+                if ewalk is None:
+                    ewalk = _rom_pin_lines(o_else, w_else, qo, qw, "#pre", otag, wtag)
             if ewalk is None:
                 return None
             sp = _prf_pair(o_pre, w_pre, otag)
@@ -10102,7 +10346,7 @@ def export_proof_file(proof_path: str) -> str:
         dw = _decaps_walk()
         if dw is None:
             return None
-        res = {
+        res: dict[str, object] = {
             "wtag": wtag,
             "otag": otag,
             "coupling": " /\\ ".join(conj),
@@ -10118,7 +10362,9 @@ def export_proof_file(proof_path: str) -> str:
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> dict[str, list[str]] | None:
         roh = _roh_hop(step_a, step_b)
-        return None if roh is None else {"decaps": roh["decaps_tac"]}
+        if roh is None:
+            return None
+        return {"decaps": cast("list[str]", roh["decaps_tac"])}
 
     def _prg_expansion_game_coupling(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
         step_a: frog_ast.Step, step_b: frog_ast.Step
@@ -12925,7 +13171,7 @@ def export_proof_file(proof_path: str) -> str:
             # REDUCTION ~ REDUCTION lazy-RO handoff: the cross-side rF/RO
             # coupling + the value-traced wrapper-state pairings replace the
             # unprovable same-side materialization below.
-            live_state_holders.add(roh["chal_base"])
+            live_state_holders.add(cast(str, roh["chal_base"]))
             return cast(str, roh["coupling"])
         # pylint: disable=protected-access
         ro_ref = next(iter(top_types.ro_by_arrow_type().values()), None)
@@ -15789,6 +16035,7 @@ def export_proof_file(proof_path: str) -> str:
                     if isinstance(h, frog_ast.Reduction) and not h.fields
                 },
                 is_lazyro_honest=_is_lazyro_honest_hop(step_a, step_b) is not None,
+                is_ro_handoff=_roh_hop(step_a, step_b) is not None,
                 drop_globs=(
                     frozenset(
                         m
@@ -16174,7 +16421,7 @@ def export_proof_file(proof_path: str) -> str:
                     n_calls=0,
                     dfun_ll=cast(str, roh["dfun_ll"]),
                     red_side=cast(str, roh["wtag"]),
-                    init_tac_override=cast(list, roh["init_tac"]),
+                    init_tac_override=cast("list[str]", roh["init_tac"]),
                 )
         return pt.MultiOraclePrSpec(
             coupling=_live_state_coupling(step_a, step_b),

@@ -5749,6 +5749,7 @@ def emit_multi_oracle_chain_for_hop(
     use_canonical_fields: bool = False,
     stateless_wrapper_bases: frozenset[str] | set[str] | None = None,
     is_lazyro_honest: bool = False,
+    is_ro_handoff: bool = False,
     drop_globs: frozenset[str] = frozenset(),
     both_reductions: bool = False,
     init_tac_override: list[str] | None = None,
@@ -5895,6 +5896,7 @@ def emit_multi_oracle_chain_for_hop(
             glob_info_by_base=glob_info_by_base,
             stateless_wrapper_bases=stateless_wrapper_bases,
             is_lazyro_honest=is_lazyro_honest,
+            is_ro_handoff=is_ro_handoff,
             drop_globs=drop_globs,
             both_reductions=both_reductions,
             outer_globs=outer_globs,
@@ -5956,6 +5958,7 @@ def _emit_one_oracle_chain(
     ) = None,
     stateless_wrapper_bases: frozenset[str] | set[str] | None = None,
     is_lazyro_honest: bool = False,
+    is_ro_handoff: bool = False,
     drop_globs: frozenset[str] = frozenset(),
     both_reductions: bool = False,
     outer_globs: frozenset[str] | None = None,
@@ -7072,7 +7075,8 @@ def _emit_one_oracle_chain(
             "qed.",
         ]
     elif rom_stateless_oracle and (
-        _ref_base(left_wrapper_expr) in (stateless_wrapper_bases or set())
+        is_ro_handoff
+        or _ref_base(left_wrapper_expr) in (stateless_wrapper_bases or set())
         or _ref_base(right_wrapper_expr) in (stateless_wrapper_bases or set())
     ):
         # Stateless RO oracle where one wrapper is a STATELESS reduction (holds no

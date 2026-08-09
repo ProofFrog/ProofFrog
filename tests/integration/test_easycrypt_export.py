@@ -1738,6 +1738,7 @@ MULTI_ORACLE_ABSTRACT_CALL_TEMPLATE = (
 )
 DEAD_SAMPLE_DROP_TEMPLATE = EC_TEMPLATES / "dead_sample_drop.ec"
 LOCAL_RENAME_SIM_TEMPLATE = EC_TEMPLATES / "local_rename_sim.ec"
+SINGLE_SITE_REWRITE_TEMPLATE = EC_TEMPLATES / "single_site_rewrite.ec"
 CALL_PAST_SAMPLE_SWAP_TEMPLATE = EC_TEMPLATES / "call_past_sample_swap.ec"
 MARGINAL_SPLIT_TEMPLATE = EC_TEMPLATES / "marginal_split.ec"
 SAMPLE_REORDER_TWIN_TEMPLATE = EC_TEMPLATES / "sample_reorder_twin.ec"
@@ -1825,6 +1826,37 @@ def test_local_rename_sim_template_compiles(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the local-rename-sim template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_single_site_rewrite_template_compiles(tmp_path: Path) -> None:
+    """Regression tripwire for the Move 2 single-site rewrite closers
+    (Phase-2 micro synthesizers). Two shapes: a RETURN-site rewrite closed
+    by the plain backbone peel (``proc; call (_: true); rnd; skip => /#``)
+    and an if-GUARD rewrite behind a statement prefix closed by
+    ``proc; seq N N : (<locals> /\\ <coupling>); sim; if; [smt()|sim|sim]``.
+    Both negative controls (falsified guard / falsified return) EC-reject —
+    recorded in the template header. Python-side decline mutations are
+    unit-tested in ``tests/unit/export/test_single_site_rewrite.py``. If
+    this stops compiling, re-derive the closers before trusting
+    ``_single_site_rewrite_step``."""
+    ec_file = tmp_path / "single_site_rewrite.ec"
+    ec_file.write_text(SINGLE_SITE_REWRITE_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=600,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the single-site rewrite template.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

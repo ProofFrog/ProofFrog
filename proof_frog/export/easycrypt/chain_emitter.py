@@ -25,6 +25,7 @@ from typing import Callable, NamedTuple, cast
 
 from ... import frog_ast
 from ...transforms._base import TransformApplication
+from ...transforms.algebraic import SimplifyNot
 from ...visitors import (
     SearchVisitor,
     SubstitutionTransformer,
@@ -2351,8 +2352,15 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     modules: mt.ModuleTranslator,
     flat_params: list[ec_ast.ModuleParam],
     det_methods: dict[str, set[str]],
+    micro_pre_text: str = "true",
 ) -> tuple[list[str], MicroRequests, str] | None:
     """Tactic for one chain step's micro lemma, restricted to ``oracle_name``.
+
+    ``micro_pre_text`` is the exact precondition the caller will state on
+    this micro's lemma (``micro_pre(lref, rref)``); Move 2's guard-site
+    closer restates it inside its ``seq`` invariant, and declines when it is
+    ``"true"`` (an init leg -- nothing to re-establish the guard equality
+    from).
 
     Returns ``(tactic, requests, rung)`` where ``requests`` is the
     :class:`MicroRequests` record of axiom families the tactic references
@@ -2431,7 +2439,7 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     # projections are compared (same basis as the exact-equal gate).
     if _rename_equal_projection(pb, pa):
         return ["proc; sim."], MicroRequests(), SYNTH_STATIC
-    return _dead_call_drop_step(
+    dead = _dead_call_drop_step(
         pb,
         pa,
         reversed_dir,
@@ -2440,6 +2448,22 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         modules,
         flat_params,
         det_methods,
+    )
+    if dead is not None:
+        return dead
+    # Move 2 (Phase-2): the two bodies are identical except at exactly ONE
+    # pure expression site (an if-guard or the return expression) whose
+    # rewrite matches one of the fact-free row schemas. Last, so every
+    # existing route stays byte-identical.
+    return _single_site_rewrite_step(
+        pb,
+        pa,
+        reversed_dir,
+        external_module_types,
+        method_return_types,
+        modules,
+        flat_params,
+        micro_pre_text,
     )
 
 
@@ -2543,6 +2567,273 @@ def _dead_call_drop_step(  # pylint: disable=too-many-arguments,too-many-positio
             tac.append("rnd.")
     tac.append("skip => /#.")
     return tac, MicroRequests(pres=pres), SYNTH_PARAM
+
+
+def _raw_single_site(
+    mb: frog_ast.Method, ma: frog_ast.Method
+) -> tuple[str, frog_ast.Expression, frog_ast.Expression] | None:
+    """The single differing expression site of two raw oracle bodies.
+
+    Returns ``("guard", cond_b, cond_a)`` when the two top-level statement
+    lists are identical except one ``if`` statement's (single) condition,
+    ``("return", expr_b, expr_a)`` when identical except the value of one
+    return statement, else ``None``.
+    """
+    sb, sa = mb.block.statements, ma.block.statements
+    if len(sb) != len(sa):
+        return None
+    diffs = [i for i, (x, y) in enumerate(zip(sb, sa)) if x != y]
+    if len(diffs) != 1:
+        return None
+    x, y = sb[diffs[0]], sa[diffs[0]]
+    if (
+        isinstance(x, frog_ast.ReturnStatement)
+        and isinstance(y, frog_ast.ReturnStatement)
+        and x.expression is not None
+        and y.expression is not None
+    ):
+        return ("return", x.expression, y.expression)
+    if (
+        isinstance(x, frog_ast.IfStatement)
+        and isinstance(y, frog_ast.IfStatement)
+        and len(x.conditions) == 1
+        and len(y.conditions) == 1
+        and x.blocks == y.blocks
+        and x.conditions[0] != y.conditions[0]
+    ):
+        return ("guard", x.conditions[0], y.conditions[0])
+    return None
+
+
+def _schema_reflexive(lhs: frog_ast.Expression, rhs: frog_ast.Expression) -> bool:
+    """Reflexive Comparison row: ``e == e ~ true`` / ``e != e ~ false``."""
+    if not isinstance(lhs, frog_ast.BinaryOperation) or not isinstance(
+        rhs, frog_ast.Boolean
+    ):
+        return False
+    if lhs.left_expression != lhs.right_expression:
+        return False
+    if lhs.operator == frog_ast.BinaryOperators.EQUALS:
+        return rhs.bool is True
+    if lhs.operator == frog_ast.BinaryOperators.NOTEQUALS:
+        return rhs.bool is False
+    return False
+
+
+def _schema_bool_identity(lhs: frog_ast.Expression, rhs: frog_ast.Expression) -> bool:
+    """Boolean Identity row: a literal-boolean AND/OR identity collapse."""
+    if not isinstance(lhs, frog_ast.BinaryOperation):
+        return False
+    left, right = lhs.left_expression, lhs.right_expression
+    lit = left if isinstance(left, frog_ast.Boolean) else None
+    other = right
+    if lit is None:
+        lit = right if isinstance(right, frog_ast.Boolean) else None
+        other = left
+    if lit is None:
+        return False
+    if lhs.operator == frog_ast.BinaryOperators.AND:
+        expected = frog_ast.Boolean(False) if lit.bool is False else other
+    elif lhs.operator == frog_ast.BinaryOperators.OR:
+        expected = frog_ast.Boolean(True) if lit.bool is True else other
+    else:
+        return False
+    return rhs == expected
+
+
+def _schema_simplify_nots(lhs: frog_ast.Expression, rhs: frog_ast.Expression) -> bool:
+    """Simplify Nots row: ``rhs`` is exactly the SimplifyNot pass of ``lhs``.
+
+    Reuses the engine transformer itself (context-free), so the row's
+    precondition is definitionally the transform's own firing condition.
+    """
+    if not isinstance(lhs, frog_ast.UnaryOperation):
+        return False
+    simplified = SimplifyNot().transform(copy.deepcopy(lhs))
+    return simplified != lhs and simplified == rhs
+
+
+def _schema_tuple_neq(lhs: frog_ast.Expression, rhs: frog_ast.Expression) -> bool:
+    """Tuple Equality Decompose row (v1: tuple-literal-arity gated).
+
+    ``a != b ~ a[0] != b[0] || ... || a[k-1] != b[k-1]``. Fires only when at
+    least one side of the ``!=`` is a tuple LITERAL whose arity equals the
+    disjunct count -- the only case where completeness of the decomposition
+    is checkable without a type map (an incomplete disjunction is not an
+    equivalence). Wider arity sources are logged Phase-2 debt.
+    """
+    if (
+        not isinstance(lhs, frog_ast.BinaryOperation)
+        or lhs.operator != frog_ast.BinaryOperators.NOTEQUALS
+    ):
+        return False
+    a, b = lhs.left_expression, lhs.right_expression
+
+    def flatten_or(e: frog_ast.Expression) -> list[frog_ast.Expression]:
+        if (
+            isinstance(e, frog_ast.BinaryOperation)
+            and e.operator == frog_ast.BinaryOperators.OR
+        ):
+            return flatten_or(e.left_expression) + flatten_or(e.right_expression)
+        return [e]
+
+    def proj(e: frog_ast.Expression, i: int) -> frog_ast.Expression:
+        if isinstance(e, frog_ast.Tuple):
+            values = list(e.values)
+            return values[i] if i < len(values) else e
+        return frog_ast.ArrayAccess(e, frog_ast.Integer(i))
+
+    disjuncts = flatten_or(rhs)
+    arity = None
+    for side in (a, b):
+        if isinstance(side, frog_ast.Tuple):
+            arity = len(list(side.values))
+            break
+    if arity is None or arity != len(disjuncts) or arity < 1:
+        return False
+    for i, d in enumerate(disjuncts):
+        if (
+            not isinstance(d, frog_ast.BinaryOperation)
+            or d.operator != frog_ast.BinaryOperators.NOTEQUALS
+            or d.left_expression != proj(a, i)
+            or d.right_expression != proj(b, i)
+        ):
+            return False
+    return True
+
+
+# Move 2's declarative row table: every schema is fact-free (closable by
+# smt() / /# from the locals invariant + coupling alone). Rows needing
+# semantic facts about call results (Injective Equality Simplify, Concat
+# Equality Decompose -- det pins, _inj/slice lemmas) are Move 3's walk, per
+# the probe finding that even their same-call-multiset variants need
+# ev-form pins in the seq invariant.
+_PURE_SITE_SCHEMAS: tuple[Callable[..., bool], ...] = (
+    _schema_reflexive,
+    _schema_bool_identity,
+    _schema_simplify_nots,
+    _schema_tuple_neq,
+)
+
+
+def _single_site_rewrite_step(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements,too-many-branches,too-many-locals
+    pb: frog_ast.Game,
+    pa: frog_ast.Game,
+    reversed_dir: bool,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    modules: mt.ModuleTranslator,
+    flat_params: list[ec_ast.ModuleParam],
+    micro_pre_text: str,
+) -> tuple[list[str], MicroRequests, str] | None:
+    """Move 2: single pure-expression-site rewrite (guard or return).
+
+    Validated closers (``ec_templates/single_site_rewrite.ec``):
+
+    * guard site: ``proc; seq N N : (<assigned locals> /\\ <micro pre>);
+      sim; if; [smt() | sim | sim]`` -- N and the locals list computed from
+      the RENDERED bodies (the standing lesson);
+    * return site: the plain backbone peel ``proc; (call (_: true) | rnd)*;
+      skip => /#`` -- v1 fires only on the probed shape class (every other
+      statement is a call/sample; interleaved assignments are Move 3's walk).
+
+    The raw-AST site pair must match one of ``_PURE_SITE_SCHEMAS`` (either
+    orientation); everything else declines. Declines on init legs
+    (``micro_pre_text == "true"``): there is nothing to re-establish the
+    site equality from.
+    """
+    if micro_pre_text == "true":
+        return None
+    raw = _raw_single_site(pb.methods[0], pa.methods[0])
+    if raw is None:
+        return None
+    raw_kind, expr_b, expr_a = raw
+    if not any(
+        schema(expr_b, expr_a) or schema(expr_a, expr_b)
+        for schema in _PURE_SITE_SCHEMAS
+    ):
+        return None
+    bmod = _flat_state_module(
+        modules,
+        "Step_ss_b",
+        pb,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    amod = _flat_state_module(
+        modules,
+        "Step_ss_a",
+        pa,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not bmod.procs or not amod.procs:
+        return None
+    proc_b, proc_a = bmod.procs[0], amod.procs[0]
+    # The emitted micro's side 1 is state_before forward / state_after
+    # reversed (same convention as the dead-call drop).
+    s1, s2 = (proc_a, proc_b) if reversed_dir else (proc_b, proc_a)
+    decls1 = [s for s in s1.body if isinstance(s, ec_ast.VarDecl)]
+    decls2 = [s for s in s2.body if isinstance(s, ec_ast.VarDecl)]
+    if decls1 != decls2:
+        return None
+    exec1 = [s for s in s1.body if not isinstance(s, ec_ast.VarDecl)]
+    exec2 = [s for s in s2.body if not isinstance(s, ec_ast.VarDecl)]
+    if len(exec1) != len(exec2):
+        return None
+    diffs = [i for i, (x, y) in enumerate(zip(exec1, exec2)) if x != y]
+    if len(diffs) != 1:
+        return None
+    site = diffs[0]
+    x, y = exec1[site], exec2[site]
+    if isinstance(x, ec_ast.Return) and isinstance(y, ec_ast.Return):
+        if raw_kind != "return" or site != len(exec1) - 1:
+            return None
+        # Probed shape class only: a pure call/sample backbone before the
+        # differing return (no assignments, no control flow).
+        peels: list[str] = []
+        for stmt in exec1[:site]:
+            if isinstance(stmt, ec_ast.Call):
+                peels.append("call (_: true).")
+            elif isinstance(stmt, ec_ast.Sample):
+                peels.append("rnd.")
+            else:
+                return None
+        return (
+            ["proc.", *reversed(peels), "skip => /#."],
+            MicroRequests(),
+            SYNTH_PARAM,
+        )
+    if isinstance(x, ec_ast.If) and isinstance(y, ec_ast.If):
+        if raw_kind != "guard":
+            return None
+        if (
+            x.guard == y.guard
+            or x.then_body != y.then_body
+            or x.else_body != y.else_body
+        ):
+            return None
+        assigned: list[str] = []
+        for stmt in exec1[:site]:
+            if isinstance(stmt, (ec_ast.Assign, ec_ast.Sample, ec_ast.Call)):
+                if stmt.var and stmt.var not in assigned:
+                    assigned.append(stmt.var)
+            else:
+                # Nested control flow before the site: decline (v1).
+                return None
+        inv_parts: list[str] = []
+        if assigned:
+            inv_parts.append("={" + ", ".join(assigned) + "}")
+        inv_parts.append(micro_pre_text)
+        tac = ["proc."]
+        if site > 0:
+            tac.append(f"seq {site} {site} : ({' /\\ '.join(inv_parts)}).")
+            tac.append("sim.")
+        tac.append("if; [smt() | sim | sim].")
+        return tac, MicroRequests(), SYNTH_PARAM
+    return None
 
 
 def _oracle_pending_admit(hop_index: int, oracle_name: str) -> list[str]:
@@ -7102,6 +7393,7 @@ def _emit_one_oracle_chain(
     for k, app in enumerate(left_apps):
         if stateless_oracle:
             break
+        lref, rref = mod_ref(left_mods[k]), mod_ref(left_mods[k + 1])
         step = _oracle_step_tactic(
             left_states[k],
             left_states[k + 1],
@@ -7112,13 +7404,13 @@ def _emit_one_oracle_chain(
             modules=modules,
             flat_params=flat_params,
             det_methods=det_methods,
+            micro_pre_text=micro_pre(lref, rref),
         )
         if step is None:
             return _admit_fallback()
         tac, reqs, rung = step
         _absorb_requests(reqs)
         name = f"micro_{hop_index}_{oracle_name}_left_{k}"
-        lref, rref = mod_ref(left_mods[k]), mod_ref(left_mods[k + 1])
         micros_left.append(name)
         chunks.append(
             "\n".join(
@@ -7139,6 +7431,8 @@ def _emit_one_oracle_chain(
     for k, app in enumerate(right_apps):
         if stateless_oracle:
             break
+        # Reversed: proves Step_R_state_{k+1} ~ Step_R_state_k.
+        lref, rref = mod_ref(right_mods[k + 1]), mod_ref(right_mods[k])
         step = _oracle_step_tactic(
             right_states[k],
             right_states[k + 1],
@@ -7149,14 +7443,13 @@ def _emit_one_oracle_chain(
             modules=modules,
             flat_params=flat_params,
             det_methods=det_methods,
+            micro_pre_text=micro_pre(lref, rref),
         )
         if step is None:
             return _admit_fallback()
         tac, reqs, rung = step
         _absorb_requests(reqs)
         name = f"micro_{hop_index}_{oracle_name}_right_{k}_rev"
-        # Reversed: proves Step_R_state_{k+1} ~ Step_R_state_k.
-        lref, rref = mod_ref(right_mods[k + 1]), mod_ref(right_mods[k])
         micros_right_rev.append(name)
         chunks.append(
             "\n".join(

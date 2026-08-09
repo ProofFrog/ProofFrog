@@ -17,6 +17,7 @@ from proof_frog.transforms._base import TransformApplication
 from proof_frog.export.easycrypt import type_collector as tc
 from proof_frog.export.easycrypt import module_translator as mt
 from proof_frog.export.easycrypt.chain_emitter import (
+    MicroRequests,
     _chain_role_map,
     _coupling_spec,
     _dead_call_drop_tags,
@@ -249,7 +250,9 @@ def test_oracle_step_tactic_identity_is_coupling_preserving_sim() -> None:
     )
     # Third element is the automation-ladder rung the caller tags the micro
     # with: a fixed tactic text selected by a structural gate -> synth-static.
-    assert tac == (["proc; sim."], set(), "synth-static")
+    # Middle element: the leg's MicroRequests record (empty -- sim needs no
+    # axiom families).
+    assert tac == (["proc; sim."], MicroRequests(), "synth-static")
 
 
 # --- pure-of-args chain collapse -------------------------------------------

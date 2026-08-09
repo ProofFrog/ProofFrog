@@ -2197,13 +2197,15 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     modules: mt.ModuleTranslator,
     flat_params: list[ec_ast.ModuleParam],
     det_methods: dict[str, set[str]],
-) -> tuple[list[str], set[tuple[str, str]]] | None:
+) -> tuple[list[str], set[tuple[str, str]], str] | None:
     """Tactic for one chain step's micro lemma, restricted to ``oracle_name``.
 
-    Returns ``(tactic, pres_methods)`` where ``pres_methods`` is the set of
-    ``(module, method)`` glob-preservation axioms the tactic references (empty
-    unless a dead-call drop fired), or ``None`` when no tactic applies (the
-    caller routes the whole oracle to a coupling-pending admit). The tactic is:
+    Returns ``(tactic, pres_methods, rung)`` where ``pres_methods`` is the set
+    of ``(module, method)`` glob-preservation axioms the tactic references
+    (empty unless a dead-call drop fired) and ``rung`` is the automation-ladder
+    token the caller tags the micro with, or ``None`` when no tactic applies
+    (the caller routes the whole oracle to a coupling-pending admit). The
+    tactic is:
 
     * ``["proc; sim."]`` when that oracle's body is unchanged across the step
       (``sim`` preserves the coupling on untouched state);
@@ -2251,9 +2253,9 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         for kind, _callee in reversed(_call_sample_backbone(body)):
             tac.append("call (_: true)." if kind == "call" else "rnd.")
         tac.append("auto.")
-        return tac, set()
+        return tac, set(), SYNTH_PARAM
     if pb.methods[0] == pa.methods[0]:
-        return ["proc; sim."], set()
+        return ["proc; sim."], set(), SYNTH_STATIC
     before_h = _normalize_for_ec(
         copy.deepcopy(pb), external_module_types, method_return_types
     )
@@ -2262,7 +2264,7 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     )
     swaps = _permutation_swaps(before_h, after_h, reversed_dir=reversed_dir)
     if swaps is not None:
-        return ["proc.", *swaps, "sim."], set()
+        return ["proc.", *swaps, "sim."], set(), SYNTH_PARAM
     return _dead_call_drop_step(
         pb,
         pa,
@@ -2284,7 +2286,7 @@ def _dead_call_drop_step(  # pylint: disable=too-many-arguments,too-many-positio
     modules: mt.ModuleTranslator,
     flat_params: list[ec_ast.ModuleParam],
     det_methods: dict[str, set[str]],
-) -> tuple[list[str], set[tuple[str, str]]] | None:
+) -> tuple[list[str], set[tuple[str, str]], str] | None:
     """A chain step that drops dead (result-unused) abstract calls -- wall 5.
 
     ``Absorb Redundant Early Return`` prunes the ``K.decaps`` calls of a
@@ -2297,9 +2299,10 @@ def _dead_call_drop_step(  # pylint: disable=too-many-arguments,too-many-positio
     unchanged, so it is removed one-sided with ``call{side} (<M>_<m>_pres g)``
     (the same one-sided glob-preserving drop the init backbone peel uses).
 
-    Returns ``(tactic, pres_methods)`` -- the ``(module, method)`` set the tactic
-    needs ``_pres`` axioms for -- or ``None`` when the step is not a pure
-    dead-call drop. Validated end-to-end: ``ec_templates/dead_call_drop.ec``.
+    Returns ``(tactic, pres_methods, rung)`` -- the ``(module, method)`` set the
+    tactic needs ``_pres`` axioms for, plus the automation-ladder token -- or
+    ``None`` when the step is not a pure dead-call drop. Validated end-to-end:
+    ``ec_templates/dead_call_drop.ec``.
     """
     bmod = _flat_state_module(
         modules, "Step_b", pb, external_module_types, method_return_types, flat_params
@@ -2343,7 +2346,7 @@ def _dead_call_drop_step(  # pylint: disable=too-many-arguments,too-many-positio
             # ``var`` decls are stripped; a real statement-level difference is not
             # sim-closable and must fall through to a coupling-pending admit.
             return None
-        return ["proc; sim."], set()
+        return ["proc; sim."], set(), SYNTH_STATIC
     if len(s1_bb) > len(s2_bb):
         long_bb, short_bb, side, long_body = s1_bb, s2_bb, 1, s1_body
     else:
@@ -2373,7 +2376,7 @@ def _dead_call_drop_step(  # pylint: disable=too-many-arguments,too-many-positio
         else:
             tac.append("rnd.")
     tac.append("skip => /#.")
-    return tac, pres
+    return tac, pres, SYNTH_PARAM
 
 
 def _oracle_pending_admit(hop_index: int, oracle_name: str) -> list[str]:
@@ -6916,7 +6919,7 @@ def _emit_one_oracle_chain(
     chunks: list[str] = []
     step_pres: set[tuple[str, str]] = set()
     micros_left: list[str] = []
-    for k, _app in enumerate(left_apps):
+    for k, app in enumerate(left_apps):
         if stateless_oracle:
             break
         step = _oracle_step_tactic(
@@ -6932,7 +6935,7 @@ def _emit_one_oracle_chain(
         )
         if step is None:
             return _admit_fallback()
-        tac, tac_pres = step
+        tac, tac_pres, rung = step
         step_pres |= tac_pres
         name = f"micro_{hop_index}_{oracle_name}_left_{k}"
         lref, rref = mod_ref(left_mods[k]), mod_ref(left_mods[k + 1])
@@ -6945,14 +6948,15 @@ def _emit_one_oracle_chain(
                     rref,
                     oracle_name,
                     micro_pre(lref, rref),
-                    tac,
+                    [_res_tag(rung), *tac],
+                    comment=_micro_transform_comment(app),
                     postcondition=micro_post(lref, rref),
                 )
             )
         )
 
     micros_right_rev: list[str] = []
-    for k, _app in enumerate(right_apps):
+    for k, app in enumerate(right_apps):
         if stateless_oracle:
             break
         step = _oracle_step_tactic(
@@ -6968,7 +6972,7 @@ def _emit_one_oracle_chain(
         )
         if step is None:
             return _admit_fallback()
-        tac, tac_pres = step
+        tac, tac_pres, rung = step
         step_pres |= tac_pres
         name = f"micro_{hop_index}_{oracle_name}_right_{k}_rev"
         # Reversed: proves Step_R_state_{k+1} ~ Step_R_state_k.
@@ -6982,7 +6986,8 @@ def _emit_one_oracle_chain(
                     rref,
                     oracle_name,
                     micro_pre(lref, rref),
-                    tac,
+                    [_res_tag(rung), *tac],
+                    comment=_micro_transform_comment(app, reversed_dir=True),
                     postcondition=micro_post(lref, rref),
                 )
             )
@@ -16883,6 +16888,22 @@ def _render_module_decl(module: ec_ast.Module) -> list[str]:
     while lines and lines[-1].strip() == "":
         lines.pop()
     return lines
+
+
+def _micro_transform_comment(
+    app: TransformApplication, reversed_dir: bool = False
+) -> str:
+    """The ``(* transform: ... *)`` header one chain micro carries.
+
+    Identical in shape to the single-oracle path's (:func:`_render_micro_lemma`,
+    via ``_MicroLemma.transform_name``/``bucket``), including the
+    ``(reversed)`` marker on a right-chain micro, so the dashboard's
+    comment/resolution-tag pairing counts multi-oracle micros exactly the way it
+    counts single-oracle ones. Purely an EC comment -- it is what makes each
+    micro attributable to the transform application it machine-checks.
+    """
+    name = app.transform_name + (" (reversed)" if reversed_dir else "")
+    return f"(* transform: {name} (bucket={classify(app.transform_name).value}) *)"
 
 
 def _render_micro_lemma(  # pylint: disable=too-many-arguments,too-many-positional-arguments

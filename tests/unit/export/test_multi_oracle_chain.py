@@ -9,6 +9,7 @@ against the validated template ``ec_templates/multi_oracle_indist.ec``.
 
 from __future__ import annotations
 
+import re
 from typing import Callable
 
 from proof_frog import frog_ast
@@ -246,7 +247,9 @@ def test_oracle_step_tactic_identity_is_coupling_preserving_sim() -> None:
         flat_params=[],
         det_methods={},
     )
-    assert tac == (["proc; sim."], set())
+    # Third element is the automation-ladder rung the caller tags the micro
+    # with: a fixed tactic text selected by a structural gate -> synth-static.
+    assert tac == (["proc; sim."], set(), "synth-static")
 
 
 # --- pure-of-args chain collapse -------------------------------------------
@@ -471,6 +474,72 @@ def test_emit_one_oracle_chain_post_init_carries_args() -> None:
     assert "canon_bridge_0_challenge" in text
     # post-init precondition carries both the arg equality and the coupling.
     assert "={m0} /\\ (glob Step_0L_state_0){1} = (glob Step_0R_state_0){2}" in text
+
+
+def test_multi_oracle_micros_carry_transform_and_resolution_tags() -> None:
+    """Every emitted multi-oracle micro is attributable to its transform.
+
+    An EC-accepted micro is a machine-checked test case for ONE application of
+    ONE transform, but that evidence is only countable when the micro carries
+    both the ``(* transform: NAME (bucket=...) *)`` header and a
+    ``(* resolution: <rung> *)`` tag -- the pair the dashboard parser pairs by
+    adjacency, exactly as it does for single-oracle micros. Both are EC
+    comments, so the tagging is semantics-neutral.
+    """
+    left = [_two_oracle_game(n, stateful_challenge=True) for n in ("L0", "L1")]
+    right = [_two_oracle_game(n, stateful_challenge=True) for n in ("R0", "R1")]
+    chunks, _outer, _pres = _emit_one_oracle_chain(
+        hop_index=3,
+        oracle_name="challenge",
+        is_init=False,
+        eq_args="={m0}",
+        left_mods=["Step_3L_state_0", "Step_3L_state_1"],
+        right_mods=["Step_3R_state_0", "Step_3R_state_1"],
+        left_states=left,
+        right_states=right,
+        left_apps=[
+            TransformApplication(
+                iteration=0,
+                transform_name="Alpha Rename",
+                game_before=left[0],
+                game_after=left[1],
+            )
+        ],
+        right_apps=[
+            TransformApplication(
+                iteration=0,
+                transform_name="Topological Sorting",
+                game_before=right[0],
+                game_after=right[1],
+            )
+        ],
+        mod_ref=lambda n: n,
+        left_wrapper_expr="GL(E)",
+        right_wrapper_expr="GR(E)",
+        bridge_tactic="proc; inline *; sp; wp; sim",
+        external_module_types={},
+        method_return_types={},
+        modules=_modules(),
+        flat_params=[],
+        det_methods={},
+    )
+    text = "\n".join(chunks)
+    assert "(* transform: Alpha Rename (bucket=canned) *)" in text
+    # The right chain is proven in the reverse direction; the marker matches the
+    # single-oracle path's so the same suffix-stripping reads both.
+    assert "(* transform: Topological Sorting (reversed) (bucket=canned) *)" in text
+    # Mirrors the dashboard parser's adjacency pairing: a transform comment then
+    # the rung tag opening that micro's proof body.
+    pairs = re.findall(
+        r"\(\* transform: (.+?) \(bucket=\w+\) \*\)"
+        r".*?\(\* resolution: ([\w-]+) \*\)",
+        text,
+        re.DOTALL,
+    )
+    assert pairs == [
+        ("Alpha Rename", "synth-static"),
+        ("Topological Sorting (reversed)", "synth-static"),
+    ]
 
 
 def test_render_coupling_chain_body_walks_left_bridge_right() -> None:

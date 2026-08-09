@@ -9184,54 +9184,68 @@ def export_proof_file(proof_path: str) -> str:
         def _sub(t: str) -> str:
             return _rom_subst(_rom_subst(t, ren), pmap)
 
-        for s in proc.body:
-            if isinstance(s, ec_ast.VarDecl):
-                continue
-            if isinstance(s, ec_ast.Assign):
-                out.append(ec_ast.Assign(ren.get(s.var, s.var), _sub(s.rhs)))
-            elif isinstance(s, ec_ast.Sample):
-                out.append(ec_ast.Sample(ren.get(s.var, s.var), _sub(s.distr)))
-            elif isinstance(s, ec_ast.Call):
-                chead, _, cmeth = s.callee.partition(".")
-                target_mod = pmap.get(chead, chead)
-                inner = _rom_find_module(target_mod)
-                inner_args = (
-                    [a.strip() for a in _split_call_args(s.args)]
-                    if s.args.strip()
-                    else []
-                )
-                if (
-                    inner is not None
-                    and "(" in target_mod
-                    or (
-                        inner is not None
-                        and target_mod == inner.name
-                        and inner.params == []
-                    )
-                ):
-                    nested = _rom_inline_proc(
-                        target_mod,
-                        cmeth,
-                        [_sub(a) for a in inner_args],
-                        ren.get(s.var, s.var),
-                        taken,
-                    )
-                    if nested is None:
+        def _process(stmts: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt] | None:
+            acc: list[ec_ast.EcStmt] = []
+            for s in stmts:
+                if isinstance(s, ec_ast.VarDecl):
+                    continue
+                if isinstance(s, ec_ast.Assign):
+                    acc.append(ec_ast.Assign(ren.get(s.var, s.var), _sub(s.rhs)))
+                elif isinstance(s, ec_ast.Sample):
+                    acc.append(ec_ast.Sample(ren.get(s.var, s.var), _sub(s.distr)))
+                elif isinstance(s, ec_ast.If):
+                    tb = _process(s.then_body)
+                    eb = _process(s.else_body)
+                    if tb is None or eb is None:
                         return None
-                    out += nested
-                else:
-                    out.append(
-                        ec_ast.Call(
-                            ren.get(s.var, s.var),
-                            f"{target_mod}.{cmeth}",
-                            ", ".join(_sub(a) for a in inner_args),
-                        )
+                    acc.append(ec_ast.If(_sub(s.guard), tb, eb))
+                elif isinstance(s, ec_ast.Call):
+                    chead, _, cmeth = s.callee.partition(".")
+                    target_mod = pmap.get(chead, chead)
+                    inner = _rom_find_module(target_mod)
+                    inner_args = (
+                        [a.strip() for a in _split_call_args(s.args)]
+                        if s.args.strip()
+                        else []
                     )
-            elif isinstance(s, ec_ast.Return):
-                if ret_target is not None and s.expr is not None:
-                    out.append(ec_ast.Assign(ret_target, _sub(s.expr)))
-            else:
-                return None
+                    if (
+                        inner is not None
+                        and "(" in target_mod
+                        or (
+                            inner is not None
+                            and target_mod == inner.name
+                            and inner.params == []
+                        )
+                    ):
+                        nested = _rom_inline_proc(
+                            target_mod,
+                            cmeth,
+                            [_sub(a) for a in inner_args],
+                            ren.get(s.var, s.var),
+                            taken,
+                        )
+                        if nested is None:
+                            return None
+                        acc += nested
+                    else:
+                        acc.append(
+                            ec_ast.Call(
+                                ren.get(s.var, s.var),
+                                f"{target_mod}.{cmeth}",
+                                ", ".join(_sub(a) for a in inner_args),
+                            )
+                        )
+                elif isinstance(s, ec_ast.Return):
+                    if ret_target is not None and s.expr is not None:
+                        acc.append(ec_ast.Assign(ret_target, _sub(s.expr)))
+                else:
+                    return None
+            return acc
+
+        body = _process(proc.body)
+        if body is None:
+            return None
+        out += body
         return out
 
     def _split_call_args(args: str) -> list[str]:
@@ -9713,6 +9727,398 @@ def export_proof_file(proof_path: str) -> str:
             ]
             + walk
         }
+
+    # ------------------------------------------------------------------
+    # RO-HANDOFF seam (validated probe c357, EC EXIT 0): a REDUCTION ~
+    # REDUCTION hop where one side's challenger is the lazy-RO Honest
+    # wrapper (stores a fresh-sampled Function field rF) and the other
+    # side's composed oracles read the shared RO directly. The emitted
+    # same-side ``rF{w} = RO.h{w}`` coupling is unprovable (rF is drawn
+    # fresh AFTER the main fixed h): the true coupling is CROSS-side
+    # (``rF{w} = RO.h{o}``, the wrapper side's own h being dead), plus the
+    # wrapper-state pairings value-traced from the two init backbones
+    # (``st.`k{w} = <o-field expr>{o}``, det chains in ev-form). The init
+    # equiv cannot be stated per-oracle at all -- the pr lemma inlines both
+    # inits, swaps the rF draw up next to the dead h, couples ``rnd`` cross
+    # + drops the dead h one-sided, then runs the pin-everything walk.
+    _roh_cache: dict[tuple[int, int], dict | None] = {}
+
+    def _roh_hop(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> dict | None:
+        key = (id(step_a), id(step_b))
+        if key in _roh_cache:
+            return _roh_cache[key]
+        _roh_cache[key] = None
+        ro_ref = next(iter(top_types.ro_by_arrow_type().values()), None)
+        dfun = next((d for _m, d in top_types.function_value_modules()), None)
+        if ro_ref is None or dfun is None:
+            return None
+        sides = (step_a, step_b)
+        if any(st.reduction is None for st in sides):
+            return None
+        if _is_assumption_hop(step_a, step_b):
+            # An assumption hop's two endpoints are the SAME reduction against
+            # the challenger's two sides (Honest ~ Lazy) -- not a handoff.
+            return None
+        chal_exprs = [
+            pt.last_module_arg(resolver.resolve(st).module_expr) for st in sides
+        ]
+        chal_mods = [_rom_find_module(e) for e in chal_exprs]
+        if any(m is None for m in chal_mods):
+            return None
+
+        def _arrow_field(m: ec_ast.Module) -> str | None:
+            init = next((p for p in m.procs if p.name == "initialize"), None)
+            if init is None:
+                return None
+            arrows = {v.name for v in m.module_vars if "->" in v.type.text}
+            return next(
+                (
+                    s.var
+                    for s in init.body
+                    if isinstance(s, ec_ast.Sample) and s.var in arrows
+                ),
+                None,
+            )
+
+        arrow = [_arrow_field(cast(ec_ast.Module, m)) for m in chal_mods]
+        wi = next((k for k in range(2) if arrow[k] is not None), None)
+        if wi is None or arrow[1 - wi] is not None:
+            return None
+        oi = 1 - wi
+        rf_name = cast(str, arrow[wi])
+        wchal = cast(ec_ast.Module, chal_mods[wi])
+        wchal_base = pt.module_base_name(chal_exprs[wi])
+        wtag, otag = str(wi + 1), str(oi + 1)
+        rmods = [
+            next(
+                (
+                    d
+                    for d in ec_reductions
+                    if isinstance(d, ec_ast.Module)
+                    and st.reduction is not None
+                    and d.name == st.reduction.name
+                ),
+                None,
+            )
+            for st in sides
+        ]
+        if any(m is None for m in rmods):
+            return None
+        wred = cast(ec_ast.Module, rmods[wi])
+        ored = cast(ec_ast.Module, rmods[oi])
+
+        def _inlined_init(
+            ri: int,
+        ) -> list[ec_ast.EcStmt] | None:
+            rmod = cast(ec_ast.Module, rmods[ri])
+            proc = next((p for p in rmod.procs if p.name == "initialize"), None)
+            if proc is None:
+                return None
+            r_chal = rmod.params[-1].name if rmod.params else None
+            taken = {d.name for d in proc.body if isinstance(d, ec_ast.VarDecl)}
+            acc: list[ec_ast.EcStmt] = []
+            for s in proc.body:
+                if isinstance(s, (ec_ast.VarDecl, ec_ast.Return)):
+                    continue
+                if (
+                    isinstance(s, ec_ast.Call)
+                    and r_chal is not None
+                    and s.callee.partition(".")[0] == r_chal
+                ):
+                    nested = _rom_inline_proc(
+                        chal_exprs[ri],
+                        s.callee.partition(".")[2],
+                        _split_call_args(s.args) if s.args.strip() else [],
+                        s.var if s.var else None,
+                        taken,
+                    )
+                    if nested is None:
+                        return None
+                    acc += nested
+                else:
+                    acc.append(s)
+            return acc
+
+        w_body = _inlined_init(wi)
+        o_body = _inlined_init(oi)
+        if w_body is None or o_body is None:
+            return None
+        # seedbased derivation chains (slice-of-seed assigns) need ev-chain
+        # conjuncts this seam does not yet derive -- decline (the committed
+        # ``slice_`` gate precedent; the expanded cells carry no slices)
+        if any(
+            isinstance(s, ec_ast.Assign) and "slice_" in s.rhs
+            for s in w_body + o_body
+        ):
+            return None
+
+        def _is_det(c: ec_ast.Call) -> bool:
+            m, _, meth = c.callee.partition(".")
+            return (
+                meth in det_methods_by_module.get(m, set())
+                and m in clone_alias_by_module
+            )
+
+        # ---- symbolic value trace of one inlined body ----
+        def _symtrace(body: list[ec_ast.EcStmt], skip_var: str | None) -> dict | None:
+            env: dict[str, tuple] = {}
+            counters = {"s": 0, "c": 0}
+
+            def ev(expr: str) -> tuple:
+                e = expr.strip()
+                if e.startswith("(") and e.endswith(")"):
+                    parts = _split_call_args(e[1:-1])
+                    if len(parts) > 1:
+                        return ("tup", tuple(ev(a) for a in parts))
+                    e = parts[0] if parts else e
+                m = re.fullmatch(r"([A-Za-z_]\w*)\.`(\d+)", e)
+                if m:
+                    base = ev(m.group(1))
+                    k = int(m.group(2))
+                    if base[0] == "tup" and k <= len(base[1]):
+                        return base[1][k - 1]
+                    return ("proj", base, k)
+                if re.fullmatch(r"[A-Za-z_]\w*", e):
+                    return env.get(e, ("opaque", e))
+                return ("expr", e)
+
+            for s in body:
+                if isinstance(s, ec_ast.If):
+                    return None
+                if isinstance(s, ec_ast.Sample):
+                    if s.var == skip_var:
+                        env[s.var] = ("rf",)
+                        continue
+                    env[s.var] = ("samp", counters["s"])
+                    counters["s"] += 1
+                elif isinstance(s, ec_ast.Call):
+                    if _is_det(s):
+                        alias = clone_alias_by_module[s.callee.partition(".")[0]]
+                        meth = s.callee.partition(".")[2]
+                        args = (
+                            _split_call_args(s.args) if s.args.strip() else []
+                        )
+                        env[s.var] = (
+                            "ev",
+                            alias,
+                            meth,
+                            tuple(ev(a) for a in args),
+                        )
+                    else:
+                        env[s.var] = ("call", counters["c"])
+                        counters["c"] += 1
+                elif isinstance(s, ec_ast.Assign):
+                    env[s.var] = ev(s.rhs)
+            return env
+
+        w_env = _symtrace(w_body, rf_name)
+        o_env = _symtrace(o_body, None)
+        if w_env is None or o_env is None:
+            return None
+        o_fields = {
+            v.name: o_env[v.name] for v in ored.module_vars if v.name in o_env
+        }
+
+        def _render_o(v: tuple) -> str | None:
+            for fname, fval in o_fields.items():
+                if fval == v:
+                    return f"{ored.name}.{fname}{{{otag}}}"
+                # a field holding a TUPLE also renders its components
+                if fval[0] == "tup" and v in fval[1]:
+                    k = fval[1].index(v) + 1
+                    return f"{ored.name}.{fname}{{{otag}}}.`{k}"
+            if v[0] == "proj":
+                inner = _render_o(v[1])
+                return None if inner is None else f"{inner}.`{v[2]}"
+            if v[0] == "ev":
+                _e, alias, meth, args = v
+                rendered = []
+                for a in args:
+                    ra = _render_o(a)
+                    if ra is None:
+                        return None
+                    rendered.append(f"({ra})")
+                head = f"{alias}.ev_{meth}"
+                return f"{head} " + " ".join(rendered) if rendered else head
+            return None
+
+        # wrapper-state pairing conjuncts (every stored chal field but rF):
+        # a whole-value match first (``qStar{w} = R.ctStar{o}``), else the
+        # per-component decomposition (``st.`k{w} = <expr>{o}``)
+        conj: list[str] = [f"{wchal_base}.{rf_name}{{{wtag}}} = {ro_ref}{{{otag}}}"]
+        for v in wchal.module_vars:
+            if v.name == rf_name:
+                continue
+            val = w_env.get(v.name)
+            if val is None:
+                return None
+            whole = _render_o(val)
+            if whole is not None:
+                conj.append(f"{wchal_base}.{v.name}{{{wtag}}} = {whole}")
+            elif val[0] == "tup":
+                for k, comp in enumerate(val[1], start=1):
+                    rhs = _render_o(comp)
+                    if rhs is None:
+                        return None
+                    conj.append(
+                        f"{wchal_base}.{v.name}.`{k}{{{wtag}}} = {rhs}"
+                    )
+            else:
+                return None
+
+        # ---- qualification: chal fields + each side's own module vars ----
+        wf = {v.name for v in wred.module_vars}
+        cf = {v.name for v in wchal.module_vars}
+
+        def qw(v: str) -> str:
+            base, _, comp = v.partition(".`")
+            if base in cf:
+                r = f"{wchal_base}.{base}{{{wtag}}}"
+            elif base in wf:
+                r = f"{wred.name}.{base}{{{wtag}}}"
+            else:
+                r = f"{base}{{{wtag}}}"
+            return f"{r}.`{comp}" if comp else r
+
+        qo0 = _prf_qualify(ored, otag)
+
+        def qo(v: str) -> str:
+            base, _, comp = v.partition(".`")
+            r = qo0(base)
+            return f"{r}.`{comp}" if comp else r
+
+        # ---- the pr-lemma init tail (spliced after the translator's
+        #      ``inline *.``): swap rF up, cross-couple + dead drop, walk ----
+        rf_idx = next(
+            (
+                i
+                for i, s in enumerate(w_body)
+                if isinstance(s, ec_ast.Sample) and s.var == rf_name
+            ),
+            None,
+        )
+        if rf_idx is None:
+            return None
+        w_tail = [s for i, s in enumerate(w_body) if i != rf_idx]
+        walk = _rom_pin_lines(w_tail, o_body, qw, qo, "#pre", wtag, otag)
+        if walk is None:
+            walk = _rom_pin_lines(o_body, w_tail, qo, qw, "#pre", otag, wtag)
+        if walk is None:
+            return None
+        swap_pos = 2 + rf_idx
+        cross = conj[0]
+        inv0 = f"{multi_oracle_byequiv_pre} /\\ {cross}"
+        seq_k = "1 2" if wtag == "2" else "2 1"
+        init_tac = (
+            [f"swap{{{wtag}}} {swap_pos} -{swap_pos - 2}."] if swap_pos > 2 else []
+        )
+        init_tac += [
+            f"seq {seq_k} : ({inv0}).",
+            f"+ rnd. rnd{{{wtag}}}. skip => />. smt({dfun}_ll).",
+            *walk,
+        ]
+
+        # ---- the decaps walk: refusal branch + det-drain of both elses ----
+        def _decaps_walk() -> list[str] | None:
+            w_proc = next((p for p in wred.procs if p.name == "decaps"), None)
+            o_proc = next((p for p in ored.procs if p.name == "decaps"), None)
+            if w_proc is None or o_proc is None:
+                return None
+            r_chal = wred.params[-1].name if wred.params else None
+            taken = {d.name for d in w_proc.body if isinstance(d, ec_ast.VarDecl)}
+            w_list: list[ec_ast.EcStmt] = []
+            for s in w_proc.body:
+                if isinstance(s, (ec_ast.VarDecl, ec_ast.Return)):
+                    continue
+                if (
+                    isinstance(s, ec_ast.Call)
+                    and r_chal is not None
+                    and s.callee.partition(".")[0] == r_chal
+                ):
+                    nested = _rom_inline_proc(
+                        chal_exprs[wi],
+                        s.callee.partition(".")[2],
+                        _split_call_args(s.args) if s.args.strip() else [],
+                        s.var if s.var else None,
+                        taken,
+                    )
+                    if nested is None:
+                        return None
+                    w_list += nested
+                else:
+                    w_list.append(s)
+            o_list = [
+                s
+                for s in o_proc.body
+                if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
+            ]
+
+            def _split_if(
+                stmts: list[ec_ast.EcStmt],
+            ) -> tuple[int, ec_ast.If, list[ec_ast.EcStmt]] | None:
+                ifs = [i for i, s in enumerate(stmts) if isinstance(s, ec_ast.If)]
+                if len(ifs) != 1:
+                    return None
+                i = ifs[0]
+                pre = stmts[:i]
+                if any(not isinstance(s, ec_ast.Assign) for s in pre):
+                    return None
+                return (len(pre), cast(ec_ast.If, stmts[i]), stmts[i + 1 :])
+
+            wsplit = _split_if(w_list)
+            osplit = _split_if(o_list)
+            if wsplit is None or osplit is None:
+                return None
+            w_pre, w_if, w_post = wsplit
+            o_pre, o_if, o_post = osplit
+            if any(
+                not isinstance(s, ec_ast.Assign) for s in w_post + o_post
+            ):
+                return None
+            w_else = [
+                s for s in w_if.else_body if not isinstance(s, ec_ast.VarDecl)
+            ] + w_post
+            o_else = [
+                s for s in o_if.else_body if not isinstance(s, ec_ast.VarDecl)
+            ] + o_post
+            if any(isinstance(s, ec_ast.If) for s in w_else + o_else):
+                return None
+            ewalk = _rom_pin_lines(w_else, o_else, qw, qo, "#pre", wtag, otag)
+            if ewalk is None:
+                ewalk = _rom_pin_lines(o_else, w_else, qo, qw, "#pre", otag, wtag)
+            if ewalk is None:
+                return None
+            sp = _prf_pair(o_pre, w_pre, otag)
+            return [
+                "inline *.",
+                *([f"sp {sp}."] if (w_pre or o_pre) else []),
+                "if; 1: smt().",
+                "+ auto.",
+                *ewalk,
+            ]
+
+        dw = _decaps_walk()
+        if dw is None:
+            return None
+        res = {
+            "wtag": wtag,
+            "otag": otag,
+            "coupling": " /\\ ".join(conj),
+            "chal_base": wchal_base,
+            "init_tac": init_tac,
+            "decaps_tac": dw,
+            "dfun_ll": f"{dfun}_ll",
+        }
+        _roh_cache[key] = res
+        return res
+
+    def _roh_decaps_walk(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> dict[str, list[str]] | None:
+        roh = _roh_hop(step_a, step_b)
+        return None if roh is None else {"decaps": roh["decaps_tac"]}
 
     def _prg_expansion_game_coupling(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
         step_a: frog_ast.Step, step_b: frog_ast.Step
@@ -12514,6 +12920,13 @@ def export_proof_file(proof_path: str) -> str:
                 f"{l_ro_ref}{{{l_game_side}}} = "
                 f"{l_chal_base}.{l_chal_field}{{{l_red_side}}}"
             )
+        roh = _roh_hop(step_a, step_b)
+        if roh is not None:
+            # REDUCTION ~ REDUCTION lazy-RO handoff: the cross-side rF/RO
+            # coupling + the value-traced wrapper-state pairings replace the
+            # unprovable same-side materialization below.
+            live_state_holders.add(roh["chal_base"])
+            return cast(str, roh["coupling"])
         # pylint: disable=protected-access
         ro_ref = next(iter(top_types.ro_by_arrow_type().values()), None)
         if ro_ref is None:
@@ -15025,6 +15438,15 @@ def export_proof_file(proof_path: str) -> str:
                 base = base.replace(f" /\\ ={{glob {m}}}", "").replace(
                     f"={{glob {m}}} /\\ ", ""
                 )
+        elif _roh_hop(step_a, step_b) is not None:
+            # RO-handoff hop: the wrapper side's shared-RO holder is DEAD (its
+            # oracles answer from the challenger's fresh rF), so ``={glob RO}``
+            # cannot hold post-init -- the pr lemma drops the dead sample. The
+            # cross-side coupling in ``extra`` is the real RO conjunct.
+            for m in ro_holder_modules:
+                base = base.replace(f" /\\ ={{glob {m}}}", "").replace(
+                    f"={{glob {m}}} /\\ ", ""
+                )
         coupled = f"{base} /\\ {extra}" if extra else base
         # Seedbased binding wrapper: couple the reduction's seed field to the
         # inlined challenger's decaps key when the reduction's Initialize repacks
@@ -15222,10 +15644,14 @@ def export_proof_file(proof_path: str) -> str:
     ) -> list[str] | None:
         if _is_assumption_hop(step_a, step_b):
             return None
-        if _is_init and _is_lazyro_honest_hop(step_a, step_b) is not None:
-            # The init lemma is unprovable for a lazy-RO Honest hop (the challenger
-            # samples a fresh RO the game reads pre-existing) AND unused -- the
-            # pr-lemma inlines the init and couples the samples directly. Skip it.
+        if _is_init and (
+            _is_lazyro_honest_hop(step_a, step_b) is not None
+            or _roh_hop(step_a, step_b) is not None
+        ):
+            # The init lemma is unprovable for a lazy-RO Honest / RO-handoff hop
+            # (the challenger samples a fresh RO the other side reads
+            # pre-existing) AND unused -- the pr-lemma inlines the init and
+            # couples the samples directly. Skip it.
             return None
         if _i not in multi_oracle_hop_cache:
             model = resolver.oracle_model_for(step_a)
@@ -15387,6 +15813,7 @@ def export_proof_file(proof_path: str) -> str:
                     or _irs_seam_decaps_walk(step_a, step_b)
                     or _c2pri_seam_decaps_walk(step_a, step_b)
                     or _rom_pin_decaps_walk(step_a, step_b)
+                    or _roh_decaps_walk(step_a, step_b)
                 ),
                 # The OUTER hop lemma's glob set (see ``glob_invariant_conj``).
                 # The chain coupling must match it exactly -- see the gparams
@@ -15735,6 +16162,19 @@ def export_proof_file(proof_path: str) -> str:
                     red_side=red_side,
                     init_tac_override=override,
                     **derived_kw,
+                )
+        if lazyro is None:
+            roh = _roh_hop(step_a, step_b)
+            if roh is not None:
+                # RO-handoff hop: the whole init tail (rF hoist + cross-couple
+                # + dead-h drop + pin walk) is computed by the seam; the
+                # translator splices it after its ``inline *.``.
+                lazyro = pt.LazyroInitSpec(
+                    swap_below=0,
+                    n_calls=0,
+                    dfun_ll=cast(str, roh["dfun_ll"]),
+                    red_side=cast(str, roh["wtag"]),
+                    init_tac_override=cast(list, roh["init_tac"]),
                 )
         return pt.MultiOraclePrSpec(
             coupling=_live_state_coupling(step_a, step_b),

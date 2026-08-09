@@ -7724,12 +7724,49 @@ def export_proof_file(proof_path: str) -> str:
         r_then: list[ec_ast.EcStmt] = [
             s for s in r_split.then_body if not isinstance(s, ec_ast.VarDecl)
         ]
-        then_tail = _prf_seam_det_block(spec, g_then, r_then, gtag, rtag, qg, qr)
-        if then_tail is None:
-            return None
         lines.append("if; 1: smt().")
-        lines.append(f"+ inline{{{rtag}}} {spec['chal_expr']}.{spec['lu_name']}.")
-        lines += ["  " + t for t in then_tail]
+        if (
+            len(g_then) == 1
+            and isinstance(g_then[0], ec_ast.If)
+            and len(r_then) == 1
+            and isinstance(r_then[0], ec_ast.If)
+        ):
+            # the implicit-rejection COLLISION level: both match branches
+            # open with an identical-guard split whose then-part draws the
+            # rejection value fresh on both sides ([r <$ d; Some r])
+            g_ci = g_then[0]
+            r_ci = r_then[0]
+            g_cm = [s for s in g_ci.then_body if not isinstance(s, ec_ast.VarDecl)]
+            r_cm = [s for s in r_ci.then_body if not isinstance(s, ec_ast.VarDecl)]
+            if not (
+                g_cm
+                and r_cm
+                and isinstance(g_cm[0], ec_ast.Sample)
+                and isinstance(r_cm[0], ec_ast.Sample)
+                and g_cm[0].distr == r_cm[0].distr
+                and all(isinstance(s, ec_ast.Assign) for s in g_cm[1:])
+                and all(isinstance(s, ec_ast.Assign) for s in r_cm[1:])
+            ):
+                return None
+            g_ce: list[ec_ast.EcStmt] = [
+                s for s in g_ci.else_body if not isinstance(s, ec_ast.VarDecl)
+            ]
+            r_ce: list[ec_ast.EcStmt] = [
+                s for s in r_ci.else_body if not isinstance(s, ec_ast.VarDecl)
+            ]
+            inner_tail = _prf_seam_det_block(spec, g_ce, r_ce, gtag, rtag, qg, qr)
+            if inner_tail is None:
+                return None
+            lines.append("+ if; 1: smt().")
+            lines.append("  + wp; rnd; skip => /#.")
+            lines.append(f"  inline{{{rtag}}} {spec['chal_expr']}.{spec['lu_name']}.")
+            lines += ["  " + t for t in inner_tail]
+        else:
+            then_tail = _prf_seam_det_block(spec, g_then, r_then, gtag, rtag, qg, qr)
+            if then_tail is None:
+                return None
+            lines.append(f"+ inline{{{rtag}}} {spec['chal_expr']}.{spec['lu_name']}.")
+            lines += ["  " + t for t in then_tail]
         g_eb = [s for s in g_split.else_body if not isinstance(s, ec_ast.VarDecl)]
         r_eb = [s for s in r_split.else_body if not isinstance(s, ec_ast.VarDecl)]
         if len(g_eb) != len(r_eb):

@@ -2192,6 +2192,32 @@ def _project_to_method(game: frog_ast.Game, oracle_name: str) -> frog_ast.Game |
     return proj
 
 
+@dataclass
+class MicroRequests:
+    """Axiom/lemma requests one micro leg's tactic references (Phase 2, (c)).
+
+    Mirrors the request families of :class:`MultiOracleHopChainInfo` so a
+    per-transform micro can request the same licensed foundations the
+    whole-oracle routes thread today: ``pres`` — ``<M>_<m>_pres``
+    glob-preservation axioms; ``inj`` — ``<M>_<m>_inj`` joint-injectivity
+    axioms; ``bij`` — ``(module, method, bitstring type, clone alias)``
+    bijectivity derivations; ``decaps_val`` — concrete-scheme
+    ``<Scheme>_decaps_val`` phoare lemmas. Two validation-only families
+    (never emitted, only checked): ``det`` — the always-emitted
+    ``<M>_<m>_det`` axioms a drain references, recorded so tripwires can
+    assert a leg touches only licensed axioms; ``slice_types`` — registered
+    concat-triple keys a slice cascade uses (an unregistered triple must
+    DECLINE the move, never mint an axiom — fail closed).
+    """
+
+    pres: set[tuple[str, str]] = field(default_factory=set)
+    inj: set[tuple[str, str]] = field(default_factory=set)
+    bij: set[tuple[str, str, str, str]] = field(default_factory=set)
+    decaps_val: set[str] = field(default_factory=set)
+    det: set[tuple[str, str]] = field(default_factory=set)
+    slice_types: set[str] = field(default_factory=set)
+
+
 class _LocalBinderScan(Visitor[None]):
     """Ordered scan of one method body for the rename-equality gate (Move 1).
 
@@ -2325,13 +2351,14 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     modules: mt.ModuleTranslator,
     flat_params: list[ec_ast.ModuleParam],
     det_methods: dict[str, set[str]],
-) -> tuple[list[str], set[tuple[str, str]], str] | None:
+) -> tuple[list[str], MicroRequests, str] | None:
     """Tactic for one chain step's micro lemma, restricted to ``oracle_name``.
 
-    Returns ``(tactic, pres_methods, rung)`` where ``pres_methods`` is the set
-    of ``(module, method)`` glob-preservation axioms the tactic references
-    (empty unless a dead-call drop fired) and ``rung`` is the automation-ladder
-    token the caller tags the micro with, or ``None`` when no tactic applies
+    Returns ``(tactic, requests, rung)`` where ``requests`` is the
+    :class:`MicroRequests` record of axiom families the tactic references
+    (only ``pres`` populated until the later Phase-2 moves land) and ``rung``
+    is the automation-ladder token the caller tags the micro with, or
+    ``None`` when no tactic applies
     (the caller routes the whole oracle to a coupling-pending admit). The
     tactic is:
 
@@ -2384,9 +2411,9 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         for kind, _callee in reversed(_call_sample_backbone(body)):
             tac.append("call (_: true)." if kind == "call" else "rnd.")
         tac.append("auto.")
-        return tac, set(), SYNTH_PARAM
+        return tac, MicroRequests(), SYNTH_PARAM
     if pb.methods[0] == pa.methods[0]:
-        return ["proc; sim."], set(), SYNTH_STATIC
+        return ["proc; sim."], MicroRequests(), SYNTH_STATIC
     before_h = _normalize_for_ec(
         copy.deepcopy(pb), external_module_types, method_return_types
     )
@@ -2395,7 +2422,7 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     )
     swaps = _permutation_swaps(before_h, after_h, reversed_dir=reversed_dir)
     if swaps is not None:
-        return ["proc.", *swaps, "sim."], set(), SYNTH_PARAM
+        return ["proc.", *swaps, "sim."], MicroRequests(), SYNTH_PARAM
     # Move 1 (Phase-2 micro synthesizers): equal modulo local-binder renaming
     # -- the Alpha Rename / Variable Standardization legs. ``sim`` is
     # name-blind on locals, so the exact-AST gate above was the only thing
@@ -2403,7 +2430,7 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     # branches so any leg they close today stays byte-identical; the raw
     # projections are compared (same basis as the exact-equal gate).
     if _rename_equal_projection(pb, pa):
-        return ["proc; sim."], set(), SYNTH_STATIC
+        return ["proc; sim."], MicroRequests(), SYNTH_STATIC
     return _dead_call_drop_step(
         pb,
         pa,
@@ -2425,7 +2452,7 @@ def _dead_call_drop_step(  # pylint: disable=too-many-arguments,too-many-positio
     modules: mt.ModuleTranslator,
     flat_params: list[ec_ast.ModuleParam],
     det_methods: dict[str, set[str]],
-) -> tuple[list[str], set[tuple[str, str]], str] | None:
+) -> tuple[list[str], MicroRequests, str] | None:
     """A chain step that drops dead (result-unused) abstract calls -- wall 5.
 
     ``Absorb Redundant Early Return`` prunes the ``K.decaps`` calls of a
@@ -2438,8 +2465,8 @@ def _dead_call_drop_step(  # pylint: disable=too-many-arguments,too-many-positio
     unchanged, so it is removed one-sided with ``call{side} (<M>_<m>_pres g)``
     (the same one-sided glob-preserving drop the init backbone peel uses).
 
-    Returns ``(tactic, pres_methods, rung)`` -- the ``(module, method)`` set the
-    tactic needs ``_pres`` axioms for, plus the automation-ladder token -- or
+    Returns ``(tactic, requests, rung)`` -- ``requests.pres`` carries the
+    ``(module, method)`` set the tactic needs ``_pres`` axioms for -- or
     ``None`` when the step is not a pure dead-call drop. Validated end-to-end:
     ``ec_templates/dead_call_drop.ec``.
     """
@@ -2485,7 +2512,7 @@ def _dead_call_drop_step(  # pylint: disable=too-many-arguments,too-many-positio
             # ``var`` decls are stripped; a real statement-level difference is not
             # sim-closable and must fall through to a coupling-pending admit.
             return None
-        return ["proc; sim."], set(), SYNTH_STATIC
+        return ["proc; sim."], MicroRequests(), SYNTH_STATIC
     if len(s1_bb) > len(s2_bb):
         long_bb, short_bb, side, long_body = s1_bb, s2_bb, 1, s1_body
     else:
@@ -2515,7 +2542,7 @@ def _dead_call_drop_step(  # pylint: disable=too-many-arguments,too-many-positio
         else:
             tac.append("rnd.")
     tac.append("skip => /#.")
-    return tac, pres, SYNTH_PARAM
+    return tac, MicroRequests(pres=pres), SYNTH_PARAM
 
 
 def _oracle_pending_admit(hop_index: int, oracle_name: str) -> list[str]:
@@ -7057,6 +7084,20 @@ def _emit_one_oracle_chain(
 
     chunks: list[str] = []
     step_pres: set[tuple[str, str]] = set()
+
+    def _absorb_requests(reqs: MicroRequests) -> None:
+        # Thread a micro leg's requests into the same accumulators the
+        # whole-oracle routes populate; they flow through
+        # ``MultiOracleHopChainInfo`` to the exporter's request sets
+        # unchanged (design review (c) — no new exporter-side plumbing).
+        step_pres.update(reqs.pres)
+        if inj_acc is not None:
+            inj_acc.update(reqs.inj)
+        if bij_acc is not None:
+            bij_acc.update(reqs.bij)
+        if decaps_val_acc is not None:
+            decaps_val_acc.update(reqs.decaps_val)
+
     micros_left: list[str] = []
     for k, app in enumerate(left_apps):
         if stateless_oracle:
@@ -7074,8 +7115,8 @@ def _emit_one_oracle_chain(
         )
         if step is None:
             return _admit_fallback()
-        tac, tac_pres, rung = step
-        step_pres |= tac_pres
+        tac, reqs, rung = step
+        _absorb_requests(reqs)
         name = f"micro_{hop_index}_{oracle_name}_left_{k}"
         lref, rref = mod_ref(left_mods[k]), mod_ref(left_mods[k + 1])
         micros_left.append(name)
@@ -7111,8 +7152,8 @@ def _emit_one_oracle_chain(
         )
         if step is None:
             return _admit_fallback()
-        tac, tac_pres, rung = step
-        step_pres |= tac_pres
+        tac, reqs, rung = step
+        _absorb_requests(reqs)
         name = f"micro_{hop_index}_{oracle_name}_right_{k}_rev"
         # Reversed: proves Step_R_state_{k+1} ~ Step_R_state_k.
         lref, rref = mod_ref(right_mods[k + 1]), mod_ref(right_mods[k])

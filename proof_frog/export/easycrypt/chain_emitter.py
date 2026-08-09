@@ -25,7 +25,12 @@ from typing import Callable, NamedTuple, cast
 
 from ... import frog_ast
 from ...transforms._base import TransformApplication
-from ...visitors import SearchVisitor, VariableCollectionVisitor
+from ...visitors import (
+    SearchVisitor,
+    SubstitutionTransformer,
+    VariableCollectionVisitor,
+    Visitor,
+)
 from . import binding_challenge as bch
 from . import ec_ast
 from .challenge_common import paren as cc_paren
@@ -2187,6 +2192,129 @@ def _project_to_method(game: frog_ast.Game, oracle_name: str) -> frog_ast.Game |
     return proj
 
 
+class _LocalBinderScan(Visitor[None]):
+    """Ordered scan of one method body for the rename-equality gate (Move 1).
+
+    Collects the typed local binders (``Assignment``/``Sample``/
+    ``UniqueSample`` with a type annotation and a ``Variable`` LHS) in
+    traversal order, plus everything that makes a *name-based* positional
+    renaming unsafe: duplicate binder names, a binder name already seen
+    before its binding (a use-before-decl reads the OUTER scope, which Alpha
+    Rename preserves per-occurrence while a name substitution cannot), a
+    self-reference inside the binder's own annotation/RHS, and the binders a
+    substitution over ``Variable`` nodes cannot rename at their binding site
+    (``VariableDeclaration`` / loop binders, which bind plain strings).
+    """
+
+    def __init__(self) -> None:
+        self.binders: list[tuple[str, frog_ast.Type]] = []
+        self._binder_names: set[str] = set()
+        self.seen: set[str] = set()
+        self.fixed_binders: set[str] = set()
+        self.unsafe = False
+
+    def result(self) -> None:
+        return None
+
+    @staticmethod
+    def _names_in(*nodes: frog_ast.ASTNode | None) -> set[str]:
+        out: set[str] = set()
+        for node in nodes:
+            if node is None:
+                continue
+            collector = VariableCollectionVisitor()
+            collector.visit(node)
+            out |= {v.name for v in collector.result()}
+        return out
+
+    def _maybe_bind(
+        self,
+        the_type: frog_ast.Type | None,
+        var: frog_ast.Expression,
+        *own_reads: frog_ast.ASTNode | None,
+    ) -> None:
+        if the_type is None or not isinstance(var, frog_ast.Variable):
+            return
+        name = var.name
+        if (
+            name in self._binder_names
+            or name in self.seen
+            or name in self._names_in(the_type, *own_reads)
+        ):
+            self.unsafe = True
+        self._binder_names.add(name)
+        self.binders.append((name, the_type))
+
+    def visit_assignment(self, node: frog_ast.Assignment) -> None:
+        self._maybe_bind(node.the_type, node.var, node.value)
+
+    def visit_sample(self, node: frog_ast.Sample) -> None:
+        self._maybe_bind(node.the_type, node.var, node.sampled_from)
+
+    def visit_unique_sample(self, node: frog_ast.UniqueSample) -> None:
+        self._maybe_bind(node.the_type, node.var, node.sampled_from, node.unique_set)
+
+    def visit_variable_declaration(self, node: frog_ast.VariableDeclaration) -> None:
+        self.fixed_binders.add(node.name)
+
+    def visit_numeric_for(self, node: frog_ast.NumericFor) -> None:
+        self.fixed_binders.add(node.name)
+
+    def visit_generic_for(self, node: frog_ast.GenericFor) -> None:
+        self.fixed_binders.add(node.var_name)
+
+    def visit_variable(self, node: frog_ast.Variable) -> None:
+        self.seen.add(node.name)
+
+
+def _rename_equal_projection(pb: frog_ast.Game, pa: frog_ast.Game) -> bool:
+    """Move 1: equal modulo a positional renaming of typed local binders.
+
+    True only when fields, game parameters, and the method signature are
+    byte-identical and the two bodies become AST-equal after renaming each
+    side's typed local binders positionally to the same fresh ``__mv<i>__``
+    names. That guarantees ``proc; sim.`` closes (identical modulo local
+    names — the probe-validated ``leg_alpha_rename`` shape), so this is
+    never a maybe-tactic. Any shadowing hazard DECLINES instead: duplicate
+    or use-before-binding binder names, a binder colliding with a
+    field/param/string-bound binder, or a ``__mv`` collision. Covers the
+    ``Alpha Rename`` / ``Variable Standardization`` legs (and any other
+    rename-only residue); field renames stay with the role-map machinery.
+    """
+    if pb.fields != pa.fields or pb.parameters != pa.parameters:
+        return False
+    mb, ma = pb.methods[0], pa.methods[0]
+    if mb.signature != ma.signature:
+        return False
+    scan_b, scan_a = _LocalBinderScan(), _LocalBinderScan()
+    scan_b.visit(mb.block)
+    scan_a.visit(ma.block)
+    if scan_b.unsafe or scan_a.unsafe:
+        return False
+    if len(scan_b.binders) != len(scan_a.binders):
+        return False
+    names_b = [n for n, _ in scan_b.binders]
+    names_a = [n for n, _ in scan_a.binders]
+    reserved = (
+        {f.name for f in pb.fields}
+        | {p.name for p in mb.signature.parameters}
+        | scan_b.fixed_binders
+        | scan_a.fixed_binders
+    )
+    if any(n in reserved for n in names_b + names_a):
+        return False
+    if "__mv" in str(mb) or "__mv" in str(ma):
+        return False
+
+    def canonicalize(method: frog_ast.Method, names: list[str]) -> frog_ast.ASTNode:
+        replace_map: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(identity=False)
+        for i, name in enumerate(names):
+            replace_map.set(frog_ast.Variable(name), frog_ast.Variable(f"__mv{i}__"))
+        return SubstitutionTransformer(replace_map).transform(copy.deepcopy(method))
+
+    return canonicalize(mb, names_b) == canonicalize(ma, names_a)
+
+
 def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     state_before: frog_ast.Game,
     state_after: frog_ast.Game,
@@ -2208,7 +2336,10 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     tactic is:
 
     * ``["proc; sim."]`` when that oracle's body is unchanged across the step
-      (``sim`` preserves the coupling on untouched state);
+      (``sim`` preserves the coupling on untouched state), or unchanged
+      modulo a renaming of typed local binders (Move 1,
+      :func:`_rename_equal_projection` — the Alpha Rename / Variable
+      Standardization legs);
     * a ``proc; swap...; sim`` sequence when the step is a pure top-level
       reorder of that oracle's body;
     * a backbone peel when the step is a "Remove redundant variables for
@@ -2265,6 +2396,14 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     swaps = _permutation_swaps(before_h, after_h, reversed_dir=reversed_dir)
     if swaps is not None:
         return ["proc.", *swaps, "sim."], set(), SYNTH_PARAM
+    # Move 1 (Phase-2 micro synthesizers): equal modulo local-binder renaming
+    # -- the Alpha Rename / Variable Standardization legs. ``sim`` is
+    # name-blind on locals, so the exact-AST gate above was the only thing
+    # blocking these (probe: ``leg_alpha_rename``). Placed AFTER the existing
+    # branches so any leg they close today stays byte-identical; the raw
+    # projections are compared (same basis as the exact-equal gate).
+    if _rename_equal_projection(pb, pa):
+        return ["proc; sim."], set(), SYNTH_STATIC
     return _dead_call_drop_step(
         pb,
         pa,

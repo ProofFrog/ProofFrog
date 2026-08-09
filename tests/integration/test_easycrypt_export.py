@@ -1737,6 +1737,7 @@ MULTI_ORACLE_ABSTRACT_CALL_TEMPLATE = (
     EC_TEMPLATES / "multi_oracle_abstract_call_coupling.ec"
 )
 DEAD_SAMPLE_DROP_TEMPLATE = EC_TEMPLATES / "dead_sample_drop.ec"
+LOCAL_RENAME_SIM_TEMPLATE = EC_TEMPLATES / "local_rename_sim.ec"
 CALL_PAST_SAMPLE_SWAP_TEMPLATE = EC_TEMPLATES / "call_past_sample_swap.ec"
 MARGINAL_SPLIT_TEMPLATE = EC_TEMPLATES / "marginal_split.ec"
 SAMPLE_REORDER_TWIN_TEMPLATE = EC_TEMPLATES / "sample_reorder_twin.ec"
@@ -1793,6 +1794,37 @@ def test_dead_sample_drop_template_compiles(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, (
         f"EasyCrypt rejected the dead-sample-drop template.\n"
+        f"stderr:\n{result.stderr}\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_local_rename_sim_template_compiles(tmp_path: Path) -> None:
+    """Regression tripwire for the Move 1 rename-equality micro (Phase-2
+    micro synthesizers). The shape: two flat states whose oracle bodies are
+    AST-equal after a positional renaming of typed local binders (the
+    ``Alpha Rename`` / ``Variable Standardization`` legs). ``sim`` is
+    name-blind on locals, so ``proc; sim.`` closes both orientations under
+    the live-state coupling. The gate (``_rename_equal_projection``) fires
+    only on that exact shape — its decline mutations are unit-tested in
+    ``tests/unit/export/test_rename_equal_gate.py``; the goal-falsifying EC
+    mutations are recorded in the template header. If this stops compiling,
+    the Move 1 tactic must be re-derived before the gate can be trusted."""
+    ec_file = tmp_path / "local_rename_sim.ec"
+    ec_file.write_text(LOCAL_RENAME_SIM_TEMPLATE.read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=600,
+    )
+    assert result.returncode == 0, (
+        f"EasyCrypt rejected the local-rename-sim template.\n"
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )

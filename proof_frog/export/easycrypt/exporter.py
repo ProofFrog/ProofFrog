@@ -9642,11 +9642,63 @@ def export_proof_file(proof_path: str) -> str:
         del s_head
         return lines + walk
 
-    def _rom_pin_decaps_walk(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches
+    def _red_proc_chal_inlined(
+        rmod: ec_ast.Module, chal_expr: str, proc_name: str
+    ) -> list[ec_ast.EcStmt] | None:
+        """The reduction's ``proc_name`` body with its challenger calls
+        inlined (challenger module vars QUALIFIED, matching EC), recursing
+        into ``if`` branches. ``None`` off-shape."""
+        proc = next((p for p in rmod.procs if p.name == proc_name), None)
+        if proc is None:
+            return None
+        r_chal = rmod.params[-1].name if rmod.params else None
+        chal_base = pt.module_base_name(chal_expr)
+        taken = {d.name for d in proc.body if isinstance(d, ec_ast.VarDecl)} | {
+            p.name for p in proc.params
+        }
+
+        def _many(stmts: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt] | None:
+            acc: list[ec_ast.EcStmt] = []
+            for s in stmts:
+                if isinstance(s, (ec_ast.VarDecl, ec_ast.Return)):
+                    continue
+                if (
+                    isinstance(s, ec_ast.Call)
+                    and r_chal is not None
+                    and s.callee.partition(".")[0] == r_chal
+                ):
+                    nested = _rom_inline_proc(
+                        chal_expr,
+                        s.callee.partition(".")[2],
+                        _split_call_args(s.args) if s.args.strip() else [],
+                        s.var if s.var else None,
+                        taken,
+                        var_prefix=chal_base,
+                    )
+                    if nested is None:
+                        return None
+                    acc.extend(nested)
+                elif isinstance(s, ec_ast.If):
+                    tb = _many(s.then_body)
+                    eb = _many(s.else_body)
+                    if tb is None or eb is None:
+                        return None
+                    acc.append(ec_ast.If(s.guard, tb, eb))
+                else:
+                    acc.append(s)
+            return acc
+
+        return _many(proc.body)
+
+    def _rom_pin_decaps_walk(  # pylint: disable=too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
         step_a: frog_ast.Step, step_b: frog_ast.Step
     ) -> dict[str, list[str]] | None:
         """The ROM pin-walk ``decaps`` (probe c349): refusal + the same
-        pattern-driven pin walk over the two else bodies."""
+        pattern-driven pin walk over the two else bodies. A reduction side
+        whose challenger is a C2PRI *Ideal* (``submit`` returns the literal
+        ``false``) carries a DEAD collision branch: drain up to it one-sided,
+        ``rcondf`` it away, and walk the surviving tail (the c361 building
+        blocks; CK hop_6/hop_17 decaps)."""
         coupling = _live_state_coupling(step_a, step_b)
         if "RO_H" not in coupling:
             return None
@@ -9679,12 +9731,10 @@ def export_proof_file(proof_path: str) -> str:
         if g_res is None:
             return None
         g_list, wrap_base, wmod = g_res
-        r_proc = next((p for p in rmod.procs if p.name == "decaps"), None)
-        if r_proc is None:
+        r_chal_expr = pt.last_module_arg(resolver.resolve(red_step).module_expr)
+        r_body = _red_proc_chal_inlined(rmod, r_chal_expr, "decaps")
+        if r_body is None:
             return None
-        r_body = [
-            s for s in r_proc.body if not isinstance(s, (ec_ast.VarDecl, ec_ast.Return))
-        ]
         if (
             len(g_list) != 1
             or not isinstance(g_list[0], ec_ast.If)
@@ -9698,7 +9748,7 @@ def export_proof_file(proof_path: str) -> str:
         r_else: list[ec_ast.EcStmt] = [
             s for s in r_body[0].else_body if not isinstance(s, ec_ast.VarDecl)
         ]
-        if any(isinstance(s, ec_ast.If) for s in g_else + r_else):
+        if any(isinstance(s, ec_ast.If) for s in g_else):
             return None
         # the SEEDBASED variants re-derive their decaps keys from seeds inside
         # the scheme's decaps (slice-of-seed assigns); the walk's final /#
@@ -9721,6 +9771,71 @@ def export_proof_file(proof_path: str) -> str:
             r = qr0(base)
             return f"{r}.`{comp}" if comp else r
 
+        def _is_det_c(c: ec_ast.Call) -> bool:
+            m, _, meth = c.callee.partition(".")
+            return (
+                meth in det_methods_by_module.get(m, set())
+                and m in clone_alias_by_module
+            )
+
+        # DEAD-collision handling: one inner ``if`` on the reduction side
+        # whose guard conjoins a var assigned the literal ``false`` (the
+        # Ideal challenger's inlined ``submit``): drain the prefix
+        # one-sided, ``rcondf`` the branch away, walk the else tail.
+        pre_lines: list[str] = []
+        r_ifs = [i for i, s in enumerate(r_else) if isinstance(s, ec_ast.If)]
+        if len(r_ifs) > 1:
+            return None
+        if r_ifs:
+            ii = r_ifs[0]
+            inner = cast(ec_ast.If, r_else[ii])
+            false_vars = {
+                s.var
+                for s in r_else[:ii]
+                if isinstance(s, ec_ast.Assign) and s.rhs.strip() == "false"
+            }
+            if not any(
+                re.search(rf"\b{re.escape(v)}\b", inner.guard) for v in false_vars
+            ):
+                return None
+            pend = 0
+            for s in r_else[:ii]:
+                if isinstance(s, ec_ast.Assign):
+                    pend += 1
+                    continue
+                if not (isinstance(s, ec_ast.Call) and _is_det_c(s)):
+                    return None
+                if pend:
+                    pre_lines.append(
+                        f"sp {pend} 0." if rtag == "1" else f"sp 0 {pend}."
+                    )
+                    pend = 0
+                m, _, meth = s.callee.partition(".")
+                alias = clone_alias_by_module[m]
+                cargs = _split_call_args(s.args) if s.args.strip() else []
+                o_ = "1 0" if rtag == "1" else "0 1"
+                binds = ", ".join(
+                    [f"(glob {m}){{{rtag}}}"] + [f"({qr(a)})" for a in cargs]
+                )
+                names = " ".join(["g"] + [f"a{k}" for k in range(len(cargs))])
+                evargs = "".join(f" ({qr(a)})" for a in cargs)
+                pre_lines.append(
+                    f"seq {o_} : (#pre /\\ {qr(s.var)} = {alias}.ev_{meth}{evargs})."
+                )
+                pre_lines.append(
+                    f"+ exists* {binds}; elim* => {names}."
+                    f" call{{{rtag}}} ({m}_{meth}_det {names}). skip => /#."
+                )
+            if pend:
+                pre_lines.append(f"sp {pend} 0." if rtag == "1" else f"sp 0 {pend}.")
+            pre_lines.append(f"rcondf{{{rtag}}} 1; first by auto => /#.")
+            r_else = cast(
+                "list[ec_ast.EcStmt]",
+                [t for t in inner.else_body if not isinstance(t, ec_ast.VarDecl)],
+            ) + list(r_else[ii + 1 :])
+            if any(isinstance(t, ec_ast.If) for t in r_else):
+                return None
+
         walk = _rom_pin_lines(g_else, r_else, qg, qr, "#pre", gtag, rtag)
         if walk is None:
             return None
@@ -9739,6 +9854,7 @@ def export_proof_file(proof_path: str) -> str:
                 "if; 1: smt().",
                 "+ auto.",
             ]
+            + pre_lines
             + walk
         }
 

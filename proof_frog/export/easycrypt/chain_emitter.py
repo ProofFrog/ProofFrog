@@ -2497,6 +2497,24 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     )
     if dead is not None:
         return dead
+    # Move 5 (Phase-2): the two states RENDER to the same EC module -- the
+    # transform's whole effect was absorbed by the renderer's own
+    # normalization. Measured origin: the route-retirement shadow run, where
+    # 173 of 179 declined binding chains died on a ``Symbolic Computation``
+    # step that only rewrites a width ANNOTATION (``BitString<a + b + b + c>``
+    # -> ``BitString<a + 2 * b + c>``); the type collector canonicalizes width
+    # keys, so both sides emit byte-identical modules. Placed strictly after
+    # every existing branch, so a leg any of them closes today is unchanged.
+    identity = _rendered_identity_step(
+        pb,
+        pa,
+        external_module_types,
+        method_return_types,
+        modules,
+        flat_params,
+    )
+    if identity is not None:
+        return identity
     # Move 2 (Phase-2): the two bodies are identical except at exactly ONE
     # pure expression site (an if-guard or the return expression) whose
     # rewrite matches one of the fact-free row schemas.
@@ -2651,6 +2669,59 @@ def _dead_call_drop_step(  # pylint: disable=too-many-arguments,too-many-positio
             tac.append("rnd.")
     tac.append("skip => /#.")
     return tac, MicroRequests(pres=pres), SYNTH_PARAM
+
+
+def _rendered_identity_step(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    pb: frog_ast.Game,
+    pa: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    modules: mt.ModuleTranslator,
+    flat_params: list[ec_ast.ModuleParam],
+) -> tuple[list[str], MicroRequests, str] | None:
+    """Move 5: the adjacent states RENDER to the same EC module.
+
+    The strongest possible gate for ``proc; sim.``: both projections are
+    rendered under the SAME module name and compared as whole
+    :class:`ec_ast.Module` values -- state variables (so a field rename or
+    a type change declines) and the oracle body alike. Equal means the
+    lemma relates a module to itself, where ``sim`` closes and preserves
+    every coupling conjunct by construction; it can never be a
+    maybe-tactic.
+
+    Why a FrogLang-level step can render away entirely: a transform may
+    rewrite only material the renderer normalizes. The measured class is
+    ``Symbolic Computation`` rewriting a bitstring WIDTH ANNOTATION
+    (``BitString<kem_pq_nss + ng_nss + ng_nelem + ng_nelem + nlabel>`` ->
+    ``BitString<kem_pq_nss + 2 * ng_nelem + ng_nss + nlabel>`` on two local
+    declarations, statements untouched): the type collector canonicalizes
+    width keys to one EC type, so both sides emit the same module. Before
+    this row those legs returned ``None`` and FUSED their whole oracle --
+    173 of the 179 chain deaths in the 2026-08-09 route-retirement shadow
+    run, hiding every later step of the same chain behind them.
+
+    Deliberately NOT a rendered-text comparison: the AST comparison also
+    pins the module's variable block, which the coupling references.
+    """
+    bmod = _flat_state_module(
+        modules,
+        "Step_id",
+        pb,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    amod = _flat_state_module(
+        modules,
+        "Step_id",
+        pa,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not bmod.procs or not amod.procs or bmod != amod:
+        return None
+    return ["proc; sim."], MicroRequests(), SYNTH_STATIC
 
 
 def _raw_single_site(

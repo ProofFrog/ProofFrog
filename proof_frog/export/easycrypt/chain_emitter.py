@@ -1876,6 +1876,7 @@ def _make_field_aware_coupling(
     lazyro_cross: tuple[str, str, frozenset[str]] | None = None,
     type_sig_by_base: dict[str, tuple[str, ...]] | None = None,
     outer_globs: frozenset[str] | None = None,
+    hoist_conjuncts: dict[str, list[str]] | None = None,
 ) -> CouplingFn:
     """Build a coupling closure that is field-aware for cardinality-differing states.
 
@@ -2044,6 +2045,16 @@ def _make_field_aware_coupling(
                         f" = {qualify(base, s)}"
                         f"{{{side}}}"
                     )
+        # Hoist-pair cache invariants (Phase-2 Move 3c): one-sided
+        # ``<base>.<h>{s} = ev_<m>(<args>{s})`` for every base registered as
+        # carrying a Hoist cache field. Emitted with the same consistency
+        # discipline as the survivor invariants above, which is what lets
+        # the transitivity side conditions witness/thread the conjunct
+        # (probe: ``.ec-tmp/move3/hoist_chain_probe.ec``). Empty registry
+        # (every chain without a Hoist pair) is byte-identical.
+        for side, base in (("1", lb), ("2", rb)):
+            for tmpl in (hoist_conjuncts or {}).get(base, ()):
+                fields_conj.append(tmpl.replace("__SIDE__", "{" + side + "}"))
         # A materialized-RO field (arrow-typed, assigned ``<- RO_H.h``) equals
         # the shared RO on its side. Emit ``base.f{side} = RO_H.h{side}`` so a hop
         # that DROPS this field and reverts to ``RO_H.h`` (the lazy-RO Honest
@@ -2398,6 +2409,33 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     pa = _project_to_method(state_after, oracle_name)
     if pb is None or pa is None:
         return None
+    # Move 3c (Phase-2): the Hoist-Deterministic-Call-to-Initialize pair.
+    # MUST run before the field-cardinality branch below: a Hoist step is a
+    # +1-cardinality pair whose backbones differ by the cached det call, so
+    # the survivor peel would mispair the backbone (a tactic that runs but
+    # does not close -- the worst case). Detection is exact (reverse
+    # substitution); non-Hoist cardinality pairs fall through unchanged. A
+    # detected pair is AUTHORITATIVE: if its leg builder declines, the
+    # oracle takes the honest admit, never the mispairing peel.
+    hoist = _detect_hoist_pair(state_before, state_after, det_methods)
+    if hoist is not None:
+        return _hoist_pair_step(
+            hoist,
+            pb,
+            pa,
+            state_after,
+            oracle_name,
+            reversed_dir,
+            modules,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            det_methods,
+            micro_pre_text,
+            left_ref,
+            right_ref,
+            clone_alias or {},
+        )
     # Field-removal step: the field-aware coupling carries a survivor invariant
     # (``dk0 = challenger_dk0``); peel the (structurally identical) call/sample
     # backbone with ``call (_: true)``/``rnd`` so ``auto; smt()`` discharges each
@@ -3270,6 +3308,424 @@ def _ies_delta_walk_step(  # pylint: disable=too-many-arguments,too-many-positio
         MicroRequests(inj=set(inj_used), det=env1.det_used | env2.det_used),
         SYNTH_PARAM,
     )
+
+
+@dataclass(frozen=True)
+class _HoistPair:
+    """A detected ``Hoist Deterministic Call to Initialize`` adjacent pair.
+
+    ``field_name`` is the cache field the transform introduced (FrogLang
+    name); ``mod``/``meth`` name the deterministic callee (rendered module +
+    lowercase method, the ``<M>_<m>_det``/``ev_<m>`` key); ``call`` is the
+    hoisted candidate call (before-side AST); ``consumers`` are the
+    lowercase non-init method names whose bodies swapped the inline call
+    for the field read (every other method is a bystander).
+    """
+
+    field_name: str
+    mod: str
+    meth: str
+    call: frog_ast.FuncCall
+    consumers: frozenset[str]
+
+
+def _lhs_writes_any(block: frog_ast.ASTNode, names: set[str]) -> bool:
+    """True if any assignment/sample in ``block`` writes a name in ``names``.
+
+    Conservative: a write is any ``Assignment``/``Sample``/``UniqueSample``
+    whose LHS expression mentions the name at all (tuple/projection LHS
+    included), so a partial write counts.
+    """
+
+    def hits(node: frog_ast.ASTNode) -> bool:
+        if not isinstance(
+            node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            return False
+        collector = VariableCollectionVisitor()
+        collector.visit(node.var)
+        return any(v.name in names for v in collector.result())
+
+    return SearchVisitor[frog_ast.ASTNode](hits).visit(block) is not None
+
+
+def _detect_hoist_pair(
+    before: frog_ast.Game,
+    after: frog_ast.Game,
+    det_methods: dict[str, set[str]],
+) -> _HoistPair | None:
+    """Exact detection of a ``Hoist Deterministic Call to Initialize`` pair.
+
+    Mirrors the transform's own output contract (inlining.py): ``after`` is
+    ``before`` plus (a) one appended field, (b) one ``Initialize`` statement
+    caching a deterministic call to it, and (c) every structurally-equal
+    occurrence of that call replaced by the field read. Verified by REVERSE
+    SUBSTITUTION: undoing (a)-(c) must reproduce ``before`` byte-for-byte,
+    so any other difference declines. The transform's preservation gate
+    (``_fields_mutated_outside_init``) is re-checked statically -- it is
+    what makes the cache invariant a frame condition for every bystander.
+    v1 declines the Function-variable callee and an alias-rewritten init
+    return (the reverse substitution fails there) -- logged Phase-2 debt.
+    """
+    if len(after.fields) != len(before.fields) + 1:
+        return None
+    if after.fields[:-1] != before.fields or after.parameters != before.parameters:
+        return None
+    if [m.signature.name for m in after.methods] != [
+        m.signature.name for m in before.methods
+    ]:
+        return None
+    hoisted = after.fields[-1]
+    init_idx = next(
+        (
+            i
+            for i, m in enumerate(after.methods)
+            if m.signature.name.lower() == "initialize"
+        ),
+        None,
+    )
+    if init_idx is None:
+        return None
+    a_init = after.methods[init_idx]
+    cache_idxs = [
+        i
+        for i, s in enumerate(a_init.block.statements)
+        if isinstance(s, frog_ast.Assignment)
+        and isinstance(s.var, frog_ast.Variable)
+        and s.var.name == hoisted.name
+    ]
+    if len(cache_idxs) != 1:
+        return None
+    cache_stmt = a_init.block.statements[cache_idxs[0]]
+    assert isinstance(cache_stmt, frog_ast.Assignment)
+    call = cache_stmt.value
+    if not isinstance(call, frog_ast.FuncCall) or not call.args:
+        return None
+    func = call.func
+    if not isinstance(func, frog_ast.FieldAccess) or not isinstance(
+        func.the_object, frog_ast.Variable
+    ):
+        return None
+    mod = func.the_object.name.split("@", 1)[0]
+    meth = func.name.lower()
+    if meth not in det_methods.get(mod, set()):
+        return None
+    # Stable args: the candidate's argument reads must be field reads of the
+    # shared field block (the transform's ``_is_stable_arg`` residue after
+    # canonicalization; params/lets decline in v1).
+    field_names = {f.name for f in before.fields}
+    arg_reader = VariableCollectionVisitor()
+    for a in call.args:
+        arg_reader.visit(a)
+    arg_names = {v.name for v in arg_reader.result()}
+    if not arg_names or not arg_names <= field_names:
+        return None
+    # The preservation gate, re-checked: no non-init method writes the cache
+    # field or any arg field (this is what keeps the conjunct a frame
+    # condition on every oracle leg).
+    guarded = arg_names | {hoisted.name}
+    for i, m in enumerate(after.methods):
+        if i != init_idx and _lhs_writes_any(m.block, guarded):
+            return None
+    # Reverse substitution: drop the field + cache statement, put the call
+    # back at every field read, and require exact equality with ``before``.
+    sub: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(identity=False)
+    sub.set(frog_ast.Variable(hoisted.name), copy.deepcopy(call))
+    consumers: set[str] = set()
+    for i, (bm, am) in enumerate(zip(before.methods, after.methods)):
+        restored = copy.deepcopy(am)
+        if i == init_idx:
+            stmts = list(restored.block.statements)
+            del stmts[cache_idxs[0]]
+            restored.block = frog_ast.Block(stmts)
+        restored = SubstitutionTransformer(sub).transform(restored)
+        if restored != bm:
+            return None
+        if i != init_idx and am != bm:
+            consumers.add(bm.signature.name.lower())
+    return _HoistPair(
+        field_name=hoisted.name,
+        mod=mod,
+        meth=meth,
+        call=call,
+        consumers=frozenset(consumers),
+    )
+
+
+_HOIST_SIMPLE_ARG_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_']*(\.`\d+)*$")
+
+
+def _hoist_rendered_cache_call(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    modules: mt.ModuleTranslator,
+    state: frog_ast.Game,
+    pair: _HoistPair,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+) -> tuple[str, str, list[str]] | None:
+    """Rendered ``(callee, cache var, arg texts)`` of ``pair``'s cache call.
+
+    Read off ``state``'s RENDERED ``initialize`` (the standing lesson: the
+    tactic's terms must come from the renderer, never the raw AST). ``None``
+    unless exactly one call statement assigns the cache field and every
+    argument is a plain field read/projection (``dk0.`3``) -- the v1 shape;
+    anything richer declines and stays an honest admit.
+    """
+    proj = _project_to_method(state, "initialize")
+    if proj is None:
+        return None
+    mod_ec = _flat_state_module(
+        modules,
+        "Step_hz",
+        proj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not mod_ec.procs:
+        return None
+    h_ec = mt._ec_field_name(pair.field_name)  # pylint: disable=protected-access
+    cache = [
+        s for s in mod_ec.procs[0].body if isinstance(s, ec_ast.Call) and s.var == h_ec
+    ]
+    if len(cache) != 1 or cache[0].callee != f"{pair.mod}.{pair.meth}":
+        return None
+    args = [a.strip() for a in cc_split_top_args(cache[0].args)]
+    field_ecs = {
+        mt._ec_field_name(f.name)  # pylint: disable=protected-access
+        for f in state.fields
+    }
+    for a in args:
+        if not _HOIST_SIMPLE_ARG_RE.match(a) or a.split(".", 1)[0] not in field_ecs:
+            return None
+    return cache[0].callee, h_ec, args
+
+
+def _hoist_state_carries(state: frog_ast.Game, pair: _HoistPair) -> bool:
+    """True if ``state`` still carries ``pair``'s cache field AND its
+    ``initialize`` still contains the defining cache assignment (same call,
+    AST-equal) -- the per-state condition under which the cache invariant is
+    emitted, consistently, in every field-wise coupling that names it."""
+    if not any(f.name == pair.field_name for f in state.fields):
+        return False
+    init = next(
+        (m for m in state.methods if m.signature.name.lower() == "initialize"),
+        None,
+    )
+    if init is None:
+        return False
+    return any(
+        isinstance(s, frog_ast.Assignment)
+        and isinstance(s.var, frog_ast.Variable)
+        and s.var.name == pair.field_name
+        and s.value == pair.call
+        for s in init.block.statements
+    )
+
+
+def _hoist_conjunct_registry(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    left_states: list[frog_ast.Game],
+    right_states: list[frog_ast.Game],
+    left_mods: list[str],
+    right_mods: list[str],
+    mod_ref: Callable[[str], str],
+    modules: mt.ModuleTranslator,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    det_methods: dict[str, set[str]],
+    clone_alias: dict[str, str],
+) -> dict[str, list[str]]:
+    """Per-base cache-invariant conjuncts for the chain's Hoist pairs (3c).
+
+    For every detected Hoist pair, every chain state (either side) that
+    still carries the cache field + its defining init assignment gets the
+    one-sided conjunct ``<base>.<h>__SIDE__ = <alias>.ev_<m> (<base>.<arg>
+    __SIDE__) ...`` registered under its module base. The coupling emits it
+    per side wherever that base appears in a field-wise coupling -- the
+    survivor-invariant consistency discipline, which is what lets the
+    transitivity's smt side conditions witness/thread it (probe:
+    ``.ec-tmp/move3/hoist_chain_probe.ec``). Empty for every chain without
+    a Hoist pair, so all other exports are byte-identical.
+    """
+    pairs: list[_HoistPair] = []
+    for states in (left_states, right_states):
+        for b, a in zip(states, states[1:]):
+            p = _detect_hoist_pair(b, a, det_methods)
+            if p is not None and p not in pairs:
+                pairs.append(p)
+    if not pairs:
+        return {}
+    registry: dict[str, list[str]] = {}
+    for states, names in ((left_states, left_mods), (right_states, right_mods)):
+        for state, name in zip(states, names):
+            base = _ref_base(mod_ref(name))
+            for pair in pairs:
+                if not _hoist_state_carries(state, pair):
+                    continue
+                rendered = _hoist_rendered_cache_call(
+                    modules,
+                    state,
+                    pair,
+                    external_module_types,
+                    method_return_types,
+                    flat_params,
+                )
+                if rendered is None:
+                    continue
+                _callee, h_ec, args = rendered
+                alias = clone_alias.get(pair.mod, f"{pair.mod}_c")
+                applied = " ".join(f"({base}.{a}__SIDE__)" for a in args)
+                text = f"{base}.{h_ec}__SIDE__ = {alias}.ev_{pair.meth}" + (
+                    f" {applied}" if applied else ""
+                )
+                bucket = registry.setdefault(base, [])
+                if text not in bucket:
+                    bucket.append(text)
+    return registry
+
+
+def _hoist_pair_step(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
+    pair: _HoistPair,
+    pb: frog_ast.Game,
+    pa: frog_ast.Game,
+    state_after: frog_ast.Game,
+    oracle_name: str,
+    reversed_dir: bool,
+    modules: mt.ModuleTranslator,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    det_methods: dict[str, set[str]],
+    micro_pre_text: str,
+    left_ref: str,
+    right_ref: str,
+    clone_alias: dict[str, str],
+) -> tuple[list[str], MicroRequests, str] | None:
+    """Move 3c: one oracle leg of a Hoist pair (probe-validated shapes).
+
+    Bystander (body untouched): the plain wp-interleaved backbone peel --
+    NEVER ``proc; sim``, which fails SILENTLY under the one-sided cache
+    conjunct ("cannot infer the set of equalities", surfacing only at qed;
+    the probed worst case). Consumer (inline call swapped for the field
+    read): the dead-call-drop walk with the cached call drained one-sided
+    through its ``<M>_<m>_det`` axiom -- the result is LIVE, so the drain
+    PINS ``res = ev_<m>(args)`` from up-front ``exists*`` pins (licensed by
+    the transform's own arg-stability gate) and the closing ``/#`` equates
+    it with the field read via the coupling's cache conjunct. Probes:
+    ``.ec-tmp/move3/hoist_probe.ec`` (legs) and ``hoist_chain_probe.ec``
+    (chain composition + both drain directions, exact emitted text).
+    """
+    if micro_pre_text == "true" or not left_ref or not right_ref:
+        return None
+    rendered = _hoist_rendered_cache_call(
+        modules,
+        state_after,
+        pair,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if rendered is None:
+        return None
+    callee, h_ec, args = rendered
+    alias = clone_alias.get(pair.mod, f"{pair.mod}_c")
+    bmod = _flat_state_module(
+        modules,
+        "Step_hb",
+        pb,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    amod = _flat_state_module(
+        modules,
+        "Step_ha",
+        pa,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not bmod.procs or not amod.procs:
+        return None
+    if oracle_name not in pair.consumers:
+        # Bystander: identical bodies; peel the shared backbone.
+        if pb.methods[0] != pa.methods[0]:
+            return None
+        tac = ["proc."]
+        for kind, _callee in reversed(_call_sample_backbone(bmod.procs[0].body)):
+            tac.append("wp.")
+            tac.append("call (_: true)." if kind == "call" else "rnd.")
+        tac.append("auto => /#.")
+        return tac, MicroRequests(), SYNTH_PARAM
+    # Consumer. Enabling-coupling gate (checked on the coupling TEXT, the
+    # ``_synth_correctness_decaps_casesplit`` discipline): without the cache
+    # conjunct in the pre the peel would run and leave a goal -- a BLOCKED
+    # export where an honest admit was available.
+    h_base = _ref_base(left_ref if reversed_dir else right_ref)
+    if (
+        f"{alias}.ev_{pair.meth}" not in micro_pre_text
+        or f"{h_base}.{h_ec}" not in micro_pre_text
+    ):
+        return None
+    # The inline call always sits in ``state_before`` (the longer backbone);
+    # forward that is the emitted micro's side 1, reversed its side 2.
+    side = "2" if reversed_dir else "1"
+    pin_base = _ref_base(right_ref if reversed_dir else left_ref)
+    long_body, short_body = bmod.procs[0].body, amod.procs[0].body
+    long_bb = _call_sample_backbone(long_body)
+    short_bb = _call_sample_backbone(short_body)
+    # ``long_body=None`` deliberately: the tags' dead-result condition is for
+    # ``_pres`` drops, which FORGET the result; this drain pins it via
+    # ``_det``, so a live result is exactly the point.
+    tags = _dead_call_drop_tags(long_bb, short_bb, det_methods)
+    if tags is None or not any(tags):
+        return None
+    events = [
+        s for s in _exec_stmts(long_body) if isinstance(s, (ec_ast.Call, ec_ast.Sample))
+    ]
+    for idx, tagged in enumerate(tags):
+        if not tagged:
+            continue
+        ev = events[idx]
+        if not isinstance(ev, ec_ast.Call) or ev.callee != callee:
+            return None
+        if [a.strip() for a in cc_split_top_args(ev.args)] != args:
+            return None
+    # Up-front pins of the drained call's arg fields + callee glob (initial
+    # memory is valid: the args are stable by the transform's own gate).
+    pin_fields: list[str] = []
+    for a in args:
+        tok = a.split(".", 1)[0]
+        if tok not in pin_fields:
+            pin_fields.append(tok)
+    pin_exprs = [f"{pin_base}.{f}{{{side}}}" for f in pin_fields] + [
+        f"(glob {pair.mod}){{{side}}}"
+    ]
+    pin_names = [f"kv{i}" for i in range(len(pin_fields))] + ["gv"]
+    pin_of = dict(zip(pin_fields, pin_names))
+    applied = " ".join(
+        f"({pin_of[a.split('.', 1)[0]]}{a[len(a.split('.', 1)[0]):]})" for a in args
+    )
+    tac = ["proc."]
+    tac.append(
+        "exists* " + ", ".join(pin_exprs) + "; elim* => " + " ".join(pin_names) + "."
+    )
+    for idx in reversed(range(len(long_bb))):
+        kind, _bb_callee = long_bb[idx]
+        tac.append("wp.")
+        if tags[idx]:
+            tac.append(
+                f"call{{{side}}} ({pair.mod}_{pair.meth}_det gv"
+                + (f" {applied}" if applied else "")
+                + ")."
+            )
+        elif kind == "call":
+            tac.append("call (_: true).")
+        else:
+            tac.append("rnd.")
+    tac.append("auto => /#.")
+    return tac, MicroRequests(det={(pair.mod, pair.meth)}), SYNTH_PARAM
 
 
 def _oracle_pending_admit(hop_index: int, oracle_name: str) -> list[str]:
@@ -7669,6 +8125,27 @@ def _emit_one_oracle_chain(
             red_bases = {_ref_base(mod_ref(m)) for m in red_mods}
             red_bases.add(_ref_base(red_wrapper_expr))
             lazyro_cross = (shared_ro_ref, chal_h_ref, frozenset(red_bases))
+    # Hoist-pair cache invariants (Move 3c). ROM chains (canonical field
+    # naming) are out of the v1 scope -- their consumers then decline via
+    # the enabling-coupling gate, an honest admit. Empty for every chain
+    # without a Hoist pair (byte-identity).
+    hoist_conjuncts = (
+        {}
+        if use_canonical
+        else _hoist_conjunct_registry(
+            left_states,
+            right_states,
+            left_mods,
+            right_mods,
+            mod_ref,
+            modules,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            det_methods,
+            clone_alias or {},
+        )
+    )
     coupling = _make_field_aware_coupling(
         fields_by_base,
         survivor_map,
@@ -7682,6 +8159,7 @@ def _emit_one_oracle_chain(
         lazyro_cross,
         type_sig_by_base=type_sig_by_base,
         outer_globs=outer_globs,
+        hoist_conjuncts=hoist_conjuncts or None,
     )
 
     # Composite-wrapper bridge tactic (wall 7). When the hop has a composite

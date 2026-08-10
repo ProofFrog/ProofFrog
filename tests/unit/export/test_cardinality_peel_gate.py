@@ -7,7 +7,9 @@ be a procedure call, which makes the peel applicable exactly when every
 executable statement from the first abstract call onward is itself a call or a
 sample. A deterministic assignment sitting BETWEEN two calls makes the next
 ``call`` fail with "invalid last instruction" -- a tactic that runs but cannot
-close -- so the gate declines instead.
+close. That shape takes the generic peel instead (one ``wp; call`` pair per
+backbone entry, closed by ``auto => /#``); only a kind-sequence mismatch
+between the two sides declines.
 """
 
 from typing import Callable
@@ -109,12 +111,6 @@ def test_peel_fires_on_a_pure_call_tail() -> None:
     assert rung == "synth-param"
 
 
-def test_peel_declines_when_a_deterministic_assignment_splits_the_calls() -> None:
-    # ``x <- m`` between ``E.Enc`` and ``E.Mix``: the second ``call`` would hit
-    # an assignment, so the leg declines rather than emit a failing tactic.
-    assert _dispatch(interleaved=True) is None
-
-
 def test_coupling_classes_merge_same_side_survivor_equations() -> None:
     # The validated field-removal shape states the redundant-copy identity on
     # ONE side (``dk0 = challenger_dk0``) and pairs the surviving field across
@@ -134,3 +130,23 @@ def test_coupling_classes_ignore_other_modules() -> None:
     # says nothing about these two programs and must not merge their fields.
     pre = "Other.a{1} = Other.b{2}"
     assert _coupled_field_renaming(pre, "S5", "S4") == {}
+
+
+def test_interleaved_calls_take_the_paired_peel() -> None:
+    # ``x <- m`` between ``E.Enc`` and ``E.Mix`` breaks the unbroken-tail
+    # shape, so the leg takes the generic peel instead: one ``wp; call`` pair
+    # per backbone entry, closed by ``auto => /#``. That tactic is pinned by
+    # the EasyCrypt tripwire ``ec_templates/interleaved_peel.ec``, whose
+    # proof-level control (survivor invariant dropped) EasyCrypt rejects.
+    step = _dispatch(interleaved=True)
+    assert step is not None
+    tac, _reqs, rung = step
+    assert tac == [
+        "proc.",
+        "wp.",
+        "call (_: true).",
+        "wp.",
+        "call (_: true).",
+        "auto => /#.",
+    ]
+    assert rung == "synth-param"

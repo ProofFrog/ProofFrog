@@ -2474,13 +2474,26 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         # either condition fails the leg DECLINES rather than emitting a tactic
         # that cannot close -- the caller then falls back to the whole-oracle
         # route exactly as it does for any other unhandled shape.
-        bb_before = _peelable_tail_backbone(bmod.procs[0].body)
-        bb_after = _peelable_tail_backbone(body)
-        if (
-            bb_before is None
-            or bb_after is None
-            or [k for k, _ in bb_before] != [k for k, _ in bb_after]
-        ):
+        #
+        # A backbone that is NOT an unbroken tail is still peelable -- just not
+        # by THIS tactic. One ``wp; call (_: true)`` pair per backbone entry
+        # (``_backbone_peel``'s shape), closed by ``auto => /#``, absorbs each
+        # interleaved deterministic run and closes the same leg; probed on the
+        # exact shape in ``ec_templates/interleaved_peel.ec`` (EasyCrypt OK,
+        # with a proof-level negative control that fails when the survivor
+        # invariant is dropped). So the broken-tail case takes the paired peel
+        # and only the kind-sequence mismatch declines.
+        tail_before = _peelable_tail_backbone(bmod.procs[0].body)
+        tail_after = _peelable_tail_backbone(body)
+        pure_tail = tail_before is not None and tail_after is not None
+        bb_before: list[tuple[str, str | None]]
+        bb_after: list[tuple[str, str | None]]
+        if tail_before is not None and tail_after is not None:
+            bb_before, bb_after = tail_before, tail_after
+        else:
+            bb_before = _call_sample_backbone(bmod.procs[0].body)
+            bb_after = _call_sample_backbone(body)
+        if [k for k, _ in bb_before] != [k for k, _ in bb_after]:
             return None
         # SECOND HONEST GATE: the closing ``auto`` must discharge ``={res}``
         # and every field conjunct from the precondition alone, which it can do
@@ -2520,8 +2533,10 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         # ``ec_templates/field_removal_coupling.ec`` -- ``proc; call (_: true); auto``).
         tac = ["proc."]
         for kind, _callee in reversed(bb_after):
+            if not pure_tail:
+                tac.append("wp.")
             tac.append("call (_: true)." if kind == "call" else "rnd.")
-        tac.append("auto.")
+        tac.append("auto." if pure_tail else "auto => /#.")
         return tac, MicroRequests(), SYNTH_PARAM
     if pb.methods[0] == pa.methods[0]:
         return ["proc; sim."], MicroRequests(), SYNTH_STATIC

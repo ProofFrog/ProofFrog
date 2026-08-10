@@ -2503,8 +2503,11 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     # 173 of 179 declined binding chains died on a ``Symbolic Computation``
     # step that only rewrites a width ANNOTATION (``BitString<a + b + b + c>``
     # -> ``BitString<a + 2 * b + c>``); the type collector canonicalizes width
-    # keys, so both sides emit byte-identical modules. Placed strictly after
-    # every existing branch, so a leg any of them closes today is unchanged.
+    # keys, so both sides emit byte-identical modules. Placed after every
+    # branch that could fire on a rendered-identical pair; Moves 2/3a/4
+    # below each REQUIRE a rendered difference (a site, a guard delta, an
+    # if-tree), so they are mutually exclusive with this row rather than
+    # merely ordered after it.
     identity = _rendered_identity_step(
         pb,
         pa,
@@ -2515,6 +2518,23 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     )
     if identity is not None:
         return identity
+    # Move 6 (Phase-2): an inlining step (``Inline Single-Use Variables``,
+    # ``Extract Repeated Tuple Access``) that also exposed an independent
+    # cross-module CALL REORDER. Measured second layer of the
+    # route-retirement shadow run: after the rendered-identity row cleared
+    # the width class, 160 + 13 of the 179 remaining deaths are these two
+    # transforms.
+    isuv = _isuv_align_step(
+        pb,
+        pa,
+        reversed_dir,
+        external_module_types,
+        method_return_types,
+        modules,
+        flat_params,
+    )
+    if isuv is not None:
+        return isuv
     # Move 2 (Phase-2): the two bodies are identical except at exactly ONE
     # pure expression site (an if-guard or the return expression) whose
     # rewrite matches one of the fact-free row schemas.
@@ -2722,6 +2742,80 @@ def _rendered_identity_step(  # pylint: disable=too-many-arguments,too-many-posi
     if not bmod.procs or not amod.procs or bmod != amod:
         return None
     return ["proc; sim."], MicroRequests(), SYNTH_STATIC
+
+
+def _isuv_align_step(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    pb: frog_ast.Game,
+    pa: frog_ast.Game,
+    reversed_dir: bool,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    modules: mt.ModuleTranslator,
+    flat_params: list[ec_ast.ModuleParam],
+) -> tuple[list[str], MicroRequests, str] | None:
+    """Move 6: an inlining leg that also exposed a cross-module call reorder.
+
+    ``Inline Single-Use Variables`` / ``Extract Repeated Tuple Access``
+    remove or introduce deterministic single-use assignments, so the two
+    sides differ in statement COUNT -- every permutation check declines --
+    and the inlining can free two independent calls of *different*
+    declared modules to swap (measured:
+    ``KEM_PQ.encodesharedsecret`` moving up past ``NG.exp`` /
+    ``NG.elementtosharedsecret``). ``sim`` cannot align calls at
+    mismatched positions.
+
+    The tactic is the single-oracle walker's, re-aimed at the emitted
+    micro sides: align the SIDE-2 body's calls to side 1's with
+    ``swap{2}`` (:func:`_calls_only_align_swaps`, dependency-validated,
+    assignments left in place), peel the now-aligned backbone bottom-up
+    (:func:`_backbone_peel`), and close ``auto => /#``.
+
+    The closer differs from :func:`_synth_isuv_walk`'s ``skip => /#`` and
+    that difference is load-bearing: ``_backbone_peel`` leaves the body's
+    LEADING deterministic run to its caller, and a micro leg's body starts
+    with the flat state's field projections (``__a14__ <- dk0.`1``), so
+    ``skip`` fails with "left instruction list is not empty". ``auto``
+    performs that trailing ``wp`` first. Probe:
+    ``.ec-tmp/move6/isuv_coupling_probe.ec`` -- the walker under a
+    field-wise micro COUPLING (the new condition; the single-oracle
+    validation only covers a ``={glob}`` pre), with both controls
+    proof-level: swap removed -> "K.ess and N.ets should be equal";
+    an untouched-field frame conjunct falsified by a right-side write ->
+    "cannot prove goal (strict)".
+
+    Declines when the callees are not a permutation, or when they already
+    align (``swaps == []``) -- an already-aligned pair is some other row's
+    business, and firing here would mask it.
+    """
+    mod1 = _flat_state_module(
+        modules,
+        "Step_iv_1",
+        pa if reversed_dir else pb,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    mod2 = _flat_state_module(
+        modules,
+        "Step_iv_2",
+        pb if reversed_dir else pa,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not mod1.procs or not mod2.procs:
+        return None
+    body1, body2 = mod1.procs[0].body, mod2.procs[0].body
+    if not [s for s in _exec_stmts(body1) if isinstance(s, ec_ast.Call)]:
+        return None
+    swaps = _calls_only_align_swaps(body2, body1)
+    if not swaps:
+        return None
+    tac = ["proc."]
+    tac.extend(sw.replace("{1}", "{2}") + "." for sw in swaps)
+    tac.extend(_backbone_peel(body1))
+    tac.append("auto => /#.")
+    return tac, MicroRequests(), SYNTH_PARAM
 
 
 def _raw_single_site(

@@ -2451,9 +2451,66 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
             method_return_types,
             flat_params,
         )
-        if not amod.procs:
+        bmod = _flat_state_module(
+            modules,
+            "Step_rm_before",
+            pb,
+            external_module_types,
+            method_return_types,
+            flat_params,
+        )
+        if not amod.procs or not bmod.procs:
             return None
         body = amod.procs[0].body
+        # HONEST GATE. The peel below emits one ``call``/``rnd`` per backbone
+        # entry with NOTHING between them, so it only applies when the backbone
+        # is an unbroken TAIL of the body: EasyCrypt's ``call`` requires the
+        # last instruction of both programs to be a procedure call, and a
+        # deterministic assignment sitting BETWEEN two abstract calls (e.g.
+        # ``__a26__ <- __a25__.`1;`` between ``KEM_PQ.derivekeypair`` and
+        # ``KEM_PQ.decaps``) makes the next ``call`` fail with "invalid last
+        # instruction". Both sides must also present the same kind sequence,
+        # since each tactic step consumes one instruction on each side. When
+        # either condition fails the leg DECLINES rather than emitting a tactic
+        # that cannot close -- the caller then falls back to the whole-oracle
+        # route exactly as it does for any other unhandled shape.
+        bb_before = _peelable_tail_backbone(bmod.procs[0].body)
+        bb_after = _peelable_tail_backbone(body)
+        if (
+            bb_before is None
+            or bb_after is None
+            or [k for k, _ in bb_before] != [k for k, _ in bb_after]
+        ):
+            return None
+        # SECOND HONEST GATE: the closing ``auto`` must discharge ``={res}``
+        # and every field conjunct from the precondition alone, which it can do
+        # exactly when the two bodies are the SAME program modulo the field
+        # renaming the coupling states (the shape the validated template has:
+        # one side reads ``challenger_dk0`` where the other reads ``dk0``, and
+        # the coupling equates them). When they are not -- e.g. a
+        # ``Split Opaque Tuple Field`` step, where one side reads a packed
+        # field and the other reads its components, a relation the coupling
+        # does not state -- ``auto`` runs and leaves the goal open, which is
+        # the worst outcome: a file with no ``admit.`` that EasyCrypt still
+        # rejects. Decline instead.
+        # pylint: disable=protected-access
+        names_b = {mt._ec_field_name(f.name) for f in state_before.fields}
+        names_a = {mt._ec_field_name(f.name) for f in state_after.fields}
+        side1, side2, f1, f2 = (
+            (amod, bmod, names_a, names_b)
+            if reversed_dir
+            else (bmod, amod, names_b, names_a)
+        )
+        if not _bodies_equal_under_field_map(
+            side1,
+            side2,
+            micro_pre_text,
+            _ref_base(left_ref),
+            _ref_base(right_ref),
+            f1,
+            f2,
+        ):
+            return None
         # Couple each abstract call (``call (_: true)``) / sample (``rnd``) of the
         # shared backbone, tail-to-front, then close with a single ``auto.``.
         # ``auto`` performs the trailing ``wp`` and the residual arg-equality
@@ -2462,7 +2519,7 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         # even though the interactive prover can (validated tactic:
         # ``ec_templates/field_removal_coupling.ec`` -- ``proc; call (_: true); auto``).
         tac = ["proc."]
-        for kind, _callee in reversed(_call_sample_backbone(body)):
+        for kind, _callee in reversed(bb_after):
             tac.append("call (_: true)." if kind == "call" else "rnd.")
         tac.append("auto.")
         return tac, MicroRequests(), SYNTH_PARAM
@@ -3832,6 +3889,18 @@ def _hoist_pair_step(  # pylint: disable=too-many-arguments,too-many-positional-
     )
     if not bmod.procs or not amod.procs:
         return None
+    # MEASURED DECLINE (2026-08-10). Both branches below close with a single
+    # ``auto => /#`` over the coupling. That works when each field pairs with
+    # its OWN name across the two states -- the shape the tripwire validates.
+    # When the step also RENAMES a field (a coupling conjunct
+    # ``<L>.f10{1} = <R>.f11{2}``), the two bodies still read ``f10`` on both
+    # sides, so the relation the goal needs is not the one the coupling
+    # states and EasyCrypt answers "cannot prove goal (strict)". Decline; the
+    # oracle falls back to the whole-oracle route.
+    if _coupling_has_field_rename(
+        micro_pre_text, _ref_base(left_ref), _ref_base(right_ref)
+    ):
+        return None
     if oracle_name not in pair.consumers:
         # Bystander: identical bodies; peel the shared backbone.
         if pb.methods[0] != pa.methods[0]:
@@ -3857,6 +3926,19 @@ def _hoist_pair_step(  # pylint: disable=too-many-arguments,too-many-positional-
     side = "2" if reversed_dir else "1"
     pin_base = _ref_base(right_ref if reversed_dir else left_ref)
     long_body, short_body = bmod.procs[0].body, amod.procs[0].body
+    # MEASURED DECLINE (2026-08-10). The walk's closer is a single
+    # ``auto => /#`` over the whole call-generated post. On the validated
+    # template that post is small and closes. On every corpus instance whose
+    # body carries the bitstring concatenation algebra -- five nested
+    # ``concat_*`` applications feeding the KDF call -- EasyCrypt answers
+    # "cannot prove goal (strict)", and it is not a solver-budget effect (a
+    # larger budget, introducing the quantifiers first, and ``smt()`` in place
+    # of ``/#`` all fail the same way). Six of six such instances were
+    # rejected. Until the closer is strengthened, decline: an oracle whose
+    # chain needs this leg falls back to the whole-oracle route, which is what
+    # it did before the walk existed.
+    if _uses_bitstring_algebra(long_body) or _uses_bitstring_algebra(short_body):
+        return None
     long_bb = _call_sample_backbone(long_body)
     short_bb = _call_sample_backbone(short_body)
     # ``long_body=None`` deliberately: the tags' dead-result condition is for
@@ -8803,6 +8885,25 @@ def _emit_one_oracle_chain(
         if decaps_val_acc is not None:
             decaps_val_acc.update(reqs.decaps_val)
 
+    # EVIDENCE-ONLY MICRO EMISSION. A chain whose legs do not ALL close cannot
+    # carry the hop, so the oracle falls back to a whole-oracle route (or an
+    # honest admit) exactly as before. But the legs that DID close are still
+    # machine-checkable statements about single transform applications, and
+    # dropping them threw that evidence away -- which made every move's payoff
+    # all-or-nothing (a chain 37 pairs deep evidenced nothing until its last
+    # pair closed). So: keep scanning after a declining leg, emit every leg
+    # that closed as a standalone lemma, and emit NOTHING for a leg that
+    # declined (never an ``admit.`` -- an admit-free proof stays admit-free and
+    # a clean proof stays clean). The unreferenced lemmas still have to be
+    # PROVEN by EasyCrypt, so accepting the file is evidence for exactly the
+    # applications they name.
+    chain_broken = False
+    # One entry per appended micro chunk, in the same order: the two flat-state
+    # games the lemma relates and its rendered precondition. Only consulted on
+    # the broken-chain path (see the well-typedness filter below), so a chain
+    # that closes pays nothing for it.
+    evidence_meta: list[tuple[frog_ast.Game, frog_ast.Game, str, str, str]] = []
+
     micros_left: list[str] = []
     for k, app in enumerate(left_apps):
         if stateless_oracle:
@@ -8825,7 +8926,8 @@ def _emit_one_oracle_chain(
             inj_methods_by_module=inj_methods_by_module,
         )
         if step is None:
-            return _admit_fallback()
+            chain_broken = True
+            continue
         tac, reqs, rung = step
         _absorb_requests(reqs)
         name = f"micro_{hop_index}_{oracle_name}_left_{k}"
@@ -8843,6 +8945,9 @@ def _emit_one_oracle_chain(
                     postcondition=micro_post(lref, rref),
                 )
             )
+        )
+        evidence_meta.append(
+            (left_states[k], left_states[k + 1], lref, rref, micro_pre(lref, rref))
         )
 
     micros_right_rev: list[str] = []
@@ -8868,7 +8973,8 @@ def _emit_one_oracle_chain(
             inj_methods_by_module=inj_methods_by_module,
         )
         if step is None:
-            return _admit_fallback()
+            chain_broken = True
+            continue
         tac, reqs, rung = step
         _absorb_requests(reqs)
         name = f"micro_{hop_index}_{oracle_name}_right_{k}_rev"
@@ -8887,6 +8993,40 @@ def _emit_one_oracle_chain(
                 )
             )
         )
+        evidence_meta.append(
+            (right_states[k + 1], right_states[k], lref, rref, micro_pre(lref, rref))
+        )
+
+    if chain_broken:
+        # The chain cannot carry the hop: take the same fallback as before
+        # (whole-oracle route, else honest admit) and keep the closed legs as
+        # standalone evidence lemmas. The fallback emits no chunks of its own,
+        # and its ``pres`` requests are unioned with the ones the surviving
+        # legs asked for so every axiom an emitted lemma names is declared.
+        #
+        # Filter out any lemma whose STATEMENT does not typecheck. A chain that
+        # never closed can carry a field coupling that pairs fields of
+        # different types (the chain-wide role map is a union-find over bare
+        # field names, so one mispairing anywhere can equate unrelated roles);
+        # its own chain lemma is never emitted, but an evidence lemma built on
+        # the same coupling would be, and EasyCrypt would reject the whole file
+        # with "no matching operator `='". Dropping those keeps evidence-only
+        # emission strictly additive: it can never turn an accepted export into
+        # a rejected one.
+        kept = [
+            chunk
+            for chunk, meta in zip(chunks, evidence_meta)
+            if _micro_pre_well_typed(
+                meta,
+                oracle_name,
+                modules,
+                external_module_types,
+                method_return_types,
+                flat_params,
+            )
+        ]
+        _, fb_body, fb_pres = _admit_fallback()
+        return _mark_evidence_only(kept), fb_body, step_pres | fb_pres
 
     bridge_name = f"canon_bridge_{hop_index}_{oracle_name}"
     bl, br = mod_ref(left_mods[-1]), mod_ref(right_mods[-1])
@@ -17766,6 +17906,77 @@ def _call_sample_backbone(
     return out
 
 
+def _coupling_has_field_rename(pre_text: str, base1: str, base2: str) -> bool:
+    """True if some cross-side conjunct pairs two DIFFERENTLY-named fields.
+
+    A coupling that renames a field (``<L>.f10{1} = <R>.f11{2}``) does not
+    relate the field each side's body actually reads under its own name, so a
+    route whose closer relies on the coupling reading through by name cannot
+    close. Only cross-side (``{1} = {2}``) conjuncts count; a same-side
+    equation is a survivor/cache invariant, not a rename.
+    """
+    return any(
+        f != g
+        for mb1, f, mb2, g in _FIELD_PAIR_RE.findall(pre_text)
+        if mb1 == base1 and mb2 == base2
+    )
+
+
+def _uses_bitstring_algebra(body: list[ec_ast.EcStmt]) -> bool:
+    """True if any statement applies an emitted bitstring ``concat``/``slice`` op.
+
+    These are ``op [smt_opaque]`` declarations, so a goal that has to equate two
+    nested applications of them is discharged by congruence alone -- which the
+    solver reliably fails to find once the surrounding post is large. Routes
+    whose closer is a single whole-post ``smt`` use this to decline rather than
+    emit a tactic that runs and leaves the goal open.
+    """
+    # pylint: disable=protected-access
+    for stmt in _exec_stmts(body):
+        try:
+            text = ec_ast._render_stmt(stmt)
+        except TypeError:
+            return True
+        if "concat_" in text or "slice_" in text:
+            return True
+    return False
+
+
+def _peelable_tail_backbone(
+    body: list[ec_ast.EcStmt],
+) -> list[tuple[str, str | None]] | None:
+    """The call/sample backbone, but ONLY when it forms an unbroken tail.
+
+    A peel that emits consecutive ``call``/``rnd`` steps with no ``wp`` between
+    them consumes one instruction per step from the end of the program, so it
+    is applicable exactly when every executable statement from the first
+    abstract call or sample onward is itself a call or a sample. Deterministic
+    statements are fine BEFORE that point (the trailing ``auto`` clears them);
+    one sitting between two calls is not, and EasyCrypt rejects the next
+    ``call`` with "invalid last instruction". A ``return`` is transparent here:
+    EasyCrypt treats it as part of the procedure, not as an instruction, so a
+    body ending ``_r9 <@ H.evaluate(...); return _r9;`` still has a call as its
+    last instruction. Returns ``None`` for a broken tail so the caller can
+    decline instead of emitting a tactic that cannot close.
+    """
+    stmts = [s for s in _exec_stmts(body) if not isinstance(s, ec_ast.Return)]
+    first = next(
+        (i for i, s in enumerate(stmts) if isinstance(s, (ec_ast.Call, ec_ast.Sample))),
+        None,
+    )
+    if first is None:
+        return []
+    out: list[tuple[str, str | None]] = []
+    for stmt in stmts[first:]:
+        if isinstance(stmt, ec_ast.Call):
+            out.append(("call", stmt.callee))
+        elif isinstance(stmt, ec_ast.Sample):
+            out.append(("sample", getattr(stmt, "var", None)))
+        else:
+            return None
+    return out
+
+
 def _strip_decls(body: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
     """``body`` with its ``var`` declarations removed -- the executable core.
 
@@ -18813,6 +19024,168 @@ def _micro_transform_comment(
     """
     name = app.transform_name + (" (reversed)" if reversed_dir else "")
     return f"(* transform: {name} (bucket={classify(app.transform_name).value}) *)"
+
+
+_FIELD_PAIR_RE = re.compile(r"(\w+)\.(\w+)\{1\}\s*=\s*(\w+)\.(\w+)\{2\}")
+
+
+_FIELD_EQ_RE = re.compile(r"(\w+)\.(\w+)\{(\d)\}\s*=\s*(\w+)\.(\w+)\{(\d)\}")
+
+
+def _coupled_field_renaming(
+    pre_text: str, side1_base: str, side2_base: str
+) -> dict[str, str]:
+    """Map each field name to a representative of its coupling-equal class.
+
+    Every ``<Mod>.<f>{i} = <Mod>.<g>{j}`` conjunct naming one of the lemma's two
+    modules says the two fields hold the same value, so either may be
+    substituted for the other when comparing the two programs. BOTH orientations
+    matter: the cross-side pairs (``{1} = {2}``) carry a rename, and the
+    SAME-side pairs (the survivor invariant ``dk0 = challenger_dk0``, stated on
+    one side) carry the redundant-copy identity that the field-removal shape is
+    entirely about. Union-find over the names, mapping each to the smallest
+    member of its class.
+    """
+    parent: dict[str, str] = {}
+
+    def find(x: str) -> str:
+        parent.setdefault(x, x)
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    bases = {side1_base, side2_base}
+    for mb1, f, _s1, mb2, g, _s2 in _FIELD_EQ_RE.findall(pre_text):
+        if mb1 not in bases or mb2 not in bases:
+            continue
+        ra, rb = find(f), find(g)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+    return {name: find(name) for name in parent}
+
+
+def _bodies_equal_under_field_map(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    side1: ec_ast.Module,
+    side2: ec_ast.Module,
+    pre_text: str,
+    side1_base: str,
+    side2_base: str,
+    fields1: set[str],
+    fields2: set[str],
+) -> bool:
+    """True if the two oracle bodies are the same program modulo the coupling.
+
+    The field-cardinality survivor peel couples each abstract call with
+    ``call (_: true)`` and closes with one ``auto``, which discharges the
+    result equality and the field conjuncts from the precondition. That is
+    sound exactly when the two programs become the SAME program once every
+    field is replaced by a representative of the class the coupling proves it
+    equal to (:func:`_coupled_field_renaming`): then each call receives equal
+    arguments under the invariant and the results agree. The validated shape
+    is exactly this -- ``K.decaps(challenger_dk0, ct)`` against
+    ``K.decaps(dk0, ct)`` with ``dk0 = challenger_dk0`` in the coupling. Any
+    residual difference -- a field the coupling does not relate, a
+    differently-shaped read such as a packed field against its components --
+    means ``auto`` cannot finish, so the caller must decline.
+
+    Names are substituted token-wise and only where the token is a declared
+    field of the module being rendered, so a local is never rewritten.
+    """
+    # pylint: disable=protected-access
+    if not side1.procs or not side2.procs:
+        return False
+    classes = _coupled_field_renaming(pre_text, side1_base, side2_base)
+    ren1 = {k: v for k, v in classes.items() if k in fields1}
+    ren2 = {k: v for k, v in classes.items() if k in fields2}
+
+    def rendered(mod: ec_ast.Module, mapping: dict[str, str]) -> list[str]:
+        out: list[str] = []
+        for stmt in _exec_stmts(mod.procs[0].body):
+            try:
+                text = ec_ast._render_stmt(stmt)
+            except TypeError:
+                return []
+            if mapping:
+                text = re.sub(
+                    r"\b\w+\b",
+                    lambda m: mapping.get(m.group(0), m.group(0)),
+                    text,
+                )
+            out.append(text)
+        return out
+
+    b1, b2 = rendered(side1, ren1), rendered(side2, ren2)
+    return bool(b1) and b1 == b2
+
+
+def _micro_pre_well_typed(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    meta: tuple[frog_ast.Game, frog_ast.Game, str, str, str],
+    oracle_name: str,
+    modules: mt.ModuleTranslator,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+) -> bool:
+    """True unless the micro's precondition equates two differently-typed fields.
+
+    ``meta`` is ``(left_state, right_state, left_ref, right_ref, pre_text)``.
+    Each ``<Mod>.<f>{1} = <Mod>.<g>{2}`` conjunct is checked against the two
+    rendered flat-state modules' declared variable types; a conjunct naming a
+    module other than this lemma's two endpoints is skipped rather than judged.
+    Used only to filter EVIDENCE-ONLY lemmas, so a mistake here can lose
+    evidence but can never change a chain that carries its hop.
+    """
+    left_state, right_state, lref, rref, pre_text = meta
+    lproj = _project_to_method(left_state, oracle_name)
+    rproj = _project_to_method(right_state, oracle_name)
+    if lproj is None or rproj is None:
+        return True
+    lbase, rbase = _ref_base(lref), _ref_base(rref)
+    lmod = _flat_state_module(
+        modules,
+        lbase,
+        lproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+        emit_state_vars=True,
+    )
+    rmod = _flat_state_module(
+        modules,
+        rbase,
+        rproj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+        emit_state_vars=True,
+    )
+    ltypes = {v.name: str(v.type) for v in lmod.module_vars}
+    rtypes = {v.name: str(v.type) for v in rmod.module_vars}
+    for mb1, f, mb2, g in _FIELD_PAIR_RE.findall(pre_text):
+        if mb1 != lbase or mb2 != rbase:
+            continue
+        if f in ltypes and g in rtypes and ltypes[f] != rtypes[g]:
+            return False
+    return True
+
+
+EVIDENCE_ONLY_HEADER = (
+    "(* evidence-only: this leg closed but its chain did not; the hop is "
+    "carried by the whole-oracle route below. *)"
+)
+
+
+def _mark_evidence_only(chunks: list[str]) -> list[str]:
+    """Prefix each emitted micro lemma with the evidence-only banner.
+
+    Purely an EasyCrypt comment. The banner sits ABOVE the
+    ``(* transform: ... *)`` header so the dashboard's comment/resolution-tag
+    pairing (which keys on the transform comment immediately preceding the
+    lemma name) is untouched, and it tells a reader why these lemmas are not
+    referenced by any chain.
+    """
+    return [f"{EVIDENCE_ONLY_HEADER}\n{c}" for c in chunks]
 
 
 def _render_micro_lemma(  # pylint: disable=too-many-arguments,too-many-positional-arguments

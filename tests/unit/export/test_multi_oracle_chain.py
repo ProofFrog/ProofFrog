@@ -662,3 +662,89 @@ def test_emit_multi_oracle_chain_admits_changed_post_init_body() -> None:
     # Call-free init endpoints (no deterministic call) => ``sim`` aligns them.
     init_body = "\n".join(info.tactic_body_by_oracle["initialize"])
     assert "proc; inline *; sim." in init_body
+
+
+# --- evidence-only micro emission ------------------------------------------
+
+
+def _sampling_variant(g: frog_ast.Game) -> frog_ast.Game:
+    """``g`` with a live sample prepended to ``Challenge`` -- the difference no
+    micro route closes (not identity, not a reorder, not a droppable
+    deterministic call), so a leg into it declines."""
+    out = _two_oracle_game(g.name, stateful_challenge=True)
+    out.methods[1].block.statements.insert(
+        0,
+        frog_ast.Sample(
+            frog_ast.Variable("MessageSpace"),
+            frog_ast.Variable("mPrime"),
+            frog_ast.Variable("MessageSpace"),
+        ),
+    )
+    return out
+
+
+def _broken_chain_chunks() -> tuple[list[str], list[str]]:
+    """Emit a 2-leg chain whose first leg closes and whose second declines."""
+    s0 = _two_oracle_game("GL", stateful_challenge=True)
+    s1 = _two_oracle_game("GL", stateful_challenge=True)
+    s2 = _sampling_variant(s1)
+    left = [s0, s1, s2]
+    chunks, outer, _pres = _emit_one_oracle_chain(
+        hop_index=0,
+        oracle_name="challenge",
+        is_init=False,
+        eq_args="={m0}",
+        left_mods=["Step_0L_state_0", "Step_0L_state_1", "Step_0L_state_2"],
+        right_mods=["Step_0R_state_0"],
+        left_states=left,
+        right_states=[_two_oracle_game("GR", stateful_challenge=True)],
+        left_apps=[
+            TransformApplication(
+                iteration=i,
+                transform_name="Synthetic",
+                game_before=left[i],
+                game_after=left[i + 1],
+            )
+            for i in range(2)
+        ],
+        right_apps=[],
+        mod_ref=lambda n: n,
+        left_wrapper_expr="GL(E)",
+        right_wrapper_expr="GR(E)",
+        bridge_tactic="proc; inline *; sp; wp; sim",
+        external_module_types={},
+        method_return_types={},
+        modules=_modules(),
+        flat_params=[],
+        det_methods={},
+    )
+    return chunks, outer
+
+
+def test_broken_chain_emits_its_closable_leg_as_evidence() -> None:
+    # The chain cannot carry the oracle (leg 1 declines), but leg 0 -- an
+    # identity step ``proc; sim`` closes -- is still a machine-checkable
+    # statement about one transform application. It is emitted standalone,
+    # flagged evidence-only, so EasyCrypt accepting the file is evidence for
+    # that application even though the hop is carried elsewhere.
+    chunks, _outer = _broken_chain_chunks()
+    text = "\n".join(chunks)
+    assert "lemma micro_0_challenge_left_0 :" in text
+    assert "proc; sim." in text
+    assert "evidence-only" in text
+    # Nothing is emitted for the declining leg, and no chain artifact claims
+    # the oracle is carried by these lemmas.
+    assert "micro_0_challenge_left_1" not in text
+    assert "canon_bridge_0_challenge" not in text
+    assert "hop_0_challenge_chain" not in text
+
+
+def test_broken_chain_never_emits_an_admitting_micro() -> None:
+    # The load-bearing guarantee of evidence-only emission: an unclosable leg
+    # emits NOTHING. If it emitted ``admit.`` instead, an admit-free proof
+    # would gain admits and a clean proof would regress to warn.
+    chunks, outer = _broken_chain_chunks()
+    assert "admit" not in "\n".join(chunks)
+    # The oracle itself still routes exactly as before -- here, to the honest
+    # coupling-pending admit in the whole-oracle body.
+    assert "admit" in "\n".join(outer)

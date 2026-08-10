@@ -587,6 +587,36 @@ Key modules:
   `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
   `ec_ast.py` — FrogLang→EC translation primitives.
 
+## Evidence-only micro emission (broken chains still pay evidence)
+
+`_emit_one_oracle_chain` no longer abandons an oracle at the first leg
+`_oracle_step_tactic` declines. It keeps scanning, emits every leg that DID
+close as a standalone lemma prefixed
+`(* evidence-only: this leg closed but its chain did not ... *)`, and routes the
+oracle to exactly the whole-oracle fallback it used before. A leg that declines
+emits **nothing** — never an `admit.` — so an admit-free proof stays admit-free
+and a clean proof stays clean; the flat states those lemmas name are kept by the
+existing referenced-state filter. The lemmas are unreferenced but EasyCrypt still
+has to prove them, so an accepted file is per-application evidence for exactly
+the transform applications they name (the dashboard's evidence coverage counts
+them via `_micro_leg`).
+
+Two consequences to keep in mind when adding or changing a leg route:
+
+- **Every route's gate is now exercised on shapes no closing chain ever
+  reached.** A gate that emits a tactic it cannot GUARANTEE closes will now show
+  up as a rejected export. `_oracle_step_tactic`'s field-cardinality survivor
+  peel needed two applicability gates for this reason: `_peelable_tail_backbone`
+  (the call/sample backbone must be an unbroken tail, else EasyCrypt says
+  *invalid last instruction*) and `_bodies_equal_under_field_map` (the two bodies
+  must be the same program modulo the coupling's field renaming, else the closing
+  `auto` leaves the goal open — *cannot save an incomplete proof*).
+- **A broken chain's coupling may not even typecheck.** `_chain_role_map` is a
+  union-find over bare field names, so an unrelated state's identically-named
+  field can merge roles and produce `A.f{1} = B.g{2}` across different types.
+  `_micro_pre_well_typed` drops such evidence lemmas (evidence-only path only),
+  which is what makes the feature strictly additive.
+
 ## Automation ladder (how each resolution closes)
 
 Every closed transform micro-lemma or whole-hop body is labelled with

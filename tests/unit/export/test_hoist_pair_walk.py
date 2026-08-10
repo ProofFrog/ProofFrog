@@ -288,11 +288,14 @@ def test_consumer_declines_on_init_pre_true() -> None:
 
 
 def test_detected_pair_is_authoritative_on_nondet() -> None:
-    """A pair whose callee is not det is NOT a Hoist pair; the cardinality
-    branch then handles it (here: it emits the survivor peel), which this
-    test pins only as 'does not raise'."""
-    step = _dispatch("challenge", det={"M": set()})
-    # Falls through to the cardinality-survivor branch (not the walk).
-    assert step is not None
-    tac, _reqs, _rung = step
-    assert not any("M_f_det" in t for t in tac)
+    """A pair whose callee is not det is NOT a Hoist pair, so the walk must not
+    fire; the cardinality-survivor branch inspects it next and DECLINES.
+
+    It declines because this ``Challenge`` interleaves a deterministic
+    assignment (``x <- h``) between two abstract calls, and the survivor peel
+    emits consecutive ``call`` steps with no ``wp`` between them -- EasyCrypt
+    rejects the second one with "invalid last instruction". Declining is the
+    honest outcome: the oracle falls back to the whole-oracle route rather than
+    carrying a tactic that cannot close.
+    """
+    assert _dispatch("challenge", det={"M": set()}) is None

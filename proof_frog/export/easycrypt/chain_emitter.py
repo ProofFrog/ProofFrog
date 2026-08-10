@@ -2513,9 +2513,8 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     if single is not None:
         return single
     # Move 3a (Phase-2): the delta-det guard-site walk -- the Injective
-    # Equality Simplify class (Q1 probe ``leg_injective_eq_simplify``). Last
-    # in the dispatch, so every existing route stays byte-identical.
-    return _ies_delta_walk_step(
+    # Equality Simplify class (Q1 probe ``leg_injective_eq_simplify``).
+    walk = _ies_delta_walk_step(
         pb,
         pa,
         reversed_dir,
@@ -2529,6 +2528,26 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         right_ref,
         clone_alias or {},
         inj_methods_by_module or {},
+    )
+    if walk is not None:
+        return walk
+    # Move 4 (Phase-2): if-tree collapse legs -- the Fold Equivalent Return
+    # Branch case tree and the deterministic-tail (Absorb / early-return
+    # lowering) row. Last in the dispatch, so every existing route stays
+    # byte-identical.
+    return _if_fold_step(
+        pb,
+        pa,
+        reversed_dir,
+        modules,
+        external_module_types,
+        method_return_types,
+        flat_params,
+        det_methods,
+        micro_pre_text,
+        left_ref,
+        right_ref,
+        clone_alias or {},
     )
 
 
@@ -3726,6 +3745,322 @@ def _hoist_pair_step(  # pylint: disable=too-many-arguments,too-many-positional-
             tac.append("rnd.")
     tac.append("auto => /#.")
     return tac, MicroRequests(det={(pair.mod, pair.meth)}), SYNTH_PARAM
+
+
+def _fold_guard_formula(
+    guard: str, side: str, base: str, global_names: set[str]
+) -> str | None:
+    """``guard`` (rendered program syntax) as a one-sided pRHL formula.
+
+    Every identifier gets the ``{side}`` memory selector (module fields
+    qualified through ``base``); ``&&``/``||`` become ``/\\``/``\\/``.
+    ``None`` when the guard uses syntax outside the boolean-comparison
+    fragment this rewrite is known to preserve (decline-don't-guess).
+    """
+    if re.fullmatch(r"[A-Za-z0-9_\s=<>!&|().`]*", guard) is None:
+        return None
+    text = guard.replace("&&", "/\\").replace("||", "\\/")
+    out: list[str] = []
+    pos = 0
+    for m in _EC_IDENT_RE.finditer(text):
+        out.append(text[pos : m.start()])
+        tok = m.group(0)
+        if tok in ("true", "false", "witness"):
+            out.append(tok)
+        elif tok in global_names:
+            out.append(f"{base}.{tok}{{{side}}}")
+        else:
+            out.append(f"{tok}{{{side}}}")
+        pos = m.end()
+    out.append(text[pos:])
+    return "(" + "".join(out) + ")"
+
+
+def _stmts_have_event(stmts: Sequence[ec_ast.EcStmt]) -> bool:
+    """True if any call/sample occurs in ``stmts``, descending into ifs."""
+    for s in stmts:
+        if isinstance(s, (ec_ast.Call, ec_ast.Sample)):
+            return True
+        if isinstance(s, ec_ast.If) and (
+            _stmts_have_event(s.then_body) or _stmts_have_event(s.else_body)
+        ):
+            return True
+    return False
+
+
+def _if_fold_step(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
+    pb: frog_ast.Game,
+    pa: frog_ast.Game,
+    reversed_dir: bool,
+    modules: mt.ModuleTranslator,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    det_methods: dict[str, set[str]],
+    micro_pre_text: str,
+    left_ref: str,
+    right_ref: str,
+    clone_alias: dict[str, str],
+) -> tuple[list[str], MicroRequests, str] | None:
+    """Move 4: if-tree collapse legs, on the RENDERED bodies (the standing
+    lesson -- stmt_translator's single-exit lowering turns every FrogLang
+    early return into a result var + guarded if-tree).
+
+    Two probe-validated rows (``.ec-tmp/move4/fold_probe.ec`` /
+    ``absorb_probe.ec``, negative-controlled):
+
+    * **Fold Equivalent Return Branch**: the before side is
+      ``prefix; if (P) { _r <- X } else { <Y's calls>; _r <- Y }; return
+      _r`` against ``prefix; <Y's calls>; return Y``. Closer: the Move-3a
+      prefix walk (pins + ``seq n n`` whose invariant ALSO carries the
+      glob-pin equations -- the drains run after the ``seq``, so the
+      pin-defining ``(glob M){2} = gv`` must ride the invariant), then
+      ``case (P{if-side})``; ``rcondt``: ``wp`` + one-sided ``_det``
+      drains of the straight side's calls (all deterministic by the
+      transform's own Gap-F gate) + ``skip; move => &1 &2 />; smt()``
+      (the ``/>`` crush before ``smt`` is load-bearing -- a bare
+      ``skip => /#`` fails); ``rcondf``: the paired peel. Instances whose
+      fold needed the transform's init-field RHS expansion
+      (``_collect_init_field_rhs`` -- e.g. the Q1 ``state_30/31`` pair,
+      whose smt needs the Hoist cache facts in a SAME-cardinality
+      coupling) decline via EC-gating until the cache conjuncts extend to
+      same-glob couplings -- logged Phase-2 debt.
+    * **Deterministic tail** (Absorb Redundant Early Return / If False
+      Return To Conjunction / Else Unwrap residue): after the shared
+      prefix both tails are call/sample-free and one side's divergence is
+      the early-return lowering signature (an ``if`` whose then-body is a
+      single assign); plain ``wp`` then decides the whole lowered if-tree
+      on both sides, so the closer is the ordinary prefix peel +
+      ``auto => /#``.
+    """
+    if micro_pre_text == "true" or not left_ref or not right_ref:
+        return None
+    bmod = _flat_state_module(
+        modules,
+        "Step_f_b",
+        pb,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    amod = _flat_state_module(
+        modules,
+        "Step_f_a",
+        pa,
+        external_module_types,
+        method_return_types,
+        flat_params,
+    )
+    if not bmod.procs or not amod.procs:
+        return None
+    proc_1, proc_2 = (
+        (amod.procs[0], bmod.procs[0])
+        if reversed_dir
+        else (bmod.procs[0], amod.procs[0])
+    )
+    exec1 = _exec_stmts(proc_1.body)
+    exec2 = _exec_stmts(proc_2.body)
+    n = 0
+    while n < min(len(exec1), len(exec2)) and exec1[n] == exec2[n]:
+        n += 1
+    if n == len(exec1) and n == len(exec2):
+        return None
+    # The if-carrying side is always ``state_before`` (the fold REMOVED the
+    # if): the emitted micro's side 1 forward, side 2 reversed.
+    s_if, s_st = ("2", "1") if reversed_dir else ("1", "2")
+    ex_if, ex_st = (exec2, exec1) if reversed_dir else (exec1, exec2)
+    if_ref = right_ref if reversed_dir else left_ref
+    base_if = _ref_base(if_ref)
+    fold = _fold_shape(ex_if, ex_st, n)
+    if fold is not None:
+        stmt_if, else_b = fold
+        param_names = {p.name for p in proc_1.params}
+        global_names = (
+            {v.name for v in bmod.module_vars}
+            | {v.name for v in amod.module_vars}
+            | {
+                mt._ec_field_name(f.name)  # pylint: disable=protected-access
+                for g in (pb, pa)
+                for f in g.fields
+            }
+        )
+        guard_formula = _fold_guard_formula(stmt_if.guard, s_if, base_if, global_names)
+        if guard_formula is None:
+            return None
+        pins: dict[str, str] = {}
+        glob_pins: dict[str, str] = {}
+        # Pins are hardcoded to memory {2} in ``_EvEnv._subst``, so the pin
+        # base must be the module the {2} memory actually runs (Move 3a's
+        # discipline) -- never the if-side base.
+        ref_2 = _ref_base(right_ref)
+        env_if = _EvEnv(
+            det_methods,
+            clone_alias,
+            param_names,
+            global_names,
+            ref_2,
+            pins,
+            glob_pins,
+        )
+        env_st = _EvEnv(
+            det_methods,
+            clone_alias,
+            param_names,
+            global_names,
+            ref_2,
+            pins,
+            glob_pins,
+        )
+        matched_vars: list[str] = []
+        for stmt in ex_if[:n]:
+            if not env_if.feed(stmt):
+                return None
+            if (
+                isinstance(stmt, (ec_ast.Assign, ec_ast.Call))
+                and stmt.var
+                and stmt.var not in matched_vars
+            ):
+                matched_vars.append(stmt.var)
+        # Straight side: shared prefix PLUS the else-body statements, whose
+        # drains close the P-true branch.
+        st_len = n + len(else_b) - 1
+        for stmt in ex_st[:st_len]:
+            if not env_st.feed(stmt):
+                return None
+        inv_parts = (
+            (["={" + ", ".join(matched_vars) + "}"] if matched_vars else [])
+            + [micro_pre_text]
+            # The probe lesson: the post-seq drains' pin equations must
+            # ride the invariant or their preconditions are underivable.
+            + [f"(glob {mod}){{2}} = {gp}" for mod, gp in glob_pins.items()]
+            + [f"{name}{{{s_if}}} = {term}" for name, term in env_if.conjuncts]
+        )
+        pin_exprs = list(pins.keys()) + [f"(glob {mod}){{2}}" for mod in glob_pins]
+        pin_names = list(pins.values()) + list(glob_pins.values())
+        tac = ["proc."]
+        if pin_exprs:
+            tac.append(
+                "exists* "
+                + ", ".join(pin_exprs)
+                + "; elim* => "
+                + " ".join(pin_names)
+                + "."
+            )
+        tac.append(f"seq {n} {n} : ({' /\\ '.join(inv_parts)}).")
+        k = n - 1
+        while k >= 0:
+            if isinstance(ex_if[k], ec_ast.Assign):
+                tac.append("wp.")
+                while k >= 0 and isinstance(ex_if[k], ec_ast.Assign):
+                    k -= 1
+                continue
+            d_if, d_st = env_if.drains[k], env_st.drains[k]
+            assert d_if is not None and d_st is not None
+            tac.append(f"call{{{s_if}}} {d_if}")
+            tac.append(f"call{{{s_st}}} {d_st}")
+            k -= 1
+        tac.append("auto => /#.")
+        tac.append(f"case {guard_formula}.")
+        # P-true: the if side takes its single-assign branch; the straight
+        # side's calls drain one-sided.
+        tac.append(f"rcondt{{{s_if}}} 1; first by auto => /#.")
+        tac.append("wp.")
+        k = st_len - 1
+        while k >= n:
+            stmt = ex_st[k]
+            if isinstance(stmt, ec_ast.Assign):
+                tac.append("wp.")
+                while k >= n and isinstance(ex_st[k], ec_ast.Assign):
+                    k -= 1
+                continue
+            drain = env_st.drains[k]
+            assert drain is not None
+            tac.append(f"call{{{s_st}}} {drain}")
+            k -= 1
+        tac.append("skip.")
+        tac.append("move => &1 &2 />.")
+        tac.append("smt().")
+        # P-false: both sides run the else region; paired peel.
+        tac.append(f"rcondf{{{s_if}}} 1; first by auto => /#.")
+        tac.append("wp.")
+        k = st_len - 1
+        while k >= n:
+            if isinstance(ex_st[k], ec_ast.Assign):
+                tac.append("wp.")
+                while k >= n and isinstance(ex_st[k], ec_ast.Assign):
+                    k -= 1
+                continue
+            tac.append("call (_: true).")
+            k -= 1
+        tac.append("auto => /#.")
+        return (
+            tac,
+            MicroRequests(det=env_if.det_used | env_st.det_used),
+            SYNTH_PARAM,
+        )
+    # Deterministic-tail row.
+    tail1, tail2 = exec1[n:], exec2[n:]
+    if _stmts_have_event(tail1) or _stmts_have_event(tail2):
+        return None
+    early_lowering = False
+    for tail in (tail1, tail2):
+        if tail and isinstance(tail[0], ec_ast.If):
+            tb = _exec_stmts(tail[0].then_body)
+            if len(tb) == 1 and isinstance(tb[0], ec_ast.Assign):
+                early_lowering = True
+    if not early_lowering:
+        return None
+    tac = ["proc."]
+    for k in reversed(range(n)):
+        stmt = exec1[k]
+        if isinstance(stmt, (ec_ast.Call, ec_ast.Sample)):
+            tac.append("wp.")
+            tac.append("call (_: true)." if isinstance(stmt, ec_ast.Call) else "rnd.")
+    tac.append("auto => /#.")
+    return tac, MicroRequests(), SYNTH_PARAM
+
+
+def _fold_shape(
+    ex_if: list[ec_ast.EcStmt],
+    ex_st: list[ec_ast.EcStmt],
+    n: int,
+) -> tuple[ec_ast.If, list[ec_ast.EcStmt]] | None:
+    """Match the Fold pair at divergence ``n``: the if side's remainder is
+    ``if (P) { rv <- X } else { B*; rv <- Y }; return rv`` and the straight
+    side's is ``B*; return Y`` (statement-identical ``B*``, same ``Y``).
+    Returns ``(the if, the else body)`` or ``None``."""
+    if n >= len(ex_if):
+        return None
+    stmt_if = ex_if[n]
+    if not isinstance(stmt_if, ec_ast.If):
+        return None
+    then_b = _exec_stmts(stmt_if.then_body)
+    else_b = _exec_stmts(stmt_if.else_body)
+    tail_if = ex_if[n + 1 :]
+    tail_st = ex_st[n:]
+    if len(then_b) != 1 or not else_b or len(tail_if) != 1:
+        return None
+    then_assign, else_assign = then_b[0], else_b[-1]
+    ret_if = tail_if[0]
+    if not (
+        isinstance(then_assign, ec_ast.Assign)
+        and isinstance(else_assign, ec_ast.Assign)
+        and isinstance(ret_if, ec_ast.Return)
+    ):
+        return None
+    rv = then_assign.var
+    if else_assign.var != rv or ret_if.expr.strip() != rv:
+        return None
+    if len(tail_st) != len(else_b):
+        return None
+    if any(x != y for x, y in zip(else_b[:-1], tail_st[:-1])):
+        return None
+    ret_st = tail_st[-1]
+    if not isinstance(ret_st, ec_ast.Return):
+        return None
+    if ret_st.expr.strip() != else_assign.rhs.strip():
+        return None
+    return stmt_if, else_b
 
 
 def _oracle_pending_admit(hop_index: int, oracle_name: str) -> list[str]:
@@ -17293,15 +17628,29 @@ def _all_calls_dead(body: list[ec_ast.EcStmt]) -> bool:
     if not call_vars:
         return False
     operands: list[str] = []
-    for stmt in body:
-        if isinstance(stmt, ec_ast.Call):
-            operands.append(stmt.args)
-        elif isinstance(stmt, ec_ast.Assign):
-            operands.append(stmt.rhs)
-        elif isinstance(stmt, ec_ast.Sample):
-            operands.append(stmt.distr)
-        elif isinstance(stmt, ec_ast.Return):
-            operands.append(stmt.expr)
+
+    def collect(stmts: Sequence[ec_ast.EcStmt]) -> None:
+        # ``if`` guards and branch bodies are reads too: a result consumed
+        # only inside a guard used to be misjudged dead, and the branch
+        # then emitted ``proc; sim`` over structurally different bodies (a
+        # doomed tactic where an honest decline was available -- surfaced
+        # by Move 4's early-return-lowering shapes, whose guards read the
+        # deterministic results).
+        for stmt in stmts:
+            if isinstance(stmt, ec_ast.Call):
+                operands.append(stmt.args)
+            elif isinstance(stmt, ec_ast.Assign):
+                operands.append(stmt.rhs)
+            elif isinstance(stmt, ec_ast.Sample):
+                operands.append(stmt.distr)
+            elif isinstance(stmt, ec_ast.Return):
+                operands.append(stmt.expr)
+            elif isinstance(stmt, ec_ast.If):
+                operands.append(stmt.guard)
+                collect(stmt.then_body)
+                collect(stmt.else_body)
+
+    collect(body)
     blob = " ".join(operands)
     return not any(re.search(rf"\b{re.escape(v)}\b", blob) for v in call_vars)
 

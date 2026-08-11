@@ -9719,21 +9719,18 @@ def _emit_one_oracle_chain(
             if decaps_val_acc is not None:
                 decaps_val_acc.add(sr_scheme)
             return _evidence_only_chunks(), sr_body, set()
-        ro_route = _challenge_reorder_route(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            left_wrapper_expr,
-            right_wrapper_expr,
-            external_module_types,
-            method_return_types,
-            flat_params,
-            clone_alias or {},
-            ladder_closer=init_tac_override is not None,
-        )
-        if ro_route is not None:
-            return _evidence_only_chunks(), ro_route, set()
+        # RETIRED 2026-08-11, first of the whole-oracle endpoint routes to go.
+        # ``_challenge_reorder_route`` is still defined below and is kept as a
+        # reference for a tactic shape known to work, but it is no longer
+        # dispatched to: the per-transform chain is the architecture, and a
+        # bespoke whole-oracle closure hides every leg of the chain it stands
+        # in for. Where it used to close an oracle the chain now runs and, if
+        # it does not complete, the oracle takes an honest admit -- an
+        # expected, temporary cost, not a regression. Chosen as the pilot
+        # because it was the cheapest of the twelve: 7 closures over 6 proofs,
+        # against 24 for the most expensive (per-route census, Phase-2 plan).
+        # The legs that DO close are still emitted as evidence, so the
+        # per-application coverage of these oracles does not fall.
         # Same-shape post-init oracle: the two bodies have IDENTICAL statement
         # structure and differ only in the field REFERENCES the hop's coupling
         # equates (the reduction reads its packed ``corr.`k`` where the game

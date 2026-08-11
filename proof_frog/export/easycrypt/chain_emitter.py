@@ -3201,7 +3201,8 @@ def _modules_alpha_equal(  # pylint: disable=too-many-return-statements
         return False
     if len(bmod.procs) != len(amod.procs):
         return False
-    rename: dict[str, str] = {}
+    reserved = {v.name for v in bmod.module_vars} | {p.name for p in bmod.params}
+    any_locals = False
     for bproc, aproc in zip(bmod.procs, amod.procs):
         if (
             bproc.name != aproc.name
@@ -3213,18 +3214,44 @@ def _modules_alpha_equal(  # pylint: disable=too-many-return-statements
         alocals = [st for st in aproc.body if isinstance(st, ec_ast.VarDecl)]
         if len(blocals) != len(alocals):
             return False
+        # ONE MAP PER PROC. EC procedure scopes are independent, so the same
+        # local name in two procedures may legitimately correspond to two
+        # different names, and a single module-wide map calls that a
+        # conflict and declines. Measured on `CG_expanded_INDCCA_T`: four
+        # legs lost to exactly that, e.g. `decaps`'s `ct_PQ -> __a6__`
+        # against `hash`'s `ct_PQ -> __a7__`.
+        rename: dict[str, str] = {}
         for bvar, avar in zip(blocals, alocals):
             if bvar.type != avar.type:
                 return False
             if rename.setdefault(bvar.name, avar.name) != avar.name:
                 return False
-    if not rename or len(set(rename.values())) != len(rename):
-        return False
-    reserved = {v.name for v in bmod.module_vars} | {p.name for p in bmod.params}
-    if reserved & (set(rename) | set(rename.values())):
-        return False
-    btext = "\n".join(_render_module_decl(bmod))
-    atext = "\n".join(_render_module_decl(amod))
+        if len(set(rename.values())) != len(rename):
+            return False
+        if reserved & (set(rename) | set(rename.values())):
+            return False
+        any_locals = any_locals or bool(rename)
+        if not _procs_equal_under_rename(bmod, bproc, aproc, rename):
+            return False
+    return any_locals
+
+
+def _procs_equal_under_rename(
+    module: ec_ast.Module,
+    bproc: ec_ast.Proc,
+    aproc: ec_ast.Proc,
+    rename: dict[str, str],
+) -> bool:
+    """Whether two procs render identically once ``rename`` is applied to
+    ``bproc``.
+
+    Each proc is rendered inside a one-proc copy of ``module`` so the
+    renderer sees the same context it would in the real module; that context
+    is identical on both sides (the caller has already compared the header,
+    the functor params and the state var block), so it cancels.
+    """
+    btext = "\n".join(_render_module_decl(replace(module, procs=[bproc])))
+    atext = "\n".join(_render_module_decl(replace(module, procs=[aproc])))
     renamed = _RENAME_TOKEN_RE.sub(lambda m: rename.get(m.group(0), m.group(0)), btext)
     return renamed == atext
 

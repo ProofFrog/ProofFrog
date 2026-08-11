@@ -39,9 +39,7 @@ def _mod(
                 + body,
             )
         ],
-        module_vars=[
-            ec_ast.VarDecl(name=state[0], type=ec_ast.EcType(text=state[1]))
-        ],
+        module_vars=[ec_ast.VarDecl(name=state[0], type=ec_ast.EcType(text=state[1]))],
     )
 
 
@@ -134,4 +132,51 @@ def test_identical_modules_with_no_locals_decline_here() -> None:
     a second time."""
     left = _mod([], [ec_ast.Return("f00")])
     right = _mod([], [ec_ast.Return("f00")])
+    assert not _modules_alpha_equal(left, right)
+
+
+def _two_proc_mod(
+    first: list[tuple[str, str]], second: list[tuple[str, str]]
+) -> ec_ast.Module:
+    """A module with two procs, each declaring one local, so the two procs'
+    scopes can be exercised independently."""
+
+    def proc(name: str, locals_: list[tuple[str, str]]) -> ec_ast.Proc:
+        var = locals_[0][0]
+        return ec_ast.Proc(
+            name=name,
+            params=[ec_ast.ProcParam(name="m", type=ec_ast.EcType(text="int"))],
+            return_type=ec_ast.EcType(text="int"),
+            body=[
+                ec_ast.VarDecl(name=n, type=ec_ast.EcType(text=t)) for n, t in locals_
+            ]
+            + [ec_ast.Assign(var, "f00 + m"), ec_ast.Return(var)],
+        )
+
+    return ec_ast.Module(
+        name="Step_id",
+        procs=[proc("g", first), proc("h", second)],
+        module_vars=[ec_ast.VarDecl(name="f00", type=ec_ast.EcType(text="int"))],
+    )
+
+
+def test_the_same_local_name_may_map_differently_in_two_procs() -> None:
+    """EC procedure scopes are independent, so `ct_PQ` in `g` and `ct_PQ` in
+    `h` are different variables and may correspond to different names.
+
+    A single module-wide rename map calls that a conflict and declines. Four
+    legs of `CG_expanded_INDCCA_T` were lost to exactly this before the map
+    was made per-proc -- found by re-running the guard instrument after the
+    row landed, not by review.
+    """
+    left = _two_proc_mod([("ct_PQ", "int")], [("ct_PQ", "int")])
+    right = _two_proc_mod([("__a6__", "int")], [("__a7__", "int")])
+    assert _modules_alpha_equal(left, right)
+
+
+def test_a_per_proc_map_still_declines_a_body_change_in_the_second_proc() -> None:
+    """Per-proc comparison must not stop at the first proc that matches."""
+    left = _two_proc_mod([("x", "int")], [("y", "int")])
+    right = _two_proc_mod([("a", "int")], [("b", "int")])
+    right.procs[1].body[-1] = ec_ast.Return("f00")
     assert not _modules_alpha_equal(left, right)

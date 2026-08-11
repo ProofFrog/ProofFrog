@@ -8626,566 +8626,11 @@ def _emit_one_oracle_chain(
     # (``(wp; call (_: true) | rnd)*`` + ``skip => /#``, plus a one-sided
     # ``_pres`` drop for a dead ``F.evaluate``); fully name-independent, no
     # ``inline``-name prediction.
-    if is_init:
-        if init_tac_override is not None:
-            # Exporter-computed whole-init tactic (the two-KEM reprogram-equiv
-            # hop, built off the RENDERED modules -- flat-state positions/names
-            # provably diverge there). Validated by hand on both toolchains.
-            # A ``transitivity``-headed override is a PROC-level tactic and
-            # must not sit under ``proc.`` (the tail-gap seed-split init).
-            _o0 = init_tac_override[0].lstrip()
-            _o1 = init_tac_override[1].lstrip() if len(init_tac_override) > 1 else ""
-            hdr = (
-                []
-                if _o0.startswith("transitivity")
-                or (_o0 == "symmetry." and _o1.startswith("transitivity"))
-                else ["proc."]
-            )
-            return (
-                [],
-                [_res_tag(SYNTH_PARAM), *hdr, *init_tac_override, "qed."],
-                set(),
-            )
-        proj_l = _project_to_method(left_states[-1], oracle_name)
-        proj_r = _project_to_method(right_states[-1], oracle_name)
-        last_states_match = (
-            proj_l is not None
-            and proj_r is not None
-            and proj_l.methods[0] == proj_r.methods[0]
-        )
-        # Seedbased PK binding: the coupling carries the ek-DERIVATION
-        # ``(R.ek, R.seed) = DeriveKeyPair_ev(R.seed)`` (contains ``ev_``),
-        # which ``proc; inline *`` cannot prove (unpredictable inline names).
-        # Route through the flat-state ev-twin transitivity. Gated on the
-        # ev-form so every non-ek init is byte-identical.
-        if (
-            last_states_match
-            and full_coupling is not None
-            and "ev_" in full_coupling
-            and clone_alias
-        ):
-            ek_twin = _synth_init_ek_twin(
-                modules,
-                oracle_name,
-                left_states[0],
-                right_states[0],
-                external_module_types,
-                method_return_types,
-                flat_params,
-                det_methods,
-                clone_alias,
-                full_coupling,
-                hop_index=hop_index,
-            )
-            if ek_twin is not None:
-                return ek_twin
-        # CGLazyRO reprogramming-Lazy init: one side reprograms the RO inside an
-        # always-true ``if`` (hiding the KEM/NG backbone from the backbone peel,
-        # which would emit a spurious one-sided dead-call drop). Collapse the
-        # ``if`` (``rcondt ^if``), reorder the KeyGen side's samples, and peel
-        # the now-common backbone. Gated on exactly one side carrying the
-        # reprogramming ``if`` with an aligned backbone, so every other init is
-        # byte-identical.
-        reprogram = _synth_reprogram_lazy_init(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-        )
-        if reprogram is not None:
-            tactic, pres, rung = reprogram
-            return [], [_res_tag(rung), *tactic, "qed."], pres
-        # The backbone peel operates on the FIRST flat states (the raw wrappers
-        # the init lemma actually relates), so it is valid even when the LAST
-        # states diverge: a chain transform can unpack one side's packed key
-        # (the Breakable game reads its DecapsKey components in ``Challenge`` so
-        # the canonicalizer splits its field, while the reduction keeps it
-        # packed) without changing the raw-wrapper init -- ``proc; inline *; sim``
-        # still closes. It has its own conservative gate (matching first-state
-        # backbones, pure delegate), so it declines to ``None`` where a real
-        # coupling is needed and every other init stays byte-identical.
-        peel = _synth_init_backbone_peel(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            flat_params,
-            det_methods,
-            init_repacks=init_repacks,
-            init_decomposition=init_decomposition,
-            require_equal_bodies=not last_states_match,
-            side_local_coupling=_has_side_local_projection(full_coupling),
-            cross_seam_coupling=_has_cross_seam_projection(full_coupling),
-            ev_derivation_post=bool(full_coupling and "ev_" in full_coupling),
-        )
-        if peel is not None:
-            tactic, pres, rung = peel
-            return [], [_res_tag(rung), *tactic, "qed."], pres
-        # Bundled-delegate reorder: the two endpoints run the SAME abstract
-        # calls but one gets a block of them from a delegate ``Challenger``
-        # (``keygen; encaps`` back to back) while the other splits them around
-        # its own sampling chain. The backbone peel declines because the
-        # backbones are not equal; this route makes them equal with one
-        # ``swap`` and then peels. ``None`` off-shape, so every other init is
-        # byte-identical.
-        # Its two one-sided dead draws are COUPLED rather than dropped where a
-        # declared injective endo-map relates them (the mirror of the KDF-key
-        # substitution hop -- see ``_DeadDrawBij``). ``None`` off-shape, and the
-        # coupled path additionally needs the conjunct to be in the coupling, so
-        # every hop the exporter does not state it for keeps the old drop-peel
-        # byte-identical.
-        dd_bij = _dead_draw_bij_spec(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            det_methods,
-            inj_methods_by_module or {},
-            clone_alias or {},
-            types,
-            left_wrapper_expr,
-            right_wrapper_expr,
-        )
-        # ORIENTATION-BLIND, because the exporter's own dedup is: a
-        # correspondence another builder already emitted the other way round is
-        # kept in ITS orientation, and an exact-string check would then read the
-        # conjunct as absent and decline a route whose premise is in fact stated.
-        if dd_bij is not None and not (
-            full_coupling
-            and all(
-                _unordered_conj(c)
-                in {_unordered_conj(x) for x in full_coupling.split(" /\\ ")}
-                for c in dd_bij.conjuncts
-            )
-        ):
-            dd_bij = None
-        reorder = _synth_bundled_delegate_reorder(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            ev_post=bool(full_coupling and "ev_" in full_coupling),
-            coupling=full_coupling or "",
-            bij=dd_bij,
-        )
-        if reorder is not None:
-            if dd_bij is not None and reorder[0].startswith("have "):
-                bij_methods_out = (
-                    dd_bij.mod_name,
-                    dd_bij.meth,
-                    dd_bij.bs_name,
-                    dd_bij.alias,
-                )
-                if bij_acc is not None:
-                    bij_acc.add(bij_methods_out)
-            return [], [_res_tag(SYNTH_PARAM), *reorder, "qed."], set()
-        # KDF-key substitution: the reorder above declines because the two sides
-        # do NOT run the same calls -- one carries an extra `deterministic
-        # injective` encoding whose result is the other's directly-drawn key. It
-        # is the ESTABLISHING hop of the IND-CCA `initialize` front, so it also
-        # has to relate two differently-bracketed KDF inputs. ``None`` off-shape,
-        # so every other init stays byte-identical.
-        substitution = _synth_kdf_key_substitution(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            flat_params,
-            det_methods,
-            inj_methods_by_module or {},
-            clone_alias or {},
-            types,
-            bij_acc,
-            left_wrapper_expr,
-            right_wrapper_expr,
-        )
-        if substitution is not None:
-            return [], [_res_tag(SYNTH_PARAM), *substitution, "qed."], set()
-        # KDF-key substitution through FLAT TWINS: the same shape when the swap
-        # aligner above cannot fire at all -- a same-module encode reorder one
-        # way, the challenger-repack travel conflict the other (the two-KEM
-        # CK/UK cells). ``None`` off-shape, so every other init and every
-        # single-KEM cell stays byte-identical.
-        twin_sub = _synth_kdf_substitution_twin(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            flat_params,
-            det_methods,
-            inj_methods_by_module or {},
-            clone_alias or {},
-            types,
-            bij_acc,
-            left_wrapper_expr,
-            right_wrapper_expr,
-            full_coupling,
-            hop_index,
-        )
-        if twin_sub is not None:
-            ks_extra, ks_body, ks_names = twin_sub
-            if state_mod_acc is not None:
-                state_mod_acc.update(ks_names)
-            return ks_extra, [_res_tag(SYNTH_PARAM), *ks_body, "qed."], set()
-        # ek-twin fallback when the last states diverge. The ek-derivation twin
-        # route (tried above only when ``last_states_match``) builds its
-        # transitivity entirely off the FIRST flat states -- the raw-wrapper
-        # ``initialize`` the lemma actually relates -- so a divergent LAST state
-        # is irrelevant to it. The seedbased PK Breakable game unpacks its packed
-        # DecapsKey in ``Challenge`` (a post-init oracle), so the canonicalizer
-        # splits that field in the LAST state (``last_states_match=False``) while
-        # the raw-wrapper init is unchanged; without this fallback that hop_0
-        # admits though the identical hop_2 (Unbreakable, no unpack) closes. Same
-        # first-state reasoning as the backbone peel's last-states-diverge relax.
-        if (
-            not last_states_match
-            and full_coupling is not None
-            and "ev_" in full_coupling
-            and clone_alias
-        ):
-            ek_twin = _synth_init_ek_twin(
-                modules,
-                oracle_name,
-                left_states[0],
-                right_states[0],
-                external_module_types,
-                method_return_types,
-                flat_params,
-                det_methods,
-                clone_alias,
-                full_coupling,
-                hop_index=hop_index,
-            )
-            if ek_twin is not None:
-                return ek_twin
-        if last_states_match:
-            # Backbone reorder (same multiset, different order, functionalizable
-            # NG det calls): the functional-twin route.
-            twin = _synth_init_twin_reorder(
-                modules,
-                oracle_name,
-                left_states[0],
-                right_states[0],
-                external_module_types,
-                method_return_types,
-                flat_params,
-                det_methods,
-                clone_alias or {},
-                init_coupling,
-                hop_index=hop_index,
-            )
-            if twin is not None:
-                return twin
-            if full_coupling is not None and clone_alias:
-                plain = _synth_init_plain_reorder(
-                    modules,
-                    oracle_name,
-                    left_states[0],
-                    right_states[0],
-                    external_module_types,
-                    method_return_types,
-                    flat_params,
-                    det_methods,
-                    clone_alias,
-                    full_coupling,
-                    hop_index=hop_index,
-                )
-                if plain is not None:
-                    return plain
-            # Backbones cannot be aligned (an extra call that is not a droppable
-            # deterministic method): the peel does not apply. Emit a targeted,
-            # honest admit rather than a silently-failing ``sim``.
-            # Bundled delegate that runs an EXTRA deterministic call whose
-            # result is LIVE (the correctness challenger's ``decaps``, stored as
-            # the tuple's ``.`5``): the reorder above drops only DEAD samples and
-            # the backbone peel's ``_pres`` drop forgets the result, so both
-            # decline. Route through flat twins and drop the extra through its
-            # ``_det`` axiom, which is what states the coupling's ``ev_`` fact
-            # about it. ``None`` off-shape -> the honest admit below.
-            if full_coupling is not None and clone_alias:
-                deleg = _synth_delegate_correctness_init(
-                    modules,
-                    oracle_name,
-                    left_states[0],
-                    right_states[0],
-                    external_module_types,
-                    method_return_types,
-                    flat_params,
-                    det_methods,
-                    clone_alias,
-                    full_coupling,
-                    hop_index=hop_index,
-                )
-                if deleg is not None:
-                    return deleg
-            reprog_init = _synth_init_ro_reprogram(
-                modules,
-                oracle_name,
-                left_states[0],
-                right_states[0],
-                external_module_types,
-                method_return_types,
-                flat_params,
-                det_methods,
-                clone_alias or {},
-                types,
-                full_coupling,
-                left_wrapper_expr,
-                right_wrapper_expr,
-                hop_index,
-            )
-            if reprog_init is not None:
-                if state_mod_acc is not None:
-                    state_mod_acc.add(f"Mid_{hop_index}")
-                return reprog_init
-            return [], _init_backbone_admit(hop_index, oracle_name), set()
-
-    # Exporter-computed whole-oracle tactic, keyed by oracle name. Used where the
-    # tactic needs the RENDERED WRAPPER bodies: EC's ``seq``/``rcondt`` indices
-    # count wrapper statements, and the flat states cannot supply them once the
-    # engine has inlined a challenger oracle into the body (each inlined call
-    # collapses to one flat statement but expands to three under EC's ``inline``).
-    # Same rationale as ``init_tac_override``, one level finer.
-    if not is_init and oracle_tac_override and oracle_name in oracle_tac_override:
-        body = oracle_tac_override[oracle_name]
-        # A partial override -- one that carries the derivation as far as it is
-        # proven and leaves the rest open -- is a GUIDED ADMIT, not synth-param.
-        # Tagging it synth-param would inflate the ladder tally for a body that
-        # still admits.
-        rung = ADMIT_GUIDED if any(t.strip() == "admit." for t in body) else SYNTH_PARAM
-        return ([], [_res_tag(rung), "proc.", *body, "qed."], set())
-
-    # CFRG binding challenge case-split: the reduction's ``Challenge`` forwards a
-    # KDF-input collision to an inner KEM binding challenger and otherwise
-    # recomputes the game boolean; :func:`_challenge_casesplit_route` eliminates
-    # the split via encoding injectivity (fully AST-driven; declines to ``None``
-    # for every non-matching oracle so all other proofs stay byte-identical).
-    if not is_init and clone_alias:
-        route = _challenge_casesplit_route(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            left_wrapper_expr,
-            right_wrapper_expr,
-            external_module_types,
-            method_return_types,
-            flat_params,
-            clone_alias,
-        )
-        if route is not None:
-            outer_body, inj_reqs, val_scheme, aux_lines = route
-            if inj_acc is not None:
-                inj_acc.update(inj_reqs)
-            if decaps_val_acc is not None:
-                decaps_val_acc.add(val_scheme)
-            # Aux lemmas are shared across a proof's wrapper hops (same concat
-            # shape) and have fixed names, so emit them once (dedup by first-wins).
-            if aux_lemma_acc is not None and aux_lines and not aux_lemma_acc:
-                aux_lemma_acc.extend(aux_lines)
-            return [], outer_body, set()
-        if is_lazyro_honest:
-            lz_route = _challenge_lazyro_route(
-                modules,
-                oracle_name,
-                left_states[0],
-                right_states[0],
-                left_wrapper_expr,
-                right_wrapper_expr,
-                external_module_types,
-                method_return_types,
-                flat_params,
-                clone_alias or {},
-            )
-            if lz_route is not None:
-                return [], lz_route, set()
-        ff_route = _challenge_falsefalse_route(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            left_wrapper_expr,
-            right_wrapper_expr,
-            external_module_types,
-            method_return_types,
-            flat_params,
-            clone_alias,
-            full_coupling,
-        )
-        if ff_route is not None:
-            ff_body, ff_scheme = ff_route
-            if decaps_val_acc is not None and ff_scheme:
-                decaps_val_acc.add(ff_scheme)
-            return [], ff_body, set()
-        h2_route = _challenge_hop2_route(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            left_wrapper_expr,
-            right_wrapper_expr,
-            external_module_types,
-            method_return_types,
-            flat_params,
-            clone_alias,
-        )
-        if h2_route is not None:
-            h2_body, h2_inj, h2_scheme = h2_route
-            if inj_acc is not None and h2_inj is not None:
-                inj_acc.add(h2_inj)
-            if decaps_val_acc is not None:
-                decaps_val_acc.add(h2_scheme)
-            return [], h2_body, set()
-        sr_route = _challenge_single_r_route(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            left_wrapper_expr,
-            right_wrapper_expr,
-            external_module_types,
-            method_return_types,
-            flat_params,
-            clone_alias,
-        )
-        if sr_route is not None:
-            sr_body, sr_injs, sr_scheme = sr_route
-            if inj_acc is not None:
-                inj_acc.update(sr_injs)
-            if decaps_val_acc is not None:
-                decaps_val_acc.add(sr_scheme)
-            return [], sr_body, set()
-        ro_route = _challenge_reorder_route(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            left_wrapper_expr,
-            right_wrapper_expr,
-            external_module_types,
-            method_return_types,
-            flat_params,
-            clone_alias or {},
-            ladder_closer=init_tac_override is not None,
-        )
-        if ro_route is not None:
-            return [], ro_route, set()
-        # Same-shape post-init oracle: the two bodies have IDENTICAL statement
-        # structure and differ only in the field REFERENCES the hop's coupling
-        # equates (the reduction reads its packed ``corr.`k`` where the game
-        # reads a separate field). ``sim`` matches globals by NAME so it cannot
-        # relate them; the structural peel walks the shared shape instead.
-        # Declines to ``None`` off-shape, so every other oracle is
-        # byte-identical.
-        shape = _synth_structural_if_peel(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            full_coupling,
-        )
-        if shape is not None:
-            return [], shape, set()
-        # Same body under a field RENAME (including the arrow-typed random
-        # function the peel above declines): ``inline *`` then the same if-tree
-        # walk with ``wp; sim`` leaves, which tolerate the statement-count skew
-        # inlining a delegate call introduces.
-        # RO-REPROGRAMMING coupling: same class as the rename route below, but
-        # its ``sim`` leaves cannot run once the coupling is an implication
-        # rather than an equality set. Tried first; ``None`` for every hop whose
-        # coupling carries no reprogramming conjunct, so the rename route and
-        # every proof it serves are byte-identical.
-        reprog_oracle = _synth_ro_reprogram_oracle(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            full_coupling,
-            det_methods,
-            clone_alias or {},
-            inj_acc,
-        )
-        if reprog_oracle is not None:
-            return [], reprog_oracle, set()
-        renamed = _synth_sim_field_rename(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            full_coupling,
-        )
-        if renamed is not None:
-            return [], renamed, set()
-        # Plain GAME vs a reduction FORWARDING this oracle to its challenger:
-        # not same-shape (the inlined challenger adds dead guards), so driven by
-        # the game's if-tree alone with pattern positions.
-        fwd = _synth_forwarded_oracle_peel(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            full_coupling,
-        )
-        if fwd is not None:
-            return [], fwd, set()
-        # Packed-key correctness ``decaps``: the reduction case-splits on the
-        # challenge ciphertext and reuses its stored ``corr.`5`` where the game
-        # decapsulates. The consuming half of the front whose ``initialize`` side
-        # is already green -- ``None`` off-shape, so every other oracle stays
-        # byte-identical.
-        cdc = _synth_correctness_decaps_casesplit(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            flat_params,
-            det_methods,
-            clone_alias,
-            full_coupling,
-            hop_index=hop_index,
-        )
-        if cdc is not None:
-            return cdc
-        # KDF-PRF substitution at a POST-INIT oracle: the consuming half of what
-        # `_synth_kdf_key_substitution` closes for `initialize`. ``None``
-        # off-shape, so every other oracle stays byte-identical.
-        ksd = _synth_kdf_substitution_decaps(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            flat_params,
-            det_methods,
-            clone_alias,
-            types,
-            full_coupling,
-        )
-        if ksd is not None:
-            return [], ksd, set()
+    # The per-oracle COUPLING is built here, before any whole-oracle or
+    # endpoint route can return, so that every return path can still emit the
+    # chain's closable legs as evidence-only lemmas (they need ``micro_pre``,
+    # which needs this). Moving it earlier is otherwise behaviour-neutral: it
+    # only reads the states and the caller's parameters.
 
     # Field-aware coupling: identical-state hops keep the whole-glob equality
     # (byte-identical for clean proofs); a hop whose two sides differ in glob
@@ -9410,6 +8855,821 @@ def _emit_one_oracle_chain(
         hoist_conjuncts=hoist_conjuncts or None,
     )
 
+    def micro_pre(left_ref: str, right_ref: str) -> str:
+        cpl = coupling(left_ref, right_ref)
+        if is_init:
+            return "true"
+        return cpl if eq_args == "true" else f"{eq_args} /\\ {cpl}"
+
+    def micro_post(left_ref: str, right_ref: str) -> str:
+        return f"={{res}} /\\ {coupling(left_ref, right_ref)}"
+
+    chunks: list[str] = []
+    step_pres: set[tuple[str, str]] = set()
+
+    def _absorb_requests(reqs: MicroRequests) -> None:
+        # Thread a micro leg's requests into the same accumulators the
+        # whole-oracle routes populate; they flow through
+        # ``MultiOracleHopChainInfo`` to the exporter's request sets
+        # unchanged (design review (c) — no new exporter-side plumbing).
+        step_pres.update(reqs.pres)
+        if inj_acc is not None:
+            inj_acc.update(reqs.inj)
+        if bij_acc is not None:
+            bij_acc.update(reqs.bij)
+        if decaps_val_acc is not None:
+            decaps_val_acc.update(reqs.decaps_val)
+
+    def _cached_leg(
+        transform_name: str, state_before: frog_ast.Game, state_after: frog_ast.Game
+    ) -> tuple[list[str], MicroRequests, str] | None:
+        """A captured tactic for ONE leg the synthesizers declined.
+
+        Phase-4's attachment point for micro legs. Until the key became the
+        masked changed region there was nothing to attach: a whole-game key
+        could not name a single leg, so the per-transform capture mechanism
+        could not catch the legs that matter most. The key here is that same
+        masked shape computed on the two states PROJECTED to this oracle, so
+        a leg entry and a chain-level entry for the same one-oracle change
+        are the same key -- a hit across them is transfer working, not a
+        collision.
+
+        Returns ``None`` when no lookup is wired (every caller but the
+        exporter) or on a miss, leaving the leg to decline exactly as before.
+        """
+        if micro_leg_lookup is None:
+            return None
+        tactic = micro_leg_lookup(
+            transform_name, state_before, state_after, oracle_name
+        )
+        if tactic is None:
+            return None
+        return tactic, MicroRequests(), CACHED_UNGUIDED
+
+    # EVIDENCE-ONLY MICRO EMISSION (see the exporter CLAUDE.md). The scan
+    # below is shared by two callers. The chain path runs it and, when every
+    # leg closed, goes on to build the bridge and chain lemmas. Every OTHER
+    # return path -- an ``Initialize`` route, a whole-oracle route, an honest
+    # admit -- runs it through :func:`_evidence_only_chunks` purely to keep
+    # the legs that DID close as standalone lemmas. A leg that declines emits
+    # NOTHING (never an ``admit.``), and the route still closes the hop lemma
+    # exactly as before, so this can only add machine-checked statements.
+    def _scan_legs(
+        stateless: bool,
+    ) -> tuple[
+        list[str],
+        list[str],
+        list[str],
+        bool,
+        list[tuple[frog_ast.Game, frog_ast.Game, str, str, str]],
+    ]:
+        scan_chunks: list[str] = []
+        # EVIDENCE-ONLY MICRO EMISSION. A chain whose legs do not ALL close cannot
+        # carry the hop, so the oracle falls back to a whole-oracle route (or an
+        # honest admit) exactly as before. But the legs that DID close are still
+        # machine-checkable statements about single transform applications, and
+        # dropping them threw that evidence away -- which made every move's payoff
+        # all-or-nothing (a chain 37 pairs deep evidenced nothing until its last
+        # pair closed). So: keep scanning after a declining leg, emit every leg
+        # that closed as a standalone lemma, and emit NOTHING for a leg that
+        # declined (never an ``admit.`` -- an admit-free proof stays admit-free and
+        # a clean proof stays clean). The unreferenced lemmas still have to be
+        # PROVEN by EasyCrypt, so accepting the file is evidence for exactly the
+        # applications they name.
+        chain_broken = False
+        # One entry per appended micro chunk, in the same order: the two flat-state
+        # games the lemma relates and its rendered precondition. Only consulted on
+        # the broken-chain path (see the well-typedness filter below), so a chain
+        # that closes pays nothing for it.
+        evidence_meta: list[tuple[frog_ast.Game, frog_ast.Game, str, str, str]] = []
+
+        micros_left: list[str] = []
+        for k, app in enumerate(left_apps):
+            if stateless:
+                break
+            lref, rref = mod_ref(left_mods[k]), mod_ref(left_mods[k + 1])
+            step = _oracle_step_tactic(
+                left_states[k],
+                left_states[k + 1],
+                oracle_name,
+                reversed_dir=False,
+                external_module_types=external_module_types,
+                method_return_types=method_return_types,
+                modules=modules,
+                flat_params=flat_params,
+                det_methods=det_methods,
+                micro_pre_text=micro_pre(lref, rref),
+                left_ref=lref,
+                right_ref=rref,
+                clone_alias=clone_alias,
+                inj_methods_by_module=inj_methods_by_module,
+                use_canonical_fields=use_canonical,
+                is_init=is_init,
+            )
+            if step is None:
+                step = _cached_leg(
+                    app.transform_name, left_states[k], left_states[k + 1]
+                )
+            if step is None:
+                chain_broken = True
+                continue
+            tac, reqs, rung = step
+            _absorb_requests(reqs)
+            name = f"micro_{hop_index}_{oracle_name}_left_{k}"
+            micros_left.append(name)
+            scan_chunks.append(
+                "\n".join(
+                    _render_lemma_block(
+                        name,
+                        lref,
+                        rref,
+                        oracle_name,
+                        micro_pre(lref, rref),
+                        [_res_tag(rung), *tac],
+                        comment=_micro_transform_comment(app),
+                        postcondition=micro_post(lref, rref),
+                    )
+                )
+            )
+            evidence_meta.append(
+                (left_states[k], left_states[k + 1], lref, rref, micro_pre(lref, rref))
+            )
+
+        micros_right_rev: list[str] = []
+        for k, app in enumerate(right_apps):
+            if stateless:
+                break
+            # Reversed: proves Step_R_state_{k+1} ~ Step_R_state_k.
+            lref, rref = mod_ref(right_mods[k + 1]), mod_ref(right_mods[k])
+            step = _oracle_step_tactic(
+                right_states[k],
+                right_states[k + 1],
+                oracle_name,
+                reversed_dir=True,
+                external_module_types=external_module_types,
+                method_return_types=method_return_types,
+                modules=modules,
+                flat_params=flat_params,
+                det_methods=det_methods,
+                micro_pre_text=micro_pre(lref, rref),
+                left_ref=lref,
+                right_ref=rref,
+                clone_alias=clone_alias,
+                inj_methods_by_module=inj_methods_by_module,
+                use_canonical_fields=use_canonical,
+                is_init=is_init,
+            )
+            if step is None:
+                step = _cached_leg(
+                    app.transform_name, right_states[k + 1], right_states[k]
+                )
+            if step is None:
+                chain_broken = True
+                continue
+            tac, reqs, rung = step
+            _absorb_requests(reqs)
+            name = f"micro_{hop_index}_{oracle_name}_right_{k}_rev"
+            micros_right_rev.append(name)
+            scan_chunks.append(
+                "\n".join(
+                    _render_lemma_block(
+                        name,
+                        lref,
+                        rref,
+                        oracle_name,
+                        micro_pre(lref, rref),
+                        [_res_tag(rung), *tac],
+                        comment=_micro_transform_comment(app, reversed_dir=True),
+                        postcondition=micro_post(lref, rref),
+                    )
+                )
+            )
+            evidence_meta.append(
+                (
+                    right_states[k + 1],
+                    right_states[k],
+                    lref,
+                    rref,
+                    micro_pre(lref, rref),
+                )
+            )
+
+        return (
+            scan_chunks,
+            micros_left,
+            micros_right_rev,
+            chain_broken,
+            evidence_meta,
+        )
+
+    def _evidence_only_chunks(stateless: bool = False) -> list[str]:
+        """The closable legs of a chain this oracle does NOT take, as evidence.
+
+        Lemmas whose STATEMENT does not typecheck are dropped: a chain the
+        oracle never takes can carry a field coupling that equates fields of
+        different types (``_chain_role_map`` is a union-find over bare field
+        names), and EasyCrypt would reject the whole file for it.
+
+        An ``Initialize`` leg is dropped WHOLESALE. Its precondition is
+        ``true`` (there is no incoming state to relate), while its
+        postcondition asserts the state coupling, so a single leg has to
+        establish that coupling out of nothing -- which ``proc; sim`` cannot
+        do, and EasyCrypt answers "cannot save an incomplete proof". Only the
+        init chain AS A WHOLE, or the endpoint route that replaces it,
+        establishes the coupling; per-leg init evidence needs a different
+        statement shape and is left for a separate increment.
+        """
+        if is_init:
+            return []
+        scan, _l, _r, _broken, meta = _scan_legs(stateless)
+        kept = [
+            chunk
+            for chunk, m in zip(scan, meta)
+            if _micro_pre_well_typed(
+                m,
+                oracle_name,
+                modules,
+                external_module_types,
+                method_return_types,
+                flat_params,
+                use_canonical,
+            )
+        ]
+        return _mark_evidence_only(kept)
+
+    if is_init:
+        if init_tac_override is not None:
+            # Exporter-computed whole-init tactic (the two-KEM reprogram-equiv
+            # hop, built off the RENDERED modules -- flat-state positions/names
+            # provably diverge there). Validated by hand on both toolchains.
+            # A ``transitivity``-headed override is a PROC-level tactic and
+            # must not sit under ``proc.`` (the tail-gap seed-split init).
+            _o0 = init_tac_override[0].lstrip()
+            _o1 = init_tac_override[1].lstrip() if len(init_tac_override) > 1 else ""
+            hdr = (
+                []
+                if _o0.startswith("transitivity")
+                or (_o0 == "symmetry." and _o1.startswith("transitivity"))
+                else ["proc."]
+            )
+            return (
+                _evidence_only_chunks(),
+                [_res_tag(SYNTH_PARAM), *hdr, *init_tac_override, "qed."],
+                set(),
+            )
+        proj_l = _project_to_method(left_states[-1], oracle_name)
+        proj_r = _project_to_method(right_states[-1], oracle_name)
+        last_states_match = (
+            proj_l is not None
+            and proj_r is not None
+            and proj_l.methods[0] == proj_r.methods[0]
+        )
+        # Seedbased PK binding: the coupling carries the ek-DERIVATION
+        # ``(R.ek, R.seed) = DeriveKeyPair_ev(R.seed)`` (contains ``ev_``),
+        # which ``proc; inline *`` cannot prove (unpredictable inline names).
+        # Route through the flat-state ev-twin transitivity. Gated on the
+        # ev-form so every non-ek init is byte-identical.
+        if (
+            last_states_match
+            and full_coupling is not None
+            and "ev_" in full_coupling
+            and clone_alias
+        ):
+            ek_twin = _synth_init_ek_twin(
+                modules,
+                oracle_name,
+                left_states[0],
+                right_states[0],
+                external_module_types,
+                method_return_types,
+                flat_params,
+                det_methods,
+                clone_alias,
+                full_coupling,
+                hop_index=hop_index,
+            )
+            if ek_twin is not None:
+                return ek_twin
+        # CGLazyRO reprogramming-Lazy init: one side reprograms the RO inside an
+        # always-true ``if`` (hiding the KEM/NG backbone from the backbone peel,
+        # which would emit a spurious one-sided dead-call drop). Collapse the
+        # ``if`` (``rcondt ^if``), reorder the KeyGen side's samples, and peel
+        # the now-common backbone. Gated on exactly one side carrying the
+        # reprogramming ``if`` with an aligned backbone, so every other init is
+        # byte-identical.
+        reprogram = _synth_reprogram_lazy_init(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+        )
+        if reprogram is not None:
+            tactic, pres, rung = reprogram
+            return _evidence_only_chunks(), [_res_tag(rung), *tactic, "qed."], pres
+        # The backbone peel operates on the FIRST flat states (the raw wrappers
+        # the init lemma actually relates), so it is valid even when the LAST
+        # states diverge: a chain transform can unpack one side's packed key
+        # (the Breakable game reads its DecapsKey components in ``Challenge`` so
+        # the canonicalizer splits its field, while the reduction keeps it
+        # packed) without changing the raw-wrapper init -- ``proc; inline *; sim``
+        # still closes. It has its own conservative gate (matching first-state
+        # backbones, pure delegate), so it declines to ``None`` where a real
+        # coupling is needed and every other init stays byte-identical.
+        peel = _synth_init_backbone_peel(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            flat_params,
+            det_methods,
+            init_repacks=init_repacks,
+            init_decomposition=init_decomposition,
+            require_equal_bodies=not last_states_match,
+            side_local_coupling=_has_side_local_projection(full_coupling),
+            cross_seam_coupling=_has_cross_seam_projection(full_coupling),
+            ev_derivation_post=bool(full_coupling and "ev_" in full_coupling),
+        )
+        if peel is not None:
+            tactic, pres, rung = peel
+            return _evidence_only_chunks(), [_res_tag(rung), *tactic, "qed."], pres
+        # Bundled-delegate reorder: the two endpoints run the SAME abstract
+        # calls but one gets a block of them from a delegate ``Challenger``
+        # (``keygen; encaps`` back to back) while the other splits them around
+        # its own sampling chain. The backbone peel declines because the
+        # backbones are not equal; this route makes them equal with one
+        # ``swap`` and then peels. ``None`` off-shape, so every other init is
+        # byte-identical.
+        # Its two one-sided dead draws are COUPLED rather than dropped where a
+        # declared injective endo-map relates them (the mirror of the KDF-key
+        # substitution hop -- see ``_DeadDrawBij``). ``None`` off-shape, and the
+        # coupled path additionally needs the conjunct to be in the coupling, so
+        # every hop the exporter does not state it for keeps the old drop-peel
+        # byte-identical.
+        dd_bij = _dead_draw_bij_spec(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            det_methods,
+            inj_methods_by_module or {},
+            clone_alias or {},
+            types,
+            left_wrapper_expr,
+            right_wrapper_expr,
+        )
+        # ORIENTATION-BLIND, because the exporter's own dedup is: a
+        # correspondence another builder already emitted the other way round is
+        # kept in ITS orientation, and an exact-string check would then read the
+        # conjunct as absent and decline a route whose premise is in fact stated.
+        if dd_bij is not None and not (
+            full_coupling
+            and all(
+                _unordered_conj(c)
+                in {_unordered_conj(x) for x in full_coupling.split(" /\\ ")}
+                for c in dd_bij.conjuncts
+            )
+        ):
+            dd_bij = None
+        reorder = _synth_bundled_delegate_reorder(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            ev_post=bool(full_coupling and "ev_" in full_coupling),
+            coupling=full_coupling or "",
+            bij=dd_bij,
+        )
+        if reorder is not None:
+            if dd_bij is not None and reorder[0].startswith("have "):
+                bij_methods_out = (
+                    dd_bij.mod_name,
+                    dd_bij.meth,
+                    dd_bij.bs_name,
+                    dd_bij.alias,
+                )
+                if bij_acc is not None:
+                    bij_acc.add(bij_methods_out)
+            return (
+                _evidence_only_chunks(),
+                [_res_tag(SYNTH_PARAM), *reorder, "qed."],
+                set(),
+            )
+        # KDF-key substitution: the reorder above declines because the two sides
+        # do NOT run the same calls -- one carries an extra `deterministic
+        # injective` encoding whose result is the other's directly-drawn key. It
+        # is the ESTABLISHING hop of the IND-CCA `initialize` front, so it also
+        # has to relate two differently-bracketed KDF inputs. ``None`` off-shape,
+        # so every other init stays byte-identical.
+        substitution = _synth_kdf_key_substitution(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            flat_params,
+            det_methods,
+            inj_methods_by_module or {},
+            clone_alias or {},
+            types,
+            bij_acc,
+            left_wrapper_expr,
+            right_wrapper_expr,
+        )
+        if substitution is not None:
+            return (
+                _evidence_only_chunks(),
+                [_res_tag(SYNTH_PARAM), *substitution, "qed."],
+                set(),
+            )
+        # KDF-key substitution through FLAT TWINS: the same shape when the swap
+        # aligner above cannot fire at all -- a same-module encode reorder one
+        # way, the challenger-repack travel conflict the other (the two-KEM
+        # CK/UK cells). ``None`` off-shape, so every other init and every
+        # single-KEM cell stays byte-identical.
+        twin_sub = _synth_kdf_substitution_twin(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            flat_params,
+            det_methods,
+            inj_methods_by_module or {},
+            clone_alias or {},
+            types,
+            bij_acc,
+            left_wrapper_expr,
+            right_wrapper_expr,
+            full_coupling,
+            hop_index,
+        )
+        if twin_sub is not None:
+            ks_extra, ks_body, ks_names = twin_sub
+            if state_mod_acc is not None:
+                state_mod_acc.update(ks_names)
+            return ks_extra, [_res_tag(SYNTH_PARAM), *ks_body, "qed."], set()
+        # ek-twin fallback when the last states diverge. The ek-derivation twin
+        # route (tried above only when ``last_states_match``) builds its
+        # transitivity entirely off the FIRST flat states -- the raw-wrapper
+        # ``initialize`` the lemma actually relates -- so a divergent LAST state
+        # is irrelevant to it. The seedbased PK Breakable game unpacks its packed
+        # DecapsKey in ``Challenge`` (a post-init oracle), so the canonicalizer
+        # splits that field in the LAST state (``last_states_match=False``) while
+        # the raw-wrapper init is unchanged; without this fallback that hop_0
+        # admits though the identical hop_2 (Unbreakable, no unpack) closes. Same
+        # first-state reasoning as the backbone peel's last-states-diverge relax.
+        if (
+            not last_states_match
+            and full_coupling is not None
+            and "ev_" in full_coupling
+            and clone_alias
+        ):
+            ek_twin = _synth_init_ek_twin(
+                modules,
+                oracle_name,
+                left_states[0],
+                right_states[0],
+                external_module_types,
+                method_return_types,
+                flat_params,
+                det_methods,
+                clone_alias,
+                full_coupling,
+                hop_index=hop_index,
+            )
+            if ek_twin is not None:
+                return ek_twin
+        if last_states_match:
+            # Backbone reorder (same multiset, different order, functionalizable
+            # NG det calls): the functional-twin route.
+            twin = _synth_init_twin_reorder(
+                modules,
+                oracle_name,
+                left_states[0],
+                right_states[0],
+                external_module_types,
+                method_return_types,
+                flat_params,
+                det_methods,
+                clone_alias or {},
+                init_coupling,
+                hop_index=hop_index,
+            )
+            if twin is not None:
+                return twin
+            if full_coupling is not None and clone_alias:
+                plain = _synth_init_plain_reorder(
+                    modules,
+                    oracle_name,
+                    left_states[0],
+                    right_states[0],
+                    external_module_types,
+                    method_return_types,
+                    flat_params,
+                    det_methods,
+                    clone_alias,
+                    full_coupling,
+                    hop_index=hop_index,
+                )
+                if plain is not None:
+                    return plain
+            # Backbones cannot be aligned (an extra call that is not a droppable
+            # deterministic method): the peel does not apply. Emit a targeted,
+            # honest admit rather than a silently-failing ``sim``.
+            # Bundled delegate that runs an EXTRA deterministic call whose
+            # result is LIVE (the correctness challenger's ``decaps``, stored as
+            # the tuple's ``.`5``): the reorder above drops only DEAD samples and
+            # the backbone peel's ``_pres`` drop forgets the result, so both
+            # decline. Route through flat twins and drop the extra through its
+            # ``_det`` axiom, which is what states the coupling's ``ev_`` fact
+            # about it. ``None`` off-shape -> the honest admit below.
+            if full_coupling is not None and clone_alias:
+                deleg = _synth_delegate_correctness_init(
+                    modules,
+                    oracle_name,
+                    left_states[0],
+                    right_states[0],
+                    external_module_types,
+                    method_return_types,
+                    flat_params,
+                    det_methods,
+                    clone_alias,
+                    full_coupling,
+                    hop_index=hop_index,
+                )
+                if deleg is not None:
+                    return deleg
+            reprog_init = _synth_init_ro_reprogram(
+                modules,
+                oracle_name,
+                left_states[0],
+                right_states[0],
+                external_module_types,
+                method_return_types,
+                flat_params,
+                det_methods,
+                clone_alias or {},
+                types,
+                full_coupling,
+                left_wrapper_expr,
+                right_wrapper_expr,
+                hop_index,
+            )
+            if reprog_init is not None:
+                if state_mod_acc is not None:
+                    state_mod_acc.add(f"Mid_{hop_index}")
+                return reprog_init
+            return (
+                _evidence_only_chunks(),
+                _init_backbone_admit(hop_index, oracle_name),
+                set(),
+            )
+
+    # Exporter-computed whole-oracle tactic, keyed by oracle name. Used where the
+    # tactic needs the RENDERED WRAPPER bodies: EC's ``seq``/``rcondt`` indices
+    # count wrapper statements, and the flat states cannot supply them once the
+    # engine has inlined a challenger oracle into the body (each inlined call
+    # collapses to one flat statement but expands to three under EC's ``inline``).
+    # Same rationale as ``init_tac_override``, one level finer.
+    if not is_init and oracle_tac_override and oracle_name in oracle_tac_override:
+        body = oracle_tac_override[oracle_name]
+        # A partial override -- one that carries the derivation as far as it is
+        # proven and leaves the rest open -- is a GUIDED ADMIT, not synth-param.
+        # Tagging it synth-param would inflate the ladder tally for a body that
+        # still admits.
+        rung = ADMIT_GUIDED if any(t.strip() == "admit." for t in body) else SYNTH_PARAM
+        return ([], [_res_tag(rung), "proc.", *body, "qed."], set())
+
+    # CFRG binding challenge case-split: the reduction's ``Challenge`` forwards a
+    # KDF-input collision to an inner KEM binding challenger and otherwise
+    # recomputes the game boolean; :func:`_challenge_casesplit_route` eliminates
+    # the split via encoding injectivity (fully AST-driven; declines to ``None``
+    # for every non-matching oracle so all other proofs stay byte-identical).
+    if not is_init and clone_alias:
+        route = _challenge_casesplit_route(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            left_wrapper_expr,
+            right_wrapper_expr,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            clone_alias,
+        )
+        if route is not None:
+            outer_body, inj_reqs, val_scheme, aux_lines = route
+            if inj_acc is not None:
+                inj_acc.update(inj_reqs)
+            if decaps_val_acc is not None:
+                decaps_val_acc.add(val_scheme)
+            # Aux lemmas are shared across a proof's wrapper hops (same concat
+            # shape) and have fixed names, so emit them once (dedup by first-wins).
+            if aux_lemma_acc is not None and aux_lines and not aux_lemma_acc:
+                aux_lemma_acc.extend(aux_lines)
+            return _evidence_only_chunks(), outer_body, set()
+        if is_lazyro_honest:
+            lz_route = _challenge_lazyro_route(
+                modules,
+                oracle_name,
+                left_states[0],
+                right_states[0],
+                left_wrapper_expr,
+                right_wrapper_expr,
+                external_module_types,
+                method_return_types,
+                flat_params,
+                clone_alias or {},
+            )
+            if lz_route is not None:
+                return _evidence_only_chunks(), lz_route, set()
+        ff_route = _challenge_falsefalse_route(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            left_wrapper_expr,
+            right_wrapper_expr,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            clone_alias,
+            full_coupling,
+        )
+        if ff_route is not None:
+            ff_body, ff_scheme = ff_route
+            if decaps_val_acc is not None and ff_scheme:
+                decaps_val_acc.add(ff_scheme)
+            return _evidence_only_chunks(), ff_body, set()
+        h2_route = _challenge_hop2_route(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            left_wrapper_expr,
+            right_wrapper_expr,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            clone_alias,
+        )
+        if h2_route is not None:
+            h2_body, h2_inj, h2_scheme = h2_route
+            if inj_acc is not None and h2_inj is not None:
+                inj_acc.add(h2_inj)
+            if decaps_val_acc is not None:
+                decaps_val_acc.add(h2_scheme)
+            return _evidence_only_chunks(), h2_body, set()
+        sr_route = _challenge_single_r_route(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            left_wrapper_expr,
+            right_wrapper_expr,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            clone_alias,
+        )
+        if sr_route is not None:
+            sr_body, sr_injs, sr_scheme = sr_route
+            if inj_acc is not None:
+                inj_acc.update(sr_injs)
+            if decaps_val_acc is not None:
+                decaps_val_acc.add(sr_scheme)
+            return _evidence_only_chunks(), sr_body, set()
+        ro_route = _challenge_reorder_route(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            left_wrapper_expr,
+            right_wrapper_expr,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            clone_alias or {},
+            ladder_closer=init_tac_override is not None,
+        )
+        if ro_route is not None:
+            return _evidence_only_chunks(), ro_route, set()
+        # Same-shape post-init oracle: the two bodies have IDENTICAL statement
+        # structure and differ only in the field REFERENCES the hop's coupling
+        # equates (the reduction reads its packed ``corr.`k`` where the game
+        # reads a separate field). ``sim`` matches globals by NAME so it cannot
+        # relate them; the structural peel walks the shared shape instead.
+        # Declines to ``None`` off-shape, so every other oracle is
+        # byte-identical.
+        shape = _synth_structural_if_peel(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            full_coupling,
+        )
+        if shape is not None:
+            return _evidence_only_chunks(), shape, set()
+        # Same body under a field RENAME (including the arrow-typed random
+        # function the peel above declines): ``inline *`` then the same if-tree
+        # walk with ``wp; sim`` leaves, which tolerate the statement-count skew
+        # inlining a delegate call introduces.
+        # RO-REPROGRAMMING coupling: same class as the rename route below, but
+        # its ``sim`` leaves cannot run once the coupling is an implication
+        # rather than an equality set. Tried first; ``None`` for every hop whose
+        # coupling carries no reprogramming conjunct, so the rename route and
+        # every proof it serves are byte-identical.
+        reprog_oracle = _synth_ro_reprogram_oracle(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            full_coupling,
+            det_methods,
+            clone_alias or {},
+            inj_acc,
+        )
+        if reprog_oracle is not None:
+            return _evidence_only_chunks(), reprog_oracle, set()
+        renamed = _synth_sim_field_rename(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            full_coupling,
+        )
+        if renamed is not None:
+            return _evidence_only_chunks(), renamed, set()
+        # Plain GAME vs a reduction FORWARDING this oracle to its challenger:
+        # not same-shape (the inlined challenger adds dead guards), so driven by
+        # the game's if-tree alone with pattern positions.
+        fwd = _synth_forwarded_oracle_peel(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            full_coupling,
+        )
+        if fwd is not None:
+            return _evidence_only_chunks(), fwd, set()
+        # Packed-key correctness ``decaps``: the reduction case-splits on the
+        # challenge ciphertext and reuses its stored ``corr.`5`` where the game
+        # decapsulates. The consuming half of the front whose ``initialize`` side
+        # is already green -- ``None`` off-shape, so every other oracle stays
+        # byte-identical.
+        cdc = _synth_correctness_decaps_casesplit(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            flat_params,
+            det_methods,
+            clone_alias,
+            full_coupling,
+            hop_index=hop_index,
+        )
+        if cdc is not None:
+            return cdc
+        # KDF-PRF substitution at a POST-INIT oracle: the consuming half of what
+        # `_synth_kdf_key_substitution` closes for `initialize`. ``None``
+        # off-shape, so every other oracle stays byte-identical.
+        ksd = _synth_kdf_substitution_decaps(
+            modules,
+            oracle_name,
+            left_states[0],
+            right_states[0],
+            external_module_types,
+            method_return_types,
+            flat_params,
+            det_methods,
+            clone_alias,
+            types,
+            full_coupling,
+        )
+        if ksd is not None:
+            return _evidence_only_chunks(), ksd, set()
+
     # Composite-wrapper bridge tactic (wall 7). When the hop has a composite
     # reduction wrapper, the wrapper<->flat bridges carry a cross-module field
     # coupling that ``sim`` cannot infer ("cannot infer the set of equalities").
@@ -9429,15 +9689,6 @@ def _emit_one_oracle_chain(
         )
         if bridge_peel is not None:
             bridge_tactic = bridge_peel
-
-    def micro_pre(left_ref: str, right_ref: str) -> str:
-        cpl = coupling(left_ref, right_ref)
-        if is_init:
-            return "true"
-        return cpl if eq_args == "true" else f"{eq_args} /\\ {cpl}"
-
-    def micro_post(left_ref: str, right_ref: str) -> str:
-        return f"={{res}} /\\ {coupling(left_ref, right_ref)}"
 
     # A stateless ROM oracle collapses the whole chain to ``proc; auto`` on the
     # endpoints (see the chain-lemma assembly below), so its per-step micros and
@@ -9491,7 +9742,7 @@ def _emit_one_oracle_chain(
         )
         if reprog_hashg is not None:
             tactic, pres, rung = reprog_hashg
-            return [], [_res_tag(rung), *tactic, "qed."], pres
+            return _evidence_only_chunks(), [_res_tag(rung), *tactic, "qed."], pres
 
     def _admit_fallback() -> tuple[list[str], list[str], set[tuple[str, str]]]:
         # Derivation-chain post-init peel, consulted ONLY here -- i.e. only where
@@ -9541,167 +9792,14 @@ def _emit_one_oracle_chain(
             set(),
         )
 
-    def _cached_leg(
-        transform_name: str, state_before: frog_ast.Game, state_after: frog_ast.Game
-    ) -> tuple[list[str], MicroRequests, str] | None:
-        """A captured tactic for ONE leg the synthesizers declined.
-
-        Phase-4's attachment point for micro legs. Until the key became the
-        masked changed region there was nothing to attach: a whole-game key
-        could not name a single leg, so the per-transform capture mechanism
-        could not catch the legs that matter most. The key here is that same
-        masked shape computed on the two states PROJECTED to this oracle, so
-        a leg entry and a chain-level entry for the same one-oracle change
-        are the same key -- a hit across them is transfer working, not a
-        collision.
-
-        Returns ``None`` when no lookup is wired (every caller but the
-        exporter) or on a miss, leaving the leg to decline exactly as before.
-        """
-        if micro_leg_lookup is None:
-            return None
-        tactic = micro_leg_lookup(
-            transform_name, state_before, state_after, oracle_name
-        )
-        if tactic is None:
-            return None
-        return tactic, MicroRequests(), CACHED_UNGUIDED
-
-    chunks: list[str] = []
-    step_pres: set[tuple[str, str]] = set()
-
-    def _absorb_requests(reqs: MicroRequests) -> None:
-        # Thread a micro leg's requests into the same accumulators the
-        # whole-oracle routes populate; they flow through
-        # ``MultiOracleHopChainInfo`` to the exporter's request sets
-        # unchanged (design review (c) — no new exporter-side plumbing).
-        step_pres.update(reqs.pres)
-        if inj_acc is not None:
-            inj_acc.update(reqs.inj)
-        if bij_acc is not None:
-            bij_acc.update(reqs.bij)
-        if decaps_val_acc is not None:
-            decaps_val_acc.update(reqs.decaps_val)
-
-    # EVIDENCE-ONLY MICRO EMISSION. A chain whose legs do not ALL close cannot
-    # carry the hop, so the oracle falls back to a whole-oracle route (or an
-    # honest admit) exactly as before. But the legs that DID close are still
-    # machine-checkable statements about single transform applications, and
-    # dropping them threw that evidence away -- which made every move's payoff
-    # all-or-nothing (a chain 37 pairs deep evidenced nothing until its last
-    # pair closed). So: keep scanning after a declining leg, emit every leg
-    # that closed as a standalone lemma, and emit NOTHING for a leg that
-    # declined (never an ``admit.`` -- an admit-free proof stays admit-free and
-    # a clean proof stays clean). The unreferenced lemmas still have to be
-    # PROVEN by EasyCrypt, so accepting the file is evidence for exactly the
-    # applications they name.
-    chain_broken = False
-    # One entry per appended micro chunk, in the same order: the two flat-state
-    # games the lemma relates and its rendered precondition. Only consulted on
-    # the broken-chain path (see the well-typedness filter below), so a chain
-    # that closes pays nothing for it.
-    evidence_meta: list[tuple[frog_ast.Game, frog_ast.Game, str, str, str]] = []
-
-    micros_left: list[str] = []
-    for k, app in enumerate(left_apps):
-        if stateless_oracle:
-            break
-        lref, rref = mod_ref(left_mods[k]), mod_ref(left_mods[k + 1])
-        step = _oracle_step_tactic(
-            left_states[k],
-            left_states[k + 1],
-            oracle_name,
-            reversed_dir=False,
-            external_module_types=external_module_types,
-            method_return_types=method_return_types,
-            modules=modules,
-            flat_params=flat_params,
-            det_methods=det_methods,
-            micro_pre_text=micro_pre(lref, rref),
-            left_ref=lref,
-            right_ref=rref,
-            clone_alias=clone_alias,
-            inj_methods_by_module=inj_methods_by_module,
-            use_canonical_fields=use_canonical,
-            is_init=is_init,
-        )
-        if step is None:
-            step = _cached_leg(app.transform_name, left_states[k], left_states[k + 1])
-        if step is None:
-            chain_broken = True
-            continue
-        tac, reqs, rung = step
-        _absorb_requests(reqs)
-        name = f"micro_{hop_index}_{oracle_name}_left_{k}"
-        micros_left.append(name)
-        chunks.append(
-            "\n".join(
-                _render_lemma_block(
-                    name,
-                    lref,
-                    rref,
-                    oracle_name,
-                    micro_pre(lref, rref),
-                    [_res_tag(rung), *tac],
-                    comment=_micro_transform_comment(app),
-                    postcondition=micro_post(lref, rref),
-                )
-            )
-        )
-        evidence_meta.append(
-            (left_states[k], left_states[k + 1], lref, rref, micro_pre(lref, rref))
-        )
-
-    micros_right_rev: list[str] = []
-    for k, app in enumerate(right_apps):
-        if stateless_oracle:
-            break
-        # Reversed: proves Step_R_state_{k+1} ~ Step_R_state_k.
-        lref, rref = mod_ref(right_mods[k + 1]), mod_ref(right_mods[k])
-        step = _oracle_step_tactic(
-            right_states[k],
-            right_states[k + 1],
-            oracle_name,
-            reversed_dir=True,
-            external_module_types=external_module_types,
-            method_return_types=method_return_types,
-            modules=modules,
-            flat_params=flat_params,
-            det_methods=det_methods,
-            micro_pre_text=micro_pre(lref, rref),
-            left_ref=lref,
-            right_ref=rref,
-            clone_alias=clone_alias,
-            inj_methods_by_module=inj_methods_by_module,
-            use_canonical_fields=use_canonical,
-            is_init=is_init,
-        )
-        if step is None:
-            step = _cached_leg(app.transform_name, right_states[k + 1], right_states[k])
-        if step is None:
-            chain_broken = True
-            continue
-        tac, reqs, rung = step
-        _absorb_requests(reqs)
-        name = f"micro_{hop_index}_{oracle_name}_right_{k}_rev"
-        micros_right_rev.append(name)
-        chunks.append(
-            "\n".join(
-                _render_lemma_block(
-                    name,
-                    lref,
-                    rref,
-                    oracle_name,
-                    micro_pre(lref, rref),
-                    [_res_tag(rung), *tac],
-                    comment=_micro_transform_comment(app, reversed_dir=True),
-                    postcondition=micro_post(lref, rref),
-                )
-            )
-        )
-        evidence_meta.append(
-            (right_states[k + 1], right_states[k], lref, rref, micro_pre(lref, rref))
-        )
+    (
+        scan_chunks,
+        micros_left,
+        micros_right_rev,
+        chain_broken,
+        evidence_meta,
+    ) = _scan_legs(stateless_oracle)
+    chunks.extend(scan_chunks)
 
     if chain_broken:
         # The chain cannot carry the hop: take the same fallback as before
@@ -9729,6 +9827,7 @@ def _emit_one_oracle_chain(
                 external_module_types,
                 method_return_types,
                 flat_params,
+                use_canonical,
             )
         ]
         _, fb_body, fb_pres = _admit_fallback()
@@ -19887,15 +19986,30 @@ def _micro_pre_well_typed(  # pylint: disable=too-many-arguments,too-many-positi
     external_module_types: dict[str, str],
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     flat_params: list[ec_ast.ModuleParam],
+    use_canonical_fields: bool = False,
 ) -> bool:
-    """True unless the micro's precondition equates two differently-typed fields.
+    """True unless the micro's precondition is ill-typed as a STATEMENT.
 
     ``meta`` is ``(left_state, right_state, left_ref, right_ref, pre_text)``.
-    Each ``<Mod>.<f>{1} = <Mod>.<g>{2}`` conjunct is checked against the two
-    rendered flat-state modules' declared variable types; a conjunct naming a
-    module other than this lemma's two endpoints is skipped rather than judged.
-    Used only to filter EVIDENCE-ONLY lemmas, so a mistake here can lose
-    evidence but can never change a chain that carries its hop.
+    Two ways a broken chain's coupling can fail to typecheck, both of which
+    would make EasyCrypt reject the whole file:
+
+    * a ``<Mod>.<f>{1} = <Mod>.<g>{2}`` conjunct equating differently-typed
+      fields (``_chain_role_map`` is a union-find over bare field names, so
+      an unrelated state's identically-named field can merge roles). A
+      conjunct naming a module other than this lemma's two endpoints is
+      skipped rather than judged;
+    * a WHOLE-GLOB conjunct ``(glob A){1} = (glob B){2}`` between two states
+      whose glob signatures differ. EasyCrypt compares globs by name and
+      type, so a step that adds or removes a field (``Inline Single-Use
+      Field``) makes the equality itself ill-typed: *no matching operator,
+      named `=`* on the lemma statement, measured on
+      ``UG_expanded_LEAK_BIND_K_PK`` ``micro_2_challenge_left_11``.
+
+    ``use_canonical_fields`` must be the chain's own field-naming decision,
+    or the signatures compared here are not the emitted ones. Used only to
+    filter EVIDENCE-ONLY lemmas, so a mistake here can lose evidence but can
+    never change a chain that carries its hop.
     """
     left_state, right_state, lref, rref, pre_text = meta
     lproj = _project_to_method(left_state, oracle_name)
@@ -19911,6 +20025,7 @@ def _micro_pre_well_typed(  # pylint: disable=too-many-arguments,too-many-positi
         method_return_types,
         flat_params,
         emit_state_vars=True,
+        use_canonical_fields=use_canonical_fields,
     )
     rmod = _flat_state_module(
         modules,
@@ -19920,7 +20035,53 @@ def _micro_pre_well_typed(  # pylint: disable=too-many-arguments,too-many-positi
         method_return_types,
         flat_params,
         emit_state_vars=True,
+        use_canonical_fields=use_canonical_fields,
     )
+    if f"(glob {lref}){{1}} = (glob {rref}){{2}}" in pre_text:
+        # Compare the signature of the modules AS EMITTED -- the whole flat
+        # state, not this oracle's projection -- and compare it with
+        # :func:`_glob_signature`, which is what the emitter itself uses.
+        # Both corrections are load-bearing, and each was measured:
+        #
+        # * the FIELD list of a projection can agree while the emitted
+        #   modules' differs, since a field only another oracle reads is
+        #   dropped by the projection;
+        # * ``glob F(A, B)`` contains ``glob A`` only when ``F``'s body
+        #   actually CALLS ``A`` (EC drops unused functor args), so two
+        #   states whose ``initialize`` differs in which parameters it calls
+        #   have DIFFERENT glob types even with identical field lists. That
+        #   is not a solver problem and not a tactic problem: the STATEMENT
+        #   does not typecheck, and EasyCrypt rejects the whole file with
+        #   *no matching operator, named `='* naming no parameter types at
+        #   all. Probed standalone in ``.ec-tmp/diag/param_glob_probe.ec``
+        #   (two functors over one abstract module, one calling it and one
+        #   not) and measured as the single cause of all four proofs that
+        #   evidence-only emission was breaking, each goal read separately.
+        param_names = [p.name for p in flat_params]
+        if use_canonical_fields:
+            param_names += [m for m, _ in modules.types.function_value_modules()]
+        lfull = _render_flat_state(
+            modules,
+            lbase,
+            left_state,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            emit_state_vars=True,
+            use_canonical_fields=use_canonical_fields,
+        )
+        rfull = _render_flat_state(
+            modules,
+            rbase,
+            right_state,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            emit_state_vars=True,
+            use_canonical_fields=use_canonical_fields,
+        )
+        if _glob_signature(lfull, param_names) != _glob_signature(rfull, param_names):
+            return False
     ltypes = {v.name: str(v.type) for v in lmod.module_vars}
     rtypes = {v.name: str(v.type) for v in rmod.module_vars}
     for mb1, f, mb2, g in _FIELD_PAIR_RE.findall(pre_text):

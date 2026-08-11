@@ -3339,3 +3339,53 @@ def test_bitword_derivation_templates_compile(tmp_path: Path, template: str) -> 
         f"stderr:\n{result.stderr}\n"
         f"stdout:\n{result.stdout[-2000:]}"
     )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
+def test_whole_glob_precondition_rejects_mismatched_parameter_usage(
+    tmp_path: Path,
+) -> None:
+    """A REJECTING template: EasyCrypt must REFUSE it, and that is the point.
+
+    An evidence-only micro lemma states a WHOLE-GLOB precondition,
+    ``(glob A){1} = (glob B){2}``. Whether that STATEMENT typechecks turns on
+    something the exporter did not compare: ``glob F(A)`` contains ``glob A``
+    only when ``F``'s body actually CALLS ``A``, since EasyCrypt drops unused
+    functor arguments. Two flat states with identical field lists therefore
+    have different glob TYPES as soon as one stops calling a parameter, and
+    EasyCrypt rejects the whole file with *no matching operator, named `='* --
+    naming no parameter types at all, which is why the message reads like a
+    solver failure rather than a typing one.
+
+    The template's first lemma is the control (matching usage, must be
+    accepted); the second is the shape the exporter emitted. Measured as the
+    single cause of all four proofs evidence-only emission was breaking
+    (``CG_seedbased`` LEAK_BIND_K_PK / K_CT_DIFFKEY / K_CT_SAMEKEY and
+    ``CK_seedbased`` LEAK_BIND_K_CT_SAMEKEY), each goal read separately.
+    ``_micro_pre_well_typed`` now drops such a lemma; if EasyCrypt ever
+    accepts the second one, that filter is over-tight.
+    """
+    template = "evidence_glob_param_usage_rejects.ec"
+    ec_file = tmp_path / template
+    ec_file.write_text((EC_TEMPLATES / template).read_text())
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    assert result.returncode != 0, (
+        "EasyCrypt ACCEPTED a whole-glob equality between two functors with "
+        "different parameter usage; the evidence-lemma filter may be "
+        "over-tight.\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+    assert "no matching operator" in (result.stdout + result.stderr), (
+        "EasyCrypt rejected the template for a different reason than the one "
+        "it documents (the control lemma above it may have broken).\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )

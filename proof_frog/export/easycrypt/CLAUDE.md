@@ -587,19 +587,28 @@ Key modules:
   `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
   `ec_ast.py` — FrogLang→EC translation primitives.
 
-## Evidence-only micro emission (broken chains still pay evidence)
+## Evidence-only micro emission (every return path pays evidence)
 
 `_emit_one_oracle_chain` no longer abandons an oracle at the first leg
-`_oracle_step_tactic` declines. It keeps scanning, emits every leg that DID
-close as a standalone lemma prefixed
-`(* evidence-only: this leg closed but its chain did not ... *)`, and routes the
-oracle to exactly the whole-oracle fallback it used before. A leg that declines
-emits **nothing** — never an `admit.` — so an admit-free proof stays admit-free
-and a clean proof stays clean; the flat states those lemmas name are kept by the
+`_oracle_step_tactic` declines. The leg scan (`_scan_legs`) is shared by two
+callers: the chain path runs it and, when every leg closed, goes on to build the
+bridge and chain lemmas; **every other return path** — an `Initialize` route, a
+whole-oracle endpoint route, an honest admit — runs it through
+`_evidence_only_chunks` purely to keep the legs that DID close as standalone
+lemmas, prefixed `(* evidence-only: this leg closed but its chain did not ... *)`.
+The route still closes the hop lemma exactly as before. A leg that declines emits
+**nothing** — never an `admit.` — so an admit-free proof stays admit-free and a
+clean proof stays clean; the flat states those lemmas name are kept by the
 existing referenced-state filter. The lemmas are unreferenced but EasyCrypt still
 has to prove them, so an accepted file is per-application evidence for exactly
 the transform applications they name (the dashboard's evidence coverage counts
-them via `_micro_leg`).
+them via `_micro_leg`). Measured across the corpus: transform evidence 23.7% →
+49.6% with **no** proof's EC status changing and open admits unchanged at 73.
+
+An `Initialize` leg is dropped WHOLESALE from evidence-only emission: its
+precondition is `true` (there is no incoming state to relate) while its
+postcondition asserts the state coupling, so a single leg would have to
+establish that coupling out of nothing.
 
 Two consequences to keep in mind when adding or changing a leg route:
 
@@ -616,6 +625,18 @@ Two consequences to keep in mind when adding or changing a leg route:
   field can merge roles and produce `A.f{1} = B.g{2}` across different types.
   `_micro_pre_well_typed` drops such evidence lemmas (evidence-only path only),
   which is what makes the feature strictly additive.
+- **A WHOLE-GLOB precondition typechecks only if the two states' emitted glob
+  SIGNATURES agree**, and the signature is `_glob_signature`'s pair: the module
+  vars *and the functor parameters the body actually calls*. `glob F(A)` contains
+  `glob A` only when `F` calls `A` — EasyCrypt drops unused functor args — so two
+  states with identical field lists have different glob types as soon as one
+  stops calling a parameter, and EasyCrypt rejects the file with *no matching
+  operator, named `='* listing no parameter types at all (which reads like a
+  solver failure, not a typing one). The comparison must be made on the WHOLE
+  flat state, not the oracle projection: the difference usually lives in
+  `initialize`. Rejecting tripwire: `ec_templates/evidence_glob_param_usage_rejects.ec`
+  (control lemma first, so a drift in the control cannot be mistaken for the
+  rejection under test).
 
 ## Automation ladder (how each resolution closes)
 

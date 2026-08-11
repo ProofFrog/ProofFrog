@@ -9705,17 +9705,12 @@ def _emit_one_oracle_chain(
         # Plain GAME vs a reduction FORWARDING this oracle to its challenger:
         # not same-shape (the inlined challenger adds dead guards), so driven by
         # the game's if-tree alone with pattern positions.
-        fwd = _synth_forwarded_oracle_peel(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            full_coupling,
-        )
-        if fwd is not None:
-            return _evidence_only_chunks(), fwd, set()
+        # RETIRED 2026-08-11, ninth of the whole-oracle endpoint routes to go.
+        # ``_synth_forwarded_oracle_peel`` (a plain game against a reduction
+        # FORWARDING this oracle to its challenger, driven by the game's
+        # if-tree with pattern positions) is still defined below and kept as a
+        # reference for that tactic shape, but it is no longer dispatched to.
+        # Priced by the per-route census at 24 closures over 12 proofs.
         # Packed-key correctness ``decaps``: the reduction case-splits on the
         # challenge ciphertext and reuses its stored ``corr.`5`` where the game
         # decapsulates. The consuming half of the front whose ``initialize`` side

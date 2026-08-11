@@ -2948,12 +2948,18 @@ def export_proof_file(proof_path: str) -> str:
                 # A reduction that declares no Initialize still has to ascribe
                 # to the OUTER game's oracle interface, which for a multi-oracle
                 # theorem game declares one. See translate_reduction.
-                requires_initialize=multi_oracle_spec_for(
-                    top_modules,
-                    proof.theorem.name,
-                    scheme_args=list(proof.theorem.args),
-                )
-                is not None,
+                inherited_init_type=(
+                    _thm_spec.init_return_type
+                    if (
+                        _thm_spec := multi_oracle_spec_for(
+                            top_modules,
+                            proof.theorem.name,
+                            scheme_args=list(proof.theorem.args),
+                        )
+                    )
+                    is not None
+                    else None
+                ),
             )
         )
         if helper.methods:

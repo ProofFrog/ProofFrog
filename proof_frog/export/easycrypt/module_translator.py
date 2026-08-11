@@ -974,7 +974,7 @@ class ModuleTranslator:
         param_module_types: dict[str, str] | None = None,
         param_primitive_types: dict[str, str] | None = None,
         allow_void_call: bool = False,
-        requires_initialize: bool = False,
+        inherited_init_type: ec_ast.EcType | None = None,
     ) -> ec_ast.Module:
         """Translate a Reduction to a multi-parameter EC module.
 
@@ -1078,7 +1078,7 @@ class ModuleTranslator:
             )
             for i, method in enumerate(reduction.methods)
         ]
-        if _reduction_init_method(reduction) is None and requires_initialize:
+        if _reduction_init_method(reduction) is None and inherited_init_type:
             # A reduction that declares no Initialize INHERITS the challenger's:
             # composition gives the composed game the challenger's setup, and
             # the emitted step wrapper calls `R(...).initialize()` accordingly.
@@ -1091,17 +1091,30 @@ class ModuleTranslator:
             # `HybridKEMDEM_INDCPA_MultiChal`, `HybridPKEDEM_INDCPA_MultiChal`).
             # Emitted only when the caller says the interface requires it, so
             # every reduction that already ascribes stays byte-identical.
+            # A non-`unit` outer init has a RESULT the composed game must
+            # hand on, so forward the challenger's; `unit` threads nothing.
+            init_body: list[ec_ast.EcStmt] = (
+                [
+                    ec_ast.Call(
+                        var="", callee=f"{challenger_ec_name}.initialize", args=""
+                    )
+                ]
+                if inherited_init_type.text == "unit"
+                else [
+                    ec_ast.VarDecl(name="_r", type=inherited_init_type),
+                    ec_ast.Call(
+                        var="_r", callee=f"{challenger_ec_name}.initialize", args=""
+                    ),
+                    ec_ast.Return(expr="_r"),
+                ]
+            )
             procs.insert(
                 0,
                 ec_ast.Proc(
                     name="initialize",
                     params=[],
-                    return_type=ec_ast.EcType("unit"),
-                    body=[
-                        ec_ast.Call(
-                            var="", callee=f"{challenger_ec_name}.initialize", args=""
-                        )
-                    ],
+                    return_type=inherited_init_type,
+                    body=init_body,
                 ),
             )
         return ec_ast.Module(

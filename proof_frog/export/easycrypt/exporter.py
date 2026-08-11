@@ -16144,12 +16144,47 @@ def export_proof_file(proof_path: str) -> str:
             if reprogram_override is None:
                 reprogram_override = _batched_align_init_tac(step_a, step_b)
 
+            def _micro_leg_cache_lookup(
+                transform_name: str,
+                state_before: frog_ast.Game,
+                state_after: frog_ast.Game,
+                oracle_name: str,
+            ) -> list[str] | None:
+                """A captured tactic for ONE chain leg, keyed on that leg.
+
+                Phase-4's micro-leg attachment point. Until the key became
+                the masked changed region there was nothing to attach to: a
+                whole-game key cannot name a single leg, so the per-transform
+                capture mechanism could not catch the legs that matter most.
+                The key is `masked_shape` of the two states PROJECTED to this
+                oracle -- the same key shape the per-transform lookup uses,
+                so an entry derived for a one-oracle change is found from
+                either side. The lookup is recorded in
+                ``requested_cache_keys`` so the orphan report still sees
+                every lookup the export performed.
+                """
+                # pylint: disable=import-outside-toplevel
+                from .chain_emitter import _project_to_method
+
+                proj_b = _project_to_method(state_before, oracle_name)
+                proj_a = _project_to_method(state_after, oracle_name)
+                if proj_b is None or proj_a is None:
+                    return None
+                leg_key = canonical_form.masked_shape(
+                    proj_b, proj_a, external_module_types, method_return_types
+                )
+                key = (transform_name, leg_key[0], leg_key[1])
+                requested_cache_keys.append(key)
+                hit = tactic_cache.lookup(*key)
+                return hit.tactic.splitlines() if hit is not None else None
+
             info = emit_multi_oracle_chain_for_hop(
                 hop_index=_i,
                 left_game=left_ast,
                 right_game=right_ast,
                 left_apps=left_apps,
                 right_apps=right_apps,
+                micro_leg_lookup=_micro_leg_cache_lookup,
                 oracles=oracles,
                 oracle_eq_args=oracle_eq_args,
                 left_wrapper_expr=resolver.resolve(step_a).module_expr,

@@ -247,3 +247,52 @@ def test_explicit_override_and_env_beat_discovery(
     # A path that is not a directory is ignored rather than crashing.
     monkeypatch.setenv(tc.TACTIC_CACHE_ENV, str(tmp_path / "nope"))
     assert tc.find_project_store(deep / "p.proof") is None
+
+
+def test_micro_leg_key_is_the_projected_masked_shape() -> None:
+    """The micro-leg attachment point (Phase-4) keys a leg on the masked
+    changed region of the two states PROJECTED to one oracle -- which is the
+    same key a per-transform lookup produces for a one-oracle change, so an
+    entry derived on either side is found from the other. That equality is
+    the whole reason the key change was worth making."""
+    # pylint: disable=import-outside-toplevel
+    from proof_frog import frog_ast
+    from proof_frog.export.easycrypt import canonical_form as cf
+    from proof_frog.export.easycrypt.chain_emitter import _project_to_method
+
+    bs = frog_ast.BitStringType(parameterization=frog_ast.Variable("lambda"))
+
+    def game(ret: str, second_ret: str) -> frog_ast.Game:
+        def method(name: str, expr: str) -> frog_ast.Method:
+            return frog_ast.Method(
+                frog_ast.MethodSignature(name, bs, [frog_ast.Parameter(bs, "m")]),
+                frog_ast.Block([frog_ast.ReturnStatement(frog_ast.Variable(expr))]),
+            )
+
+        return frog_ast.Game(
+            (
+                "G",
+                [],
+                [frog_ast.Field(bs, "f", None)],
+                [method("Challenge", ret), method("Other", second_ret)],
+            )
+        )
+
+    # Only `Challenge` differs, and only structurally.
+    before = game("m", "f")
+    after = game("m", "f")
+    after.methods[0].block.statements = [
+        frog_ast.ReturnStatement(
+            frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.ADD,
+                frog_ast.Variable("m"),
+                frog_ast.Variable("f"),
+            )
+        )
+    ]
+    whole = cf.masked_shape(before, after, {}, {})
+    proj_b = _project_to_method(before, "challenge")
+    proj_a = _project_to_method(after, "challenge")
+    assert proj_b is not None and proj_a is not None
+    leg = cf.masked_shape(proj_b, proj_a, {}, {})
+    assert whole == leg

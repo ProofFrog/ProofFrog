@@ -8028,6 +8028,9 @@ def emit_multi_oracle_chain_for_hop(
     is_lazyro_honest: bool = False,
     is_ro_handoff: bool = False,
     drop_globs: frozenset[str] = frozenset(),
+    micro_leg_lookup: (
+        Callable[[str, frog_ast.Game, frog_ast.Game, str], list[str] | None] | None
+    ) = None,
     both_reductions: bool = False,
     init_tac_override: list[str] | None = None,
     oracle_tac_override: dict[str, list[str]] | None = None,
@@ -8179,6 +8182,7 @@ def emit_multi_oracle_chain_for_hop(
             drop_globs=drop_globs,
             both_reductions=both_reductions,
             outer_globs=outer_globs,
+            micro_leg_lookup=micro_leg_lookup,
         )
         oracle_chunks_all.extend(oracle_chunks)
         tactic_body_by_oracle[oracle_name] = outer_body
@@ -8261,6 +8265,9 @@ def _emit_one_oracle_chain(
     drop_globs: frozenset[str] = frozenset(),
     both_reductions: bool = False,
     outer_globs: frozenset[str] | None = None,
+    micro_leg_lookup: (
+        Callable[[str, frog_ast.Game, frog_ast.Game, str], list[str] | None] | None
+    ) = None,
 ) -> tuple[list[str], list[str], set[tuple[str, str]]]:
     """Emit one oracle's chain artifacts + outer tactic body.
 
@@ -9212,6 +9219,32 @@ def _emit_one_oracle_chain(
                 return [], [_res_tag(rung), *tactic, "qed."], pres
         return [], _oracle_pending_admit(hop_index, oracle_name), set()
 
+    def _cached_leg(
+        transform_name: str, state_before: frog_ast.Game, state_after: frog_ast.Game
+    ) -> tuple[list[str], MicroRequests, str] | None:
+        """A captured tactic for ONE leg the synthesizers declined.
+
+        Phase-4's attachment point for micro legs. Until the key became the
+        masked changed region there was nothing to attach: a whole-game key
+        could not name a single leg, so the per-transform capture mechanism
+        could not catch the legs that matter most. The key here is that same
+        masked shape computed on the two states PROJECTED to this oracle, so
+        a leg entry and a chain-level entry for the same one-oracle change
+        are the same key -- a hit across them is transfer working, not a
+        collision.
+
+        Returns ``None`` when no lookup is wired (every caller but the
+        exporter) or on a miss, leaving the leg to decline exactly as before.
+        """
+        if micro_leg_lookup is None:
+            return None
+        tactic = micro_leg_lookup(
+            transform_name, state_before, state_after, oracle_name
+        )
+        if tactic is None:
+            return None
+        return tactic, MicroRequests(), CACHED_UNGUIDED
+
     chunks: list[str] = []
     step_pres: set[tuple[str, str]] = set()
 
@@ -9270,6 +9303,8 @@ def _emit_one_oracle_chain(
             use_canonical_fields=use_canonical,
         )
         if step is None:
+            step = _cached_leg(app.transform_name, left_states[k], left_states[k + 1])
+        if step is None:
             chain_broken = True
             continue
         tac, reqs, rung = step
@@ -9317,6 +9352,8 @@ def _emit_one_oracle_chain(
             inj_methods_by_module=inj_methods_by_module,
             use_canonical_fields=use_canonical,
         )
+        if step is None:
+            step = _cached_leg(app.transform_name, right_states[k + 1], right_states[k])
         if step is None:
             chain_broken = True
             continue

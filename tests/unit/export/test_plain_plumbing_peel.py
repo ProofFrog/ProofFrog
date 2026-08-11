@@ -50,6 +50,7 @@ def _game(
     drop_call: bool = False,
     cross_args: bool = False,
     extra_sample: bool = False,
+    commute_return: bool = False,
 ) -> frog_ast.Game:
     """``extracted``: the repeated ``ct0`` use is bound to a local first --
     the plumbing difference. ``swap_fields``: the two fields change roles,
@@ -114,11 +115,14 @@ def _game(
             )
         )
     ret = _var("s") if drop_call else _var("u")
-    stmts.append(
-        frog_ast.ReturnStatement(
-            frog_ast.BinaryOperation(frog_ast.BinaryOperators.EQUALS, ret, _var("s"))
-        )
+    tail: frog_ast.Expression = frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.EQUALS, ret, _var("s")
     )
+    if commute_return:
+        # Two FIELD operands of an `=`, commuted -- inside one peel segment.
+        lo, hi = (_var("dk1"), _var("dk0")) if extracted else (_var("dk0"), _var("dk1"))
+        tail = frog_ast.BinaryOperation(frog_ast.BinaryOperators.EQUALS, lo, hi)
+    stmts.append(frog_ast.ReturnStatement(tail))
     chal = frog_ast.Method(
         frog_ast.MethodSignature(
             "Challenge",
@@ -230,3 +234,19 @@ def test_declines_a_one_sided_sample() -> None:
     comparing only the CALLEES is not enough. Measured on `7_13_Forward`,
     whose leg adds a `<$` on one side only -- *invalid last instruction*."""
     assert _row(_game("PP_L"), _game("PP_R", extracted=True, extra_sample=True)) is None
+
+
+def test_fires_when_two_field_operands_are_merely_COMMUTED() -> None:
+    """The field comparison is per PEEL SEGMENT with each segment's fields
+    sorted, so a leg that only commutes two field operands of an `=` inside
+    one segment still fires: the coupling supplies both equalities, so the
+    goal is true. A ROLE SWAP between two different calls still declines
+    (the test above), and that is the distinction the segment granularity
+    buys -- measured as 24 of the 44 declining plain-peelable legs on the two
+    flagship binding cells."""
+    step = _row(
+        _game("PP_L", commute_return=True),
+        _game("PP_R", extracted=True, commute_return=True),
+    )
+    assert step is not None
+    assert step[0][-1] == "auto => /#."

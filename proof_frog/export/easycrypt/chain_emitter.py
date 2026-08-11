@@ -3442,7 +3442,10 @@ def _plain_plumbing_peel_step(
       variants, whose two ciphertext branches run in opposite orders; the
       goal demanded ``ct1.`1 = ct0.`1``. Same defect as the one the gate was
       written for, reached through a different route;
-    * the two bodies must reference the state's FIELDS in the same order.
+    * the two bodies must reference the state's FIELDS the same way,
+      statement by statement (operand order WITHIN a statement does not
+      count -- that granularity is what the peel works at, and it is what
+      lets a commuted pair of field operands through).
       The micro precondition couples the two globs by NAME, so a leg that
       renames or permutes fields is not provable from it however the
       plumbing lines up. Measured on the first run of this row:
@@ -3493,22 +3496,50 @@ def _plain_plumbing_peel_step(
     )
 
 
-def _field_reference_order(body: list[ec_ast.EcStmt], fields: set[str]) -> list[str]:
-    """Every state-field name ``body`` mentions, in statement order.
+def _field_reference_order(
+    body: list[ec_ast.EcStmt], fields: set[str]
+) -> list[list[str]]:
+    """Which state fields ``body`` mentions, per PEEL SEGMENT.
 
-    Descends into ``if``/``while`` bodies so a branch-local reference counts
-    where it appears. Used to decline a leg whose two sides use the fields
-    differently: the micro precondition couples the globs by NAME, so any
-    renaming or permutation of fields makes the peel's obligation false.
+    The body is cut at each abstract call, giving alternating deterministic
+    runs and calls; each segment contributes the sorted multiset of the state
+    fields it mentions. Descends into ``if``/``while`` bodies so a
+    branch-local reference counts where it appears.
+
+    That granularity is the peel's own: ``wp`` collapses a whole deterministic
+    run at once and ``call`` couples one call, so what has to correspond
+    between the two sides is which fields each SEGMENT mentions -- not which
+    statement, since a plumbing leg changes the statement count by
+    construction, and not the whole body, which cannot tell a role swap from a
+    commuted pair.
+
+    So a leg that merely commutes two field operands passes (``Normalize
+    Commutative Chains``: ``field7 <> field8`` against ``field8 <> field7``,
+    whose goal is true because the coupling supplies both equalities), while a
+    leg that swaps two fields' ROLES between two different calls is declined
+    (``CG_expanded_LEAK_BIND_K_PK``, where the closer was handed
+    ``concat(.., field1{1}) = concat(.., field2{2})`` against a precondition
+    coupling the globs by name -- a FALSE subgoal, not a hard one).
     """
-    out: list[str] = []
+    out: list[list[str]] = []
+    run: list[str] = []
     for stmt in _exec_stmts(body):
-        out.extend(tok for tok in _stmt_tokens(stmt) if tok in fields)
+        toks = [tok for tok in _stmt_tokens(stmt) if tok in fields]
+        if isinstance(stmt, ec_ast.Call):
+            out.append(sorted(run))
+            out.append(sorted(toks))
+            run = []
+            continue
+        run.extend(toks)
         if isinstance(stmt, ec_ast.If):
-            out.extend(_field_reference_order(stmt.then_body, fields))
-            out.extend(_field_reference_order(stmt.else_body, fields))
+            for seg in _field_reference_order(stmt.then_body, fields):
+                run.extend(seg)
+            for seg in _field_reference_order(stmt.else_body, fields):
+                run.extend(seg)
         elif isinstance(stmt, ec_ast.While):
-            out.extend(_field_reference_order(stmt.body, fields))
+            for seg in _field_reference_order(stmt.body, fields):
+                run.extend(seg)
+    out.append(sorted(run))
     return out
 
 

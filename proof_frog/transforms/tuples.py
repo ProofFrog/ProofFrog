@@ -51,6 +51,31 @@ def _count_var_refs(node: frog_ast.ASTNode, name: str) -> int:
     return count[0]
 
 
+def _has_self_referencing_whole_assignment(node: frog_ast.ASTNode, name: str) -> bool:
+    """Return True iff *node* contains a whole-variable assignment to *name*
+    whose right-hand side also references *name* (e.g. a swap
+    ``v = [v[1], v[0]];``).
+
+    F-321: ``ExpandTupleTransformer`` rewrites a whole-tuple assignment into
+    *sequential* per-component assignments. That is only faithful when the
+    right-hand side does not read the tuple being assigned: the RHS of
+    ``v = [v[1], v[0]];`` evaluates to a value before the assignment happens,
+    but the sequential expansion ``v@0 = v@1; v@1 = v@0;`` makes later
+    components read already-overwritten ones. Expansion must decline on any
+    such self-referencing whole-variable assignment.
+    """
+
+    def _p(n: frog_ast.ASTNode) -> bool:
+        return (
+            isinstance(n, frog_ast.Assignment)
+            and isinstance(n.var, frog_ast.Variable)
+            and n.var.name == name
+            and _count_var_refs(n.value, name) > 0
+        )
+
+    return SearchVisitor(_p).visit(node) is not None
+
+
 def _count_var_decls(node: frog_ast.ASTNode, name: str) -> int:
     """Count local declarations that bind *name* in *node* (typed
     sample/assignment/declaration, or a loop binder)."""
@@ -80,15 +105,60 @@ class ExpandTupleTransformer(Transformer):
     """Expands product-typed variables into individual component variables.
 
     A field or local of type ``T1 * T2`` is split into ``T1 v@0`` and
-    ``T2 v@1``.  Index accesses like ``v[0]`` are rewritten to the
-    corresponding component variable.  Only applies when all accesses
-    use constant indices (checked via ``AllConstantFieldAccesses``).
+    ``T2 v@1``.  Locals are handled both as declarations with an
+    initializer (``[T1, T2] v = [e0, e1];``) and as bare declarations
+    (``[T1, T2] v;``) later written by whole-variable or element
+    assignments (issue #255).  Index accesses like ``v[0]`` are rewritten
+    to the corresponding component variable.  Only applies when all
+    accesses use constant indices and no whole-variable reassignment
+    reads the variable in its own right-hand side (checked via
+    ``AllConstantFieldAccesses`` and
+    ``_has_self_referencing_whole_assignment``).
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        ctx: PipelineContext | None = None,
+        bare_locals_only: bool = False,
+        pass_name: str = "Expand Tuples",
+    ) -> None:
+        self.ctx = ctx
+        # ``bare_locals_only`` restricts the transformer to splitting bare
+        # product-typed local declarations (issue #255). It is used by the
+        # early ``Split Bare Tuple Declarations`` pass, which must run before
+        # Topological Sorting prunes bare declarations and Collapse Assignment
+        # folds their assignments away. Fields and decl-with-initializer
+        # locals keep their existing late-pipeline route (the full
+        # ``Expand Tuples`` pass) so their canonical routes are unchanged.
+        self.bare_locals_only = bare_locals_only
+        self.pass_name = pass_name
         self.to_transform: list[str] = []
         self.lengths: list[int] = []
         self._current_method: frog_ast.Method | None = None
+
+    def _near_miss(
+        self,
+        reason: str,
+        suggestion: str | None,
+        variable: str,
+        location: frog_ast.SourceOrigin | None = None,
+    ) -> None:
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name=self.pass_name,
+                reason=reason,
+                location=location,
+                suggestion=suggestion,
+                variable=variable,
+                method=(
+                    self._current_method.signature.name
+                    if self._current_method is not None
+                    else None
+                ),
+            )
+        )
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
         # Capture the enclosing method so the F-324 scope guard can tell whether
@@ -124,9 +194,44 @@ class ExpandTupleTransformer(Transformer):
     def _is_transformable_tuple(
         self, the_type: frog_ast.Type, name: str, search_space: frog_ast.ASTNode
     ) -> bool:
-        return isinstance(the_type, frog_ast.ProductType) and AllConstantFieldAccesses(
-            name
-        ).visit(search_space)
+        if not isinstance(the_type, frog_ast.ProductType):
+            return False
+        if not AllConstantFieldAccesses(name).visit(search_space):
+            self._near_miss(
+                reason=(
+                    f"product-typed '{name}' was not split into components: "
+                    "an access uses a non-constant index, a whole-variable "
+                    "write is not a tuple literal, or the whole variable is "
+                    "sampled"
+                ),
+                suggestion=(
+                    f"Access '{name}' only at constant indices and write it "
+                    "either element-wise or as a whole-variable tuple literal"
+                ),
+                variable=name,
+            )
+            return False
+        # F-321: a whole-variable reassignment whose RHS reads the variable
+        # itself (e.g. a swap ``v = [v[1], v[0]];``) cannot be split into
+        # sequential component assignments -- later components would read
+        # already-overwritten values instead of the pre-assignment ones.
+        if _has_self_referencing_whole_assignment(search_space, name):
+            self._near_miss(
+                reason=(
+                    f"product-typed '{name}' was not split into components: "
+                    f"a whole-variable assignment reads '{name}' in its "
+                    "right-hand side, and sequential component assignments "
+                    "would overwrite components the right-hand side still "
+                    "needs"
+                ),
+                suggestion=(
+                    f"Copy '{name}' into a temporary variable and build the "
+                    "reassigned tuple from the temporary"
+                ),
+                variable=name,
+            )
+            return False
+        return True
 
     @staticmethod
     def _has_reference(name: str, block: frog_ast.Block) -> bool:
@@ -137,7 +242,59 @@ class ExpandTupleTransformer(Transformer):
 
         return SearchVisitor(is_named_variable).visit(block) is not None
 
+    def _can_expand_bare_declaration(
+        self,
+        statement: frog_ast.VariableDeclaration,
+        block: frog_ast.Block,
+        stmt_idx: int,
+    ) -> bool:
+        """Decide whether a bare product-typed local ``[T0, T1] v;`` may be
+        split into per-component declarations (issue #255: the split-decl
+        spelling must canonicalize like the decl-with-initializer one).
+
+        Carries the same guards as the decl-with-initializer branch: the
+        variable must be referenced in the remainder of THIS block (otherwise
+        the use site is in an enclosing scope, or the decl is dead code),
+        every access must pass ``_is_transformable_tuple``, and the F-324
+        scope guard must not trip.
+        """
+        if not isinstance(statement.type, frog_ast.ProductType):
+            return False
+        if not self._has_reference(
+            statement.name,
+            frog_ast.Block(list(block.statements[stmt_idx + 1 :])),
+        ):
+            return False
+        if not self._is_transformable_tuple(statement.type, statement.name, block):
+            # near-miss emitted by _is_transformable_tuple
+            return False
+        if self._local_escapes_block(block, statement.name):
+            self._near_miss(
+                reason=(
+                    f"product-typed '{statement.name}' was not split into "
+                    "components: it is referenced outside the block that "
+                    "declares it, and splitting would leave those references "
+                    "dangling"
+                ),
+                suggestion=(
+                    f"Declare '{statement.name}' in the block where it is " "used"
+                ),
+                variable=statement.name,
+                location=statement.origin,
+            )
+            return False
+        return True
+
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        if self.bare_locals_only:
+            return frog_ast.Game(
+                (
+                    game.name,
+                    game.parameters,
+                    list(game.fields),
+                    [self.transform(method) for method in game.methods],
+                )
+            )
         new_fields = []
         for field in game.fields:
             if self._is_transformable_tuple(field.type, field.name, game):
@@ -199,7 +356,8 @@ class ExpandTupleTransformer(Transformer):
                 )
                 new_statements.append(new_statement)
             elif (
-                isinstance(statement, frog_ast.Assignment)
+                not self.bare_locals_only
+                and isinstance(statement, frog_ast.Assignment)
                 and statement.the_type is not None
                 and isinstance(statement.var, frog_ast.Variable)
                 and self._is_transformable_tuple(
@@ -234,6 +392,24 @@ class ExpandTupleTransformer(Transformer):
                     )
                 self.to_transform.append(statement.var.name)
                 self.lengths.append(len(unfolded_types))
+                expanded_tuple_count += 1
+            # A bare product-typed declaration ``[T0, T1] v;`` (issue #255)
+            # is split into per-component declarations; the later
+            # whole-variable / element assignments and accesses are then
+            # handled by the branches above and by transform_array_access.
+            elif isinstance(
+                statement, frog_ast.VariableDeclaration
+            ) and self._can_expand_bare_declaration(statement, block, stmt_idx):
+                assert isinstance(statement.type, frog_ast.ProductType)
+                unfolded_decl_types = statement.type.types
+                for index, the_type in enumerate(unfolded_decl_types):
+                    new_statements.append(
+                        frog_ast.VariableDeclaration(
+                            the_type, f"{statement.name}@{index}"
+                        )
+                    )
+                self.to_transform.append(statement.name)
+                self.lengths.append(len(unfolded_decl_types))
                 expanded_tuple_count += 1
             else:
                 new_statements.append(statement)
@@ -368,7 +544,29 @@ class ExpandTuple(TransformPass):
     name = "Expand Tuples"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return ExpandTupleTransformer().transform(game)
+        return ExpandTupleTransformer(ctx).transform(game)
+
+
+class SplitBareTupleDeclarations(TransformPass):
+    """Splits a bare product-typed local declaration ``[T0, T1] v;`` into
+    per-component declarations, rewriting the later whole-variable / element
+    assignments and constant-index accesses (issue #255).
+
+    Runs EARLY in the pipeline: by the time the full ``Expand Tuples`` pass
+    runs, Topological Sorting has pruned bare declarations and Collapse
+    Assignment has folded their assignments into use sites, leaving a
+    ``[e0, e1][i]`` shape that ``Fold Tuple Literal Indexing`` must
+    conservatively decline when a discarded element is non-deterministic.
+    Splitting the declaration first lets the split-declaration spelling
+    canonicalize exactly like the declaration-with-initializer spelling.
+    """
+
+    name = "Split Bare Tuple Declarations"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return ExpandTupleTransformer(
+            ctx, bare_locals_only=True, pass_name=self.name
+        ).transform(game)
 
 
 class FoldTupleIndex(TransformPass):

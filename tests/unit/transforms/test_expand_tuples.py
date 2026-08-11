@@ -482,3 +482,208 @@ def test_f324_control_expands_when_all_uses_in_block() -> None:
         """)
     out = str(ExpandTupleTransformer().transform(method))
     assert "[1, 2]" not in out  # expanded into components
+
+
+# ---------------------------------------------------------------------------
+# Issue #255: bare product-typed local declarations
+# ---------------------------------------------------------------------------
+
+
+def test_bare_decl_whole_assignment_expands() -> None:
+    """Issue #255: a bare product-typed local declaration followed by a
+    whole-variable tuple-literal assignment splits into per-component
+    declarations and assignments, exactly like the decl-with-initializer
+    spelling."""
+    method = frog_parser.parse_method("""
+        Int Oracle() {
+            [Int, Int] v;
+            v = [1, 2];
+            return v[1];
+        }
+        """)
+    out = str(ExpandTupleTransformer().transform(method))
+    assert "[Int, Int]" not in out  # declaration split
+    assert "v@0 = 1;" in out
+    assert "v@1 = 2;" in out
+    assert "return v@1;" in out
+
+
+def test_bare_decl_element_writes_expand() -> None:
+    """Issue #255 sibling: a bare product-typed local written element-wise
+    also splits into components."""
+    method = frog_parser.parse_method("""
+        Int Oracle() {
+            [Int, Int] v;
+            v[0] = 1;
+            v[1] = 2;
+            return v[1];
+        }
+        """)
+    out = str(ExpandTupleTransformer().transform(method))
+    assert "[Int, Int]" not in out
+    assert "v@0 = 1;" in out
+    assert "v@1 = 2;" in out
+    assert "return v@1;" in out
+
+
+def test_bare_decl_dead_declaration_left_alone() -> None:
+    """A bare product-typed local that is never referenced afterwards is dead
+    code: splitting it is pointless (and the use site may be in an enclosing
+    scope), so the declaration is left intact for DCE."""
+    method = frog_parser.parse_method("""
+        Int Oracle() {
+            [Int, Int] v;
+            return 0;
+        }
+        """)
+    out = str(ExpandTupleTransformer().transform(method))
+    assert "[Int, Int] v;" in out
+
+
+def test_bare_decl_non_constant_index_declines() -> None:
+    """A non-constant index access blocks splitting a bare declaration (the
+    component variable cannot be named at transform time). If the split fired
+    anyway, ``v[i]`` would dangle."""
+    method = frog_parser.parse_method("""
+        Int Oracle(Int i) {
+            [Int, Int] v;
+            v = [1, 2];
+            return v[i];
+        }
+        """)
+    out = str(ExpandTupleTransformer().transform(method))
+    assert "[Int, Int] v;" in out  # left intact
+    assert "v@0" not in out
+
+
+def test_f324_bare_decl_declines_when_local_escapes_block() -> None:
+    """F-324 guard on the bare-declaration path: a bare product local declared
+    in an inner block but read in an enclosing block (an out-of-scope AST the
+    typechecker rejects) must not be split -- the outer ``v[k]`` access would
+    dangle."""
+    method = frog_parser.parse_method("""
+        Int Oracle(Bool c) {
+            Int acc = 0;
+            if (c) {
+                [Int, Int] v;
+                v = [1, 2];
+                acc = acc + v[0];
+            }
+            return v[1];
+        }
+        """)
+    out = str(ExpandTupleTransformer().transform(method))
+    assert "[Int, Int] v;" in out  # declaration left intact
+    assert "v@1" not in out  # no dangling component reference
+
+
+# ---------------------------------------------------------------------------
+# F-321: whole-variable reassignment reading the tuple in its own RHS
+# ---------------------------------------------------------------------------
+
+
+def test_f321_swap_reassignment_declines_decl_with_init() -> None:
+    """F-321: a swap ``v = [v[1], v[0]];`` must NOT be split into sequential
+    component assignments ``v@0 = v@1; v@1 = v@0;`` -- after them BOTH
+    components hold the old ``v[1]``, whereas the swap leaves ``v[1]`` holding
+    the old ``v[0]``. Distinguisher (pre-fix): a game returning ``v[1]`` after
+    the swap was canonicalized to return the wrong component, and the engine
+    accepted an equivalence any instantiation with distinguishable components
+    refutes with advantage 1."""
+    method = frog_parser.parse_method("""
+        Int Oracle() {
+            [Int, Int] v = [1, 2];
+            v = [v[1], v[0]];
+            return v[1];
+        }
+        """)
+    out = str(ExpandTupleTransformer().transform(method))
+    assert "[Int, Int] v = [1, 2];" in out  # left intact
+    assert "v@0" not in out
+
+
+def test_f321_swap_reassignment_declines_bare_decl() -> None:
+    """F-321 on the bare-declaration path (issue #255): the same swap after a
+    bare declaration must equally decline."""
+    method = frog_parser.parse_method("""
+        Int Oracle() {
+            [Int, Int] v;
+            v = [1, 2];
+            v = [v[1], v[0]];
+            return v[1];
+        }
+        """)
+    out = str(ExpandTupleTransformer().transform(method))
+    assert "[Int, Int] v;" in out
+    assert "v@0" not in out
+
+
+def test_f321_swap_reassignment_declines_field() -> None:
+    """F-321 on the field path: a product-typed game field whose oracle swaps
+    it in place must not be expanded either -- the same sequentialization bug
+    would corrupt the field across oracle calls."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            [Int, Int] pair;
+            Void Initialize() {
+                pair = [1, 2];
+            }
+            Int Swap() {
+                pair = [pair[1], pair[0]];
+                return pair[1];
+            }
+        }
+        """)
+    out = str(ExpandTupleTransformer().transform(game))
+    assert "[Int, Int] pair;" in out  # field left intact
+    assert "pair@0" not in out
+
+
+def test_f321_control_plain_reassignment_still_expands() -> None:
+    """Control for F-321: a whole-variable reassignment whose RHS does NOT
+    read the variable still expands component-wise."""
+    method = frog_parser.parse_method("""
+        Int Oracle(Int x) {
+            [Int, Int] v = [1, 2];
+            v = [x, 3];
+            return v[1];
+        }
+        """)
+    out = str(ExpandTupleTransformer().transform(method))
+    assert "v@0" in out  # expanded
+    assert "return v@1;" in out
+
+
+# ---------------------------------------------------------------------------
+# SplitBareTupleDeclarations (bare_locals_only mode)
+# ---------------------------------------------------------------------------
+
+
+def test_bare_mode_splits_only_bare_local_declarations() -> None:
+    """The early ``Split Bare Tuple Declarations`` pass must split bare local
+    declarations but leave fields and decl-with-initializer locals to the full
+    ``Expand Tuples`` pass, so their canonical routes are unchanged."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            [Int, Int] fieldPair;
+            Void Initialize() {
+                fieldPair = [1, 2];
+            }
+            Int WithInit() {
+                [Int, Int] a = [3, 4];
+                return a[0];
+            }
+            Int Bare() {
+                [Int, Int] b;
+                b = [5, 6];
+                return b[0];
+            }
+        }
+        """)
+    out = str(
+        ExpandTupleTransformer(bare_locals_only=True).transform(game)
+    )
+    assert "[Int, Int] fieldPair;" in out  # field untouched
+    assert "[Int, Int] a = [3, 4];" in out  # decl-with-init untouched
+    assert "b@0 = 5;" in out  # bare local split
+    assert "return b@0;" in out

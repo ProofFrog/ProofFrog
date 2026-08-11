@@ -33,10 +33,16 @@ import tomllib
 from dataclasses import dataclass, field
 from typing import Iterable
 
-SCHEMA_VERSION = 1
-"""Bumped whenever ``canonical_text`` or this file's serialization shape
-changes. Entries written under an older schema are loaded as stale
-hints (orphaned) rather than treated as cache hits."""
+SCHEMA_VERSION = 2
+"""Bumped whenever the KEY or this file's serialization shape changes.
+Entries written under an older schema are loaded as stale hints (orphaned)
+rather than treated as cache hits.
+
+Version 2 (Phase-4 Decisions 1+2, 2026-08-11): ``game_before``/``game_after``
+hold :func:`canonical_form.masked_shape` -- the changed region of the pair
+with variable names masked -- instead of :func:`canonical_form.canonical_text`
+of two whole games. Version 1's whole-game key made an entry unreachable from
+any proof but the one it was derived on."""
 
 HOP_TRANSFORM = "<hop>"
 """Reserved ``transform`` value for a *per-hop* cache entry (a whole-hop

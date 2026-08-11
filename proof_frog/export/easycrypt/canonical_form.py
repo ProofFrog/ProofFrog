@@ -72,6 +72,87 @@ def canonical_text(
 # AST → canonical text
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Masked local shape — the Phase-4 cache key
+# ---------------------------------------------------------------------------
+
+
+def _variable_names(game: frog_ast.Game) -> set[str]:
+    """Every name that BINDS a variable in ``game``: fields, parameters and
+    locals. Deliberately not type, module or operator names -- see
+    :func:`masked_shape`."""
+    names: set[str] = {fld.name for fld in game.fields}
+    for method in game.methods:
+        for param in method.signature.parameters:
+            names.add(param.name)
+        _collect_locals(method.block.statements, names)
+    return names
+
+
+def _mask_variables(text: str, names: set[str]) -> str:
+    if not names:
+        return text
+    pattern = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True) if n)
+    return re.sub(rf"\b(?:{pattern})\b", "v", text)
+
+
+def masked_shape(
+    game_before: frog_ast.Game,
+    game_after: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+) -> tuple[str, str]:
+    """The cache key's two halves: the CHANGED REGION, variable-names masked.
+
+    Phase-4 Decision 2. :func:`canonical_text` keys an entry on the text of
+    two WHOLE games, which two different proofs essentially never share --
+    that is why the designed capture path never transferred anything. This
+    key keeps only what a tactic actually reasons about:
+
+    * **changed region only** -- the methods whose before/after text
+      differs. A method both sides agree on cannot be what the transform
+      did, and including it makes the key needlessly proof-specific. If no
+      method differs the whole game is kept, which is degenerate but
+      well-defined.
+    * **start-tight masking** -- only VARIABLE names are masked (fields,
+      parameters, locals, taken from the AST); type names, module names and
+      operator names survive. So a consistent renaming is invisible while
+      the shape, the types and the call structure still have to match.
+      Deliberately tighter than ``chain_emitter._mask_idents``, which masks
+      every identifier run and would erase the types too.
+
+    The masking name set is the UNION over both games, so a variable the
+    transform renamed is masked on both sides rather than only one.
+
+    Loosening this is a MEASURED decision, not a free one: a looser key
+    reuses an entry on a site it was never validated on. EasyCrypt still
+    re-checks everything, so the cost of a wrong hit is a rejected export,
+    not unsoundness -- but it is an honest-gating violation all the same.
+    """
+    prepared_b = _normalize_for_ec(
+        copy.deepcopy(game_before), external_module_types, method_return_types
+    )
+    prepared_a = _normalize_for_ec(
+        copy.deepcopy(game_after), external_module_types, method_return_types
+    )
+    by_name_b = {
+        m.signature.name: "\n".join(_pretty_print_method(m)) for m in prepared_b.methods
+    }
+    by_name_a = {
+        m.signature.name: "\n".join(_pretty_print_method(m)) for m in prepared_a.methods
+    }
+    order: list[str] = [m.signature.name for m in prepared_b.methods]
+    order += [n for n in by_name_a if n not in by_name_b]
+    changed = [n for n in order if by_name_b.get(n) != by_name_a.get(n)]
+    kept = changed or order
+    names = _variable_names(prepared_b) | _variable_names(prepared_a)
+    before = _mask_variables("\n".join(by_name_b.get(n, "") for n in kept), names)
+    after = _mask_variables("\n".join(by_name_a.get(n, "") for n in kept), names)
+    return (
+        before if before.endswith("\n") else before + "\n",
+        after if after.endswith("\n") else after + "\n",
+    )
+
 
 def _pretty_print_game(game: frog_ast.Game) -> str:
     lines: list[str] = []

@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 
 from proof_frog import frog_ast
+from proof_frog.export.easycrypt import canonical_form as cf
 from proof_frog.export.easycrypt.canonical_form import (
     canonical_text,
     _normalize_for_ec,
@@ -84,7 +85,9 @@ def test_canonical_text_does_not_mutate_input() -> None:
     snapshot = copy.deepcopy(g)
     canonical_text(g, {"E": "SymEnc"}, {("SymEnc", "enc"): frog_ast.Variable("C")})
     # The local variable count and structure should be unchanged.
-    assert len(g.methods[0].block.statements) == len(snapshot.methods[0].block.statements)
+    assert len(g.methods[0].block.statements) == len(
+        snapshot.methods[0].block.statements
+    )
 
 
 def test_canonical_text_mangles_invalid_local_names() -> None:
@@ -120,15 +123,11 @@ def test_canonical_text_two_invocations_use_distinct_hoist_names() -> None:
                     frog_ast.Tuple(
                         [
                             frog_ast.FuncCall(
-                                frog_ast.FieldAccess(
-                                    frog_ast.Variable("E"), "enc"
-                                ),
+                                frog_ast.FieldAccess(frog_ast.Variable("E"), "enc"),
                                 [frog_ast.Variable("m")],
                             ),
                             frog_ast.FuncCall(
-                                frog_ast.FieldAccess(
-                                    frog_ast.Variable("E"), "enc"
-                                ),
+                                frog_ast.FieldAccess(frog_ast.Variable("E"), "enc"),
                                 [frog_ast.Variable("m")],
                             ),
                         ]
@@ -177,3 +176,89 @@ def test_module_call_return_type_qualifies_product_fields() -> None:
     assert isinstance(result, frog_ast.ProductType)
     assert all(isinstance(t, frog_ast.FieldAccess) for t in result.types)
     assert str(result) == "[K.SharedSecret, K.Ciphertext]"
+
+
+# ---------------------------------------------------------------------------
+# masked_shape — the Phase-4 cache key (Decision 2)
+# ---------------------------------------------------------------------------
+
+
+def _one_method_game(name: str, body_var: str, extra_method: bool) -> frog_ast.Game:
+    bs = frog_ast.BitStringType(parameterization=frog_ast.Variable("lambda"))
+    methods = [
+        frog_ast.Method(
+            frog_ast.MethodSignature("Challenge", bs, [frog_ast.Parameter(bs, "m")]),
+            frog_ast.Block([frog_ast.ReturnStatement(frog_ast.Variable(body_var))]),
+        )
+    ]
+    if extra_method:
+        methods.append(
+            frog_ast.Method(
+                frog_ast.MethodSignature("Untouched", bs, []),
+                frog_ast.Block([frog_ast.ReturnStatement(frog_ast.Variable("shared"))]),
+            )
+        )
+    return frog_ast.Game((name, [], [frog_ast.Field(bs, "shared", None)], methods))
+
+
+def test_masked_shape_masks_variables_but_keeps_types() -> None:
+    """Start-tight masking (Decision 2): variable names go, types and
+    structure stay. Note two DIFFERENT variable reads mask to the same
+    thing -- that is the policy working, not a defect -- so the change here
+    is structural."""
+    bs = frog_ast.BitStringType(parameterization=frog_ast.Variable("lambda"))
+    before = _one_method_game("G", "m", extra_method=False)
+    after = _one_method_game("G", "m", extra_method=False)
+    after.methods[0].block.statements = [
+        frog_ast.ReturnStatement(
+            frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.ADD,
+                frog_ast.Variable("m"),
+                frog_ast.Variable("shared"),
+            )
+        )
+    ]
+    assert isinstance(bs, frog_ast.BitStringType)
+    mb, ma = cf.masked_shape(before, after, {}, {})
+    assert mb != ma  # a STRUCTURAL change survives masking
+    assert "BitString<lambda>" in mb  # the TYPE is not masked
+    assert "return v;" in mb  # the variable IS masked
+
+
+def test_masked_shape_keeps_only_the_changed_method() -> None:
+    """A method both sides agree on cannot be what the transform did, and
+    including it would make the key needlessly proof-specific."""
+    before = _one_method_game("G", "m", extra_method=True)
+    after = _one_method_game("G", "shared", extra_method=True)
+    mb, ma = cf.masked_shape(before, after, {}, {})
+    assert "Untouched" not in mb and "Untouched" not in ma
+    assert "Challenge" in mb and "Challenge" in ma
+
+
+def test_masked_shape_is_blind_to_a_consistent_rename() -> None:
+    """The whole point of the key change: two proofs whose only difference is
+    what they call their variables must produce the SAME key."""
+    bs = frog_ast.BitStringType(parameterization=frog_ast.Variable("lambda"))
+
+    def game(param: str) -> frog_ast.Game:
+        return frog_ast.Game(
+            (
+                "G",
+                [],
+                [],
+                [
+                    frog_ast.Method(
+                        frog_ast.MethodSignature(
+                            "Challenge", bs, [frog_ast.Parameter(bs, param)]
+                        ),
+                        frog_ast.Block(
+                            [frog_ast.ReturnStatement(frog_ast.Variable(param))]
+                        ),
+                    )
+                ],
+            )
+        )
+
+    a_before, a_after = cf.masked_shape(game("m"), game("x"), {}, {})
+    b_before, b_after = cf.masked_shape(game("msg"), game("y"), {}, {})
+    assert (a_before, a_after) == (b_before, b_after)

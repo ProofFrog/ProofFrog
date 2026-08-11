@@ -41,7 +41,7 @@ from .challenge_common import walk_env as cc_walk_env
 from . import module_translator as mt
 from . import single_r_challenge as srb
 from . import type_collector as tc
-from .canonical_form import _normalize_for_ec, canonical_text
+from .canonical_form import _normalize_for_ec, masked_shape
 from .resolution import (
     ADMIT_GUIDED,
     ADMIT_UNGUIDED,
@@ -333,11 +333,9 @@ def emit_chain_for_hop(
         """
         before_game = app.game_after if reversed_dir else app.game_before
         after_game = app.game_before if reversed_dir else app.game_after
-        before_text = canonical_text(
-            before_game, external_module_types, method_return_types
-        )
-        after_text = canonical_text(
-            after_game, external_module_types, method_return_types
+        # Phase-4 Decision 2: the CHANGED REGION with variable names masked.
+        before_text, after_text = masked_shape(
+            before_game, after_game, external_module_types, method_return_types
         )
         requested_keys.append((app.transform_name, before_text, after_text))
         entry = cache.lookup(app.transform_name, before_text, after_text)
@@ -359,11 +357,10 @@ def emit_chain_for_hop(
         """
         before_game = app.game_after if reversed_dir else app.game_before
         after_game = app.game_before if reversed_dir else app.game_after
-        before_text = canonical_text(
-            before_game, external_module_types, method_return_types
-        )
-        after_text = canonical_text(
-            after_game, external_module_types, method_return_types
+        # The SAME key the lookup uses, so the text this diagnostic tells a
+        # human to paste into a sidecar is the text the next export looks up.
+        before_text, after_text = masked_shape(
+            before_game, after_game, external_module_types, method_return_types
         )
         sidecar_display = sidecar_relpath or "<proof_path>.tactics.toml"
         lines: list[str] = [

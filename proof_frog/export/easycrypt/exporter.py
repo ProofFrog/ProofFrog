@@ -3380,11 +3380,10 @@ def export_proof_file(proof_path: str) -> str:
             hop_right_ast = engine._get_game_ast(step_b.challenger, step_b.reduction)
             # pylint: enable=protected-access
             emt = {inst.let_name: primitive.name for inst in instances}
-            left_key = canonical_form.canonical_text(
-                hop_left_ast, emt, method_return_types
-            )
-            right_key = canonical_form.canonical_text(
-                hop_right_ast, emt, method_return_types
+            # Phase-4 Decision 2: the key is the CHANGED REGION of the pair
+            # with variable names masked, not the text of two whole games.
+            left_key, right_key = canonical_form.masked_shape(
+                hop_left_ast, hop_right_ast, emt, method_return_types
             )
             requested_cache_keys.append((HOP_TRANSFORM, left_key, right_key))
             cached = tactic_cache.lookup(HOP_TRANSFORM, left_key, right_key)
@@ -16221,13 +16220,8 @@ def export_proof_file(proof_path: str) -> str:
             if info.aux_lemmas and not aux_lemma_lines:
                 aux_lemma_lines.extend(info.aux_lemmas)
             multi_oracle_hop_cache[_i] = info.tactic_body_by_oracle
-            multi_oracle_game_keys[_i] = (
-                canonical_form.canonical_text(
-                    left_ast, external_module_types, method_return_types
-                ),
-                canonical_form.canonical_text(
-                    right_ast, external_module_types, method_return_types
-                ),
+            multi_oracle_game_keys[_i] = canonical_form.masked_shape(
+                left_ast, right_ast, external_module_types, method_return_types
             )
         body = multi_oracle_hop_cache[_i].get(oracle_name)
         if _is_init:

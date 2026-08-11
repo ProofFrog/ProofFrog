@@ -9753,25 +9753,15 @@ def _emit_one_oracle_chain(
         # function the peel above declines): ``inline *`` then the same if-tree
         # walk with ``wp; sim`` leaves, which tolerate the statement-count skew
         # inlining a delegate call introduces.
-        # RO-REPROGRAMMING coupling: same class as the rename route below, but
-        # its ``sim`` leaves cannot run once the coupling is an implication
-        # rather than an equality set. Tried first; ``None`` for every hop whose
-        # coupling carries no reprogramming conjunct, so the rename route and
-        # every proof it serves are byte-identical.
-        reprog_oracle = _synth_ro_reprogram_oracle(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            full_coupling,
-            det_methods,
-            clone_alias or {},
-            inj_acc,
-        )
-        if reprog_oracle is not None:
-            return _evidence_only_chunks(), reprog_oracle, set()
+        # RETIRED 2026-08-11, second of the whole-oracle endpoint routes to go.
+        # ``_synth_ro_reprogram_oracle`` (the random-oracle reprogramming
+        # coupling, whose ``sim`` leaves cannot run once the coupling is an
+        # implication rather than an equality set) is still defined below and
+        # kept as a reference for that tactic shape, but it is no longer
+        # dispatched to. Chosen as the second increment because the per-route
+        # census priced it at 4 closures over 4 proofs -- the cheapest of the
+        # eleven that remained. Where it used to close an oracle the chain now
+        # runs, and the legs that close are still emitted as evidence.
         renamed = _synth_sim_field_rename(
             modules,
             oracle_name,
@@ -16117,6 +16107,22 @@ def _synth_ro_reprogram_oracle(  # pylint: disable=too-many-arguments,too-many-p
     return [_res_tag(SYNTH_PARAM), "proc.", "inline *.", *peel, "qed."]
 
 
+def _coupling_has_implication(coupling: str) -> bool:
+    """True when ``coupling`` is not a plain set of equalities.
+
+    ``sim`` infers its equality set from the coupling and refuses anything
+    else -- interactively it answers *cannot recognize ... as a set of
+    equalities*, and inside a whole-oracle body it fails later with *cannot
+    infer the set of equalities*. A quantifier or an implication is the
+    signature: the random-oracle reprogramming conjunct is
+    ``forall (p : ...), <guard> => rF{1} p = rF{2} p``.
+
+    Any route whose leaves are ``sim`` must consult this, or it emits a tactic
+    that runs and leaves the goal open.
+    """
+    return "forall" in coupling or "=>" in coupling
+
+
 def _synth_sim_field_rename(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -16162,6 +16168,18 @@ def _synth_sim_field_rename(  # pylint: disable=too-many-arguments,too-many-posi
     already pinned that ``sim`` crosses a plain field rename.
     """
     if not coupling:
+        return None
+    # ``sim`` TAKES ONLY A SET OF EQUALITIES. A coupling carrying a quantified
+    # IMPLICATION -- the random-oracle reprogramming conjunct
+    # ``forall p, <guard> => rF{1} p = rF{2} p`` -- is not one, and EasyCrypt
+    # says so outright: *cannot infer the set of equalities*. The route used to
+    # be shielded from that shape by ``_synth_ro_reprogram_oracle`` running
+    # first; with that route retired the shape reaches here, and a tactic that
+    # RUNS WITHOUT CLOSING is the worst state this exporter can be in -- a
+    # zero-admit file EasyCrypt rejects. Measured on all four `INDCCA_PQ`
+    # proofs of the CG and UG frameworks, which went clean -> REJECTED rather
+    # than clean -> accepted-with-admits until this gate was added.
+    if _coupling_has_implication(coupling):
         return None
     pair = _shape_pair(
         modules,

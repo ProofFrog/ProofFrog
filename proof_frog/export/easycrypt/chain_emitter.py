@@ -4491,6 +4491,24 @@ def _if_fold_step(  # pylint: disable=too-many-arguments,too-many-positional-arg
         # Straight side: shared prefix PLUS the else-body statements, whose
         # drains close the P-true branch.
         st_len = n + len(else_b) - 1
+        # DECLINE when the P-true branch would have to drain calls. Its
+        # obligation is then "the guard makes the if-side's answer equal to
+        # the straight side's *computed* one", which the closer hands to
+        # ``smt`` whole. That succeeds at tripwire size and fails at corpus
+        # size: on the binding `challenge` the two sides' answers are
+        # ``H.evaluate`` of five-deep ``concat`` applications, equal by
+        # congruence from the guard's leaf equalities, and the solver does
+        # not find it. Census over the corpus (under the evidence-only
+        # emission that first exposed these legs): 32 fold legs, 20 with a
+        # drain-free P-true branch and 12 with drains -- and the 12 are
+        # EXACTLY the twelve `CG_*`/`CK_*` LEAK_BIND exports EasyCrypt
+        # rejects. So this gate declines only legs measured to fail. The
+        # drain-bearing shape is Phase-2 debt: it needs a closer that
+        # discharges the concat equality by congruence instead of handing
+        # the whole postcondition to the solver -- the same wall as the
+        # Move 3c Hoist-to-Initialize closer.
+        if any(isinstance(s, (ec_ast.Call, ec_ast.Sample)) for s in ex_st[n:st_len]):
+            return None
         for stmt in ex_st[:st_len]:
             if not env_st.feed(stmt):
                 return None

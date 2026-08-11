@@ -65,8 +65,8 @@ module FB (K : K_c.Scheme) = {
     if ((d0 = d1) && (ct0 = ct1)) {
       _r0 <- ek0 <> ek1;
     } else {
-      e0 <@ K.enc(d0);
-      e1 <@ K.enc(d1);
+      e0 <- d0;
+      e1 <- d1;
       _r0 <- (e0 = e1) && (ek0 <> ek1);
     }
     return _r0;
@@ -88,8 +88,8 @@ module FA (K : K_c.Scheme) = {
     var e1 : bs_lambda;
     d0 <@ K.decaps(dk0, ct0);
     d1 <@ K.decaps(dk1, ct1);
-    e0 <@ K.enc(d0);
-    e1 <@ K.enc(d1);
+    e0 <- d0;
+    e1 <- d1;
     return (e0 = e1) && (ek0 <> ek1);
   }
 }.
@@ -115,14 +115,12 @@ proof.
   case ((d0{1} = d1{1}) /\ (ct0{1} = ct1{1})).
   rcondt{1} 1; first by auto => /#.
   wp.
-  call{2} (K_enc_det gv0 ((K_c.ev_decaps (kv2) (kv3)))).
-  call{2} (K_enc_det gv0 ((K_c.ev_decaps (kv0) (kv1)))).
+  wp.
   skip.
   move => &1 &2 />; smt().
   rcondf{1} 1; first by auto => /#.
   wp.
-  call (_: true).
-  call (_: true).
+  wp.
   auto => /#.
 qed.
 
@@ -142,14 +140,12 @@ proof.
   case ((d0{2} = d1{2}) /\ (ct0{2} = ct1{2})).
   rcondt{2} 1; first by auto => /#.
   wp.
-  call{1} (K_enc_det gv0 ((K_c.ev_decaps (kv2) (kv3)))).
-  call{1} (K_enc_det gv0 ((K_c.ev_decaps (kv0) (kv1)))).
+  wp.
   skip.
   move => &1 &2 />; smt().
   rcondf{2} 1; first by auto => /#.
   wp.
-  call (_: true).
-  call (_: true).
+  wp.
   auto => /#.
 qed.
 

@@ -43,7 +43,11 @@ def _op(
     return frog_ast.BinaryOperation(op, a, b)
 
 
-def _fold_game(name: str, folded: bool) -> frog_ast.Game:
+def _fold_game(name: str, folded: bool, drains: bool = False) -> frog_ast.Game:
+    """``drains``: the else region CALLS, so the P-true branch would have to
+    drain those calls one-sided before the solver sees its obligation. That
+    is the shape the row declines (see
+    ``test_fold_declines_when_the_p_true_branch_would_drain``)."""
     fields = [
         frog_ast.Field(BS, "dk0", None),
         frog_ast.Field(BS, "dk1", None),
@@ -77,11 +81,18 @@ def _fold_game(name: str, folded: bool) -> frog_ast.Game:
         stmts.append(
             frog_ast.IfStatement([p], [frog_ast.Block([frog_ast.ReturnStatement(x)])])
         )
-    stmts += [
-        frog_ast.Assignment(BS, _var("e0"), _call("K", "Enc", _var("d0"))),
-        frog_ast.Assignment(BS, _var("e1"), _call("K", "Enc", _var("d1"))),
-        frog_ast.ReturnStatement(y),
-    ]
+    stmts += (
+        [
+            frog_ast.Assignment(BS, _var("e0"), _call("K", "Enc", _var("d0"))),
+            frog_ast.Assignment(BS, _var("e1"), _call("K", "Enc", _var("d1"))),
+        ]
+        if drains
+        else [
+            frog_ast.Assignment(BS, _var("e0"), _var("d0")),
+            frog_ast.Assignment(BS, _var("e1"), _var("d1")),
+        ]
+    )
+    stmts.append(frog_ast.ReturnStatement(y))
     chal = frog_ast.Method(
         frog_ast.MethodSignature(
             "Challenge",
@@ -201,7 +212,7 @@ def test_fold_fwd_lockstep_with_template() -> None:
     assert step is not None
     tac, reqs, rung = step
     assert rung == "synth-param"
-    assert reqs.det == {("K", "decaps"), ("K", "enc")}
+    assert reqs.det == {("K", "decaps")}
     assert tac == _template_proof_body("fold_pair_walk.ec", "micro_fold_fwd")
 
 
@@ -242,29 +253,41 @@ def test_fold_declines_on_init_pre_true() -> None:
     )
 
 
-def test_fold_declines_on_nondet_else_call() -> None:
-    """An else-region call without a det axiom cannot drain -- the fold row
-    declines (and the tails carry calls, so the det-tail row declines too)."""
-    assert (
-        _dispatch(
-            _fold_game("FB", False),
-            _fold_game("FA", True),
-            PRE_F,
-            "FB(K)",
-            "FA(K)",
-            det={"K": {"decaps"}},
+def test_fold_declines_on_an_else_call_however_it_is_declared() -> None:
+    """An else region that CALLS declines whether or not the callee has a det
+    axiom: with one the P-true branch would drain it and hand the solver an
+    obligation it does not close at corpus size; without one it could not
+    drain at all."""
+    for det in ({"K": {"decaps", "enc"}}, {"K": {"decaps"}}):
+        assert (
+            _dispatch(
+                _fold_game("FB", False, drains=True),
+                _fold_game("FA", True, drains=True),
+                PRE_F,
+                "FB(K)",
+                "FA(K)",
+                det=det,
+            )
+            is None
         )
-        is None
-    )
 
 
 def test_fold_declines_on_extra_tail_diff() -> None:
-    """A straight side whose tail is not exactly the else region declines."""
-    ga = _fold_game("FA", True)
+    """A straight side whose tail is not exactly the else region declines.
+
+    Stated on the call-bearing pair: with a call-free tail the
+    deterministic-tail row legitimately picks the shape up instead, so the
+    fold row declining would not be observable at the dispatch."""
+    ga = _fold_game("FA", True, drains=True)
+    # A FIELD write: a dead local would be pruned before the shape matcher
+    # ever sees it, so the extra statement has to have an effect.
     ga.methods[1].block.statements.insert(
-        3, frog_ast.Assignment(BS, _var("z"), _var("d0"))
+        3, frog_ast.Assignment(None, _var("ek0"), _var("d0"))
     )
-    assert _dispatch(_fold_game("FB", False), ga, PRE_F, "FB(K)", "FA(K)") is None
+    assert (
+        _dispatch(_fold_game("FB", False, drains=True), ga, PRE_F, "FB(K)", "FA(K)")
+        is None
+    )
 
 
 def test_guard_formula_rewrite_and_gate() -> None:
@@ -282,8 +305,7 @@ def test_guard_formula_declines_foreign_field() -> None:
     """A name that is a field of the SIBLING state only cannot be qualified
     through this state and must not be read as a local either."""
     assert (
-        _fold_guard_formula("dkX = ct0", "2", "SB", {"dk0"}, frozenset({"dkX"}))
-        is None
+        _fold_guard_formula("dkX = ct0", "2", "SB", {"dk0"}, frozenset({"dkX"})) is None
     )
 
 
@@ -355,3 +377,21 @@ def test_fold_closer_sequences_the_crush_and_the_solver() -> None:
     tac = step[0]
     assert "move => &1 &2 />; smt()." in tac
     assert "smt()." not in tac
+
+
+def test_fold_declines_when_the_p_true_branch_would_drain() -> None:
+    """A P-true branch that must drain calls hands the solver "the guard
+    makes the two computed answers equal", which succeeds at this size and
+    fails at corpus size. Census under evidence-only emission: 32 fold legs,
+    12 with drains, and those 12 are exactly the twelve `CG_*`/`CK_*`
+    LEAK_BIND exports EasyCrypt rejects."""
+    assert (
+        _dispatch(
+            _fold_game("FB", False, drains=True),
+            _fold_game("FA", True, drains=True),
+            PRE_F,
+            "FB(K)",
+            "FA(K)",
+        )
+        is None
+    )

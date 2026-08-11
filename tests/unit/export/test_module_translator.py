@@ -807,3 +807,28 @@ def test_single_oracle_emitters_unchanged_when_spec_none() -> None:
     body_str = "\n".join(_render_stmt_for_test(s) for s in wrapper.procs[0].body)
     assert "b <@ A(PRFGame_Left(E)).distinguish();" in body_str
     assert "initialize" not in body_str
+
+
+def test_fresh_pk_param_avoids_the_bodys_own_locals() -> None:
+    """The consume-pk lifted adversary renders the reduction's own
+    ``Initialize`` inline, and such a body typically binds a local called
+    ``pk`` -- the same name the lifted parameter carries. EasyCrypt then
+    rejects the procedure at its declaration: *duplicated local/parameters
+    name: `pk'* (measured on `KEMPRF_INDCCA`, StarHunters
+    `CK_INDCCA_PreQuantum` and `LCK_INDCCA`). The parameter takes the
+    smallest fresh name instead -- and keeps ``pk`` when ``pk`` is free, so
+    every other export stays byte-identical."""
+    # pylint: disable=protected-access
+    fresh = mt.ModuleTranslator._fresh_pk_param
+    t = ec_ast.EcType("t")
+    param = ec_ast.ProcParam("pk", t)
+    # No collision: the name is kept, including when the only param IS the
+    # one being named (it must not count as taken against itself).
+    assert fresh([ec_ast.VarDecl("b", t)], [param]) == "pk"
+    assert fresh([], []) == "pk"
+    # Collides with a local: take the next free index, skipping taken ones.
+    assert fresh([ec_ast.VarDecl("pk", t)], [param]) == "pk1"
+    assert fresh([ec_ast.VarDecl("pk", t), ec_ast.VarDecl("pk1", t)], [param]) == "pk2"
+    # Collides with another parameter.
+    assert fresh([], [param, ec_ast.ProcParam("pk", t)]) == "pk"
+    assert fresh([], [ec_ast.ProcParam("pk0", t)]) == "pk"

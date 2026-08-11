@@ -1190,6 +1190,34 @@ class ModuleTranslator:
             params=[ec_ast.ModuleParam(name="O", module_type=oracle_type_name)],
         )
 
+    @staticmethod
+    def _fresh_pk_param(
+        decls: Sequence[ec_ast.EcStmt], params: Sequence[ec_ast.ProcParam]
+    ) -> str:
+        """A ``distinguish`` parameter name the rendered body cannot shadow.
+
+        The consume-pk path renders the reduction's own ``Initialize`` inline,
+        and a FrogLang reduction that destructures the challenger's result
+        typically binds a local called ``pk`` -- the same name the lifted
+        parameter carries. EasyCrypt rejects the procedure outright:
+        *duplicated local/parameters name: `pk'* (measured on
+        ``KEMPRF_INDCCA``, ``StarHunters CK_INDCCA_PreQuantum`` and
+        ``LCK_INDCCA``, all three at their module declaration, long before any
+        tactic runs). Returns ``pk`` when it is free, else the smallest fresh
+        ``pk<i>``.
+        """
+        # The parameter being named is excluded: it is the one we may rename,
+        # not a name it has to avoid.
+        taken = {d.name for d in decls if isinstance(d, ec_ast.VarDecl)} | {
+            p.name for p in params if p.name != INIT_RESULT_NAME
+        }
+        if INIT_RESULT_NAME not in taken:
+            return INIT_RESULT_NAME
+        i = 1
+        while f"{INIT_RESULT_NAME}{i}" in taken:
+            i += 1
+        return f"{INIT_RESULT_NAME}{i}"
+
     def translate_reduction_adversary(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
         self,
         reduction: frog_ast.Reduction,
@@ -1333,6 +1361,26 @@ class ModuleTranslator:
                     method_return_types=method_return_types or {},
                     reduction_arg_exprs=reduction_arg_exprs,
                 )
+                pk_param = self._fresh_pk_param(
+                    list(body) + list(consumed_decls), distinguish_params
+                )
+                if pk_param != INIT_RESULT_NAME:
+                    consumed_decls, consumed_stmts = self._render_consumed_pk_init(
+                        reduction,
+                        pk_param_name=pk_param,
+                        pk0_local_name=outer_init_local,
+                        challenger_oracle_type=inner_oracle_type_name,
+                        method_return_types=method_return_types or {},
+                        reduction_arg_exprs=reduction_arg_exprs,
+                    )
+                    distinguish_params[:] = [
+                        (
+                            ec_ast.ProcParam(pk_param, prm.type)
+                            if prm.name == INIT_RESULT_NAME
+                            else prm
+                        )
+                        for prm in distinguish_params
+                    ]
                 body.extend(consumed_decls)
                 body.extend(consumed_stmts)
                 distinguish_args = outer_init_local
@@ -1378,6 +1426,26 @@ class ModuleTranslator:
                     method_return_types=method_return_types or {},
                     reduction_arg_exprs=reduction_arg_exprs,
                 )
+                pk_param = self._fresh_pk_param(
+                    list(body) + list(consumed_decls), distinguish_params
+                )
+                if pk_param != INIT_RESULT_NAME:
+                    consumed_decls, consumed_stmts = self._render_consumed_pk_init(
+                        reduction,
+                        pk_param_name=pk_param,
+                        pk0_local_name=outer_init_local,
+                        challenger_oracle_type=inner_oracle_type_name,
+                        method_return_types=method_return_types or {},
+                        reduction_arg_exprs=reduction_arg_exprs,
+                    )
+                    distinguish_params[:] = [
+                        (
+                            ec_ast.ProcParam(pk_param, prm.type)
+                            if prm.name == INIT_RESULT_NAME
+                            else prm
+                        )
+                        for prm in distinguish_params
+                    ]
                 body.extend(consumed_decls)
                 body.extend(consumed_stmts)
                 distinguish_args = outer_init_local

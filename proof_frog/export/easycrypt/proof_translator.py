@@ -575,17 +575,12 @@ class StepResolver:
         arg_exprs: list[str] = [
             self._instance_module_expr[a.name]
             for a in game.args
-            if isinstance(a, frog_ast.Variable) and a.name in self._instance_module_expr
-            # Drop the theorem-scheme instance argument (e.g. ``hybrid ->
-            # CG_expanded(...)``): ``translate_intermediate_game`` keeps only
-            # PRIMITIVE-typed params (``param_module_types``) and INLINES the
-            # scheme's methods to base-module calls, so the emitted module has no
-            # scheme functor param. Passing it here made the application arity
-            # exceed the definition ("expected 5, got 6"). A scheme instance's
-            # module expr is the scheme functor applied to the primitives, so it
-            # begins with the scheme name; primitive instances render as bare
-            # declared-module names.
-            and not self._instance_module_expr[a.name].startswith(self._scheme_name)
+            if isinstance(a, frog_ast.Variable)
+            # The SAME rule the exporter uses for the declaration -- see
+            # :func:`intermediate_param_kept`.
+            and intermediate_param_kept(
+                a.name, self._instance_module_expr, self._scheme_name
+            )
         ]
         module_expr = f"{game.name}({', '.join(arg_exprs)})" if arg_exprs else game.name
         # Played against the outer adversary -> the theorem game's oracle. Fall
@@ -593,6 +588,32 @@ class StepResolver:
         # games with no outer-oracle override).
         oracle = self._outer_oracle_name or self._oracle_names.get(game.name, "main")
         return ResolvedStep(module_expr=module_expr, oracle_name=oracle)
+
+
+def intermediate_param_kept(
+    param_name: str, instance_module_expr: dict[str, str], scheme_name: str
+) -> bool:
+    """Is ``param_name`` a functor parameter of an intermediate game module?
+
+    ONE rule, used by both sides: :meth:`_ProofTranslator._resolve_intermediate_game`
+    when it builds the module APPLICATION and the exporter when it builds the
+    module DECLARATION. They were two independent rules that happened to
+    coincide on most proofs; where they disagreed EasyCrypt rejected the
+    export, in one direction with `unknown procedure: Intermediate1.initialize`
+    (declaration keeps a parameter the application drops -- a partial
+    application has no procedures) and in the other with `invalid module
+    application: wrong number of arguments`.
+
+    Kept when the parameter names a known instance that is NOT the theorem
+    scheme: ``translate_intermediate_game`` keeps only PRIMITIVE-typed params
+    and inlines the scheme's methods to base-module calls, so the emitted
+    module has no scheme functor param. A scheme instance's module expression
+    is the scheme functor applied to the primitives, so it begins with the
+    scheme name; primitive instances render as bare declared-module names.
+    """
+    return param_name in instance_module_expr and not instance_module_expr[
+        param_name
+    ].startswith(scheme_name)
 
 
 def translate_assumption_axioms_theory(  # pylint: disable=too-many-arguments,too-many-positional-arguments

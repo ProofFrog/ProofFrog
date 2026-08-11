@@ -903,3 +903,25 @@ def test_assumption_hop_pr_lemma_default_bridge_keeps_sim_close() -> None:
     body = "\n".join(lemma.body)
     assert "proc; inline *; sim." in body
     assert "skip => /#" not in body
+
+
+def test_intermediate_param_kept_is_one_rule_for_both_sides() -> None:
+    """The declaration of a proof-local intermediate game and its module
+    APPLICATION must keep exactly the same parameters. They used to be two
+    independent rules that coincided on most proofs; where they disagreed
+    EasyCrypt rejected the export in one direction with `unknown procedure:
+    Intermediate1.initialize` (a partial application has no procedures) and
+    in the other with `invalid module application: wrong number of
+    arguments` -- the latter measured on twelve CFRG `INDCCA_PQ`/`INDCCA_T`
+    exports, nine of them clean."""
+    exprs = {"E": "E", "P": "P", "H": "Hybrid(E, P)"}
+    scheme = "Hybrid"
+    # Primitive instances are kept; the theorem SCHEME instance is not (the
+    # emitted module inlines the scheme's methods and has no functor param
+    # for it).
+    assert pt.intermediate_param_kept("E", exprs, scheme)
+    assert pt.intermediate_param_kept("P", exprs, scheme)
+    assert not pt.intermediate_param_kept("H", exprs, scheme)
+    # A parameter that names no known instance (a compile-time index) is not
+    # a functor parameter either.
+    assert not pt.intermediate_param_kept("q", exprs, scheme)

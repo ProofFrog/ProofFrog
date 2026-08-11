@@ -7301,7 +7301,11 @@ def export_proof_file(proof_path: str) -> str:
                 _prf_game_mod_cache[name] = None
             else:
                 module_helper_params = [
-                    p for p in helper.parameters if p.name in instances_by_let_name
+                    p
+                    for p in helper.parameters
+                    if pt.intermediate_param_kept(
+                        p.name, instance_module_expr, primary_module_expr
+                    )
                 ]
                 _prf_game_mod_cache[name] = top_modules.translate_intermediate_game(
                     canonical_form.hoist_game_calls(helper, method_return_types),
@@ -16268,8 +16272,14 @@ def export_proof_file(proof_path: str) -> str:
             helper, frog_ast.Reduction
         ):
             continue
+        # The declaration must keep EXACTLY the parameters the application
+        # passes, so both sides call one rule (`pt.intermediate_param_kept`).
         module_helper_params = [
-            p for p in helper.parameters if p.name in instances_by_let_name
+            p
+            for p in helper.parameters
+            if pt.intermediate_param_kept(
+                p.name, instance_module_expr, primary_module_expr
+            )
         ]
         param_module_types = {
             p.name: f"{instances_by_let_name[p.name].clone_alias}.{scheme_type_name}"

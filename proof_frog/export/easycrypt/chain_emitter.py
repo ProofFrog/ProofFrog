@@ -9807,24 +9807,13 @@ def _emit_one_oracle_chain(
         )
         if cdc is not None:
             return cdc
-        # KDF-PRF substitution at a POST-INIT oracle: the consuming half of what
-        # `_synth_kdf_key_substitution` closes for `initialize`. ``None``
-        # off-shape, so every other oracle stays byte-identical.
-        ksd = _synth_kdf_substitution_decaps(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            flat_params,
-            det_methods,
-            clone_alias,
-            types,
-            full_coupling,
-        )
-        if ksd is not None:
-            return _evidence_only_chunks(), ksd, set()
+        # RETIRED 2026-08-11, third of the whole-oracle endpoint routes to go.
+        # ``_synth_kdf_substitution_decaps`` (KDF-PRF substitution at a
+        # post-init oracle, the consuming half of what
+        # ``_synth_kdf_key_substitution`` closes for ``initialize``) is still
+        # defined below and kept as a reference for that tactic shape, but it
+        # is no longer dispatched to. Priced by the per-route census at 8
+        # closures over 4 proofs.
 
     # Composite-wrapper bridge tactic (wall 7). When the hop has a composite
     # reduction wrapper, the wrapper<->flat bridges carry a cross-module field

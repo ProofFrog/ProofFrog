@@ -9694,17 +9694,14 @@ def _emit_one_oracle_chain(
         # census priced it at 4 closures over 4 proofs -- the cheapest of the
         # eleven that remained. Where it used to close an oracle the chain now
         # runs, and the legs that close are still emitted as evidence.
-        renamed = _synth_sim_field_rename(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            full_coupling,
-        )
-        if renamed is not None:
-            return _evidence_only_chunks(), renamed, set()
+        # RETIRED 2026-08-11, eighth of the whole-oracle endpoint routes to go.
+        # ``_synth_sim_field_rename`` (same body under a field rename, closed by
+        # ``inline *`` plus an if-tree walk with ``wp; sim`` leaves) is still
+        # defined below and kept as a reference for that tactic shape, but it is
+        # no longer dispatched to. Priced by the per-route census at 16 closures
+        # over 13 proofs. Its ``_coupling_has_implication`` gate stays in place:
+        # the route is kept as a reference and the gate is part of what makes it
+        # honest, not scaffolding for the dispatch.
         # Plain GAME vs a reduction FORWARDING this oracle to its challenger:
         # not same-shape (the inlined challenger adds dead guards), so driven by
         # the game's if-tree alone with pattern positions.

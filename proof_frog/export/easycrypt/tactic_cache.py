@@ -26,6 +26,7 @@ the admit diagnostic to surface but never returned by :meth:`lookup`.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import pathlib
@@ -44,6 +45,22 @@ hold :func:`canonical_form.masked_shape` -- the changed region of the pair
 with variable names masked -- instead of :func:`canonical_form.canonical_text`
 of two whole games. Version 1's whole-game key made an entry unreachable from
 any proof but the one it was derived on."""
+
+RECORD_REQUIRED_FROM = "2026-08-11"
+"""Date from which an entry must carry a derivation record to be usable.
+
+Phase-4 Decision 4, as resolved by the maintainer: GRANDFATHER. An entry
+written before this date stays admissible; every entry created on or after it
+must supply the mandatory fields (see :func:`admissible`). The dividing line
+is the entry's own ``added`` date rather than "does it happen to have a
+record", because keying it on the record's presence would let a new
+record-free entry grandfather itself -- exactly the case the rule exists to
+catch. The thirteen inherited entries all carry ``added`` dates in May and
+June 2026 and cannot satisfy the requirement retroactively: whether a
+goal-falsifying mutation was ever run for them is recorded nowhere, and
+inventing one would be the fabrication the rule prevents."""
+
+_RECORD_FIELDS = ("derived_on", "negative_control", "refuted", "scope_note")
 
 HOP_TRANSFORM = "<hop>"
 """Reserved ``transform`` value for a *per-hop* cache entry (a whole-hop
@@ -71,6 +88,25 @@ def oracle_transform(oracle_name: str) -> str:
     return f"{ORACLE_TRANSFORM}:{oracle_name}"
 
 
+def admissible(entry: "CacheEntry") -> bool:
+    """Whether ``entry`` may close a goal.
+
+    Phase-4 Decision 4 with the maintainer's grandfather clause. An entry
+    ``added`` before :data:`RECORD_REQUIRED_FROM` is admissible as it stands.
+    Any other entry -- including one with no ``added`` date at all, which the
+    derivation scaffold does not write and an inherited entry always has --
+    must carry every field of the derivation record.
+
+    The negative control is the load-bearing one: without a goal-falsifying
+    mutation that EasyCrypt REJECTED, "the tactic closed" only says the tactic
+    ran, and a tactic that runs without closing its goal is the worst state
+    this exporter can be in (a zero-admit file EasyCrypt still rejects).
+    """
+    if entry.added is not None and entry.added < RECORD_REQUIRED_FROM:
+        return True
+    return all(getattr(entry, f) for f in _RECORD_FIELDS)
+
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -95,9 +131,10 @@ class CacheEntry:
     # Provenance a reader needs to trust an entry they did not derive. The
     # negative control is the load-bearing one: without a goal-falsifying
     # mutation that EasyCrypt rejected, "the tactic closed" only says the
-    # tactic ran. Whether an entry LACKING these is admissible is a separate
-    # question (the 13 inherited entries cannot satisfy them retroactively)
-    # and is not decided here -- nothing rejects an entry for missing them.
+    # tactic ran. An entry added on or after RECORD_REQUIRED_FROM is REFUSED
+    # by lookup without all four (see admissible); entries older than that
+    # are grandfathered, since the 13 inherited ones cannot satisfy the
+    # requirement retroactively.
     derived_on: str | None = None
     negative_control: str | None = None
     refuted: str | None = None
@@ -122,13 +159,30 @@ class TacticCache:
     def lookup(
         self, transform: str, game_before: str, game_after: str
     ) -> CacheEntry | None:
-        """Exact-match lookup. Linear scan; n is small in practice."""
+        """Exact-match lookup. Linear scan; n is small in practice.
+
+        An entry that is not :func:`admissible` is skipped as though it were
+        not there, so the leg declines to an honest admit rather than closing
+        on a tactic nobody can check. Refusing here rather than at load time
+        keeps the entry visible to the orphan report and to the admit
+        diagnostic's fuzzy hints.
+        """
         for entry in self.entries:
             if (
                 entry.transform == transform
                 and entry.game_before == game_before
                 and entry.game_after == game_after
             ):
+                if not admissible(entry):
+                    _LOGGER.warning(
+                        "tactic-cache entry for %r matched but has no derivation "
+                        "record (added=%s); skipping it. Fill the mandatory "
+                        "fields (%s) or the leg will keep admitting.",
+                        transform,
+                        entry.added,
+                        ", ".join(_RECORD_FIELDS),
+                    )
+                    continue
                 return entry
         return None
 
@@ -370,24 +424,20 @@ def load_store_dir(directory: pathlib.Path, source: str) -> list[CacheEntry]:
     never depends on directory iteration order. A file whose
     ``schema_version`` does not match is skipped exactly as a stale sidecar
     is (its entries are hints, not hits).
+
+    Only ``source`` is rewritten. It used to be rebuilt field by field, which
+    silently DROPPED the whole derivation record on the way in -- the record
+    round-trips through the serializer perfectly and then vanished here, so it
+    was invisible to every consumer. Caught by the admissibility gate
+    (:func:`admissible`), which refused store entries that had a complete
+    record on disk.
     """
     if not directory.is_dir():
         return []
     out: list[CacheEntry] = []
     for path in sorted(directory.glob("*.toml")):
         loaded = TacticCache.load(path)
-        out.extend(
-            CacheEntry(
-                transform=e.transform,
-                game_before=e.game_before,
-                game_after=e.game_after,
-                tactic=e.tactic,
-                description=e.description,
-                added=e.added,
-                source=source,
-            )
-            for e in loaded.entries
-        )
+        out.extend(dataclasses.replace(e, source=source) for e in loaded.entries)
     return out
 
 

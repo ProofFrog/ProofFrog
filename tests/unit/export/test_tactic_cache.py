@@ -144,12 +144,31 @@ def test_serialize_omits_optional_fields_when_none(tmp_path: pathlib.Path) -> No
 # ---------------------------------------------------------------------------
 
 
+def _recorded_entry(tactic: str) -> tc.CacheEntry:
+    """A store entry with a complete derivation record.
+
+    Store entries are a Phase-4 construct, so they postdate the
+    derivation-record requirement and are not grandfathered: an entry without
+    the record is refused by ``lookup`` (see
+    ``tests/unit/export/test_derivation_record_gate.py``). These fixtures test
+    layer PRECEDENCE, so they must be admissible or they test nothing.
+    """
+    return tc.CacheEntry(
+        transform="T",
+        game_before="B",
+        game_after="A",
+        tactic=tactic,
+        derived_on="fixture | EC fixture | fixture",
+        negative_control="fixture: falsified conjunct -> cannot prove goal",
+        refuted="fixture",
+        scope_note="fixture",
+    )
+
+
 def _write_store_entry(directory: pathlib.Path, name: str, tactic: str) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     cache = tc.TacticCache()
-    cache.append(
-        tc.CacheEntry(transform="T", game_before="B", game_after="A", tactic=tactic)
-    )
+    cache.append(_recorded_entry(tactic))
     cache.save(directory / f"{name}.toml")
 
 
@@ -181,11 +200,7 @@ def test_layered_lookup_prefers_the_most_specific_layer(
 
     # add a sidecar entry -> it wins over both
     side = tc.TacticCache()
-    side.append(
-        tc.CacheEntry(
-            transform="T", game_before="B", game_after="A", tactic="sidecar tactic"
-        )
-    )
+    side.append(_recorded_entry("sidecar tactic"))
     side.save(tc.relative_sidecar_path(proof))
     cache2 = tc.load_layered(proof)
     hit2 = cache2.lookup(first.transform, first.game_before, first.game_after)

@@ -9648,21 +9648,12 @@ def _emit_one_oracle_chain(
             if aux_lemma_acc is not None and aux_lines and not aux_lemma_acc:
                 aux_lemma_acc.extend(aux_lines)
             return _evidence_only_chunks(), outer_body, set()
-        if is_lazyro_honest:
-            lz_route = _challenge_lazyro_route(
-                modules,
-                oracle_name,
-                left_states[0],
-                right_states[0],
-                left_wrapper_expr,
-                right_wrapper_expr,
-                external_module_types,
-                method_return_types,
-                flat_params,
-                clone_alias or {},
-            )
-            if lz_route is not None:
-                return _evidence_only_chunks(), lz_route, set()
+        # RETIRED 2026-08-11, fourth of the whole-oracle endpoint routes to go.
+        # ``_challenge_lazyro_route`` (the lazy-random-oracle honest-binding
+        # challenge) is still defined below and kept as a reference for that
+        # tactic shape, but it is no longer dispatched to. Priced by the
+        # per-route census at 12 closures over 6 proofs -- the smallest PROOF
+        # blast radius of the four routes that close twelve oracles each.
         ff_route = _challenge_falsefalse_route(
             modules,
             oracle_name,

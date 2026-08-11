@@ -2854,6 +2854,34 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     )
 
 
+def _blank_dead_result_names(body: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
+    """``body`` with every CALL's result variable blanked.
+
+    A dead call's result name is exactly what ``sim`` is allowed to ignore,
+    so blanking it turns "equal modulo dead names" into plain equality and
+    lets a caller check that the difference really is confined to them.
+    Anything else that differs -- a commuted equality in a guard, an extra
+    statement -- survives the blanking and is caught.
+    """
+    out: list[ec_ast.EcStmt] = []
+    for stmt in body:
+        if isinstance(stmt, ec_ast.Call):
+            out.append(ec_ast.Call("", stmt.callee, stmt.args))
+        elif isinstance(stmt, ec_ast.If):
+            out.append(
+                ec_ast.If(
+                    stmt.guard,
+                    _blank_dead_result_names(stmt.then_body),
+                    _blank_dead_result_names(stmt.else_body),
+                )
+            )
+        elif isinstance(stmt, ec_ast.While):
+            out.append(ec_ast.While(stmt.guard, _blank_dead_result_names(stmt.body)))
+        else:
+            out.append(stmt)
+    return out
+
+
 def _dead_call_drop_step(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     pb: frog_ast.Game,
     pa: frog_ast.Game,
@@ -2915,8 +2943,21 @@ def _dead_call_drop_step(  # pylint: disable=too-many-arguments,too-many-positio
             return None
         if s1_bb:
             # Has calls: require they are all dead (never a live embedding such
-            # as KEMPRF's ``F.evaluate``, whose result the return uses).
+            # as KEMPRF's ``F.evaluate``, whose result the return uses) AND
+            # that the two bodies agree once those dead result names are
+            # blanked. Liveness alone was NOT enough: it let through a pair
+            # whose bodies genuinely differ elsewhere, and `sim` then left the
+            # goal open. Measured on `CG_expanded_INDCCA_T`
+            # `micro_8_hash_left_12`, a `Normalize Commutative Chains` step
+            # where the two lazy-random-oracle `hash` bodies differ by the
+            # operand order of an equality inside the `while` -- all calls
+            # dead, backbones equal, bodies not the same program. This is the
+            # check the branch's own comment always described.
             if not _all_calls_dead(s1_body):
+                return None
+            if _strip_decls(_blank_dead_result_names(s1_body)) != _strip_decls(
+                _blank_dead_result_names(s2_body)
+            ):
                 return None
         elif _strip_decls(s1_body) != _strip_decls(s2_body):
             # Call-free: the constant-return bodies must be identical once unused

@@ -13,9 +13,12 @@ Output is a per-proof report:
 
 * **used**   — sidecar entries whose ``(transform, before, after)`` key
               was requested by the current export.
-* **orphan** — sidecar entries that no current micro-lemma asks for.
-              Retained for fuzzy-hint purposes; flagged so a human can
-              curate them.
+* **orphan** — entries in a WRITABLE layer (the sidecar or the project
+              store) that no current micro-lemma asks for. Retained for
+              fuzzy-hint purposes; flagged so a human can curate them. The
+              packaged store is excluded: it is a shared library, and an
+              entry of it that this one proof does not need is not an
+              orphan.
 * **missing** — keys the export requested but the sidecar lacked. Each
               one corresponds to an ``admit-*`` resolution in the EC file.
 
@@ -33,7 +36,7 @@ import pathlib
 import sys
 from dataclasses import dataclass
 
-from .tactic_cache import TacticCache, relative_sidecar_path
+from .tactic_cache import load_layered, relative_sidecar_path
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
@@ -64,7 +67,14 @@ def _harvest_keys(proof_path: pathlib.Path) -> set[tuple[str, str, str]]:
 
 def _build_report(proof_path: pathlib.Path) -> _Report:
     sidecar_path = relative_sidecar_path(proof_path)
-    cache = TacticCache.load(sidecar_path)
+    # Every layer the export itself would consult, so `used` and `missing`
+    # answer the question the export actually asks.
+    cache = load_layered(proof_path)
+    writable = {
+        (e.transform, e.game_before, e.game_after)
+        for e in cache.entries
+        if e.source != "packaged"
+    }
     try:
         requested = _harvest_keys(proof_path)
     except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -72,13 +82,15 @@ def _build_report(proof_path: pathlib.Path) -> _Report:
             proof_path=proof_path,
             sidecar_path=sidecar_path,
             used=0,
-            orphan=len(cache.entries),
+            orphan=len(writable),
             missing=0,
             error=f"{type(exc).__name__}: {exc}",
         )
     live_keys = {(e.transform, e.game_before, e.game_after) for e in cache.entries}
     used = len(live_keys & requested)
-    orphan = len(live_keys - requested)
+    # An orphan is an entry in a WRITABLE layer that nothing asks for; a
+    # packaged-library entry this proof does not need is not an orphan.
+    orphan = len(writable - requested)
     missing = len(requested - live_keys)
     return _Report(
         proof_path=proof_path,

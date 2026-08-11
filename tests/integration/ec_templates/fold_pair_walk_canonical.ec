@@ -111,8 +111,7 @@ proof.
   call{2} (K_enc_det gv0 ((K_c.ev_decaps (kv2) (kv3)))).
   call{2} (K_enc_det gv0 ((K_c.ev_decaps (kv0) (kv1)))).
   skip.
-  move => &1 &2 />.
-  smt().
+  move => &1 &2 />; smt().
   rcondf{1} 1; first by auto => /#.
   wp.
   call (_: true).
@@ -139,8 +138,7 @@ proof.
   call{1} (K_enc_det gv0 ((K_c.ev_decaps (kv2) (kv3)))).
   call{1} (K_enc_det gv0 ((K_c.ev_decaps (kv0) (kv1)))).
   skip.
-  move => &1 &2 />.
-  smt().
+  move => &1 &2 />; smt().
   rcondf{2} 1; first by auto => /#.
   wp.
   call (_: true).

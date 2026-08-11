@@ -340,3 +340,18 @@ def test_ev_env_declines_a_foreign_field_read() -> None:
     env = _EvEnv(DET, ALIAS, set(), {"f00"}, "FA", {}, {}, frozenset({"dkX"}))
     assert env.feed(ec_ast.Assign("y", "f00")) is True
     assert env.feed(ec_ast.Assign("x", "dkX")) is False
+
+
+def test_fold_closer_sequences_the_crush_and_the_solver() -> None:
+    """``move => &1 &2 />`` and ``smt()`` must be ONE tactic. When the
+    P-true residual is trivial the crush closes that goal alone, and a
+    separate ``smt().`` would then hit the P-false branch, whose program is
+    not empty -- EasyCrypt answers "cannot prove goal (strict)" (measured on
+    `UG_expanded_LEAK_BIND_K_PK` `micro_2_challenge_left_8`)."""
+    step = _dispatch(
+        _fold_game("FB", False), _fold_game("FA", True), PRE_F, "FB(K)", "FA(K)"
+    )
+    assert step is not None
+    tac = step[0]
+    assert "move => &1 &2 />; smt()." in tac
+    assert "smt()." not in tac

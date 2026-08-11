@@ -4544,9 +4544,17 @@ def _if_fold_step(  # pylint: disable=too-many-arguments,too-many-positional-arg
             assert drain is not None
             tac.append(f"call{{{s_st}}} {drain}")
             k -= 1
+        # The crush and the solver are ONE tactic, not two steps. When the
+        # P-true residual is trivial (an oracle whose branches both return a
+        # constant), ``/>`` closes the goal by itself and a following
+        # ``smt().`` on its own line would then be applied to the NEXT open
+        # goal -- the P-false branch, whose program is not empty, so
+        # EasyCrypt answers "cannot prove goal (strict)" with the ``if``
+        # still in place. Sequenced with ``;`` the solver runs on the goals
+        # ``/>`` actually leaves, however many that is (measured on
+        # `UG_expanded_LEAK_BIND_K_PK` `micro_2_challenge_left_8`).
         tac.append("skip.")
-        tac.append("move => &1 &2 />.")
-        tac.append("smt().")
+        tac.append("move => &1 &2 />; smt().")
         # P-false: both sides run the else region; paired peel.
         tac.append(f"rcondf{{{s_if}}} 1; first by auto => /#.")
         tac.append("wp.")

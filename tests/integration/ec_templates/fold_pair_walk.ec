@@ -14,6 +14,14 @@
 (* smt() (the /> crush before smt is load-bearing -- a bare       *)
 (* skip => /# fails); rcondf: the paired peel.                    *)
 (*                                                                *)
+(* The crush and the solver are ONE tactic (`;`), not two steps.   *)
+(* On an oracle whose branches both return a constant the crush    *)
+(* closes the P-true goal by itself, and a following `smt().` on   *)
+(* its own line would be applied to the NEXT open goal -- the      *)
+(* P-false branch, whose program is not empty, giving "cannot      *)
+(* prove goal (strict)" with the `if` still in place (measured on  *)
+(* UG_expanded_LEAK_BIND_K_PK micro_2_challenge_left_8).           *)
+(*                                                                *)
 (* Negative control (validated 2026-08-09 by mutating THIS file): *)
 (* falsifying FB's then-branch X to (ek0 = ek1) -> EC rejects at  *)
 (* the P-true smt ("cannot prove goal", the goal showing the      *)
@@ -110,8 +118,7 @@ proof.
   call{2} (K_enc_det gv0 ((K_c.ev_decaps (kv2) (kv3)))).
   call{2} (K_enc_det gv0 ((K_c.ev_decaps (kv0) (kv1)))).
   skip.
-  move => &1 &2 />.
-  smt().
+  move => &1 &2 />; smt().
   rcondf{1} 1; first by auto => /#.
   wp.
   call (_: true).
@@ -138,8 +145,7 @@ proof.
   call{1} (K_enc_det gv0 ((K_c.ev_decaps (kv2) (kv3)))).
   call{1} (K_enc_det gv0 ((K_c.ev_decaps (kv0) (kv1)))).
   skip.
-  move => &1 &2 />.
-  smt().
+  move => &1 &2 />; smt().
   rcondf{2} 1; first by auto => /#.
   wp.
   call (_: true).

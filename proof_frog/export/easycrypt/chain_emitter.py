@@ -18212,6 +18212,55 @@ def _calls_only_alignment_invalid(
     return False
 
 
+def _same_callee_arg_crossing(
+    a_body: list[ec_ast.EcStmt], b_body: list[ec_ast.EcStmt]
+) -> bool:
+    """True when the two bodies call one callee with the same ARGUMENTS in a
+    DIFFERENT order -- a reordering :func:`_calls_only_align_swaps` cannot see.
+
+    That routine aligns calls by CALLEE and, by its own documentation, "leaves
+    interchangeable same-callee results for the walker". Two calls to the same
+    callee are only interchangeable when their arguments agree. When they do
+    not, the alignment pairs the wrong ones and the peel that follows emits an
+    equiv obligation relating unrelated results.
+
+    Measured on ``CG_expanded_LEAK_BIND_K_PK`` ``micro_2_challenge_left_39``, a
+    ``Stabilize Independent Statements`` leg: the left body runs
+    ``NG.exp(v7, field9)`` then ``NG.exp(v10, field10)`` and the right runs them
+    the other way round (``v7 <- ct0.`2``, ``v10 <- ct1.`2``). ``L.get`` also
+    moves, and the emitted ``swap{2} 9 -5`` realigns THAT, which is why the leg
+    looks aligned. Reading the residual goal shows what the closer is handed:
+    ``(v7_L, field9{1}).`1 = (v10{2}, field10{2}).`1``, i.e. the oracle's two
+    input ciphertexts must be equal, against a precondition offering only
+    ``={ct0, ct1}``. The lemma is true; the SUBGOAL the strategy manufactured
+    is false, so no closer, larger budget or smarter solver could discharge it.
+
+    Declining is the only honest answer, not merely the safe one: EC's ``swap``
+    refuses to reorder two abstract-module calls, so the crossing cannot be
+    repaired by adding swaps either. The oracle takes its admit.
+
+    The trigger is deliberately narrow -- same callee, same argument MULTISET,
+    different SEQUENCE -- so a leg whose two sides merely rename their locals
+    has mismatched multisets and is untouched.
+    """
+    a_calls = [
+        (st.callee, st.args)
+        for st in _exec_stmts(a_body)
+        if isinstance(st, ec_ast.Call)
+    ]
+    b_calls = [
+        (st.callee, st.args)
+        for st in _exec_stmts(b_body)
+        if isinstance(st, ec_ast.Call)
+    ]
+    for callee in {c for c, _ in a_calls}:
+        left = [args for c, args in a_calls if c == callee]
+        right = [args for c, args in b_calls if c == callee]
+        if len(left) > 1 and left != right and sorted(left) == sorted(right):
+            return True
+    return False
+
+
 def _calls_only_align_swaps(
     other_body: list[ec_ast.EcStmt],
     inlined_body: list[ec_ast.EcStmt],
@@ -18235,7 +18284,13 @@ def _calls_only_align_swaps(
     recomputed by moving only the calls (:func:`_calls_only_move_swaps`), leaving
     every assignment in place. A clean proof's swaps are already valid, so it
     keeps the coarse result byte-identical.
+
+    A same-callee argument crossing (:func:`_same_callee_arg_crossing`) is
+    DECLINED outright: the alignment is blind to it, and every route built on
+    top of this one would peel the wrong pairing into a false obligation.
     """
+    if _same_callee_arg_crossing(other_body, inlined_body):
+        return None
     target_exec = _calls_only_target(other_body, inlined_body)
     if target_exec is None:
         return None

@@ -2434,6 +2434,51 @@ def _rename_equal_projection(pb: frog_ast.Game, pa: frog_ast.Game) -> bool:
     return canonicalize(mb, names_b) == canonicalize(ma, names_a)
 
 
+def _init_determines_whole_state(
+    proj: frog_ast.Game,
+    modules: mt.ModuleTranslator,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    use_canonical_fields: bool,
+) -> bool:
+    """Does this ``Initialize`` WRITE every field of its state?
+
+    An init leg's precondition is ``true`` -- there is no incoming state to
+    relate -- while its postcondition asserts the coupling. That is provable
+    exactly when the two bodies determine the coupled state between them, so
+    every coupled field has to be written by ``Initialize``. A field it never
+    writes (a random-oracle table, which the hash oracle fills lazily) holds
+    an arbitrary value that nothing relates across the two memories, and the
+    coupling is underivable: EasyCrypt answers *cannot save an incomplete
+    proof*, measured on `CG_expanded_INDCCA_T` `micro_8_initialize_left_0`.
+
+    Rendered with the chain's own field naming so the names compared here
+    are the emitted ones.
+    """
+    mod = _flat_state_module(
+        modules,
+        "Step_it",
+        proj,
+        external_module_types,
+        method_return_types,
+        flat_params,
+        emit_state_vars=True,
+        use_canonical_fields=use_canonical_fields,
+    )
+    if not mod.procs:
+        return False
+    fields = {v.name for v in mod.module_vars}
+    if not fields:
+        return True
+    written = {
+        stmt.var
+        for stmt in _flatten_stmts(mod.procs[0].body)
+        if isinstance(stmt, (ec_ast.Assign, ec_ast.Sample, ec_ast.Call)) and stmt.var
+    }
+    return fields <= written
+
+
 def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     state_before: frog_ast.Game,
     state_after: frog_ast.Game,
@@ -2450,6 +2495,7 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     clone_alias: dict[str, str] | None = None,
     inj_methods_by_module: dict[str, set[str]] | None = None,
     use_canonical_fields: bool = False,
+    is_init: bool = False,
 ) -> tuple[list[str], MicroRequests, str] | None:
     """Tactic for one chain step's micro lemma, restricted to ``oracle_name``.
 
@@ -2494,6 +2540,30 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     pb = _project_to_method(state_before, oracle_name)
     pa = _project_to_method(state_after, oracle_name)
     if pb is None or pa is None:
+        return None
+    # An INIT leg is provable only when the two ``Initialize`` bodies
+    # determine the coupled state between them: its precondition is ``true``,
+    # so if either leaves a field unwritten nothing relates that field across
+    # the two memories and no tactic can establish the coupling -- decline
+    # rather than emit one that will not close. Gated on ``is_init`` and not
+    # on the precondition alone: a NON-init leg can also carry a ``true``
+    # precondition, and it has incoming state, so the reasoning does not
+    # apply to it. See :func:`_init_determines_whole_state`.
+    if (
+        is_init
+        and micro_pre_text == "true"
+        and not all(
+            _init_determines_whole_state(
+                proj,
+                modules,
+                external_module_types,
+                method_return_types,
+                flat_params,
+                use_canonical_fields,
+            )
+            for proj in (pb, pa)
+        )
+    ):
         return None
     # Move 3c (Phase-2): the Hoist-Deterministic-Call-to-Initialize pair.
     # MUST run before the field-cardinality branch below: a Hoist step is a
@@ -9306,6 +9376,7 @@ def _emit_one_oracle_chain(
             clone_alias=clone_alias,
             inj_methods_by_module=inj_methods_by_module,
             use_canonical_fields=use_canonical,
+            is_init=is_init,
         )
         if step is None:
             step = _cached_leg(app.transform_name, left_states[k], left_states[k + 1])
@@ -9356,6 +9427,7 @@ def _emit_one_oracle_chain(
             clone_alias=clone_alias,
             inj_methods_by_module=inj_methods_by_module,
             use_canonical_fields=use_canonical,
+            is_init=is_init,
         )
         if step is None:
             step = _cached_leg(app.transform_name, right_states[k + 1], right_states[k])

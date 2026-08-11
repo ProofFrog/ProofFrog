@@ -2850,9 +2850,8 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         return walk
     # Move 4 (Phase-2): if-tree collapse legs -- the Fold Equivalent Return
     # Branch case tree and the deterministic-tail (Absorb / early-return
-    # lowering) row. Last in the dispatch, so every existing route stays
-    # byte-identical.
-    return _if_fold_step(
+    # lowering) row.
+    fold = _if_fold_step(
         pb,
         pa,
         reversed_dir,
@@ -2866,6 +2865,18 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         right_ref,
         clone_alias or {},
         use_canonical_fields,
+    )
+    if fold is not None:
+        return fold
+    # LAST in the dispatch, so every route above stays byte-identical: the
+    # plain deterministic-plumbing peel.
+    return _plain_plumbing_peel_step(
+        pb,
+        pa,
+        external_module_types,
+        method_return_types,
+        modules,
+        flat_params,
     )
 
 
@@ -3372,6 +3383,133 @@ def _isuv_align_step(  # pylint: disable=too-many-arguments,too-many-positional-
     tac.extend(_backbone_peel(body1))
     tac.append("auto => /#.")
     return tac, MicroRequests(), SYNTH_PARAM
+
+
+def _plain_plumbing_peel_step(
+    pb: frog_ast.Game,
+    pa: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    modules: mt.ModuleTranslator,
+    flat_params: list[ec_ast.ModuleParam],
+) -> tuple[list[str], MicroRequests, str] | None:
+    """A leg that rewrites only DETERMINISTIC plumbing around an unchanged
+    abstract-call backbone.
+
+    The same walker as :func:`_isuv_align_step`, minus its swaps. That row
+    fires only when an actual call reorder exists, on the reasoning that
+    "the calls already line up, so the canned ``sim`` route closes it". For
+    this class that reasoning is false: the call sequence lines up, but the
+    two bodies differ in their deterministic assignments -- a repeated
+    projection extracted to a ``__cse_*`` local, a redundant copy removed, a
+    field renamed, the operands of an ``=`` commuted -- and ``sim`` compares
+    programs syntactically, so it aligns the extra assignment against a call
+    and gives up. The legs therefore reached no route at all and declined.
+
+    ``wp`` absorbs the deterministic runs on both sides and ``/#`` equates
+    the substituted expressions, so the ordinary bottom-up backbone peel
+    closes them. Probed standalone in ``.ec-tmp/diag/plain_peel_probe.ec``
+    over a body carrying all three difference kinds at once, with a
+    proof-level negative control (one call given the wrong ciphertext ->
+    *cannot prove goal (strict)* at the closer).
+
+    Gates, each failing closed:
+
+    * the CALL AND SAMPLE BACKBONE must be identical
+      (:func:`_call_sample_backbone`, which tags a sample by its bound
+      variable). A differing call sequence is a reorder or a deduplication,
+      which the swap and functional-twin routes own. Comparing only the
+      CALLEES is not enough and was measured: ``7_13_Forward``'s leg adds a
+      ``<$`` sample on one side only, the peel generated from the other
+      side's backbone does not fit, and EasyCrypt answers *invalid last
+      instruction*;
+    * the peel must reach every event on both sides
+      (:func:`_peel_reaches_every_event`) -- a call, sample or ``while``
+      nested under an ``if`` is invisible to a top-level peel and
+      unreachable by its ``wp``, and EasyCrypt answers *invalid last
+      instruction*. Measured: every ``Extract Repeated Tuple Access`` leg
+      that is the FIRST death of its chain in the binding family is blocked
+      here, because the binding ``challenge`` body ends in a case split that
+      calls;
+    * there must be a call to peel, and the bodies must actually differ (an
+      equal pair belongs to the rendered-identity row above);
+    * there must be no SAME-CALLEE ARGUMENT CROSSING
+      (:func:`_same_callee_arg_crossing`). An identical callee sequence is
+      exactly the shape that crossing hides in: the peel pairs the i-th call
+      of each side, and two calls on one callee whose arguments are swapped
+      make that pairing wrong. Measured on the first run of this row --
+      eleven binding cells, all the ``K_CT_SAMEKEY`` and ``HON_BIND``
+      variants, whose two ciphertext branches run in opposite orders; the
+      goal demanded ``ct1.`1 = ct0.`1``. Same defect as the one the gate was
+      written for, reached through a different route;
+    * the two bodies must reference the state's FIELDS in the same order.
+      The micro precondition couples the two globs by NAME, so a leg that
+      renames or permutes fields is not provable from it however the
+      plumbing lines up. Measured on the first run of this row:
+      ``CG_expanded_LEAK_BIND_K_PK`` ``micro_0_challenge_left_23`` swaps the
+      roles of ``field1`` and ``field2`` between the two states, and the
+      closer was handed ``concat(.., field1{1}) = concat(.., field2{2})``
+      against a precondition offering ``field1{1} = field1{2}`` -- a FALSE
+      subgoal, not a hard one. The test is deliberately blunt: it also
+      declines a leg that merely commutes two field operands, which is a
+      loss rather than a bug.
+
+    Last in the dispatch, so every route above it stays byte-identical: this
+    can only convert a decline into a close.
+    """
+
+    def _render(name: str, game: frog_ast.Game) -> ec_ast.Module:
+        return _flat_state_module(
+            modules,
+            name,
+            game,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            emit_state_vars=True,
+        )
+
+    mod1, mod2 = _render("Step_pp_1", pb), _render("Step_pp_2", pa)
+    if not mod1.procs or not mod2.procs:
+        return None
+    body1, body2 = mod1.procs[0].body, mod2.procs[0].body
+    if not [s for s in _exec_stmts(body1) if isinstance(s, ec_ast.Call)]:
+        return None
+    if _call_sample_backbone(body1) != _call_sample_backbone(body2):
+        return None
+    if body1 == body2:
+        return None
+    if not _peel_reaches_every_event(body1) or not _peel_reaches_every_event(body2):
+        return None
+    if _same_callee_arg_crossing(body1, body2):
+        return None
+    fields = {v.name for v in mod1.module_vars} | {v.name for v in mod2.module_vars}
+    if _field_reference_order(body1, fields) != _field_reference_order(body2, fields):
+        return None
+    return (
+        ["proc.", *_backbone_peel(body1), "auto => /#."],
+        MicroRequests(),
+        SYNTH_PARAM,
+    )
+
+
+def _field_reference_order(body: list[ec_ast.EcStmt], fields: set[str]) -> list[str]:
+    """Every state-field name ``body`` mentions, in statement order.
+
+    Descends into ``if``/``while`` bodies so a branch-local reference counts
+    where it appears. Used to decline a leg whose two sides use the fields
+    differently: the micro precondition couples the globs by NAME, so any
+    renaming or permutation of fields makes the peel's obligation false.
+    """
+    out: list[str] = []
+    for stmt in _exec_stmts(body):
+        out.extend(tok for tok in _stmt_tokens(stmt) if tok in fields)
+        if isinstance(stmt, ec_ast.If):
+            out.extend(_field_reference_order(stmt.then_body, fields))
+            out.extend(_field_reference_order(stmt.else_body, fields))
+        elif isinstance(stmt, ec_ast.While):
+            out.extend(_field_reference_order(stmt.body, fields))
+    return out
 
 
 def _raw_single_site(

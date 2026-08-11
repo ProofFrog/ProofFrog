@@ -9656,25 +9656,10 @@ def _emit_one_oracle_chain(
             if decaps_val_acc is not None and ff_scheme:
                 decaps_val_acc.add(ff_scheme)
             return _evidence_only_chunks(), ff_body, set()
-        h2_route = _challenge_hop2_route(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            left_wrapper_expr,
-            right_wrapper_expr,
-            external_module_types,
-            method_return_types,
-            flat_params,
-            clone_alias,
-        )
-        if h2_route is not None:
-            h2_body, h2_inj, h2_scheme = h2_route
-            if inj_acc is not None and h2_inj is not None:
-                inj_acc.add(h2_inj)
-            if decaps_val_acc is not None:
-                decaps_val_acc.add(h2_scheme)
-            return _evidence_only_chunks(), h2_body, set()
+        # RETIRED 2026-08-11, sixth of the whole-oracle endpoint routes to go.
+        # ``_challenge_hop2_route`` is still defined below and kept as a
+        # reference for that tactic shape, but it is no longer dispatched to.
+        # Priced by the per-route census at 12 closures over 12 proofs.
         sr_route = _challenge_single_r_route(
             modules,
             oracle_name,

@@ -3082,13 +3082,17 @@ def export_proof_file(proof_path: str) -> str:
     # pylint: disable=import-outside-toplevel
     from .tactic_cache import (
         HOP_TRANSFORM,
-        TacticCache,
+        load_layered,
         oracle_transform,
         relative_sidecar_path,
     )
 
     proof_path_obj = pathlib.Path(proof_path)
-    tactic_cache = TacticCache.load(relative_sidecar_path(proof_path_obj))
+    # Three layers, most specific first (Phase-4 Decision 3): the per-proof
+    # sidecar, then a project store discovered by walking up to
+    # `.prooffrog/tactic-cache/`, then the read-only packaged store. With
+    # neither of the latter two present this is exactly the old sidecar load.
+    tactic_cache = load_layered(proof_path_obj)
     sidecar_relpath = str(relative_sidecar_path(proof_path_obj))
     requested_cache_keys: list[tuple[str, str, str]] = []
     # Published as a module-level side-channel so ``cache_report.py``

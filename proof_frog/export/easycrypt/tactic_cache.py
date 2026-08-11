@@ -27,6 +27,7 @@ the admit diagnostic to surface but never returned by :meth:`lookup`.
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
 import tomllib
 from dataclasses import dataclass, field
@@ -68,7 +69,13 @@ _LOGGER = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class CacheEntry:
-    """One cached tactic body, addressed by (transform, before, after)."""
+    """One cached tactic body, addressed by (transform, before, after).
+
+    ``source`` records WHICH layer the entry came from (see
+    :func:`load_layered`). It is provenance for diagnostics only: it is
+    never serialized, never part of the key, and never affects a lookup
+    beyond the order the layers are concatenated in.
+    """
 
     transform: str
     game_before: str
@@ -76,6 +83,7 @@ class CacheEntry:
     tactic: str
     description: str | None = None
     added: str | None = None
+    source: str = "sidecar"
 
 
 @dataclass
@@ -236,6 +244,112 @@ def _block_string(s: str) -> str:
         return "'''\n" + s + ("" if s.endswith("\n") else "\n") + "'''"
     escaped = s.replace("\\", "\\\\").replace('"""', '""\\"')
     return '"""\n' + escaped + ("" if escaped.endswith("\n") else "\n") + '"""'
+
+
+# ---------------------------------------------------------------------------
+# The three-layer store (Phase-4 Decision 3)
+# ---------------------------------------------------------------------------
+
+PROJECT_STORE_DIRNAME = ".prooffrog"
+"""Project-root marker directory holding a transferable tactic store."""
+
+PROJECT_STORE_SUBDIR = "tactic-cache"
+"""Subdirectory of :data:`PROJECT_STORE_DIRNAME` holding the entry files."""
+
+TACTIC_CACHE_ENV = "PROOFFROG_TACTIC_CACHE"
+"""Environment override naming a project store directory outright (for CI)."""
+
+
+def packaged_store_dir() -> pathlib.Path:
+    """The read-only, maintainer-curated store that ships in the wheel.
+
+    Writes NEVER go here: it changes only by maintainer promotion, so its
+    entries stay in lockstep with the canonical basis and exporter version
+    they were validated against.
+    """
+    return pathlib.Path(__file__).parent / "tactic_store"
+
+
+def find_project_store(
+    proof_path: pathlib.Path, override: str | pathlib.Path | None = None
+) -> pathlib.Path | None:
+    """The project store for ``proof_path``, or ``None`` if there is none.
+
+    ``override`` (the ``--tactic-cache`` flag) wins; then the
+    :data:`TACTIC_CACHE_ENV` environment variable; otherwise walk up from
+    the proof file looking for ``.prooffrog/tactic-cache/``. Walking up --
+    rather than assuming one fixed location -- is what lets an external
+    user keep a transferable store next to their own proofs, and makes our
+    own corpus a plain instance of the same mechanism rather than a special
+    case.
+    """
+    explicit = override if override is not None else os.environ.get(TACTIC_CACHE_ENV)
+    if explicit:
+        path = pathlib.Path(explicit)
+        return path if path.is_dir() else None
+    start = proof_path.resolve()
+    for parent in [start] + list(start.parents):
+        candidate = parent / PROJECT_STORE_DIRNAME / PROJECT_STORE_SUBDIR
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def load_store_dir(directory: pathlib.Path, source: str) -> list[CacheEntry]:
+    """Every live entry in a store directory, in a deterministic order.
+
+    One TOML file per entry is the intended layout, but a file may hold
+    several ``[[entry]]`` blocks -- the parser is the sidecar's, so the two
+    layouts read identically. Files are visited in sorted order so a lookup
+    never depends on directory iteration order. A file whose
+    ``schema_version`` does not match is skipped exactly as a stale sidecar
+    is (its entries are hints, not hits).
+    """
+    if not directory.is_dir():
+        return []
+    out: list[CacheEntry] = []
+    for path in sorted(directory.glob("*.toml")):
+        loaded = TacticCache.load(path)
+        out.extend(
+            CacheEntry(
+                transform=e.transform,
+                game_before=e.game_before,
+                game_after=e.game_after,
+                tactic=e.tactic,
+                description=e.description,
+                added=e.added,
+                source=source,
+            )
+            for e in loaded.entries
+        )
+    return out
+
+
+def load_layered(
+    proof_path: pathlib.Path, override: str | pathlib.Path | None = None
+) -> TacticCache:
+    """Load the sidecar, the project store and the packaged store as one cache.
+
+    Lookup precedence is sidecar -> project -> packaged, and it falls out of
+    the ORDER the layers are concatenated in: :meth:`TacticCache.lookup`
+    returns the first exact match. Writes are unaffected -- they still go to
+    the sidecar (or, later, to the project store); the packaged layer is
+    read-only by construction.
+
+    Stale entries from every layer are kept together so the admit
+    diagnostic can still surface them as fuzzy hints.
+    """
+    sidecar = TacticCache.load(relative_sidecar_path(proof_path))
+    entries = list(sidecar.entries)
+    project_dir = find_project_store(proof_path, override)
+    if project_dir is not None:
+        entries.extend(load_store_dir(project_dir, "project"))
+    entries.extend(load_store_dir(packaged_store_dir(), "packaged"))
+    return TacticCache(
+        schema_version=SCHEMA_VERSION,
+        entries=entries,
+        stale_entries=list(sidecar.stale_entries),
+    )
 
 
 # ---------------------------------------------------------------------------

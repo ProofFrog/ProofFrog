@@ -2782,6 +2782,20 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     )
     if identity is not None:
         return identity
+    # The same row, up to a renaming of local variables: a rename leg whose
+    # FrogLang bodies differ by material the renderer normalizes away, so
+    # Move 1 declines it even though the rendered modules are alpha-equal.
+    renamed_identity = _rendered_rename_step(
+        pb,
+        pa,
+        external_module_types,
+        method_return_types,
+        modules,
+        flat_params,
+        use_canonical_fields,
+    )
+    if renamed_identity is not None:
+        return renamed_identity
     # Move 6 (Phase-2): an inlining step (``Inline Single-Use Variables``,
     # ``Extract Repeated Tuple Access``) that also exposed an independent
     # cross-module CALL REORDER. Measured second layer of the
@@ -3098,6 +3112,121 @@ def _name_sorted_vars(module: ec_ast.Module) -> ec_ast.Module:
         module,
         module_vars=sorted(module.module_vars, key=lambda v: (v.name, v.type.text)),
     )
+
+
+_RENAME_TOKEN_RE = re.compile(r"[A-Za-z_][A-Za-z_0-9]*")
+
+
+def _rendered_rename_step(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements
+    pb: frog_ast.Game,
+    pa: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    modules: mt.ModuleTranslator,
+    flat_params: list[ec_ast.ModuleParam],
+    use_canonical_fields: bool = False,
+) -> tuple[list[str], MicroRequests, str] | None:
+    """The rendered-identity row, up to a renaming of LOCAL variables.
+
+    :func:`_rename_equal_projection` (Move 1) already closes an alpha-rename
+    leg with ``proc; sim.``, and 42 of its legs are in EC-accepted exports, so
+    the tactic is evidenced for this shape. But Move 1 decides on the FrogLang
+    ASTs, and a rename leg can differ there by material the RENDERER
+    normalizes away -- the same reason the rendered-identity row exists at
+    all. Measured on `CG_expanded_INDCCA_T`: all 6 declining `Alpha Rename`
+    legs pass every one of Move 1's cheap checks and then fail its final
+    equality, while their RENDERED modules are equal modulo identifier
+    renaming. Neither existing row could take them: Move 1 because the
+    FrogLang bodies differ, the rendered-identity row because the rendered
+    names differ.
+
+    The renaming is derived POSITIONALLY from each proc's ``var`` block and
+    must be a type-preserving bijection, and everything outside the local
+    names -- module name, functor params, the state var block, each proc's
+    signature, and every other token including callees and ops -- must match
+    exactly, after substitution, as text. That is strictly stronger than the
+    masked comparison used to measure the class: masking every identifier
+    would equate a field rename or two different callees, and both must
+    decline here. A local name colliding with a state var or a functor param
+    declines rather than risking capture, mirroring Move 1's own reserved-name
+    guard.
+    """
+    bmod = _flat_state_module(
+        modules,
+        "Step_id",
+        pb,
+        external_module_types,
+        method_return_types,
+        flat_params,
+        emit_state_vars=True,
+        use_canonical_fields=use_canonical_fields,
+    )
+    amod = _flat_state_module(
+        modules,
+        "Step_id",
+        pa,
+        external_module_types,
+        method_return_types,
+        flat_params,
+        emit_state_vars=True,
+        use_canonical_fields=use_canonical_fields,
+    )
+    if not _modules_alpha_equal(bmod, amod):
+        return None
+    return ["proc; sim."], MicroRequests(), SYNTH_STATIC
+
+
+def _modules_alpha_equal(  # pylint: disable=too-many-return-statements
+    bmod: ec_ast.Module, amod: ec_ast.Module
+) -> bool:
+    """True when two rendered modules differ ONLY by a renaming of locals.
+
+    Split out of :func:`_rendered_rename_step` so every guard below is unit
+    testable without building a pair of FrogLang games; the tests are in
+    ``tests/unit/export/test_rendered_rename_row.py``.
+
+    The renaming is read POSITIONALLY off each proc's ``var`` block, must be
+    type-preserving and injective, and is then applied to the rendered TEXT,
+    which must match exactly. Text equality after substitution is what makes
+    this safe: a field rename, a different callee, a different op, a changed
+    literal or a reordered statement all survive the substitution and
+    decline. A local whose name collides with a state var or a functor param
+    declines rather than risk capture.
+    """
+    if not bmod.procs or not amod.procs:
+        return False
+    if bmod.name != amod.name or bmod.params != amod.params:
+        return False
+    if _name_sorted_vars(bmod).module_vars != _name_sorted_vars(amod).module_vars:
+        return False
+    if len(bmod.procs) != len(amod.procs):
+        return False
+    rename: dict[str, str] = {}
+    for bproc, aproc in zip(bmod.procs, amod.procs):
+        if (
+            bproc.name != aproc.name
+            or bproc.params != aproc.params
+            or bproc.return_type != aproc.return_type
+        ):
+            return False
+        blocals = [st for st in bproc.body if isinstance(st, ec_ast.VarDecl)]
+        alocals = [st for st in aproc.body if isinstance(st, ec_ast.VarDecl)]
+        if len(blocals) != len(alocals):
+            return False
+        for bvar, avar in zip(blocals, alocals):
+            if bvar.type != avar.type:
+                return False
+            if rename.setdefault(bvar.name, avar.name) != avar.name:
+                return False
+    if not rename or len(set(rename.values())) != len(rename):
+        return False
+    reserved = {v.name for v in bmod.module_vars} | {p.name for p in bmod.params}
+    if reserved & (set(rename) | set(rename.values())):
+        return False
+    btext = "\n".join(_render_module_decl(bmod))
+    atext = "\n".join(_render_module_decl(amod))
+    renamed = _RENAME_TOKEN_RE.sub(lambda m: rename.get(m.group(0), m.group(0)), btext)
+    return renamed == atext
 
 
 def _peel_reaches_every_event(body: list[ec_ast.EcStmt]) -> bool:

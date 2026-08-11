@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
+import re
 import tomllib
 from dataclasses import dataclass, field
 from typing import Iterable
@@ -356,6 +357,69 @@ def load_layered(
         entries=entries,
         stale_entries=list(sidecar.stale_entries),
     )
+
+
+# ---------------------------------------------------------------------------
+# Escalation report — synthesizer-candidate clusters
+# ---------------------------------------------------------------------------
+
+SYNTHESIZER_CANDIDATE_THRESHOLD = 5
+"""Distinct entries sharing a shape before the cluster is worth reporting.
+
+Matches the project's standing bar for promoting a recurring cached recipe
+to a synthesizer (>= 5 distinct proofs hitting the same shape), so the
+report replaces a human noticing the fifth identical fill rather than
+inventing a second, softer bar."""
+
+
+def _shape_of(text: str) -> str:
+    """Every identifier run replaced by ``ID``.
+
+    Strictly LOOSER than the stored key, which masks variable names only and
+    keeps types (see :func:`canonical_form.masked_shape`). Two entries with
+    the same shape but different keys are two sites a single synthesizer
+    might cover -- which is what makes them worth reporting -- while the
+    stored key stays tight so nothing is REUSED on this basis.
+    """
+    return re.sub(r"[A-Za-z_][A-Za-z0-9_]*", "ID", text)
+
+
+def cluster_by_shape(
+    entries: Iterable[CacheEntry],
+) -> dict[tuple[str, str, str], list[CacheEntry]]:
+    """Group entries by ``(transform, shape(before), shape(after))``.
+
+    Only groups with more than one DISTINCT key are returned: several
+    entries that share a key are one site captured in several layers, not
+    several sites.
+    """
+    groups: dict[tuple[str, str, str], list[CacheEntry]] = {}
+    for entry in entries:
+        shape = (
+            entry.transform,
+            _shape_of(entry.game_before),
+            _shape_of(entry.game_after),
+        )
+        groups.setdefault(shape, []).append(entry)
+    return {
+        shape: members
+        for shape, members in groups.items()
+        if len({(m.transform, m.game_before, m.game_after) for m in members}) > 1
+    }
+
+
+def synthesizer_candidates(
+    entries: Iterable[CacheEntry], threshold: int = SYNTHESIZER_CANDIDATE_THRESHOLD
+) -> list[tuple[str, int]]:
+    """``(transform, distinct-site count)`` for clusters at or above
+    ``threshold``, largest first -- the mechanical version of noticing that
+    the same fill has been written five times."""
+    out: list[tuple[str, int]] = []
+    for shape, members in cluster_by_shape(entries).items():
+        sites = len({(m.transform, m.game_before, m.game_after) for m in members})
+        if sites >= threshold:
+            out.append((shape[0], sites))
+    return sorted(out, key=lambda pair: (-pair[1], pair[0]))
 
 
 # ---------------------------------------------------------------------------

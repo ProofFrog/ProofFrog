@@ -296,3 +296,57 @@ def test_micro_leg_key_is_the_projected_masked_shape() -> None:
     assert proj_b is not None and proj_a is not None
     leg = cf.masked_shape(proj_b, proj_a, {}, {})
     assert whole == leg
+
+
+# ---------------------------------------------------------------------------
+# Escalation report (Phase-4): synthesizer-candidate clusters
+# ---------------------------------------------------------------------------
+
+
+def _entry(transform: str, before: str, after: str) -> tc.CacheEntry:
+    return tc.CacheEntry(
+        transform=transform, game_before=before, game_after=after, tactic="t"
+    )
+
+
+def test_cluster_by_shape_groups_sites_a_looser_key_would_merge() -> None:
+    """Clustering uses a LOOSER key than lookups do -- every identifier
+    masked, not just variable names -- so two sites differing only in a TYPE
+    name cluster together while still being distinct entries for lookup."""
+    a = _entry("T", "proc f(x : Bits) = { return x; }", "proc f(x : Bits) = { y }")
+    b = _entry("T", "proc f(x : Word) = { return x; }", "proc f(x : Word) = { y }")
+    groups = tc.cluster_by_shape([a, b])
+    assert len(groups) == 1
+    assert len(next(iter(groups.values()))) == 2
+
+
+def test_cluster_ignores_one_site_captured_in_several_layers() -> None:
+    """Several entries sharing a KEY are one site stored in more than one
+    layer, not several sites, so they are not a cluster."""
+    a = _entry("T", "before", "after")
+    b = tc.CacheEntry(
+        transform="T",
+        game_before="before",
+        game_after="after",
+        tactic="t",
+        source="packaged",
+    )
+    assert tc.cluster_by_shape([a, b]) == {}
+
+
+def test_synthesizer_candidates_respects_the_threshold() -> None:
+    """The bar matches the project's standing rule for promoting a cached
+    recipe to a synthesizer, rather than inventing a softer one."""
+    entries = [
+        _entry(
+            "T", f"proc f(x : T{i}) = {{ return x; }}", f"proc f(x : T{i}) = {{ y }}"
+        )
+        for i in range(tc.SYNTHESIZER_CANDIDATE_THRESHOLD)
+    ]
+    assert tc.synthesizer_candidates(entries) == [
+        ("T", tc.SYNTHESIZER_CANDIDATE_THRESHOLD)
+    ]
+    assert tc.synthesizer_candidates(entries[:-1]) == []
+    # An explicit lower threshold still works, for a report that wants to
+    # show near-misses.
+    assert tc.synthesizer_candidates(entries[:2], threshold=2) == [("T", 2)]

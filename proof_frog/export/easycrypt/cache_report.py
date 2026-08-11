@@ -36,7 +36,12 @@ import pathlib
 import sys
 from dataclasses import dataclass
 
-from .tactic_cache import load_layered, relative_sidecar_path
+from .tactic_cache import (
+    SYNTHESIZER_CANDIDATE_THRESHOLD,
+    load_layered,
+    relative_sidecar_path,
+    synthesizer_candidates,
+)
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 
@@ -161,16 +166,42 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     any_missing = False
+    all_entries: list[object] = []
     for proof_path in proof_files:
         report = _build_report(proof_path)
         print(_format_report(report))
         print()
         if report.missing > 0:
             any_missing = True
+        all_entries.extend(load_layered(proof_path).entries)
+
+    _print_escalation(all_entries)
 
     if args.strict and any_missing:
         return 1
     return 0
+
+
+def _print_escalation(entries: list) -> None:  # type: ignore[type-arg]
+    """The escalation report: shapes captured often enough to be worth a
+    synthesizer.
+
+    Entries are clustered by a LOOSER key than the one lookups use (every
+    identifier masked, not just variable names), so a cluster means several
+    distinct sites needed the same shape -- the mechanical replacement for a
+    human noticing the fifth identical fill. Nothing is REUSED on this
+    basis; the stored key stays tight.
+    """
+    candidates = synthesizer_candidates(entries)  # type: ignore[arg-type]
+    print(
+        "synthesizer candidates "
+        f"(shapes captured at >= {SYNTHESIZER_CANDIDATE_THRESHOLD} distinct sites)"
+    )
+    if not candidates:
+        print("  none — no shape is captured that often yet.")
+        return
+    for transform, sites in candidates:
+        print(f"  {sites:3d} sites  {transform}")
 
 
 if __name__ == "__main__":

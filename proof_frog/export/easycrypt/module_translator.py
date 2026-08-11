@@ -974,6 +974,7 @@ class ModuleTranslator:
         param_module_types: dict[str, str] | None = None,
         param_primitive_types: dict[str, str] | None = None,
         allow_void_call: bool = False,
+        requires_initialize: bool = False,
     ) -> ec_ast.Module:
         """Translate a Reduction to a multi-parameter EC module.
 
@@ -1077,6 +1078,32 @@ class ModuleTranslator:
             )
             for i, method in enumerate(reduction.methods)
         ]
+        if _reduction_init_method(reduction) is None and requires_initialize:
+            # A reduction that declares no Initialize INHERITS the challenger's:
+            # composition gives the composed game the challenger's setup, and
+            # the emitted step wrapper calls `R(...).initialize()` accordingly.
+            # Without the procedure the module does not ascribe to the outer
+            # oracle interface at all -- EasyCrypt: `unknown procedure:
+            # R.initialize`, then `argument R(E, C) does not match required
+            # interface, procedure 'initialize' is missing` (measured on
+            # `7_13_Forward`, `7_13_Backward`,
+            # `INDCPA$_MultiChal_implies_INDCPA_MultiChal`,
+            # `HybridKEMDEM_INDCPA_MultiChal`, `HybridPKEDEM_INDCPA_MultiChal`).
+            # Emitted only when the caller says the interface requires it, so
+            # every reduction that already ascribes stays byte-identical.
+            procs.insert(
+                0,
+                ec_ast.Proc(
+                    name="initialize",
+                    params=[],
+                    return_type=ec_ast.EcType("unit"),
+                    body=[
+                        ec_ast.Call(
+                            var="", callee=f"{challenger_ec_name}.initialize", args=""
+                        )
+                    ],
+                ),
+            )
         return ec_ast.Module(
             name=reduction.name,
             procs=procs,
@@ -1288,6 +1315,22 @@ class ModuleTranslator:
             # Run the reduction's OWN Initialize to produce the outer-init
             # result (and set the reduction's own state). Type-safe whenever
             # the reduction's Initialize does not call ``challenger.Initialize``.
+            if _reduction_init_method(reduction) is None:
+                # The reduction declares NO Initialize, so the composed module
+                # has no ``initialize`` procedure to call and there is no
+                # reduction state to set up. Calling one anyway is what
+                # EasyCrypt reported as `unknown procedure: R.initialize`
+                # (measured on `7_13_Forward`, `7_13_Backward`,
+                # `INDCPA$_MultiChal_implies_INDCPA_MultiChal`,
+                # `HybridKEMDEM_INDCPA_MultiChal`,
+                # `HybridPKEDEM_INDCPA_MultiChal`). Thread no result either:
+                # `translate_adversary_type` emits `distinguish()` with no
+                # parameter for a `unit` outer init, so passing one would be
+                # the next rejection. A non-`unit` outer init has a value the
+                # adversary genuinely needs, and there is nowhere honest to
+                # get it, so that shape keeps the old call and its error.
+                if outer_spec.init_return_type.text == "unit":
+                    return ""
             outer_init_local = f"{INIT_RESULT_NAME}0"
             # ``pk0`` is literally ``<reduction>(...).initialize()``, so its EC
             # type is the *reduction's own* Initialize return type, not the

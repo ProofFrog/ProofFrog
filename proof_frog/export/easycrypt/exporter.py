@@ -2945,6 +2945,15 @@ def export_proof_file(proof_path: str) -> str:
                 # containing such a statement change; every other reduction is
                 # byte-identical.
                 allow_void_call=True,
+                # A reduction that declares no Initialize still has to ascribe
+                # to the OUTER game's oracle interface, which for a multi-oracle
+                # theorem game declares one. See translate_reduction.
+                requires_initialize=multi_oracle_spec_for(
+                    top_modules,
+                    proof.theorem.name,
+                    scheme_args=list(proof.theorem.args),
+                )
+                is not None,
             )
         )
         if helper.methods:

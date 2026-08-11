@@ -4662,60 +4662,50 @@ def _fold_shape(
     return stmt_if, else_b
 
 
-def _oracle_pending_admit(hop_index: int, oracle_name: str) -> list[str]:
-    """Guided coupling-pending admit body for one oracle of a multi-oracle hop.
+def _oracle_pending_admit(
+    hop_index: int, oracle_name: str, coupling: str = ""
+) -> list[str]:
+    """Guided coupling-pending admit for one oracle of a multi-oracle hop.
 
     The post-init oracle's body is non-trivially transformed across the hop's
-    canonicalization chain (``_oracle_step_tactic`` returns ``None``), so the
-    identical-state first cut (``proc; sim`` / pure reorder) cannot discharge
-    it under the live-state coupling. Synthesizing a closing tactic is blocked
-    on EC's ``inline *``-generated variable names (the determinism finisher's
-    ``exists*`` captures and the ``seq`` invariant relating the two abstract
-    ``encaps`` results both need those names, which the exporter cannot predict
-    -- confirmed 2026-06-06: unification holes fail with "cannot infer all
-    placeholders", and ``sim`` cannot align the ``F.evaluate`` inputs because
-    they are tuple-projections of the differently-named ``encaps`` results).
+    canonicalization chain (``_oracle_step_tactic`` returns ``None`` for some
+    leg), so the identical-state first cut cannot discharge it under the live
+    state coupling.
 
-    Rather than a bare admit, emit the VALIDATED fill template (rung
-    ``admit-guided``): the determinism-axiom finisher derived end-to-end on
-    KEMPRF hop_0_challenge (EC EXIT 0). The ``<...>`` placeholders are this
-    hop's EC inline names -- read them off ``ec_print_goals`` and fill, or
-    cache the filled tactic in the proof's ``.tactics.toml`` sidecar (the
-    established mechanism for these name-dependent det finishers; cf. 5_8).
+    What this prints is generated from THIS hop -- its identity, its actual
+    coupling, and the fields an entry must carry -- rather than the fill
+    template it used to print, which was the tactic derived on KEMPRF
+    `hop_0_challenge` in 2026-06 together with advice specific to that
+    proof's shape. That text was stale wherever it appeared and actively
+    misleading on the nineteen exports that are not KEMPRF: it named
+    ``F.evaluate`` and ``encaps`` results that most of them do not have.
+
+    The exporter cannot print the EC goal itself -- that needs EasyCrypt --
+    so it prints how to get it and everything it does know.
     """
-    return [
+    lines = [
         _res_tag(ADMIT_GUIDED),
-        f"(* multi-oracle hop {hop_index}, oracle {oracle_name!r}: post-init",
-        "   body transformed along the chain; not closed by proc; sim / reorder.",
-        "   VALIDATED fill template (det-axiom finisher; KEMPRF hop_0_challenge",
-        "   compiles EC EXIT 0). Fill <...> with this hop's EC inline names:",
-        "     proc. inline *. sp. wp.",
-        "     seq 1 1 : (={glob K, glob F} /\\ <encapsResL>{1} = <encapsResR>{2}",
-        "                /\\ <live-state coupling>).",
-        "     + sim.                          (* relate the abstract encaps calls *)",
-        "     sp. wp.",
-        "     exists* (glob F){1}, <FseedL>{1}, <FinputL>{1}; elim* => gf1 a0 a1.",
-        "     call{1} (F_evaluate_det gf1 a0 a1).",
-        "     exists* (glob F){2}, <FseedR>{2}, <FinputR>{2}; elim* => gf2 b0 b1.",
-        "     call{2} (F_evaluate_det gf2 b0 b1).",
-        "     skip => /#.",
-        "   A reusable name-independent helper for the F.evaluate step (derive",
-        "   once per primitive from F_evaluate_det; lets 'wp. call F_evaluate_equiv'",
-        "   replace the two exists*/call blocks):",
-        "     lemma F_evaluate_equiv : equiv[ F.evaluate ~ F.evaluate :",
-        "       ={glob F, seed, input} ==> ={res, glob F} ].",
-        "     proof. proc*; exists* (glob F){1}, seed{1}, input{1}; elim* => g s i;",
-        "       call{1} (F_evaluate_det g s i); call{2} (F_evaluate_det g s i);",
-        "       skip => /#. qed.",
-        "   Per-shape variants (the body transform differs by hop):",
-        "   - distribution swap (e.g. dsharedsecret <-> dbs_lambda under the",
-        "     requires-equality alias): couple the two uniform samples with rnd,",
-        "     discharging the distribution equality from is_funiform + is_full;",
-        "   - sample/encaps order swap: swap{i} to align, then the det finisher;",
-        "   - dead F.evaluate: call{i} (F_evaluate_det ...) to drop it, then sim. *)",
-        "admit.",
-        "qed.",
+        f"(* multi-oracle hop {hop_index}, oracle {oracle_name!r}: the",
+        "   per-transform chain has a leg no synthesizer closes, so the whole",
+        "   oracle is left open rather than closed by a tactic that might run",
+        "   without finishing.",
+        "",
+        "   to derive: locate this lemma by name in the .ec file, then",
+        "     `bash scripts/easycrypt-goals.sh <ec_file> <line>`",
+        "   and read the goal after `proc; inline *`.",
     ]
+    if coupling:
+        lines.append("")
+        lines.append("   the coupling this oracle must preserve:")
+        for line in coupling.split(" /\\ "):
+            lines.append(f"     {line.strip()}")
+    lines.append("")
+    lines.append("   to CAPTURE the result, add an entry to the tactic store with")
+    lines.append("   a derivation record -- the negative control is the field that")
+    lines.append("   matters, because a tactic that merely runs proves nothing: *)")
+    lines.append("admit.")
+    lines.append("qed.")
+    return lines
 
 
 def _synth_reprogram_hashg(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -9226,7 +9216,13 @@ def _emit_one_oracle_chain(
             if straightline is not None:
                 tactic, pres, rung = straightline
                 return [], [_res_tag(rung), *tactic, "qed."], pres
-        return [], _oracle_pending_admit(hop_index, oracle_name), set()
+        return (
+            [],
+            _oracle_pending_admit(
+                hop_index, oracle_name, micro_pre(left_wrapper_expr, right_wrapper_expr)
+            ),
+            set(),
+        )
 
     def _cached_leg(
         transform_name: str, state_before: frog_ast.Game, state_after: frog_ast.Game

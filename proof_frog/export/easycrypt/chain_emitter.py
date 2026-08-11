@@ -9624,19 +9624,6 @@ def _emit_one_oracle_chain(
         rung = ADMIT_GUIDED if any(t.strip() == "admit." for t in body) else SYNTH_PARAM
         return ([], [_res_tag(rung), "proc.", *body, "qed."], set())
 
-    # TWO ROUTES RETIRED 2026-08-11 from this block, in the order the per-route
-    # census priced them. Both are still DEFINED below and kept as references
-    # for tactic shapes known to work; neither is dispatched to any more.
-    #
-    #   `_challenge_lazyro_route`    (fourth to go)  12 closures / 6 proofs
-    #     -- the lazy-random-oracle honest-binding challenge; smallest proof
-    #        blast radius of the four routes closing twelve oracles each.
-    #   `_challenge_casesplit_route` (fifth to go)   12 closures / 12 proofs
-    #     -- the CFRG binding challenge case-split, which eliminated the
-    #        reduction's collision-forwarding branch via encoding injectivity.
-    #
-    # Where either used to close an oracle the chain now runs, and where it
-    # does not complete the oracle takes an honest admit.
     if not is_init and clone_alias:
         ff_route = _challenge_falsefalse_route(
             modules,
@@ -9660,37 +9647,22 @@ def _emit_one_oracle_chain(
         # ``_challenge_hop2_route`` is still defined below and kept as a
         # reference for that tactic shape, but it is no longer dispatched to.
         # Priced by the per-route census at 12 closures over 12 proofs.
-        sr_route = _challenge_single_r_route(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            left_wrapper_expr,
-            right_wrapper_expr,
-            external_module_types,
-            method_return_types,
-            flat_params,
-            clone_alias,
-        )
-        if sr_route is not None:
-            sr_body, sr_injs, sr_scheme = sr_route
-            if inj_acc is not None:
-                inj_acc.update(sr_injs)
-            if decaps_val_acc is not None:
-                decaps_val_acc.add(sr_scheme)
-            return _evidence_only_chunks(), sr_body, set()
-        # RETIRED 2026-08-11, first of the whole-oracle endpoint routes to go.
-        # ``_challenge_reorder_route`` is still defined below and is kept as a
-        # reference for a tactic shape known to work, but it is no longer
-        # dispatched to: the per-transform chain is the architecture, and a
+        # ROUTES RETIRED FROM THIS BLOCK, 2026-08-11, in the order the
+        # per-route census priced them. Each is still DEFINED below and kept
+        # as a reference for a tactic shape known to work; none is dispatched
+        # to any more. The per-transform chain is the architecture, and a
         # bespoke whole-oracle closure hides every leg of the chain it stands
-        # in for. Where it used to close an oracle the chain now runs and, if
-        # it does not complete, the oracle takes an honest admit -- an
-        # expected, temporary cost, not a regression. Chosen as the pilot
-        # because it was the cheapest of the twelve: 7 closures over 6 proofs,
-        # against 24 for the most expensive (per-route census, Phase-2 plan).
-        # The legs that DO close are still emitted as evidence, so the
+        # in for -- so where one of these used to close an oracle the chain
+        # now runs, and where it does not complete the oracle takes an honest
+        # admit. That is an expected, temporary cost, not a regression. The
+        # legs that DO close are still emitted as evidence, so the
         # per-application coverage of these oracles does not fall.
+        #
+        #   1st  `_challenge_reorder_route`     7 closures /  6 proofs
+        #   4th  `_challenge_lazyro_route`     12 closures /  6 proofs
+        #   5th  `_challenge_casesplit_route`  12 closures / 12 proofs
+        #   6th  `_challenge_hop2_route`       12 closures / 12 proofs
+        #   7th  `_challenge_single_r_route`   12 closures / 12 proofs
         # Same-shape post-init oracle: the two bodies have IDENTICAL statement
         # structure and differ only in the field REFERENCES the hop's coupling
         # equates (the reduction reads its packed ``corr.`k`` where the game

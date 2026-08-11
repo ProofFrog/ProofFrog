@@ -8737,7 +8737,12 @@ def _emit_one_oracle_chain(
     inj_methods_by_module: dict[str, set[str]] | None = None,
     decaps_val_acc: set[str] | None = None,
     state_mod_acc: set[str] | None = None,
-    aux_lemma_acc: list[str] | None = None,
+    # Unused since `_challenge_casesplit_route` was retired (2026-08-11): that
+    # route was its only consumer, and it is the accumulator the route's shared
+    # concat aux-lemmas were emitted through. Kept in the signature because the
+    # route itself is kept as a reference and would need it back verbatim; the
+    # exporter still threads it, so nothing else has to change either way.
+    aux_lemma_acc: list[str] | None = None,  # pylint: disable=unused-argument
     init_tac_override: list[str] | None = None,
     oracle_tac_override: dict[str, list[str]] | None = None,
     use_canonical_fields: bool = False,
@@ -9619,41 +9624,20 @@ def _emit_one_oracle_chain(
         rung = ADMIT_GUIDED if any(t.strip() == "admit." for t in body) else SYNTH_PARAM
         return ([], [_res_tag(rung), "proc.", *body, "qed."], set())
 
-    # CFRG binding challenge case-split: the reduction's ``Challenge`` forwards a
-    # KDF-input collision to an inner KEM binding challenger and otherwise
-    # recomputes the game boolean; :func:`_challenge_casesplit_route` eliminates
-    # the split via encoding injectivity (fully AST-driven; declines to ``None``
-    # for every non-matching oracle so all other proofs stay byte-identical).
+    # TWO ROUTES RETIRED 2026-08-11 from this block, in the order the per-route
+    # census priced them. Both are still DEFINED below and kept as references
+    # for tactic shapes known to work; neither is dispatched to any more.
+    #
+    #   `_challenge_lazyro_route`    (fourth to go)  12 closures / 6 proofs
+    #     -- the lazy-random-oracle honest-binding challenge; smallest proof
+    #        blast radius of the four routes closing twelve oracles each.
+    #   `_challenge_casesplit_route` (fifth to go)   12 closures / 12 proofs
+    #     -- the CFRG binding challenge case-split, which eliminated the
+    #        reduction's collision-forwarding branch via encoding injectivity.
+    #
+    # Where either used to close an oracle the chain now runs, and where it
+    # does not complete the oracle takes an honest admit.
     if not is_init and clone_alias:
-        route = _challenge_casesplit_route(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            left_wrapper_expr,
-            right_wrapper_expr,
-            external_module_types,
-            method_return_types,
-            flat_params,
-            clone_alias,
-        )
-        if route is not None:
-            outer_body, inj_reqs, val_scheme, aux_lines = route
-            if inj_acc is not None:
-                inj_acc.update(inj_reqs)
-            if decaps_val_acc is not None:
-                decaps_val_acc.add(val_scheme)
-            # Aux lemmas are shared across a proof's wrapper hops (same concat
-            # shape) and have fixed names, so emit them once (dedup by first-wins).
-            if aux_lemma_acc is not None and aux_lines and not aux_lemma_acc:
-                aux_lemma_acc.extend(aux_lines)
-            return _evidence_only_chunks(), outer_body, set()
-        # RETIRED 2026-08-11, fourth of the whole-oracle endpoint routes to go.
-        # ``_challenge_lazyro_route`` (the lazy-random-oracle honest-binding
-        # challenge) is still defined below and kept as a reference for that
-        # tactic shape, but it is no longer dispatched to. Priced by the
-        # per-route census at 12 closures over 6 proofs -- the smallest PROOF
-        # blast radius of the four routes that close twelve oracles each.
         ff_route = _challenge_falsefalse_route(
             modules,
             oracle_name,

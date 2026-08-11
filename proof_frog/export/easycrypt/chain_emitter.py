@@ -20,7 +20,7 @@ import itertools
 import re
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Callable, NamedTuple, cast
 
 from ... import frog_ast
@@ -2778,6 +2778,7 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         method_return_types,
         modules,
         flat_params,
+        use_canonical_fields,
     )
     if identity is not None:
         return identity
@@ -3016,6 +3017,7 @@ def _rendered_identity_step(  # pylint: disable=too-many-arguments,too-many-posi
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     modules: mt.ModuleTranslator,
     flat_params: list[ec_ast.ModuleParam],
+    use_canonical_fields: bool = False,
 ) -> tuple[list[str], MicroRequests, str] | None:
     """Move 5: the adjacent states RENDER to the same EC module.
 
@@ -3048,6 +3050,8 @@ def _rendered_identity_step(  # pylint: disable=too-many-arguments,too-many-posi
         external_module_types,
         method_return_types,
         flat_params,
+        emit_state_vars=True,
+        use_canonical_fields=use_canonical_fields,
     )
     amod = _flat_state_module(
         modules,
@@ -3056,10 +3060,44 @@ def _rendered_identity_step(  # pylint: disable=too-many-arguments,too-many-posi
         external_module_types,
         method_return_types,
         flat_params,
+        emit_state_vars=True,
+        use_canonical_fields=use_canonical_fields,
     )
-    if not bmod.procs or not amod.procs or bmod != amod:
+    if not bmod.procs or not amod.procs:
+        return None
+    if _name_sorted_vars(bmod) != _name_sorted_vars(amod):
         return None
     return ["proc; sim."], MicroRequests(), SYNTH_STATIC
+
+
+def _name_sorted_vars(module: ec_ast.Module) -> ec_ast.Module:
+    """``module`` with its ``var`` block sorted by variable name.
+
+    Declaration ORDER carries no meaning in the emitted flat states, because
+    the only thing the micro-lemmas read the var block through is ``glob``,
+    and **EC orders a ``glob`` tuple by variable name, not by declaration
+    order** -- the same fact :func:`_canonical_field_renames` is built on.
+    Two states with the same ``(name, type)`` var set and the same bodies are
+    therefore literally the same EC module, and ``proc; sim.`` relates it to
+    itself.
+
+    Comparing the var block as an ordered list made
+    :func:`_rendered_identity_step` decline exactly that: measured on the six
+    IND-CCA_T exports, every `Standardize Field Names` leg (14 in
+    `CG_expanded_INDCCA_T` alone, none of which had ever closed) differs from
+    its neighbour ONLY by the order of five identically-named, identically-
+    typed `f<NN>` declarations. Sorting is the smallest normalization that
+    sees this; it does NOT dedupe, drop, or retype anything, so a genuine var
+    difference -- a rename, a type change, an added or removed field -- still
+    declines. Probed first, both ways:
+    ``ec_templates/glob_ignores_decl_order.ec`` is accepted by EasyCrypt and
+    its body-mutated twin is rejected with *cannot save an incomplete
+    proof*.
+    """
+    return replace(
+        module,
+        module_vars=sorted(module.module_vars, key=lambda v: (v.name, v.type.text)),
+    )
 
 
 def _peel_reaches_every_event(body: list[ec_ast.EcStmt]) -> bool:

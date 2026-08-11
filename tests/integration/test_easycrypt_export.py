@@ -2068,6 +2068,69 @@ def test_same_memory_coupling_template_compiles(tmp_path: Path) -> None:
     not _docker_available(),
     reason="Docker is not available; cannot run EasyCrypt.",
 )
+def test_glob_ignores_declaration_order(tmp_path: Path) -> None:
+    """`glob` is ordered by variable NAME, so declaration order is not
+    observable -- the fact `_rendered_identity_step` compares its var block
+    sorted rather than in order.
+
+    Both directions are checked here, because the widening is only sound if
+    the accepted case really is the ordering one. The template relates two
+    modules with the same `(name, type)` var set and the same bodies,
+    declared in DIFFERENT orders, and EasyCrypt accepts `proc; sim.`. The
+    negative control mutates one body -- a genuine program difference, same
+    var set -- and EasyCrypt must answer `cannot save an incomplete proof`,
+    a proof-level failure rather than a type error.
+
+    Measured payoff: every `Standardize Field Names` leg of the IND-CCA_T
+    exports differs from its neighbour only by this ordering, and none had
+    ever closed.
+    """
+    src = (EC_TEMPLATES / "glob_ignores_decl_order.ec").read_text()
+    ec_file = tmp_path / "glob_ignores_decl_order.ec"
+    ec_file.write_text(src)
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=600,
+    )
+    assert result.returncode == 0, (
+        "EasyCrypt rejected the declaration-order template; sorting the var "
+        "block in _rendered_identity_step is then unsound.\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+    head, _, tail = src.partition("module B = {")
+    mutated = head + "module B = {" + tail.replace(
+        "x <- x + n; y <- true;", "x <- x + n + 1; y <- true;", 1
+    )
+    assert mutated != src, "the negative control did not mutate the template"
+    neg_file = tmp_path / "glob_ignores_decl_order_negative.ec"
+    neg_file.write_text(mutated)
+    neg = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(neg_file)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=600,
+    )
+    assert neg.returncode != 0, (
+        "EasyCrypt ACCEPTED a body-mutated twin; the template is not "
+        "load-bearing and proves nothing about the widening.\n"
+        f"stdout:\n{neg.stdout[-2000:]}"
+    )
+    assert "cannot save an incomplete proof" in (neg.stdout + neg.stderr), (
+        "the negative control failed for a different reason than the "
+        "proof-level one it documents.\n"
+        f"stdout:\n{neg.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
 def test_rendered_identity_template_compiles(tmp_path: Path) -> None:
     """Regression tripwire for the Move 5 rendered-identity row (Phase-2
     micro synthesizers): a step whose whole effect the renderer absorbs

@@ -50,7 +50,7 @@ from .resolution import (
     SYNTH_STATIC,
 )
 from .resolution import tag as _res_tag
-from .tactic_cache import TacticCache
+from .tactic_cache import TacticCache, derivation_scaffold
 from .transform_buckets import PARAMETRIC_TACTIC, Bucket, classify, tactic_body
 
 # Engine passes that are pure structural reorderings (modulo dead-code
@@ -378,6 +378,15 @@ def emit_chain_for_hop(
         lines.append("")
         lines.append("   expected game_after:")
         for line in after_text.splitlines() or [""]:
+            lines.append(f"     {line}")
+        lines.append("")
+        lines.append("   entry skeleton -- a derivation record is what makes an")
+        lines.append("   entry trustworthy to someone who did not derive it, and")
+        lines.append("   the negative control is the load-bearing field (a tactic")
+        lines.append("   that merely RUNS proves nothing):")
+        for line in derivation_scaffold(
+            app.transform_name, before_text, after_text, sidecar_display
+        ):
             lines.append(f"     {line}")
         lines.append("   *)")
         lines.append("admit.")

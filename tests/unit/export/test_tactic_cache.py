@@ -350,3 +350,41 @@ def test_synthesizer_candidates_respects_the_threshold() -> None:
     # An explicit lower threshold still works, for a report that wants to
     # show near-misses.
     assert tc.synthesizer_candidates(entries[:2], threshold=2) == [("T", 2)]
+
+
+def test_derivation_record_round_trips(tmp_path: pathlib.Path) -> None:
+    """The record fields survive a save/load, so an entry a human fills is
+    still admissible-looking to the next reader."""
+    cache = tc.TacticCache()
+    cache.append(
+        tc.CacheEntry(
+            transform="T",
+            game_before="B",
+            game_after="A",
+            tactic="auto.",
+            derived_on="CG_expanded hop_2 | EC 2026.03 | exporter abc1234",
+            scope_note="masked because the two sites differ only in seed names",
+            negative_control="mutation: dropped X{1} = Y{2}\nEasyCrypt: cannot prove goal (strict)",
+            refuted="sim (leaves the goal open)",
+        )
+    )
+    path = tmp_path / "e.toml"
+    cache.save(path)
+    back = tc.TacticCache.load(path).entries[0]
+    assert back.derived_on is not None and "hop_2" in back.derived_on
+    assert back.scope_note is not None and "seed names" in back.scope_note
+    assert back.negative_control is not None
+    assert "cannot prove goal" in back.negative_control
+    assert back.refuted is not None and "sim" in back.refuted
+
+
+def test_derivation_scaffold_names_every_mandatory_field() -> None:
+    """The scaffold states what is required as FIELDS rather than as prose a
+    filler has to remember, and carries the exact key the export looked up so
+    an entry built from it is found rather than subtly mis-keyed."""
+    lines = tc.derivation_scaffold("Alpha Rename", "BEFORE_KEY", "AFTER_KEY", "p.proof")
+    text = "\n".join(lines)
+    for field in ("derived_on", "scope_note", "negative_control", "refuted"):
+        assert field in text
+    assert "Alpha Rename" in text
+    assert "BEFORE_KEY" in text and "AFTER_KEY" in text

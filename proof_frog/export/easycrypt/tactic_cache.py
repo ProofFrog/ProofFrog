@@ -91,6 +91,17 @@ class CacheEntry:
     description: str | None = None
     added: str | None = None
     source: str = "sidecar"
+    # --- derivation record (Phase-4 Decision 4) --------------------------
+    # Provenance a reader needs to trust an entry they did not derive. The
+    # negative control is the load-bearing one: without a goal-falsifying
+    # mutation that EasyCrypt rejected, "the tactic closed" only says the
+    # tactic ran. Whether an entry LACKING these is admissible is a separate
+    # question (the 13 inherited entries cannot satisfy them retroactively)
+    # and is not decided here -- nothing rejects an entry for missing them.
+    derived_on: str | None = None
+    negative_control: str | None = None
+    refuted: str | None = None
+    scope_note: str | None = None
 
 
 @dataclass
@@ -192,6 +203,10 @@ def _entry_from_toml(d: dict[str, object]) -> CacheEntry:
         tactic=_str("tactic"),
         description=_optstr("description"),
         added=_optstr("added"),
+        derived_on=_optstr("derived_on"),
+        negative_control=_optstr("negative_control"),
+        refuted=_optstr("refuted"),
+        scope_note=_optstr("scope_note"),
     )
 
 
@@ -221,11 +236,55 @@ def _serialize(cache: TacticCache) -> str:
             out.append(f"description = {_inline_string(entry.description)}")
         if entry.added is not None:
             out.append(f"added = {_inline_string(entry.added)}")
+        if entry.derived_on is not None:
+            out.append(f"derived_on = {_inline_string(entry.derived_on)}")
+        if entry.scope_note is not None:
+            out.append(f"scope_note = {_inline_string(entry.scope_note)}")
+        if entry.negative_control is not None:
+            out.append(f"negative_control = {_block_string(entry.negative_control)}")
+        if entry.refuted is not None:
+            out.append(f"refuted = {_block_string(entry.refuted)}")
         out.append(f"game_before = {_block_string(entry.game_before)}")
         out.append(f"game_after = {_block_string(entry.game_after)}")
         out.append(f"tactic = {_block_string(entry.tactic)}")
     out.append("")
     return "\n".join(out)
+
+
+def derivation_scaffold(
+    transform: str, before_key: str, after_key: str, site: str
+) -> list[str]:
+    """The skeleton of an admissible entry, ready to paste into a store file.
+
+    Phase-4 Decision 4. What a filler must supply is stated as fields rather
+    than as prose they have to remember, and the two key halves are the ones
+    the export just looked up -- so an entry built from this scaffold is
+    found by the next export instead of being subtly mis-keyed.
+
+    ``negative_control`` is mandatory in substance, not decoration: a tactic
+    that runs proves nothing on its own, and the mutation that EasyCrypt
+    REJECTED is the evidence that the tactic is doing work. A type error does
+    not count -- it fails at parse time, before any goal is attempted.
+    """
+    lines = [
+        "[[entry]]",
+        f"transform = {_inline_string(transform)}",
+        f'derived_on = "{site} | EC <version> | exporter <commit>"',
+        'scope_note = "why this key is masked as it is"',
+        'negative_control = """',
+        "  mutation: <the load-bearing conjunct you falsified>",
+        "  EasyCrypt said: <its rejection message>",
+        '"""',
+        'refuted = """',
+        "  <approaches that did NOT work, so the next filler skips them>",
+        '"""',
+        f"game_before = {_block_string(before_key)}",
+        f"game_after = {_block_string(after_key)}",
+        'tactic = """',
+        "  <the tactic, without the trailing qed.>",
+        '"""',
+    ]
+    return lines
 
 
 def _inline_string(s: str) -> str:

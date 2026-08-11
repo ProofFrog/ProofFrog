@@ -2368,6 +2368,7 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     right_ref: str = "",
     clone_alias: dict[str, str] | None = None,
     inj_methods_by_module: dict[str, set[str]] | None = None,
+    use_canonical_fields: bool = False,
 ) -> tuple[list[str], MicroRequests, str] | None:
     """Tactic for one chain step's micro lemma, restricted to ``oracle_name``.
 
@@ -2379,7 +2380,11 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     reference texts (for field pins); ``clone_alias`` maps a declared module
     to its per-module theory alias (``KEM_T`` -> ``KEM_T_c``, for ``ev_*``
     qualification); ``inj_methods_by_module`` lists the declared-injective
-    methods (the only ones whose ``_inj`` axioms may be hinted).
+    methods (the only ones whose ``_inj`` axioms may be hinted);
+    ``use_canonical_fields`` is the chain-wide flat-state field-naming
+    decision (see :func:`_emit_one_oracle_chain`) -- a route whose tactic
+    NAMES a state field must render its own copy of the state under the
+    same setting, or it emits a field name the emitted module has not got.
 
     Returns ``(tactic, requests, rung)`` where ``requests`` is the
     :class:`MicroRequests` record of axiom families the tactic references
@@ -2638,6 +2643,7 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         right_ref,
         clone_alias or {},
         inj_methods_by_module or {},
+        use_canonical_fields,
     )
     if walk is not None:
         return walk
@@ -2658,6 +2664,7 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         left_ref,
         right_ref,
         clone_alias or {},
+        use_canonical_fields,
     )
 
 
@@ -3230,9 +3237,16 @@ class _EvEnv:  # pylint: disable=too-many-instance-attributes
     pins (fields/params) and ``ev_*`` ops -- the Q1 probe's invariant shape.
     Shared pin registry across both sides so identical statements produce
     identical terms.
+
+    ``global_names`` MUST be the module-variable set of the state
+    ``side_ref`` names, because every field pin is qualified against it
+    (``<side_ref>.<field>{2}``). ``foreign_names`` lists field names of the
+    OTHER state in the pair; a body token matching one of those cannot be
+    pinned (it is not a variable of ``side_ref``), so :meth:`_subst`
+    declines rather than emitting a dangling qualified name.
     """
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         det_methods: dict[str, set[str]],
         clone_alias: dict[str, str],
@@ -3241,11 +3255,13 @@ class _EvEnv:  # pylint: disable=too-many-instance-attributes
         side_ref: str,
         pins: dict[str, str],
         glob_pins: dict[str, str],
+        foreign_names: frozenset[str] = frozenset(),
     ) -> None:
         self.det_methods = det_methods
         self.clone_alias = clone_alias
         self.param_names = param_names
         self.global_names = global_names
+        self.foreign_names = foreign_names
         self.side_ref = side_ref
         self.pins = pins  # pin expression text -> pin name (shared)
         self.glob_pins = glob_pins  # module -> pin name (shared)
@@ -3281,6 +3297,8 @@ class _EvEnv:  # pylint: disable=too-many-instance-attributes
                 out.append(self._pin(f"{tok}{{2}}"))
             elif tok in self.global_names:
                 out.append(self._pin(f"{self.side_ref}.{tok}{{2}}"))
+            elif tok in self.foreign_names:
+                return None  # not a variable of ``side_ref`` -- cannot pin it
             else:
                 out.append(tok)
             pos = m.end()
@@ -3335,6 +3353,7 @@ def _ies_delta_walk_step(  # pylint: disable=too-many-arguments,too-many-positio
     right_ref: str,
     clone_alias: dict[str, str],
     inj_methods_by_module: dict[str, set[str]],
+    use_canonical_fields: bool = False,
 ) -> tuple[list[str], MicroRequests, str] | None:
     """Move 3a: the delta-det guard-site walk (Injective Equality Simplify).
 
@@ -3365,6 +3384,8 @@ def _ies_delta_walk_step(  # pylint: disable=too-many-arguments,too-many-positio
         external_module_types,
         method_return_types,
         flat_params,
+        emit_state_vars=True,
+        use_canonical_fields=use_canonical_fields,
     )
     amod = _flat_state_module(
         modules,
@@ -3373,6 +3394,8 @@ def _ies_delta_walk_step(  # pylint: disable=too-many-arguments,too-many-positio
         external_module_types,
         method_return_types,
         flat_params,
+        emit_state_vars=True,
+        use_canonical_fields=use_canonical_fields,
     )
     if not bmod.procs or not amod.procs:
         return None
@@ -3381,6 +3404,7 @@ def _ies_delta_walk_step(  # pylint: disable=too-many-arguments,too-many-positio
         if reversed_dir
         else (bmod.procs[0], amod.procs[0])
     )
+    mod_1, mod_2 = (amod, bmod) if reversed_dir else (bmod, amod)
     # Globals are pinned via the UNAPPLIED module name (`State21.dk0{2}`,
     # never the functor application) -- the Q1 probe's pin shape.
     ref_2 = _ref_base(right_ref)
@@ -3449,18 +3473,14 @@ def _ies_delta_walk_step(  # pylint: disable=too-many-arguments,too-many-positio
         if before_is_assign and after_is_assign:
             return None
     # Build both sides' symbolic envs over a SHARED pin registry (identical
-    # shared statements then produce identical terms and pins). Module vars
-    # can be empty on some render paths -- the games' own field names are
-    # the fallback global set.
+    # shared statements then produce identical terms and pins). Every pin is
+    # qualified against the {2}-memory module, so the global set is THAT
+    # module's own variables; a field of the other state only is foreign and
+    # makes the env decline (it has no name under ``ref_2``).
     param_names = {p.name for p in proc_1.params}
-    global_names = (
-        {v.name for v in bmod.module_vars}
-        | {v.name for v in amod.module_vars}
-        | {
-            mt._ec_field_name(f.name)  # pylint: disable=protected-access
-            for g in (pb, pa)
-            for f in g.fields
-        }
+    global_names = {v.name for v in mod_2.module_vars}
+    foreign_names = frozenset(
+        {v.name for v in mod_1.module_vars} - global_names,
     )
     pins: dict[str, str] = {}
     glob_pins: dict[str, str] = {}
@@ -3472,6 +3492,7 @@ def _ies_delta_walk_step(  # pylint: disable=too-many-arguments,too-many-positio
         ref_2,
         pins,
         glob_pins,
+        foreign_names,
     )
     env2 = _EvEnv(
         det_methods,
@@ -3481,6 +3502,7 @@ def _ies_delta_walk_step(  # pylint: disable=too-many-arguments,too-many-positio
         ref_2,
         pins,
         glob_pins,
+        foreign_names,
     )
     for stmt in pre1:
         if not env1.feed(stmt):
@@ -4010,14 +4032,22 @@ def _hoist_pair_step(  # pylint: disable=too-many-arguments,too-many-positional-
 
 
 def _fold_guard_formula(
-    guard: str, side: str, base: str, global_names: set[str]
+    guard: str,
+    side: str,
+    base: str,
+    global_names: set[str],
+    foreign_names: frozenset[str] = frozenset(),
 ) -> str | None:
     """``guard`` (rendered program syntax) as a one-sided pRHL formula.
 
     Every identifier gets the ``{side}`` memory selector (module fields
     qualified through ``base``); ``&&``/``||`` become ``/\\``/``\\/``.
-    ``None`` when the guard uses syntax outside the boolean-comparison
-    fragment this rewrite is known to preserve (decline-don't-guess).
+    ``global_names`` must be ``base``'s own module variables and
+    ``foreign_names`` the other state's; a foreign token cannot be
+    qualified through ``base`` and cannot safely be read as a local
+    either, so it declines. ``None`` also when the guard uses syntax
+    outside the boolean-comparison fragment this rewrite is known to
+    preserve (decline-don't-guess).
     """
     if re.fullmatch(r"[A-Za-z0-9_\s=<>!&|().`]*", guard) is None:
         return None
@@ -4031,6 +4061,8 @@ def _fold_guard_formula(
             out.append(tok)
         elif tok in global_names:
             out.append(f"{base}.{tok}{{{side}}}")
+        elif tok in foreign_names:
+            return None
         else:
             out.append(f"{tok}{{{side}}}")
         pos = m.end()
@@ -4063,6 +4095,7 @@ def _if_fold_step(  # pylint: disable=too-many-arguments,too-many-positional-arg
     left_ref: str,
     right_ref: str,
     clone_alias: dict[str, str],
+    use_canonical_fields: bool = False,
 ) -> tuple[list[str], MicroRequests, str] | None:
     """Move 4: if-tree collapse legs, on the RENDERED bodies (the standing
     lesson -- stmt_translator's single-exit lowering turns every FrogLang
@@ -4104,6 +4137,8 @@ def _if_fold_step(  # pylint: disable=too-many-arguments,too-many-positional-arg
         external_module_types,
         method_return_types,
         flat_params,
+        emit_state_vars=True,
+        use_canonical_fields=use_canonical_fields,
     )
     amod = _flat_state_module(
         modules,
@@ -4112,6 +4147,8 @@ def _if_fold_step(  # pylint: disable=too-many-arguments,too-many-positional-arg
         external_module_types,
         method_return_types,
         flat_params,
+        emit_state_vars=True,
+        use_canonical_fields=use_canonical_fields,
     )
     if not bmod.procs or not amod.procs:
         return None
@@ -4120,6 +4157,7 @@ def _if_fold_step(  # pylint: disable=too-many-arguments,too-many-positional-arg
         if reversed_dir
         else (bmod.procs[0], amod.procs[0])
     )
+    mod_1, mod_2 = (amod, bmod) if reversed_dir else (bmod, amod)
     exec1 = _exec_stmts(proc_1.body)
     exec2 = _exec_stmts(proc_2.body)
     n = 0
@@ -4133,20 +4171,24 @@ def _if_fold_step(  # pylint: disable=too-many-arguments,too-many-positional-arg
     ex_if, ex_st = (exec2, exec1) if reversed_dir else (exec1, exec2)
     if_ref = right_ref if reversed_dir else left_ref
     base_if = _ref_base(if_ref)
+    mod_if, mod_st = (mod_2, mod_1) if reversed_dir else (mod_1, mod_2)
     fold = _fold_shape(ex_if, ex_st, n)
     if fold is not None:
         stmt_if, else_b = fold
         param_names = {p.name for p in proc_1.params}
-        global_names = (
-            {v.name for v in bmod.module_vars}
-            | {v.name for v in amod.module_vars}
-            | {
-                mt._ec_field_name(f.name)  # pylint: disable=protected-access
-                for g in (pb, pa)
-                for f in g.fields
-            }
+        # Each name set is the OWN module-variable set of the module it is
+        # qualified against; the sibling state's extra names are foreign and
+        # decline (they have no name under that module).
+        global_names = {v.name for v in mod_2.module_vars}
+        foreign_names = frozenset({v.name for v in mod_1.module_vars} - global_names)
+        if_globals = {v.name for v in mod_if.module_vars}
+        guard_formula = _fold_guard_formula(
+            stmt_if.guard,
+            s_if,
+            base_if,
+            if_globals,
+            frozenset({v.name for v in mod_st.module_vars} - if_globals),
         )
-        guard_formula = _fold_guard_formula(stmt_if.guard, s_if, base_if, global_names)
         if guard_formula is None:
             return None
         pins: dict[str, str] = {}
@@ -4163,6 +4205,7 @@ def _if_fold_step(  # pylint: disable=too-many-arguments,too-many-positional-arg
             ref_2,
             pins,
             glob_pins,
+            foreign_names,
         )
         env_st = _EvEnv(
             det_methods,
@@ -4172,6 +4215,7 @@ def _if_fold_step(  # pylint: disable=too-many-arguments,too-many-positional-arg
             ref_2,
             pins,
             glob_pins,
+            foreign_names,
         )
         matched_vars: list[str] = []
         for stmt in ex_if[:n]:
@@ -8939,6 +8983,7 @@ def _emit_one_oracle_chain(
             right_ref=rref,
             clone_alias=clone_alias,
             inj_methods_by_module=inj_methods_by_module,
+            use_canonical_fields=use_canonical,
         )
         if step is None:
             chain_broken = True
@@ -8986,6 +9031,7 @@ def _emit_one_oracle_chain(
             right_ref=rref,
             clone_alias=clone_alias,
             inj_methods_by_module=inj_methods_by_module,
+            use_canonical_fields=use_canonical,
         )
         if step is None:
             chain_broken = True

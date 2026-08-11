@@ -233,7 +233,7 @@ def _walk_type_of_factory() -> Callable[
     return factory
 
 
-def _dispatch_walk(inj: dict[str, set[str]]):
+def _dispatch_walk(inj: dict[str, set[str]], canonical: bool = False):
     def eqop(a: str, b: str) -> frog_ast.BinaryOperation:
         return frog_ast.BinaryOperation(OPS.EQUALS, _var(a), _var(b))
 
@@ -258,6 +258,7 @@ def _dispatch_walk(inj: dict[str, set[str]]):
         right_ref="State21(K)",
         clone_alias={"K": "K_c"},
         inj_methods_by_module=inj,
+        use_canonical_fields=canonical,
     )
 
 
@@ -283,3 +284,25 @@ def test_dispatch_synthesizes_template_tactic() -> None:
 
 def test_dispatch_declines_without_licensed_inj() -> None:
     assert _dispatch_walk({}) is None
+
+
+def test_dispatch_canonical_fields_lockstep_with_template() -> None:
+    """Under the chain-wide canonical ``f<NN>`` field naming (what a
+    random-oracle proof uses), the pins must name the CANONICAL field of the
+    {2}-memory module -- the route renders its own copy of each state, and
+    rendering it under a different field-naming decision than the emitted
+    module produced ``unknown variable or constant``."""
+    step = _dispatch_walk({"K": {"encode"}}, canonical=True)
+    assert step is not None
+    tac, _reqs, rung = step
+    assert rung == "synth-param"
+    assert any("State21.f00{2}" in t for t in tac)
+    assert not any("State21.dk0{2}" in t for t in tac)
+    template = (
+        Path(__file__).parents[2]
+        / "integration"
+        / "ec_templates"
+        / "ies_delta_walk_canonical.ec"
+    ).read_text()
+    proof_body = template.split("proof.\n", 1)[1].split("qed.", 1)[0]
+    assert tac == [ln.strip() for ln in proof_body.strip().splitlines()]

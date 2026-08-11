@@ -16,6 +16,7 @@ from proof_frog.export.easycrypt import ec_ast
 from proof_frog.export.easycrypt import module_translator as mt
 from proof_frog.export.easycrypt import type_collector as tc
 from proof_frog.export.easycrypt.chain_emitter import (
+    _EvEnv,
     _fold_guard_formula,
     _oracle_step_tactic,
 )
@@ -150,7 +151,7 @@ def _factory() -> Callable[..., Callable[[frog_ast.Expression], frog_ast.Type]]:
     return factory
 
 
-def _dispatch(
+def _dispatch(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     gb: frog_ast.Game,
     ga: frog_ast.Game,
     pre: str,
@@ -158,6 +159,7 @@ def _dispatch(
     rref: str,
     reversed_dir: bool = False,
     det: dict[str, set[str]] | None = None,
+    canonical: bool = False,
 ):
     return _oracle_step_tactic(
         gb,
@@ -174,6 +176,7 @@ def _dispatch(
         right_ref=rref,
         clone_alias=ALIAS,
         inj_methods_by_module={},
+        use_canonical_fields=canonical,
     )
 
 
@@ -273,3 +276,67 @@ def test_guard_formula_rewrite_and_gate() -> None:
         _fold_guard_formula("dk0 = ct0", "2", "SB", {"dk0"}) == "(SB.dk0{2} = ct0{2})"
     )
     assert _fold_guard_formula("f x + 1", "1", "SB", set()) is None
+
+
+def test_guard_formula_declines_foreign_field() -> None:
+    """A name that is a field of the SIBLING state only cannot be qualified
+    through this state and must not be read as a local either."""
+    assert (
+        _fold_guard_formula("dkX = ct0", "2", "SB", {"dk0"}, frozenset({"dkX"}))
+        is None
+    )
+
+
+# ---------------------------------------------------------------------------
+# Canonical f<NN> field naming (the chain-wide decision a random-oracle proof
+# makes). The route renders its OWN copy of each state to read the bodies its
+# tactic names; rendering that copy under a different field-naming decision
+# than the emitted module makes every field pin name a variable that does not
+# exist ("unknown variable or constant").
+# ---------------------------------------------------------------------------
+
+
+def test_fold_canonical_fwd_lockstep_with_template() -> None:
+    step = _dispatch(
+        _fold_game("FB", False),
+        _fold_game("FA", True),
+        PRE_F,
+        "FB(K)",
+        "FA(K)",
+        canonical=True,
+    )
+    assert step is not None
+    tac, _reqs, rung = step
+    assert rung == "synth-param"
+    # The pins name the CANONICAL field of the {2}-memory module.
+    assert any("FA.f00{2}" in t for t in tac)
+    assert not any("FA.dk0{2}" in t for t in tac)
+    assert tac == _template_proof_body(
+        "fold_pair_walk_canonical.ec", "micro_fold_canon_fwd"
+    )
+
+
+def test_fold_canonical_rev_lockstep_with_template() -> None:
+    pre_r = "={ct0, ct1} /\\ (glob FA(K)){1} = (glob FB(K)){2}"
+    step = _dispatch(
+        _fold_game("FB", False),
+        _fold_game("FA", True),
+        pre_r,
+        "FA(K)",
+        "FB(K)",
+        reversed_dir=True,
+        canonical=True,
+    )
+    assert step is not None
+    assert step[0] == _template_proof_body(
+        "fold_pair_walk_canonical.ec", "micro_fold_canon_rev"
+    )
+
+
+def test_ev_env_declines_a_foreign_field_read() -> None:
+    """Every pin is qualified against the {2}-memory module, so a name that
+    belongs only to the SIBLING state has no pin: the env declines instead of
+    emitting a dangling ``<state>.<name>{2}``."""
+    env = _EvEnv(DET, ALIAS, set(), {"f00"}, "FA", {}, {}, frozenset({"dkX"}))
+    assert env.feed(ec_ast.Assign("y", "f00")) is True
+    assert env.feed(ec_ast.Assign("x", "dkX")) is False

@@ -2933,6 +2933,37 @@ def _rendered_identity_step(  # pylint: disable=too-many-arguments,too-many-posi
     return ["proc; sim."], MicroRequests(), SYNTH_STATIC
 
 
+def _peel_reaches_every_event(body: list[ec_ast.EcStmt]) -> bool:
+    """False when ``body`` holds a ``wp``-opaque construct the TOP-LEVEL
+    backbone peel can neither see nor cross.
+
+    :func:`_call_sample_backbone` reads top-level statements only, so a call,
+    a sample or a ``while`` under an ``if`` is invisible to it -- the peel
+    comes out too short -- and ``wp`` cannot cross such an ``if``, so the
+    next ``call`` reports *invalid last instruction*. A top-level ``while``
+    blocks ``wp`` the same way.
+    """
+
+    def nested(stmts: Sequence[ec_ast.EcStmt]) -> bool:
+        for s in stmts:
+            if isinstance(s, (ec_ast.Call, ec_ast.Sample, ec_ast.While)):
+                return True
+            if isinstance(s, ec_ast.If) and (
+                nested(s.then_body) or nested(s.else_body)
+            ):
+                return True
+        return False
+
+    for stmt in _exec_stmts(body):
+        if isinstance(stmt, ec_ast.While):
+            return False
+        if isinstance(stmt, ec_ast.If) and (
+            nested(stmt.then_body) or nested(stmt.else_body)
+        ):
+            return False
+    return True
+
+
 def _isuv_align_step(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     pb: frog_ast.Game,
     pa: frog_ast.Game,
@@ -2972,9 +3003,20 @@ def _isuv_align_step(  # pylint: disable=too-many-arguments,too-many-positional-
     an untouched-field frame conjunct falsified by a right-side write ->
     "cannot prove goal (strict)".
 
-    Declines when the callees are not a permutation, or when they already
+    Declines when the callees are not a permutation, when they already
     align (``swaps == []``) -- an already-aligned pair is some other row's
-    business, and firing here would mask it.
+    business, and firing here would mask it -- or when either body puts a
+    ``wp``-opaque construct out of the top-level peel's reach
+    (:func:`_peel_reaches_every_event`). That last gate is the peel's
+    precondition, not a preference. Measured on seven binding-proof
+    ``challenge`` legs whose lowered body ends in the binding case-split
+    (``CG_expanded_LEAK_BIND_K_PK`` ``micro_0_challenge_right_28_rev`` and
+    siblings): the top-level backbone is seven calls, the ``if`` after it
+    holds six more, and the first ``call`` of the peel fails with *invalid
+    last instruction*; likewise the lazy-random-oracle ``hash`` legs of the
+    three ``INDCCA_T`` exports, whose miss branch is a ``while`` over the
+    table. Splitting that ``if`` is a different tactic scheme, not this
+    walker.
     """
     mod1 = _flat_state_module(
         modules,
@@ -2996,6 +3038,8 @@ def _isuv_align_step(  # pylint: disable=too-many-arguments,too-many-positional-
         return None
     body1, body2 = mod1.procs[0].body, mod2.procs[0].body
     if not [s for s in _exec_stmts(body1) if isinstance(s, ec_ast.Call)]:
+        return None
+    if not _peel_reaches_every_event(body1) or not _peel_reaches_every_event(body2):
         return None
     swaps = _calls_only_align_swaps(body2, body1)
     if not swaps:

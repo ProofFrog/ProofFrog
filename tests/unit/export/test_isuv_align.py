@@ -22,6 +22,7 @@ from proof_frog.export.easycrypt import module_translator as mt
 from proof_frog.export.easycrypt import type_collector as tc
 from proof_frog.export.easycrypt.chain_emitter import (
     _isuv_align_step,
+    _peel_reaches_every_event,
     _project_to_method,
 )
 
@@ -38,12 +39,18 @@ def _call(mod: str, meth: str, *args: frog_ast.Expression) -> frog_ast.FuncCall:
     return frog_ast.FuncCall(frog_ast.FieldAccess(_var(mod), meth), list(args))
 
 
-def _game(name: str, inlined: bool, ess_first: bool = False) -> frog_ast.Game:
+def _game(
+    name: str,
+    inlined: bool,
+    ess_first: bool = False,
+    branch_call: bool = False,
+) -> frog_ast.Game:
     """``inlined``: the single-use projection local is gone (count differs).
     ``ess_first``: ``K.Ess`` sits BEFORE the two ``N`` calls -- the reorder
     the inlining exposed. The measured pair is
     ``before(inlined=False, ess_first=False)`` vs
-    ``after(inlined=True, ess_first=True)``."""
+    ``after(inlined=True, ess_first=True)``. ``branch_call``: a trailing
+    ``if`` whose branch CALLS -- the shape the peel cannot reach."""
     fields = [frog_ast.Field(BS, "dk0", None), frog_ast.Field(BS, "ek0", None)]
     init = frog_ast.Method(
         frog_ast.MethodSignature("Initialize", BS, []),
@@ -61,6 +68,25 @@ def _game(name: str, inlined: bool, ess_first: bool = False) -> frog_ast.Game:
     if not inlined:
         stmts.append(frog_ast.Assignment(BS, _var("d"), _var("dk0")))
     stmts += [decaps, ess, exp, ets] if ess_first else [decaps, exp, ets, ess]
+    if branch_call:
+        stmts.append(
+            frog_ast.IfStatement(
+                [
+                    frog_ast.BinaryOperation(
+                        frog_ast.BinaryOperators.EQUALS, _var("u"), _var("t")
+                    )
+                ],
+                [
+                    frog_ast.Block(
+                        [
+                            frog_ast.Assignment(
+                                None, _var("u"), _call("K", "Ess", _var("t"))
+                            )
+                        ]
+                    )
+                ],
+            )
+        )
     stmts.append(ret)
     chal = frog_ast.Method(
         frog_ast.MethodSignature(
@@ -156,3 +182,49 @@ def test_declines_when_callees_do_not_match() -> None:
     ga = _game("IV_R", inlined=True, ess_first=True)
     del ga.methods[1].block.statements[1]  # drop the K.Ess call
     assert _row(_game("IV_L", inlined=False), ga) is None
+
+
+def test_declines_when_a_call_hides_in_a_branch() -> None:
+    """The peel reads TOP-LEVEL statements only, so a branch-local call is
+    both invisible to it (short peel) and unreachable by it (``wp`` cannot
+    cross an ``if`` whose branches call): EasyCrypt answers *invalid last
+    instruction*. Rejecting template:
+    ``ec_templates/isuv_align_branch_local_call_rejects.ec``; measured on
+    seven binding-proof ``challenge`` legs."""
+    assert (
+        _row(
+            _game("IV_L", inlined=False, branch_call=True),
+            _game("IV_R", inlined=True, ess_first=True, branch_call=True),
+        )
+        is None
+    )
+
+
+def test_peel_reach_predicate() -> None:
+    plain = [
+        ec_ast.Assign("a", "x"),
+        ec_ast.Call("b", "K.decaps", "a"),
+        ec_ast.Return("b"),
+    ]
+    assert _peel_reaches_every_event(plain)
+    assert not _peel_reaches_every_event(
+        plain + [ec_ast.If("a = b", [ec_ast.Call("c", "K.enc", "a")], [])]
+    )
+    assert not _peel_reaches_every_event(
+        plain + [ec_ast.If("a = b", [ec_ast.Sample("c", "dbs")], [])]
+    )
+    assert not _peel_reaches_every_event(
+        plain + [ec_ast.While("i < n", [ec_ast.Assign("i", "i + 1")])]
+    )
+    assert not _peel_reaches_every_event(
+        plain
+        + [
+            ec_ast.If(
+                "a = b", [ec_ast.While("i < n", [ec_ast.Assign("i", "i + 1")])], []
+            )
+        ]
+    )
+    # a branch with only deterministic work stays reachable: ``wp`` crosses it
+    assert _peel_reaches_every_event(
+        plain + [ec_ast.If("a = b", [ec_ast.Assign("a", "b")], [])]
+    )

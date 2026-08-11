@@ -1984,6 +1984,50 @@ def test_if_fold_templates_compile(tmp_path: Path, template: str) -> None:
     not _docker_available(),
     reason="Docker is not available; cannot run EasyCrypt.",
 )
+def test_backbone_peel_rejects_a_branch_local_call(tmp_path: Path) -> None:
+    """A REJECTING template: EasyCrypt must REFUSE it, and that is the point.
+
+    The backbone peel (``(wp; call (_: true))*``) reads TOP-LEVEL statements
+    only, so a call inside an ``if`` is invisible to it (the peel comes out
+    too short) and unreachable by it (``wp`` cannot cross an ``if`` whose
+    branches call). This template carries the peel the Move 6 ISUV
+    calls-alignment walker used to emit on such a body, composed from the
+    same helpers, and EasyCrypt answers ``invalid last instruction`` --
+    measured on seven binding-proof ``challenge`` legs (e.g.
+    ``CG_expanded_LEAK_BIND_K_PK`` ``micro_0_challenge_right_28_rev``) and
+    the lazy-random-oracle ``hash`` legs of the three ``INDCCA_T`` exports.
+    ``_isuv_align_step`` now declines the shape
+    (``_peel_reaches_every_event``, unit-tested in
+    ``tests/unit/export/test_isuv_align.py``); this file is the
+    machine-checked record of WHY. If EasyCrypt ever accepts it, the gate is
+    over-tight and should be revisited."""
+    ec_file = tmp_path / "isuv_align_branch_local_call_rejects.ec"
+    ec_file.write_text(
+        (EC_TEMPLATES / "isuv_align_branch_local_call_rejects.ec").read_text()
+    )
+    result = subprocess.run(
+        ["bash", str(EC_SCRIPT), str(ec_file)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=600,
+    )
+    assert result.returncode != 0, (
+        "EasyCrypt ACCEPTED the branch-local-call peel; the decline gate in "
+        "_isuv_align_step may be over-tight.\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+    assert "invalid last instruction" in (result.stdout + result.stderr), (
+        "EasyCrypt rejected the template for a different reason than the one "
+        "it documents.\n"
+        f"stdout:\n{result.stdout[-2000:]}"
+    )
+
+
+@pytest.mark.skipif(
+    not _docker_available(),
+    reason="Docker is not available; cannot run EasyCrypt.",
+)
 def test_same_memory_coupling_template_compiles(tmp_path: Path) -> None:
     """Regression tripwire for the same-memory-coupling equal-body leg.
     ``sim`` reads a postcondition as equalities BETWEEN the two memories, so

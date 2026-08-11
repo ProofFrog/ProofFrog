@@ -2000,7 +2000,14 @@ def test_backbone_peel_rejects_a_branch_local_call(tmp_path: Path) -> None:
     (``_peel_reaches_every_event``, unit-tested in
     ``tests/unit/export/test_isuv_align.py``); this file is the
     machine-checked record of WHY. If EasyCrypt ever accepts it, the gate is
-    over-tight and should be revisited."""
+    over-tight and should be revisited.
+
+    TWO routes now share this gate. ``_dead_call_drop_step``'s one-sided drop
+    is the same top-level peel and was missing it: on the three ``INDCCA_T``
+    ``hash`` oracles an ``Inline Single-Use Variables`` step moves an
+    ``L.get()`` from the top of the procedure into a ``while`` body, and the
+    drop emitted a ``call{1}`` EasyCrypt answered with this very error. Adding
+    the gate there took all three exports from EC-rejected to EC-accepted."""
     ec_file = tmp_path / "isuv_align_branch_local_call_rejects.ec"
     ec_file.write_text(
         (EC_TEMPLATES / "isuv_align_branch_local_call_rejects.ec").read_text()

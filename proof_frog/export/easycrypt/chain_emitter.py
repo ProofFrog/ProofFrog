@@ -2965,6 +2965,18 @@ def _dead_call_drop_step(  # pylint: disable=too-many-arguments,too-many-positio
             # sim-closable and must fall through to a coupling-pending admit.
             return None
         return ["proc; sim."], MicroRequests(), SYNTH_STATIC
+    # The drop below is a TOP-LEVEL backbone peel, so it inherits that peel's
+    # applicability condition: every call and sample must be visible at top
+    # level and reachable by `wp`. `_call_sample_backbone` cannot see an event
+    # under an `if` or a `while`, and `wp` cannot cross either, so the peel
+    # comes out short and the first `call{side}` reports *invalid last
+    # instruction*. Measured on the three IND-CCA_T `hash` oracles' leg 18, an
+    # `Inline Single-Use Variables` step that moves an `L.get()` from the top
+    # of the procedure INTO a `while` body -- once against once-per-iteration,
+    # which no one-sided drop closes anyway. Both sides are checked because
+    # `wp` runs on the product program.
+    if not _peel_reaches_every_event(s1_body) or not _peel_reaches_every_event(s2_body):
+        return None
     if len(s1_bb) > len(s2_bb):
         long_bb, short_bb, side, long_body = s1_bb, s2_bb, 1, s1_body
     else:

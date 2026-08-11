@@ -2194,6 +2194,81 @@ def _coupling_spec(
     return f"({pre} ==> ={{res}} /\\ {cpl})"
 
 
+_MICRO_FIELD_PAIR_RE = re.compile(
+    r"([A-Za-z_][A-Za-z0-9_.']*)\.([A-Za-z_][A-Za-z0-9_']*)\{1\}"
+    r"\s*=\s*"
+    r"([A-Za-z_][A-Za-z0-9_.']*)\.([A-Za-z_][A-Za-z0-9_']*)\{2\}"
+)
+
+
+def _coupling_field_map(
+    micro_pre_text: str, left_base: str, right_base: str
+) -> dict[str, str]:
+    """The coupling's side-1 field -> side-2 field pairing.
+
+    A field-wise micro precondition can pair ``S1.f00{1} = S2.f01{2}`` -- the
+    canonical ``f<NN>`` naming is type-ordered, so a step that changes one
+    field's type (``Split Opaque Tuple Field`` replaces a packed tuple field
+    by a component) shifts the indices of everything after it. ``sim`` relates
+    two modules' globals BY NAME and cannot infer an equality set across such
+    a pairing ("cannot infer the set of equalities"), so a route that closes
+    with ``sim`` must know when it is looking at one. Empty when the coupling
+    is whole-glob (name-identity by construction -- EC only accepts the
+    equality when the two glob signatures agree) or the refs are unknown.
+    """
+    if not left_base or not right_base:
+        return {}
+    return {
+        m.group(2): m.group(4)
+        for m in _MICRO_FIELD_PAIR_RE.finditer(micro_pre_text)
+        if m.group(1) == left_base and m.group(3) == right_base
+    }
+
+
+def _split_conjuncts(text: str) -> list[str]:
+    """Split a rendered pRHL formula on its TOP-LEVEL ``/\\``."""
+    out: list[str] = []
+    depth = 0
+    start = 0
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0 and text.startswith("/\\", i):
+            out.append(text[start:i].strip())
+            i += 2
+            start = i
+            continue
+        i += 1
+    out.append(text[start:].strip())
+    return [c for c in out if c]
+
+
+def _coupling_defeats_sim(micro_pre_text: str) -> bool:
+    """True when the coupling carries a SAME-MEMORY conjunct.
+
+    ``sim`` builds its invariant by reading the postcondition as a set of
+    equalities BETWEEN the two memories; a conjunct that mentions only one
+    memory (``S.f09{1} = S.f08{1}`` -- the survivor-consistency /
+    hoist-cache facts a broken chain's coupling threads) is not such an
+    equality and EasyCrypt gives up with *cannot infer the set of
+    equalities*. Measured on ``CK_seedbased_LEAK_BIND_K_PK``
+    ``micro_2_hashg_left_22``: dropping exactly the two same-memory conjuncts
+    from that lemma makes the identical ``proc; sim.`` close. Cross-NAMED
+    two-memory pairs (``S1.a{1} = S2.b{2}``, a ``Standardize Field Names``
+    rename) are fine and stay on ``sim``.
+    """
+    for conj in _split_conjuncts(micro_pre_text):
+        if "=" not in conj:
+            continue
+        if ("{1}" in conj) != ("{2}" in conj):
+            return True
+    return False
+
+
 def _project_to_method(game: frog_ast.Game, oracle_name: str) -> frog_ast.Game | None:
     """Deepcopy ``game`` keeping only the method named ``oracle_name`` (lower)."""
     chosen = [m for m in game.methods if m.signature.name.lower() == oracle_name]
@@ -2543,7 +2618,26 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
             tac.append("call (_: true)." if kind == "call" else "rnd.")
         tac.append("auto." if pure_tail else "auto => /#.")
         return tac, MicroRequests(), SYNTH_PARAM
+    # ``sim`` reads the postcondition as equalities BETWEEN the two memories,
+    # so an equal-body leg whose coupling also carries a same-memory conjunct
+    # ("cannot infer the set of equalities") is not a ``sim`` leg at all: it
+    # takes the route below, which closes the one recoverable shape and
+    # DECLINES the rest.
     if pb.methods[0] == pa.methods[0]:
+        if _coupling_defeats_sim(micro_pre_text):
+            return _crossed_coupling_sim_step(
+                pb,
+                pa,
+                reversed_dir,
+                modules,
+                external_module_types,
+                method_return_types,
+                flat_params,
+                micro_pre_text,
+                left_ref,
+                right_ref,
+                use_canonical_fields,
+            )
         return ["proc; sim."], MicroRequests(), SYNTH_STATIC
     before_h = _normalize_for_ec(
         copy.deepcopy(pb), external_module_types, method_return_types
@@ -2559,8 +2653,24 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
     # name-blind on locals, so the exact-AST gate above was the only thing
     # blocking these (probe: ``leg_alpha_rename``). Placed AFTER the existing
     # branches so any leg they close today stays byte-identical; the raw
-    # projections are compared (same basis as the exact-equal gate).
+    # projections are compared (same basis as the exact-equal gate). Same
+    # same-memory-conjunct gate as the exact-equal branch: renaming the
+    # LOCALS does not change what ``sim`` can infer about the memories.
     if _rename_equal_projection(pb, pa):
+        if _coupling_defeats_sim(micro_pre_text):
+            return _crossed_coupling_sim_step(
+                pb,
+                pa,
+                reversed_dir,
+                modules,
+                external_module_types,
+                method_return_types,
+                flat_params,
+                micro_pre_text,
+                left_ref,
+                right_ref,
+                use_canonical_fields,
+            )
         return ["proc; sim."], MicroRequests(), SYNTH_STATIC
     dead = _dead_call_drop_step(
         pb,
@@ -4029,6 +4139,113 @@ def _hoist_pair_step(  # pylint: disable=too-many-arguments,too-many-positional-
             tac.append("rnd.")
     tac.append("auto => /#.")
     return tac, MicroRequests(det={(pair.mod, pair.meth)}), SYNTH_PARAM
+
+
+def _stmt_all_text(stmt: ec_ast.EcStmt) -> str:
+    """Every identifier-bearing part of one statement, as text.
+
+    Unlike :func:`_stmt_text` (which yields only the value part) this includes
+    the assignment/call TARGET and an ``if`` GUARD, so a gate asking "which
+    state fields does this body touch" sees writes and guard reads too. The
+    ``if`` bodies are not descended -- callers pair this with
+    :func:`_flatten_stmts`, which already yields them.
+    """
+    if isinstance(stmt, ec_ast.Assign):
+        return f"{stmt.var} {stmt.rhs}"
+    if isinstance(stmt, ec_ast.Call):
+        return f"{stmt.var} {stmt.callee} {stmt.args}"
+    if isinstance(stmt, ec_ast.Sample):
+        return f"{stmt.var} {stmt.distr}"
+    if isinstance(stmt, ec_ast.Return):
+        return stmt.expr
+    if isinstance(stmt, ec_ast.If):
+        return stmt.guard
+    return ""
+
+
+def _crossed_coupling_sim_step(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements
+    pb: frog_ast.Game,
+    pa: frog_ast.Game,
+    reversed_dir: bool,
+    modules: mt.ModuleTranslator,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    micro_pre_text: str,
+    left_ref: str,
+    right_ref: str,
+    use_canonical_fields: bool,
+) -> tuple[list[str], MicroRequests, str] | None:
+    """The equal-body leg whose coupling carries a SAME-MEMORY conjunct.
+
+    ``sim`` builds its invariant by reading the postcondition as equalities
+    between the two memories, so a conjunct mentioning only one of them
+    (``S.f09{1} = S.f08{1}``) makes it give up: *cannot infer the set of
+    equalities*. Measured on ``CK_seedbased_LEAK_BIND_K_PK``
+    ``micro_2_hashg_left_22`` (a ``Split Opaque Tuple Field`` step) -- and
+    deleting exactly those two conjuncts from that lemma makes the identical
+    ``proc; sim.`` close, which is what identifies the cause.
+
+    One shape is recoverable, and only one: a body that touches NO abstract
+    call and NO sample, whose two renderings are the same program, and every
+    one of whose state fields the coupling pairs with the SAME name. Then
+    ``auto`` decides both sides by ``wp`` alone, each read is justified by an
+    identity conjunct of the precondition, and every other conjunct is frame
+    (untouched, so it rides from the precondition to the postcondition
+    unchanged) -- probe ``.ec-tmp/incC/sotf1_a.ec``, EC exit 0. A body with a
+    call cannot be closed this way (``auto`` cannot pass it) and a body
+    reading a CROSS-named field (``S1.f00{1} = S2.f01{2}``, which the
+    canonical type-ordered ``f<NN>`` naming produces whenever a step changes
+    one field's type) is not justified by the coupling at all, so both
+    DECLINE rather than emit ``sim`` and let EasyCrypt reject the file.
+    """
+    if not left_ref or not right_ref:
+        return None
+    bmod = _flat_state_module(
+        modules,
+        "Step_xc_b",
+        pb,
+        external_module_types,
+        method_return_types,
+        flat_params,
+        emit_state_vars=True,
+        use_canonical_fields=use_canonical_fields,
+    )
+    amod = _flat_state_module(
+        modules,
+        "Step_xc_a",
+        pa,
+        external_module_types,
+        method_return_types,
+        flat_params,
+        emit_state_vars=True,
+        use_canonical_fields=use_canonical_fields,
+    )
+    if not bmod.procs or not amod.procs:
+        return None
+    proc_1, proc_2 = (
+        (amod.procs[0], bmod.procs[0])
+        if reversed_dir
+        else (bmod.procs[0], amod.procs[0])
+    )
+    if proc_1 != proc_2:
+        return None
+    if any(
+        isinstance(s, (ec_ast.Call, ec_ast.Sample)) for s in _flatten_stmts(proc_1.body)
+    ):
+        return None
+    pairs = _coupling_field_map(
+        micro_pre_text, _ref_base(left_ref), _ref_base(right_ref)
+    )
+    mod_1, mod_2 = (amod, bmod) if reversed_dir else (bmod, amod)
+    field_names = {v.name for v in mod_1.module_vars} | {
+        v.name for v in mod_2.module_vars
+    }
+    body_text = "\n".join(_stmt_all_text(s) for s in _flatten_stmts(proc_1.body))
+    touched = {t for t in _EC_IDENT_RE.findall(body_text) if t in field_names}
+    if any(pairs.get(name, name) != name for name in touched):
+        return None
+    return ["proc.", "auto => /#."], MicroRequests(), SYNTH_PARAM
 
 
 def _fold_guard_formula(

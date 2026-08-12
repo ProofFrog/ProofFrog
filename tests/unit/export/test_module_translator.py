@@ -832,3 +832,53 @@ def test_fresh_pk_param_avoids_the_bodys_own_locals() -> None:
     # Collides with another parameter.
     assert fresh([], [param, ec_ast.ProcParam("pk", t)]) == "pk"
     assert fresh([], [ec_ast.ProcParam("pk0", t)]) == "pk"
+
+
+def test_call_argument_containing_a_call_hoists_it() -> None:
+    """A module call whose ARGUMENT merely CONTAINS another module call must
+    hoist the inner one too.
+
+    The argument lifter used to lift an argument only when the argument WAS
+    itself a module call; a compound argument -- the CFRG IND-CCA cells feed
+    their KDF a concatenation chain whose first operand is
+    ``KEM_PQ.EncodeSharedSecret(...)`` -- went straight to the expression
+    translator, which has no rendering for a call in expression position
+    (EasyCrypt has none either). That raised ``NotImplementedError``, so the
+    module translator replaced the WHOLE method with its ``return witness;``
+    stub -- and because two stubs are equal, the step's micro-lemma then
+    related one stub to another, was proved trivially, and counted as
+    evidence for a transform application it said nothing about.
+    """
+    types = tc.TypeCollector(aliases={})
+
+    def type_of(e: frog_ast.Expression) -> frog_ast.Type:
+        del e
+        return frog_ast.BoolType()
+
+    exprs = expr_translator.ExpressionTranslator(types, type_of)
+    stmts = stmt_translator.StatementTranslator(types, exprs)
+
+    inner = frog_ast.FuncCall(
+        frog_ast.FieldAccess(frog_ast.Variable("H"), "evaluate"),
+        [frog_ast.Variable("x0")],
+    )
+    compound_arg = frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.AND, inner, frog_ast.Variable("b")
+    )
+    outer = frog_ast.FuncCall(
+        frog_ast.FieldAccess(frog_ast.Variable("F"), "kdf"), [compound_arg]
+    )
+    block = frog_ast.Block([frog_ast.ReturnStatement(outer)])
+    translated = stmts.translate_block(block, return_type=ec_ast.EcType("bool"))
+
+    calls = [s for s in translated.stmts if isinstance(s, ec_ast.Call)]
+    # The inner call is hoisted FIRST (it is an operand of the outer's
+    # argument, so it must run before the outer call).
+    assert [c.callee for c in calls] == ["H.evaluate", "F.kdf"]
+    assert calls[0].args == "x0"
+    # The outer call's argument is call-free and names the inner result.
+    assert "evaluate" not in calls[1].args
+    assert calls[0].var in calls[1].args
+    ret = translated.stmts[-1]
+    assert isinstance(ret, ec_ast.Return)
+    assert ret.expr != "witness"

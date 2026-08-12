@@ -800,9 +800,27 @@ class StatementTranslator:
         decls: list[ec_ast.VarDecl],
         stmts: list[ec_ast.EcStmt],
     ) -> str:
-        """Render ``expr`` as an EC expression string. If it is itself a
-        module call, lift it (and any calls it nests) into preceding
-        ``<@`` statements and return the fresh result variable."""
+        """Render ``expr`` as an EC expression string, lifting every module
+        call it CONTAINS into preceding ``<@`` statements.
+
+        The top-level case (``expr`` IS a module call) returns the fresh
+        result variable. Any other expression goes through
+        :meth:`_translate_expr`, which hoists embedded calls and is itself
+        gated on :func:`_expr_has_module_call` -- so a call-free argument
+        takes the direct path and its rendering is unchanged.
+
+        Routing the fallback through the hoister rather than translating
+        directly is load-bearing. EasyCrypt has no call-in-expression, and a
+        COMPOUND argument that merely contains one -- a concatenation chain
+        such as ``KEM_PQ.EncodeSharedSecret(corr.\\`5) || ...`` feeding a KDF
+        call -- reached the expression translator intact, which raised
+        ``NotImplementedError`` and made ``_translate_method`` replace the
+        whole method with its ``return witness;`` stub. Two stubs are equal,
+        so the step's micro-lemma related one stub to another, EasyCrypt
+        proved it trivially, and it counted as evidence for a transform
+        application it said nothing about: 3790 such lemmas across the twelve
+        IND-CCA cells alone.
+        """
         if _is_module_call(expr):
             assert isinstance(expr, frog_ast.FuncCall)
             args = self._render_call_args(expr, decls, stmts)
@@ -814,7 +832,7 @@ class StatementTranslator:
             callee = self._render_module_call_target(expr.func)
             stmts.append(ec_ast.Call(fresh, callee, args))
             return fresh
-        return self._exprs.translate(expr)
+        return self._translate_expr(expr, decls, stmts)
 
     def _hoist_calls_in_expr(
         self,

@@ -334,3 +334,41 @@ def test_logical_or_of_bitstring_comparisons_is_not_concat() -> None:
     rendered = tr.translate(disj)
     assert "concat" not in rendered
     assert rendered == "(a <> b) || (c <> d)"
+
+
+def test_translate_logical_negation() -> None:
+    """``!e`` translates; the operand is parenthesized when it is not atomic.
+
+    Before this case existed, ANY body containing a negation raised
+    ``NotImplementedError`` and the module translator replaced the whole
+    method with its ``return witness;`` stub. Two such stubs are equal, so
+    the step's micro-lemma related one stub to another, EasyCrypt accepted
+    it, and it was counted as evidence for a transform application it said
+    nothing about (measured in ``CK_expanded_LEAK_BIND_K_PK``).
+    """
+    tr = _make()
+    flag = frog_ast.UnaryOperation(frog_ast.UnaryOperators.NOT, frog_ast.Variable("b"))
+    assert tr.translate(flag) == "!b"
+    conj = frog_ast.UnaryOperation(
+        frog_ast.UnaryOperators.NOT,
+        frog_ast.BinaryOperation(
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.Variable("x"),
+            frog_ast.Variable("y"),
+        ),
+    )
+    assert tr.translate(conj) == "!(x = y)"
+
+
+def test_other_unary_operators_still_decline() -> None:
+    """``-`` and ``|.|`` are type-dependent (integer negation vs the group
+    inverse; set cardinality vs bitstring width), so they stay unhandled
+    rather than guessed."""
+    tr = _make()
+    for op in (frog_ast.UnaryOperators.MINUS, frog_ast.UnaryOperators.SIZE):
+        expr = frog_ast.UnaryOperation(op, frog_ast.Variable("z"))
+        try:
+            tr.translate(expr)
+        except NotImplementedError:
+            continue
+        raise AssertionError(f"{op} should not translate")

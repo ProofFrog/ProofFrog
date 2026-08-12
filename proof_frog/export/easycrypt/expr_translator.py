@@ -132,6 +132,26 @@ class ExpressionTranslator:
                 return self.translate(resolved)
         if isinstance(expr, frog_ast.BinaryOperation):
             return self._translate_binop(expr)
+        if (
+            isinstance(expr, frog_ast.UnaryOperation)
+            and expr.operator == frog_ast.UnaryOperators.NOT
+        ):
+            # Logical negation. EasyCrypt spells boolean ``not`` exactly as
+            # FrogLang does, and FrogLang's typechecker admits ``!`` only on
+            # ``Bool``, so the operand needs no type dispatch. The other two
+            # unary operators DO need one and are deliberately left to the
+            # ``NotImplementedError`` below: ``-`` is integer negation on
+            # ``Int`` but the group inverse on ``GroupElem``, and ``|.|`` is
+            # set cardinality on ``Set`` but the width on ``BitString``.
+            #
+            # Measured cost of the gap this closes: a body containing one
+            # ``!(...)`` was untranslatable, so the whole method fell back to
+            # the ``return witness;`` stub -- and a stub is EQUAL to the stub
+            # on the other side of the step, which is how five micro-lemmas
+            # of ``CK_expanded_LEAK_BIND_K_PK`` came to relate two stubs to
+            # each other, be accepted by EasyCrypt, and be counted as
+            # evidence for a transform application they say nothing about.
+            return f"!{_paren(self.translate(expr.expression))}"
         if isinstance(expr, frog_ast.Tuple):
             parts = [self.translate(v) for v in expr.values]
             return "(" + ", ".join(parts) + ")"

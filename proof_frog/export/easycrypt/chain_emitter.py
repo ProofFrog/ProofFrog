@@ -9670,17 +9670,13 @@ def _emit_one_oracle_chain(
         # relate them; the structural peel walks the shared shape instead.
         # Declines to ``None`` off-shape, so every other oracle is
         # byte-identical.
-        shape = _synth_structural_if_peel(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            full_coupling,
-        )
-        if shape is not None:
-            return _evidence_only_chunks(), shape, set()
+        # RETIRED 2026-08-11, eleventh of the whole-oracle endpoint routes to
+        # go. ``_synth_structural_if_peel`` (two bodies of IDENTICAL statement
+        # structure differing only in the field REFERENCES the hop's coupling
+        # equates, walked by a shared-shape peel because ``sim`` matches
+        # globals by name) is still defined below and kept as a reference for
+        # that tactic shape, but it is no longer dispatched to. Priced by the
+        # per-route census at 24 closures over 12 proofs.
         # Same body under a field RENAME (including the arrow-typed random
         # function the peel above declines): ``inline *`` then the same if-tree
         # walk with ``wp; sim`` leaves, which tolerate the statement-count skew

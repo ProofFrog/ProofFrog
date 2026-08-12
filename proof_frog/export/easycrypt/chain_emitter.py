@@ -9624,117 +9624,47 @@ def _emit_one_oracle_chain(
         rung = ADMIT_GUIDED if any(t.strip() == "admit." for t in body) else SYNTH_PARAM
         return ([], [_res_tag(rung), "proc.", *body, "qed."], set())
 
-    if not is_init and clone_alias:
-        ff_route = _challenge_falsefalse_route(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            left_wrapper_expr,
-            right_wrapper_expr,
-            external_module_types,
-            method_return_types,
-            flat_params,
-            clone_alias,
-            full_coupling,
-        )
-        if ff_route is not None:
-            ff_body, ff_scheme = ff_route
-            if decaps_val_acc is not None and ff_scheme:
-                decaps_val_acc.add(ff_scheme)
-            return _evidence_only_chunks(), ff_body, set()
-        # RETIRED 2026-08-11, sixth of the whole-oracle endpoint routes to go.
-        # ``_challenge_hop2_route`` is still defined below and kept as a
-        # reference for that tactic shape, but it is no longer dispatched to.
-        # Priced by the per-route census at 12 closures over 12 proofs.
-        # ROUTES RETIRED FROM THIS BLOCK, 2026-08-11, in the order the
-        # per-route census priced them. Each is still DEFINED below and kept
-        # as a reference for a tactic shape known to work; none is dispatched
-        # to any more. The per-transform chain is the architecture, and a
-        # bespoke whole-oracle closure hides every leg of the chain it stands
-        # in for -- so where one of these used to close an oracle the chain
-        # now runs, and where it does not complete the oracle takes an honest
-        # admit. That is an expected, temporary cost, not a regression. The
-        # legs that DO close are still emitted as evidence, so the
-        # per-application coverage of these oracles does not fall.
-        #
-        #   1st  `_challenge_reorder_route`     7 closures /  6 proofs
-        #   4th  `_challenge_lazyro_route`     12 closures /  6 proofs
-        #   5th  `_challenge_casesplit_route`  12 closures / 12 proofs
-        #   6th  `_challenge_hop2_route`       12 closures / 12 proofs
-        #   7th  `_challenge_single_r_route`   12 closures / 12 proofs
-        # Same-shape post-init oracle: the two bodies have IDENTICAL statement
-        # structure and differ only in the field REFERENCES the hop's coupling
-        # equates (the reduction reads its packed ``corr.`k`` where the game
-        # reads a separate field). ``sim`` matches globals by NAME so it cannot
-        # relate them; the structural peel walks the shared shape instead.
-        # Declines to ``None`` off-shape, so every other oracle is
-        # byte-identical.
-        # RETIRED 2026-08-11, eleventh of the whole-oracle endpoint routes to
-        # go. ``_synth_structural_if_peel`` (two bodies of IDENTICAL statement
-        # structure differing only in the field REFERENCES the hop's coupling
-        # equates, walked by a shared-shape peel because ``sim`` matches
-        # globals by name) is still defined below and kept as a reference for
-        # that tactic shape, but it is no longer dispatched to. Priced by the
-        # per-route census at 24 closures over 12 proofs.
-        # Same body under a field RENAME (including the arrow-typed random
-        # function the peel above declines): ``inline *`` then the same if-tree
-        # walk with ``wp; sim`` leaves, which tolerate the statement-count skew
-        # inlining a delegate call introduces.
-        # RETIRED 2026-08-11, second of the whole-oracle endpoint routes to go.
-        # ``_synth_ro_reprogram_oracle`` (the random-oracle reprogramming
-        # coupling, whose ``sim`` leaves cannot run once the coupling is an
-        # implication rather than an equality set) is still defined below and
-        # kept as a reference for that tactic shape, but it is no longer
-        # dispatched to. Chosen as the second increment because the per-route
-        # census priced it at 4 closures over 4 proofs -- the cheapest of the
-        # eleven that remained. Where it used to close an oracle the chain now
-        # runs, and the legs that close are still emitted as evidence.
-        # RETIRED 2026-08-11, eighth of the whole-oracle endpoint routes to go.
-        # ``_synth_sim_field_rename`` (same body under a field rename, closed by
-        # ``inline *`` plus an if-tree walk with ``wp; sim`` leaves) is still
-        # defined below and kept as a reference for that tactic shape, but it is
-        # no longer dispatched to. Priced by the per-route census at 16 closures
-        # over 13 proofs. Its ``_coupling_has_implication`` gate stays in place:
-        # the route is kept as a reference and the gate is part of what makes it
-        # honest, not scaffolding for the dispatch.
-        # Plain GAME vs a reduction FORWARDING this oracle to its challenger:
-        # not same-shape (the inlined challenger adds dead guards), so driven by
-        # the game's if-tree alone with pattern positions.
-        # RETIRED 2026-08-11, ninth of the whole-oracle endpoint routes to go.
-        # ``_synth_forwarded_oracle_peel`` (a plain game against a reduction
-        # FORWARDING this oracle to its challenger, driven by the game's
-        # if-tree with pattern positions) is still defined below and kept as a
-        # reference for that tactic shape, but it is no longer dispatched to.
-        # Priced by the per-route census at 24 closures over 12 proofs.
-        # Packed-key correctness ``decaps``: the reduction case-splits on the
-        # challenge ciphertext and reuses its stored ``corr.`5`` where the game
-        # decapsulates. The consuming half of the front whose ``initialize`` side
-        # is already green -- ``None`` off-shape, so every other oracle stays
-        # byte-identical.
-        # RETIRED 2026-08-11, tenth of the whole-oracle endpoint routes to go.
-        # ``_synth_correctness_decaps_casesplit`` (packed-key correctness
-        # ``decaps``: the reduction case-splits on the challenge ciphertext and
-        # reuses its stored ``corr.`5`` where the game decapsulates) is still
-        # defined below and kept as a reference for that tactic shape, but it
-        # is no longer dispatched to. Priced by the per-route census at 24
-        # closures over 12 proofs.
-        # RETIRED 2026-08-11, third of the whole-oracle endpoint routes to go.
-        # ``_synth_kdf_substitution_decaps`` (KDF-PRF substitution at a
-        # post-init oracle, the consuming half of what
-        # ``_synth_kdf_key_substitution`` closes for ``initialize``) is still
-        # defined below and kept as a reference for that tactic shape, but it
-        # is no longer dispatched to. Priced by the per-route census at 8
-        # closures over 4 proofs.
+    # ALL TWELVE WHOLE-ORACLE ENDPOINT ROUTES ARE RETIRED (2026-08-11).
+    #
+    # The dispatch that stood here tried, in order, a dozen bespoke
+    # whole-oracle tactics before the per-transform chain was allowed to run.
+    # Each is still DEFINED in this module and kept as a reference for a
+    # tactic shape known to work; none of them is called any more. The
+    # per-transform chain is the architecture, and a whole-oracle closure
+    # hides every leg of the chain it stands in for -- so where one of these
+    # used to close an oracle the chain now runs, and where the chain does not
+    # complete the oracle takes an honest admit. That is the accepted cost of
+    # the change, not a regression.
+    #
+    # Retired in the order the per-route closure census priced them, each its
+    # own increment with its own sweep, EasyCrypt compile and dashboard:
+    #
+    #    1st  `_challenge_reorder_route`              7 closures /  6 proofs
+    #    2nd  `_synth_ro_reprogram_oracle`            4 closures /  4 proofs
+    #    3rd  `_synth_kdf_substitution_decaps`        8 closures /  4 proofs
+    #    4th  `_challenge_lazyro_route`              12 closures /  6 proofs
+    #    5th  `_challenge_casesplit_route`           12 closures / 12 proofs
+    #    6th  `_challenge_hop2_route`                12 closures / 12 proofs
+    #    7th  `_challenge_single_r_route`            12 closures / 12 proofs
+    #    8th  `_synth_sim_field_rename`              16 closures / 13 proofs
+    #    9th  `_synth_forwarded_oracle_peel`         24 closures / 12 proofs
+    #   10th  `_synth_correctness_decaps_casesplit`  24 closures / 12 proofs
+    #   11th  `_synth_structural_if_peel`            24 closures / 12 proofs
+    #   12th  `_challenge_falsefalse_route`          24 closures / 24 proofs
+    #
+    # Two of the twelve are worth remembering for what they taught. Retiring
+    # the SECOND exposed `_synth_sim_field_rename` to a coupling that is a
+    # quantified implication rather than an equality set: it ran without
+    # closing, which turned four proofs from clean to REJECTED until that
+    # route was gated (`_coupling_has_implication`). Retiring the TENTH is the
+    # only one that moved the evidence number -- +1040 transform applications,
+    # because the chain that took over those oracles got far enough for a
+    # thousand of its legs to close. The LAST was left until last on purpose:
+    # its oracles are `Unbreakable` challenges returning `false` on both
+    # sides, so it traded a one-line closure for an admit on the most trivial
+    # oracle in the corpus. That is a reason to do it last, not a reason to
+    # keep it.
 
-    # Composite-wrapper bridge tactic (wall 7). When the hop has a composite
-    # reduction wrapper, the wrapper<->flat bridges carry a cross-module field
-    # coupling that ``sim`` cannot infer ("cannot infer the set of equalities").
-    # Peel the oracle's shared call backbone instead -- the same tactic the init
-    # backbone peel uses -- discharging each abstract call's argument equality
-    # from the coupling. Gated on a composite wrapper being present, so every
-    # non-composite bridge (all clean proofs) keeps the byte-identical ``sim``
-    # fallback below.
     if qualified_ref_by_base:
         bridge_peel = _composite_bridge_tactic(
             modules,

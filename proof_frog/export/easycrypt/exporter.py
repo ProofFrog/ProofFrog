@@ -119,6 +119,48 @@ def _own_call_counter(acc: list[int]) -> Callable[[frog_ast.ASTNode], bool]:
     return _count
 
 
+def _concrete_function_value_types(
+    lets: list[frog_ast.Field],
+) -> dict[str, frog_ast.FunctionType]:
+    """``Function``-typed proof ``let`` bindings whose domain AND range are
+    concrete, keyed by raw name and by EC-mangled name.
+
+    These are the sampled random oracles. Scheme inlining reduces a wrapped
+    oracle's ``G.evaluate(x)`` to a bare application ``G_RO(x)`` whose callee
+    is a Variable in no local scope, so the exporter's ``type_of`` could not
+    type it, and the resulting ``NotImplementedError`` made the module
+    translator replace the WHOLE oracle body with its ``return witness;``
+    stub -- after which the step's micro-lemma related one stub to another,
+    was proved trivially, and counted as evidence for a transform
+    application it said nothing about.
+
+    Only the proof's own lets, and only concrete ones. The theorem game
+    declares the same oracle over its OWN formal type parameters (``Game
+    Breakable(KEM K, Set D, Set R, Function<D, R> G_RO)``); those names mean
+    nothing in this scope, and keying such a type by the oracle's name let
+    the abstract ``R`` displace the let's concrete range -- trading one
+    untranslatable body for another (*Slice translation requires a BitString
+    operand; got R*). A domain or range that is a bare name is exactly that
+    case, so it is skipped rather than guessed at.
+
+    Both spellings are keyed because a body reference can carry either --
+    the same reason ``type_of``'s Variable branch retries under the mangling.
+    """
+    out: dict[str, frog_ast.FunctionType] = {}
+    for let in lets:
+        t = let.type
+        if not isinstance(t, frog_ast.FunctionType):
+            continue
+        abstract = (frog_ast.Variable, frog_ast.FieldAccess)
+        if isinstance(t.domain_type, abstract) or isinstance(t.range_type, abstract):
+            continue
+        out[let.name] = t
+        # pylint: disable=protected-access
+        out[canonical_form._ec_ident(let.name)] = t
+        # pylint: enable=protected-access
+    return out
+
+
 def _qualify_method_return_type(
     rt: frog_ast.Type,
     inst: str,
@@ -1998,6 +2040,23 @@ def export_proof_file(proof_path: str) -> str:
             top_types.register_function_value(
                 canonical_form._ec_ident(proof_let.name), proof_let.type
             )
+    # The same Function-valued names, as a plain type map for ``type_of``.
+    #
+    # The registrations above teach the type collectors how to RENDER such a
+    # name; they do not tell ``type_of`` its type, and ``type_of`` needs it:
+    # scheme inlining reduces a wrapped random oracle's ``G.evaluate(x)`` to a
+    # bare application ``G_RO(x)`` whose callee is a Variable belonging to no
+    # local scope, so the random-function clause below asked ``type_of`` for
+    # the callee's type, got a ``KeyError``, and gave up -- and the resulting
+    # ``NotImplementedError`` made ``module_translator`` replace the WHOLE
+    # oracle body with its ``return witness;`` stub. Two stubs are equal, so
+    # the step's micro-lemma then related one stub to another and was counted
+    # as evidence for a transform application it said nothing about.
+    #
+    # Keyed by the raw FrogLang name AND its EC-mangled form, because a body
+    # reference can carry either (the same reason the Variable branch below
+    # retries under the mangling).
+    function_value_types = _concrete_function_value_types(proof.lets)
     # pylint: enable=protected-access
 
     # A ``Function<D,R>`` shared random oracle (a proof let or the theorem
@@ -2053,6 +2112,15 @@ def export_proof_file(proof_path: str) -> str:
                 # pylint: enable=protected-access
                 if mangled != e.name and mangled in local_types:
                     return local_types[mangled]
+                # A Function-valued proof ``let`` / theorem-game parameter --
+                # the sampled random oracle an inlined ``G.evaluate(x)``
+                # reduces to. It is in no local scope, so without this the
+                # random-function application clause below cannot type its
+                # callee and the whole body falls back to the stub.
+                if e.name in function_value_types:
+                    return function_value_types[e.name]
+                if mangled in function_value_types:
+                    return function_value_types[mangled]
                 raise KeyError(f"Unknown variable type for {e.name!r}")
             if isinstance(e, frog_ast.FuncCall) and isinstance(
                 e.func, frog_ast.FieldAccess

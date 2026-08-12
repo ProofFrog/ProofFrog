@@ -9716,21 +9716,13 @@ def _emit_one_oracle_chain(
         # decapsulates. The consuming half of the front whose ``initialize`` side
         # is already green -- ``None`` off-shape, so every other oracle stays
         # byte-identical.
-        cdc = _synth_correctness_decaps_casesplit(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            flat_params,
-            det_methods,
-            clone_alias,
-            full_coupling,
-            hop_index=hop_index,
-        )
-        if cdc is not None:
-            return cdc
+        # RETIRED 2026-08-11, tenth of the whole-oracle endpoint routes to go.
+        # ``_synth_correctness_decaps_casesplit`` (packed-key correctness
+        # ``decaps``: the reduction case-splits on the challenge ciphertext and
+        # reuses its stored ``corr.`5`` where the game decapsulates) is still
+        # defined below and kept as a reference for that tactic shape, but it
+        # is no longer dispatched to. Priced by the per-route census at 24
+        # closures over 12 proofs.
         # RETIRED 2026-08-11, third of the whole-oracle endpoint routes to go.
         # ``_synth_kdf_substitution_decaps`` (KDF-PRF substitution at a
         # post-init oracle, the consuming half of what

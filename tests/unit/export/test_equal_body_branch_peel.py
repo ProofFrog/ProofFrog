@@ -79,30 +79,57 @@ def test_branch_descent_lockstep_with_template() -> None:
     assert got == _template_proof_body("micro_branch")
 
 
-def test_declines_a_second_level_of_branching() -> None:
-    """REFUTED shape: an else-arm that itself branches after a call.
-
-    EasyCrypt answers *invalid first instruction* if a second ``if`` is
-    applied there -- ``if`` is a first-instruction rule and the arm opens
-    with an assignment and a call. Measured on 39 of the 43 corpus legs;
-    they must decline rather than carry a peel that cannot close.
-    """
-    body: list[ec_ast.EcStmt] = [
+def _seq_branch_body() -> list[ec_ast.EcStmt]:
+    """The measured shape of 39 of the 43 legs: the else-arm is
+    ``[Assign, Call, If]`` -- it branches again, after a call."""
+    return [
         ec_ast.If(
             guard="ct = ctStar",
             then_body=[_assign("r", "None")],
             else_body=[
-                _call("a", "K.decaps", "dk_0, ct"),
+                _assign("t", "ct"),
+                _call("a", "K.decaps", "dk_0, t"),
                 ec_ast.If(
-                    guard="ct = ctStar",
+                    guard="t = ctStar",
                     then_body=[_assign("r", "None")],
-                    else_body=[_call("b", "K.decaps", "dk_1, ct")],
+                    else_body=[
+                        _call("b", "K.decaps", "dk_1, t"),
+                        _call("c", "K.combine", "a, b"),
+                        _assign("r", "Some (c)"),
+                    ],
                 ),
             ],
         ),
         ec_ast.Return(expr="r"),
     ]
-    assert _equal_body_peel_tactic(body) is None
+
+
+SEQ_PRE = (
+    "={ct} /\\ ={glob K} /\\ SC0.dk_0{1} = SC1.dk_0{2} /\\ "
+    "SC0.dk_1{1} = SC1.dk_1{2} /\\ SC0.ctStar{1} = SC1.ctStar{2}"
+)
+
+
+def test_seq_split_descent_fires_on_the_measured_shape() -> None:
+    """The arm is split with ``seq`` before the inner ``if``.
+
+    Applying ``if`` a second time straight after the first is REFUTED --
+    EasyCrypt answers *invalid first instruction*, since ``if`` is a
+    first-instruction rule and the arm opens with an assignment and a call.
+    """
+    got = _equal_body_peel_tactic(_seq_branch_body(), SEQ_PRE)
+    assert got is not None
+    # The leading run is split off, and its length is read from the arm.
+    assert any(ln.startswith("seq 2 2 : (={t, a} /\\ ") for ln in got), got
+    # The descent then recurses into the inner branch.
+    assert got.count("if.") == 2
+    assert got[-1] == "auto => /#."
+
+
+def test_seq_split_declines_without_a_usable_coupling() -> None:
+    """The ``seq`` invariant IS the coupling, so a ``true`` precondition
+    leaves nothing to carry across the split and the leg declines."""
+    assert _equal_body_peel_tactic(_seq_branch_body(), "true") is None
 
 
 def test_declines_two_top_level_branches() -> None:

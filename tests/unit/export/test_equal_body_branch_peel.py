@@ -219,3 +219,37 @@ def test_descent_recurses_and_accumulates_the_invariant() -> None:
     assert seqs[1].startswith("seq 1 1 : (={t, a, b} /\\ ")
     assert got.count("if.") == 3
     assert got[-1] == "auto => /#."
+
+
+def test_descent_enters_a_branching_then_arm_with_nested_bullets() -> None:
+    """A ``then`` arm that branches gets its whole descent nested under its
+    own bullet, indented one level -- EasyCrypt's bullets nest.
+
+    Before this the descent recursed only into the else-arm, so a leg
+    branching on the then-side declined however deep the recursion went.
+    """
+    inner = ec_ast.If(
+        guard="ct = ctStar",
+        then_body=[_call("a", "K.decaps", "dk_0, ct"), _assign("r", "Some (a)")],
+        else_body=[_assign("r", "None")],
+    )
+    body: list[ec_ast.EcStmt] = [
+        ec_ast.If(
+            guard="ct = ctStar",
+            then_body=[inner],
+            else_body=[
+                _call("b", "K.decaps", "dk_1, ct"),
+                _call("c", "K.combine", "b, b"),
+                _assign("r", "Some (c)"),
+            ],
+        ),
+        ec_ast.Return(expr="r"),
+    ]
+    got = _equal_body_peel_tactic(body, "PRE")
+    assert got is not None
+    assert got[3] == "+ if."
+    # The nested descent is indented, so its bullets are one level in.
+    assert got[4] == "  + move => &1 &2 /#."
+    assert got[6] == "  auto => /#."
+    # The outer else-arm is still peeled at the top level.
+    assert got[-1] == "auto => /#."

@@ -19175,7 +19175,11 @@ def _branch_descent(
     * ``if``, whose first goal is the guards' equivalence. The two sides run
       the SAME program, so the two guards are the same expression and it
       closes from the coupling;
-    * the ``then`` arm's peel;
+    * the ``then`` arm -- peeled under its own bullet, or, when it
+      BRANCHES too, its whole descent nested there (EasyCrypt's bullets
+      nest, so the sub-descent's bullets sit one level in). Measured need:
+      the residual corpus legs branch on the then-side at level three, and
+      a ``then`` arm carrying its own ``if`` is not peelable;
     * the ``else`` arm -- peeled if its backbone is reachable, else
       DESCENDED INTO, which is where this recurses.
 
@@ -19217,11 +19221,19 @@ def _branch_descent(
         n = len(lead)
         out.append(f"seq {n} {n} : (={{{', '.join(bound)}}} /\\ {micro_pre_text}).")
         out.append("+ " + " ".join([*_backbone_peel(lead), "auto => /#."]))
-    if not _peel_reaches_every_event(branch.then_body):
-        return None
     out.append("if.")
     out.append("+ move => &1 &2 /#.")
-    out.append("+ " + " ".join([*_backbone_peel(branch.then_body), "auto => /#."]))
+    # The `then` goal is closed under its own bullet. A `then` arm that
+    # BRANCHES gets its whole descent nested there, indented -- EasyCrypt's
+    # bullets nest, so the sub-descent's own bullets sit one level in.
+    if _peel_reaches_every_event(branch.then_body):
+        out.append("+ " + " ".join([*_backbone_peel(branch.then_body), "auto => /#."]))
+    else:
+        nested = _branch_descent(branch.then_body, micro_pre_text, list(bound))
+        if nested is None:
+            return None
+        out.append("+ " + nested[0])
+        out.extend("  " + line for line in nested[1:])
     if _peel_reaches_every_event(branch.else_body):
         return [*out, *_backbone_peel(branch.else_body), "auto => /#."]
     rest = _branch_descent(branch.else_body, micro_pre_text, bound)

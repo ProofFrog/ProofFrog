@@ -2679,7 +2679,25 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
             f1,
             f2,
         ):
-            return None
+            # One shape survives this decline: the two RENDERED bodies are
+            # literally identical, so there is no field renaming to be equal
+            # under -- the oracle is a bystander to a step that only changed
+            # the state's field set. Traced to this exact line for all 43
+            # such legs across the four census proofs. Everything else still
+            # declines here, so the fallback can only convert a decline into
+            # a close.
+            return _equal_rendered_body_peel(
+                pb,
+                pa,
+                modules,
+                external_module_types,
+                method_return_types,
+                flat_params,
+                micro_pre_text,
+                left_ref,
+                right_ref,
+                use_canonical_fields,
+            )
         # Couple each abstract call (``call (_: true)``) / sample (``rnd``) of the
         # shared backbone, tail-to-front, then close with a single ``auto.``.
         # ``auto`` performs the trailing ``wp`` and the residual arg-equality
@@ -19102,6 +19120,194 @@ def _event_align_swaps(
             swaps.append(f"swap{{{side}}} {span} -{b_0 - ins}.")
         cur = cur[:ins] + block + crossed + cur[b_1 + 1 :]
     return swaps, cur
+
+
+def _equal_body_peel_tactic(body: list[ec_ast.EcStmt]) -> list[str] | None:
+    """The peel for a leg whose two sides run the SAME program, or ``None``.
+
+    Two shapes, both closing with ``auto => /#`` over the coupling:
+
+    * the backbone is reachable from the top level -- the ordinary
+      ``(wp; couple)*`` peel;
+    * the body is a single top-level ``if`` and each arm's backbone is
+      reachable -- **descend into the branch**. ``if`` on an equiv goal
+      yields three goals in order (the guards' equivalence, the ``then``
+      pair, the ``else`` pair). Because the two sides are the SAME program
+      the two guards are the same expression, so the first closes from the
+      coupling alone.
+
+    The second shape is why this row exists at all: measured over the four
+    census proofs, ALL 43 equal-body legs are blocked from the top-level
+    peel, every one of them by calls under an ``if``'s else-arm (39 with two
+    calls, 4 with seven). Their common source shape is a decapsulation
+    oracle refusing the challenge ciphertext --
+    ``if (ct = ctStar) { r <- None; } else { <calls>; r <- Some (..); }``.
+    Probe: ``.ec-tmp/bystander/branchpeel_probe.ec``, with a proof-level
+    negative control that drops the challenge-ciphertext coupling and is
+    rejected with *cannot prove goal (strict)* at the guard step.
+
+    Anything else -- a top-level ``while``, an arm holding a nested ``if``
+    over a call, more than one top-level ``if`` -- returns ``None``: the
+    peel would be too short and EasyCrypt would answer *invalid last
+    instruction*.
+    """
+    if _peel_reaches_every_event(body):
+        return ["proc.", *_backbone_peel(body), "auto => /#."]
+    stmts = _exec_stmts(body)
+    branches = [s for s in stmts if isinstance(s, ec_ast.If)]
+    if len(branches) != 1 or len(stmts) - len(branches) > 1:
+        return None
+    if any(not isinstance(s, (ec_ast.If, ec_ast.Return)) for s in stmts):
+        return None
+    branch = branches[0]
+    if not _peel_reaches_every_event(branch.then_body):
+        return None
+    if not _peel_reaches_every_event(branch.else_body):
+        return None
+    return [
+        "proc.",
+        "if.",
+        # The guards are the same expression on both sides, so their
+        # equivalence follows from the coupling.
+        "+ move => &1 &2 /#.",
+        "+ " + " ".join([*_backbone_peel(branch.then_body), "auto => /#."]),
+        *_backbone_peel(branch.else_body),
+        "auto => /#.",
+    ]
+
+
+def _same_memory_conjunct_fields(pre_text: str, fields: set[str]) -> set[str]:
+    """State fields named in a SAME-MEMORY conjunct of the coupling.
+
+    A conjunct mentioning only one of the two memories -- a survivor or
+    hoist-cache invariant such as ``<S>.h{2} = M_c.ev_f (<S>.k{2})`` -- is a
+    fact about one side that the postcondition demands back. A peel carries
+    it through the frame only while the body leaves those fields alone, so a
+    route relying on the frame must know which fields they are.
+    """
+    out: set[str] = set()
+    for conj in _split_conjuncts(pre_text):
+        if ("{1}" in conj) == ("{2}" in conj):
+            continue
+        out |= {tok for tok in _RENAME_TOKEN_RE.findall(conj) if tok in fields}
+    return out
+
+
+def _written_state_fields(body: list[ec_ast.EcStmt], fields: set[str]) -> set[str]:
+    """The state fields ``body`` ASSIGNS to, branches included.
+
+    :func:`_field_reference_order` deliberately skips the assignment target,
+    so it answers "what does this body consume"; this is the other half, for
+    a gate that must reason about what the body DISTURBS.
+    """
+    out: set[str] = set()
+    for stmt in _flatten_stmts(body):
+        target = getattr(stmt, "var", None)
+        if not isinstance(target, str) or not target:
+            continue
+        head = _RENAME_TOKEN_RE.match(target)
+        if head is not None and head.group(0) in fields:
+            out.add(head.group(0))
+    return out
+
+
+def _equal_rendered_body_peel(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements
+    pb: frog_ast.Game,
+    pa: frog_ast.Game,
+    modules: mt.ModuleTranslator,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    flat_params: list[ec_ast.ModuleParam],
+    micro_pre_text: str,
+    left_ref: str,
+    right_ref: str,
+    use_canonical_fields: bool,
+) -> tuple[list[str], MicroRequests, str] | None:
+    """The leg whose two RENDERED bodies are IDENTICAL while its two STATES
+    are not.
+
+    A multi-oracle hop rewrites one oracle; the chain emits a leg per
+    oracle; for an oracle the rewrite left alone the two projections render
+    to the same program, but the two flat states differ (a field appears or
+    disappears), so the lemma's coupling is field-wise rather than a
+    whole-glob equality.
+
+    Neither equal-body row above can take that: :func:`_rendered_identity_step`
+    compares the whole MODULES, var block included, and
+    :func:`_plain_plumbing_peel_step` requires the bodies to DIFFER. The
+    field-cardinality survivor peel reaches these legs and then declines at
+    :func:`_bodies_equal_under_field_map`, which is where this is wired.
+
+    The tactic is the ordinary backbone peel, already EasyCrypt-evidenced
+    for an identical-body leg by the Hoist bystander lemma in
+    ``ec_templates/hoist_pair_walk.ec``. It closes because the two programs
+    are the same and every field they read is related to ITSELF by the
+    coupling, so each call receives equal arguments and ``auto => /#``
+    discharges the residue.
+
+    Gates, each failing closed:
+
+    * the precondition must be a real coupling (``true`` is an
+      ``Initialize`` leg, where nothing relates the two memories) and both
+      module references must be known;
+    * the two rendered bodies must be equal -- the basis of the row;
+    * the peel must reach every event (:func:`_peel_reaches_every_event`):
+      a call, sample or ``while`` under an ``if`` is invisible to a
+      top-level peel and EasyCrypt answers *invalid last instruction*;
+    * every state field the shared body TOUCHES -- read, written, or in a
+      guard -- must be coupled to ITSELF, ``<L>.f{1} = <R>.f{2}``. A field
+      the coupling renames or omits leaves a FALSE subgoal, not a hard one:
+      the body reads ``f`` on both sides and the precondition never says
+      those two are equal;
+    * no field carried by a SAME-MEMORY conjunct may be WRITTEN by the
+      body. Those conjuncts survive only by the frame.
+
+    Measured over the four census proofs after the placeholder-body fixes:
+    43 such legs, every one with full coupling coverage, all ``decaps`` and
+    non-init. (Before those fixes 32 of 44 were pairs of untranslatable-body
+    placeholders whose real programs differ completely -- a peel built from
+    the placeholder's EMPTY backbone would have been applied to a
+    seventeen-call body.) Probe: ``.ec-tmp/bystander/eqbody_probe.ec``
+    covers the dropped-field, added-field-with-one-sided-cache-conjunct and
+    empty-backbone shapes, each with a proof-level negative control that
+    drops one load-bearing conjunct and is rejected with *cannot prove goal
+    (strict)*.
+    """
+    if micro_pre_text == "true" or not left_ref or not right_ref:
+        return None
+
+    def _render(name: str, game: frog_ast.Game) -> ec_ast.Module:
+        return _flat_state_module(
+            modules,
+            name,
+            game,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            emit_state_vars=True,
+            use_canonical_fields=use_canonical_fields,
+        )
+
+    bmod, amod = _render("Step_eb_1", pb), _render("Step_eb_2", pa)
+    if not bmod.procs or not amod.procs:
+        return None
+    body = bmod.procs[0].body
+    if body != amod.procs[0].body:
+        return None
+    peel = _equal_body_peel_tactic(body)
+    if peel is None:
+        return None
+    fields = {v.name for v in bmod.module_vars} | {v.name for v in amod.module_vars}
+    written = _written_state_fields(body, fields)
+    touched = {f for seg in _field_reference_order(body, fields) for f in seg} | written
+    pairs = _coupling_field_map(
+        micro_pre_text, _ref_base(left_ref), _ref_base(right_ref)
+    )
+    if any(pairs.get(name) != name for name in touched):
+        return None
+    if _same_memory_conjunct_fields(micro_pre_text, fields) & written:
+        return None
+    return peel, MicroRequests(), SYNTH_PARAM
 
 
 def _backbone_peel(body: list[ec_ast.EcStmt]) -> list[str]:

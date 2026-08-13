@@ -16,6 +16,7 @@ makes EasyCrypt answer *cannot prove goal (strict)*.
 from __future__ import annotations
 
 import textwrap
+import textwrap
 from pathlib import Path
 
 from proof_frog.export.easycrypt import ec_ast
@@ -24,6 +25,8 @@ from proof_frog.export.easycrypt.chain_emitter import (
     _bridge_specs_compose,
     _coupled_field_renaming,
     _coupled_guard_descent,
+    _invariant_covers_reads,
+    _split_invariant,
     _dead_local_assignments,
     _field_orders_agree,
     _field_reference_order,
@@ -338,11 +341,19 @@ def test_guards_the_coupling_does_not_relate_decline() -> None:
     )
 
 
-def test_a_leading_run_before_the_branch_declines() -> None:
-    """``if`` is a first-instruction rule; a leading run needs its own split."""
+def test_a_leading_run_before_the_branch_is_split_off() -> None:
+    """``if`` is a first-instruction rule, so the run is peeled with ``seq``.
+
+    This case used to decline; the leading-run split is what changed it.
+    """
     renaming = _coupled_field_renaming(GUARD_PRE, "S_L", "S_R")
-    left = [_assign("t", "ct.`1"), *_guard_left()]
-    assert _coupled_guard_descent(left, _guard_right(), GUARD_FIELDS, renaming) is None
+    decl = ec_ast.VarDecl(name="t", type="bs")
+    left = [decl, _assign("t", "ct.`1"), *_guard_left()]
+    right = [decl, _assign("t", "ct.`1"), *_guard_right()]
+    got = _coupled_guard_descent(left, right, GUARD_FIELDS, renaming, GUARD_PRE)
+    assert got is not None
+    assert got[0][0] == "proc."
+    assert got[0][1].startswith("seq 1 1 : (")
 
 
 def test_an_arm_that_branches_again_declines() -> None:
@@ -434,4 +445,247 @@ def test_no_hop_coupling_at_all_composes() -> None:
     """Unknown couplings answer True: the gate only declines what it knows."""
     assert _bridge_specs_compose(
         _glob_bridge, "L", "M", "R", None, {"M": ["a"], "R": ["a"]}
+    )
+
+
+# --- the leading-run split, and the recursion it unblocks -------------------
+
+LEAD_PRE = (
+    "={ct} /\\ ={glob K} /\\ ={glob H} /\\ S_L.dk0{1} = S_R.dk0{2}"
+    " /\\ S_L.ctStar{1} = S_R.field2{2}"
+)
+LEAD_FIELDS = {"dk0", "ctStar", "field2"}
+
+
+def _decl(name: str, ty: str = "bs") -> ec_ast.VarDecl:
+    return ec_ast.VarDecl(name=name, type=ty)
+
+
+def _lead_left() -> list[ec_ast.EcStmt]:
+    return [
+        _decl("r0"),
+        _decl("r1"),
+        _decl("out"),
+        _call("r0", "K.decaps", "dk0, ct.`1"),
+        _call("r1", "H.evaluate", "comb r0 ct.`2"),
+        ec_ast.If(
+            guard="r1 = ctStar",
+            then_body=[_assign("out", "witness")],
+            else_body=[_assign("out", "r1")],
+        ),
+        ec_ast.Return(expr="out"),
+    ]
+
+
+def _lead_right() -> list[ec_ast.EcStmt]:
+    """Same program, a longer leading run, guard field renamed."""
+    return [
+        _decl("r0"),
+        _decl("r1"),
+        _decl("c0"),
+        _decl("c1"),
+        _decl("out"),
+        _assign("c0", "ct.`1"),
+        _call("r0", "K.decaps", "dk0, c0"),
+        _assign("c1", "comb r0 ct.`2"),
+        _call("r1", "H.evaluate", "c1"),
+        ec_ast.If(
+            guard="r1 = field2",
+            then_body=[_assign("out", "witness")],
+            else_body=[_assign("out", "r1")],
+        ),
+        ec_ast.Return(expr="out"),
+    ]
+
+
+def test_leading_run_split_matches_the_ec_validated_template() -> None:
+    """Lockstep: `seq n m` with n != m, exactly as EasyCrypt accepted it."""
+    renaming = _coupled_field_renaming(LEAD_PRE, "S_L", "S_R")
+    got = _coupled_guard_descent(
+        _lead_left(), _lead_right(), LEAD_FIELDS, renaming, LEAD_PRE
+    )
+    assert got is not None
+    template = (
+        Path(__file__).parents[2]
+        / "integration"
+        / "ec_templates"
+        / "plumbing_peel_leading_run_split.ec"
+    ).read_text()
+    block = template.split("lemma leading_run_split :", 1)[1]
+    proof_body = block.split("proof.\n", 1)[1].split("qed.", 1)[0]
+    expected = textwrap.dedent(proof_body).strip().splitlines()
+    assert got[0][0] == expected[0]
+    assert got[0][1].startswith("seq 2 4 : (")
+    # the template writes the invariant over three lines for readability
+    assert got[0][2:] == expected[4:]
+
+
+def test_the_seq_counts_follow_the_LEMMA_sides_not_the_bodies() -> None:
+    """The defect that rejected 32 exports: reversed, body1 is the RIGHT.
+
+    `seq` is the only positional tactic this engine emits, so it is the only
+    one that can be wrong this way.
+    """
+    renaming = _coupled_field_renaming(LEAD_PRE, "S_L", "S_R")
+    fwd = _coupled_guard_descent(
+        _lead_left(), _lead_right(), LEAD_FIELDS, renaming, LEAD_PRE, False
+    )
+    rev = _coupled_guard_descent(
+        _lead_left(), _lead_right(), LEAD_FIELDS, renaming, LEAD_PRE, True
+    )
+    assert fwd is not None and rev is not None
+    assert fwd[0][1].startswith("seq 2 4 : (")
+    assert rev[0][1].startswith("seq 4 2 : (")
+    assert fwd[0][2:] == rev[0][2:]
+
+
+def test_the_invariant_equates_only_same_typed_locals_both_runs_bind() -> None:
+    """One-sided locals have nothing to equate to; differing types cannot."""
+    left, right = _lead_left(), _lead_right()
+    inv = _split_invariant(
+        left[3:5],
+        right[5:9],
+        LEAD_PRE,
+        {"r0": "bs", "r1": "bs"},
+        {"r0": "bs", "r1": "bs"},
+    )
+    assert inv.startswith("={r0, r1} /\\ ")
+    assert "c0" not in inv and "c1" not in inv
+    mixed = _split_invariant(
+        left[3:5],
+        right[5:9],
+        LEAD_PRE,
+        {"r0": "bs", "r1": "bs"},
+        {"r0": "bs", "r1": "bs * bs"},
+    )
+    assert mixed.startswith("={r0} /\\ ")
+
+
+def test_a_branch_reading_an_uncarried_local_declines() -> None:
+    """The one condition behind three separate compile failures.
+
+    `seq` throws away everything but the invariant, so a local the branch
+    reads that the invariant does not carry is gone and the closer cannot
+    finish. Here the right run extracts `c0` and its branch then reads it.
+    """
+    renaming = _coupled_field_renaming(LEAD_PRE, "S_L", "S_R")
+    right = _lead_right()
+    right[-2] = ec_ast.If(
+        guard="r1 = field2",
+        then_body=[_assign("out", "witness")],
+        else_body=[_assign("out", "c0")],
+    )
+    assert (
+        _coupled_guard_descent(_lead_left(), right, LEAD_FIELDS, renaming, LEAD_PRE)
+        is None
+    )
+
+
+def test_invariant_coverage_is_asked_of_the_rendered_text() -> None:
+    """It poses the question the closer faces, so the two cannot drift."""
+    branch = ec_ast.If(guard="x = y", then_body=[], else_body=[])
+    run = [_assign("x", "1")]
+    assert _invariant_covers_reads("={x} /\\ true", run, branch)
+    assert not _invariant_covers_reads("={z} /\\ true", run, branch)
+
+
+def test_a_prefix_whose_calls_differ_declines() -> None:
+    """A reordered or differing prefix is not this row's shape."""
+    renaming = _coupled_field_renaming(LEAD_PRE, "S_L", "S_R")
+    right = _lead_right()
+    right[6] = _call("r0", "H.evaluate", "dk0, c0")
+    assert (
+        _coupled_guard_descent(_lead_left(), right, LEAD_FIELDS, renaming, LEAD_PRE)
+        is None
+    )
+
+
+def test_work_after_the_branch_declines() -> None:
+    """`_branch_cut` allows only a trailing return after the split."""
+    left = _lead_left()
+    left.insert(6, _assign("z", "out"))
+    renaming = _coupled_field_renaming(LEAD_PRE, "S_L", "S_R")
+    assert (
+        _coupled_guard_descent(left, _lead_right(), LEAD_FIELDS, renaming, LEAD_PRE)
+        is None
+    )
+
+
+NESTED_PRE = (
+    "={ct} /\\ S_L.dk0{1} = S_R.dk0{2} /\\ S_L.ctStar_0{1} = S_R.field2{2}"
+    " /\\ S_L.ctStar_1{1} = S_R.field4{2} /\\ S_L.alt{1} = S_R.field6{2}"
+)
+NESTED_FIELDS = {
+    "dk0",
+    "ctStar_0",
+    "ctStar_1",
+    "alt",
+    "field2",
+    "field4",
+    "field6",
+}
+
+
+def _nested(inner_guard: str, outer_guard: str, extra: bool) -> list[ec_ast.EcStmt]:
+    tail = ([_assign("c0", "ct.`1")] if extra else []) + [
+        _call("r0", "K.decaps", "dk0, " + ("c0" if extra else "ct.`1")),
+        _call("r1", "H.evaluate", "comb r0 ct.`2"),
+        _assign("out", "r1"),
+    ]
+    return [
+        _decl("r0"),
+        _decl("r1"),
+        _decl("out"),
+        ec_ast.If(
+            guard=outer_guard,
+            then_body=[_assign("out", "witness")],
+            else_body=[
+                ec_ast.If(
+                    guard=inner_guard,
+                    then_body=[
+                        _call("r0", "K.decaps", "dk0, ct.`2"),
+                        _assign("out", "r0"),
+                    ],
+                    else_body=tail,
+                )
+            ],
+        ),
+        ec_ast.Return(expr="out"),
+    ]
+
+
+def test_nested_descent_matches_the_ec_validated_template() -> None:
+    """Lockstep for two levels: the bullets must nest exactly as EC accepted."""
+    renaming = _coupled_field_renaming(NESTED_PRE, "S_L", "S_R")
+    got = _coupled_guard_descent(
+        _nested("ct.`1 = alt", "ct = (ctStar_0, ctStar_1)", False),
+        _nested("ct.`1 = field6", "ct = (field2, field4)", True),
+        NESTED_FIELDS,
+        renaming,
+        NESTED_PRE,
+    )
+    assert got is not None
+    template = (
+        Path(__file__).parents[2]
+        / "integration"
+        / "ec_templates"
+        / "plumbing_peel_nested_guard_descent.ec"
+    ).read_text()
+    block = template.split("lemma nested_guard_descent :", 1)[1]
+    proof_body = block.split("proof.\n", 1)[1].split("qed.", 1)[0]
+    assert got[0] == textwrap.dedent(proof_body).strip().splitlines()
+
+
+def test_a_common_local_bound_at_different_types_declines() -> None:
+    """Skipping it is not enough: the closer would have to reconcile shapes.
+
+    A tuple-expanding canonicalization leaves the same local holding a
+    component on one side and the whole pair on the other.
+    """
+    renaming = _coupled_field_renaming(LEAD_PRE, "S_L", "S_R")
+    right = _lead_right()
+    right[0] = _decl("r0", "bs * bs")
+    assert (
+        _coupled_guard_descent(_lead_left(), right, LEAD_FIELDS, renaming, LEAD_PRE)
+        is None
     )

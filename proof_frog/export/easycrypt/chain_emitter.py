@@ -2898,6 +2898,7 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         micro_pre_text,
         left_ref,
         right_ref,
+        reversed_dir,
     )
 
 
@@ -3416,6 +3417,7 @@ def _plain_plumbing_peel_step(  # pylint: disable=too-many-arguments,too-many-po
     micro_pre_text: str = "true",
     left_ref: str = "",
     right_ref: str = "",
+    reversed_dir: bool = False,
 ) -> tuple[list[str], MicroRequests, str] | None:
     """A leg that rewrites only DETERMINISTIC plumbing around an unchanged
     abstract-call backbone.
@@ -3533,7 +3535,9 @@ def _plain_plumbing_peel_step(  # pylint: disable=too-many-arguments,too-many-po
     renaming = _coupled_field_renaming(
         micro_pre_text, _ref_base(left_ref), _ref_base(right_ref)
     )
-    descent = _coupled_guard_descent(body1, body2, fields, renaming)
+    descent = _coupled_guard_descent(
+        body1, body2, fields, renaming, micro_pre_text, reversed_dir
+    )
     if descent is not None:
         return descent
     if not [s for s in _exec_stmts(body1) if isinstance(s, ec_ast.Call)]:
@@ -3558,6 +3562,8 @@ def _coupled_guard_descent(
     body2: list[ec_ast.EcStmt],
     fields: set[str],
     renaming: dict[str, str],
+    micro_pre_text: str = "true",
+    reversed_dir: bool = False,
 ) -> tuple[list[str], MicroRequests, str] | None:
     """Descend through a case split whose two GUARDS differ by a rename.
 
@@ -3604,44 +3610,255 @@ def _coupled_guard_descent(
       the flat peel applies to a whole body, since each arm IS a flat peel
       once the split is done.
     """
-    if1, if2 = _sole_branch(body1), _sole_branch(body2)
-    if if1 is None or if2 is None:
+    lines = _guard_descent_lines(
+        body1, body2, fields, renaming, micro_pre_text, reversed_dir
+    )
+    if lines is None:
         return None
+    return (["proc.", *lines], MicroRequests(), SYNTH_PARAM)
+
+
+def _guard_descent_lines(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements
+    body1: list[ec_ast.EcStmt],
+    body2: list[ec_ast.EcStmt],
+    fields: set[str],
+    renaming: dict[str, str],
+    micro_pre_text: str,
+    reversed_dir: bool,
+) -> list[str] | None:
+    """One level of the descent, splitting off any work before the branch.
+
+    Two shapes, in order: a LEADING RUN then the branch, peeled apart with
+    ``seq n m`` (``if`` is a FIRST-instruction rule, so a body that computes
+    before it splits cannot be branched until the run is gone); or the branch
+    alone. Recurses through :func:`_guard_descent_arm`, so a nested split is
+    paired under its outer arm's bullet -- EasyCrypt's bullets nest.
+
+    ``reversed_dir`` is load-bearing and ONLY here. ``seq n m`` is the first
+    POSITIONAL tactic this engine emits: every other route is shape-symmetric
+    (``wp`` and ``call (_: true)`` read the same whichever body generated
+    them), so no row before this one had to know which body the lemma names on
+    its left. On a reversed leg ``body1`` is the lemma's RIGHT -- measured by
+    comparing the lemma's own ``left_ref`` against each rendered body's prefix
+    length on a forward proof and its mirror, not inferred from the flag,
+    because ``before_game``/``after_game`` are already swapped upstream on
+    some paths. Emitting the counts in body order made EasyCrypt answer
+    *invalid split index* on all 32 exports the first time this shipped.
+
+    Probes, all ACCEPTED, each with a negative control failing AT THE GUARD
+    GOAL: ``.ec-tmp/bystander/leadrun_probe.ec`` (runs of different lengths),
+    ``nesteddescent_probe.ec`` (two levels), ``guardcoupled_probe.ec``.
+    """
+    cut1, cut2 = _branch_cut(body1), _branch_cut(body2)
+    if cut1 is None or cut2 is None:
+        return None
+    pre1, if1 = cut1
+    pre2, if2 = cut2
+    if pre1 or pre2:
+        if not _prefix_peelable(pre1, pre2, fields, renaming):
+            return None
+        types1, types2 = _decl_types(body1), _decl_types(body2)
+        if _type_mismatched_common_local(pre1, pre2, types1, types2):
+            return None
+        invariant = _split_invariant(pre1, pre2, micro_pre_text, types1, types2)
+        if not _invariant_covers_reads(
+            invariant, pre1, if1
+        ) or not _invariant_covers_reads(invariant, pre2, if2):
+            return None
+        inner = _guard_descent_lines(
+            [if1], [if2], fields, renaming, micro_pre_text, reversed_dir
+        )
+        if inner is None:
+            return None
+        left, right = (len(pre2), len(pre1)) if reversed_dir else (len(pre1), len(pre2))
+        return [
+            f"seq {left} {right} : ({invariant}).",
+            *_bulleted([*_backbone_peel(pre1), "auto => /#."]),
+            *_bulleted(inner),
+        ]
     if _rename_tokens(if1.guard, fields, renaming) != _rename_tokens(
         if2.guard, fields, renaming
     ):
         return None
-    arms = (
+    lines = ["if.", "+ move => &1 &2 /#."]
+    for arm1, arm2 in (
         (if1.then_body, if2.then_body),
         (if1.else_body, if2.else_body),
+    ):
+        arm = _guard_descent_arm(
+            arm1, arm2, fields, renaming, micro_pre_text, reversed_dir
+        )
+        if arm is None:
+            return None
+        lines.extend(_bulleted(arm))
+    return lines
+
+
+def _guard_descent_arm(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    arm1: list[ec_ast.EcStmt],
+    arm2: list[ec_ast.EcStmt],
+    fields: set[str],
+    renaming: dict[str, str],
+    micro_pre_text: str,
+    reversed_dir: bool,
+) -> list[str] | None:
+    """One arm: its own peel, or -- when it branches -- its own descent.
+
+    A peelable arm IS a flat peel once the split is taken, so it pays the same
+    backbone, argument-crossing and field-reference checks a whole body does.
+    An arm whose calls are REORDERED still declines: that needs a reorder
+    route this row does not have.
+    """
+    if _peel_reaches_every_event(arm1) and _peel_reaches_every_event(arm2):
+        if not _prefix_peelable(arm1, arm2, fields, renaming):
+            return None
+        return [*_backbone_peel(arm1), "auto => /#."]
+    return _guard_descent_lines(
+        arm1, arm2, fields, renaming, micro_pre_text, reversed_dir
     )
-    for arm1, arm2 in arms:
-        if not _peel_reaches_every_event(arm1) or not _peel_reaches_every_event(arm2):
-            return None
-        if _call_sample_backbone(arm1) != _call_sample_backbone(arm2):
-            return None
-        if _same_callee_arg_crossing(arm1, arm2):
-            return None
-        if not _field_orders_agree(arm1, arm2, fields, renaming):
-            return None
-    tactic = ["proc.", "if.", "+ move => &1 &2 /#."]
-    for arm1, _arm2 in arms:
-        tactic.extend(_bulleted([*_backbone_peel(arm1), "auto => /#."]))
-    return (tactic, MicroRequests(), SYNTH_PARAM)
+
+
+def _branch_cut(
+    body: list[ec_ast.EcStmt],
+) -> tuple[list[ec_ast.EcStmt], ec_ast.If] | None:
+    """``body`` as (work before the branch, the branch), or ``None``.
+
+    A trailing ``return`` after the branch is allowed and dropped: ``proc.``
+    folds it into the postcondition, so it is not an instruction the ``if``
+    rule can trip over. Anything else after the branch, or no branch at all,
+    declines.
+    """
+    stmts = _exec_stmts(body)
+    idx = next((i for i, s in enumerate(stmts) if isinstance(s, ec_ast.If)), None)
+    if idx is None:
+        return None
+    if any(not isinstance(s, ec_ast.Return) for s in stmts[idx + 1 :]):
+        return None
+    branch = stmts[idx]
+    assert isinstance(branch, ec_ast.If)
+    return stmts[:idx], branch
+
+
+def _prefix_peelable(
+    run1: list[ec_ast.EcStmt],
+    run2: list[ec_ast.EcStmt],
+    fields: set[str],
+    renaming: dict[str, str],
+) -> bool:
+    """Can this pair of straight-line runs be closed by the backbone peel?
+
+    The same three checks a whole body pays: the call and sample backbones
+    must match, no two calls on one callee may cross their arguments, and the
+    two runs must reference the state's fields the same way.
+    """
+    if _call_sample_backbone(run1) != _call_sample_backbone(run2):
+        return False
+    if _same_callee_arg_crossing(run1, run2):
+        return False
+    return _field_orders_agree(run1, run2, fields, renaming)
+
+
+def _decl_types(body: list[ec_ast.EcStmt]) -> dict[str, str]:
+    """Each local's declared type, by name, as rendered text."""
+    return {s.name: str(s.type) for s in body if isinstance(s, ec_ast.VarDecl)}
+
+
+def _invariant_covers_reads(
+    invariant: str,
+    run: list[ec_ast.EcStmt],
+    rest: ec_ast.If,
+) -> bool:
+    """Does the invariant carry every local the branch goes on to READ?
+
+    ``seq`` discards everything about the prefix except the invariant, so a
+    local the branch reads that the invariant does not mention is simply gone,
+    and ``auto => /#`` is handed a goal it cannot discharge. This one
+    condition subsumes three separate ways that happened, each found by
+    compiling and each a real defect:
+
+    * a local only ONE run binds (``__cse_ct0_0__ <- ct0.`1`` extracted on one
+      side only), which has nothing to be equated to;
+    * a local both runs bind at DIFFERENT types, which
+      :func:`_split_invariant` must skip because ``={x}`` would not typecheck
+      -- EasyCrypt answers *this expression has type*, a TYPE error;
+    * anything else the invariant happens not to carry.
+
+    Asking the RENDERED invariant text, rather than re-deriving which locals it
+    ought to have equated, is deliberate: it poses the question the closer will
+    actually face, so the two cannot drift apart.
+    """
+    bound = {v for v in (getattr(s, "var", "") for s in run) if v}
+    if not bound:
+        return True
+    read = set(_RENAME_TOKEN_RE.findall(rest.guard))
+    for stmt in _flatten_stmts([rest]):
+        read.update(_RENAME_TOKEN_RE.findall(_stmt_all_text(stmt)))
+    return not (bound & read) - set(_RENAME_TOKEN_RE.findall(invariant))
+
+
+def _type_mismatched_common_local(
+    run1: list[ec_ast.EcStmt],
+    run2: list[ec_ast.EcStmt],
+    types1: dict[str, str],
+    types2: dict[str, str],
+) -> bool:
+    """Do the two runs bind a same-named local at DIFFERENT declared types?
+
+    :func:`_split_invariant` cannot equate such a local -- ``={x}`` would not
+    typecheck -- and merely skipping it leaves the prefix goal's closer to
+    reconcile the two shapes on its own. Measured on
+    ``CK_seedbased_LEAK_BIND_K_CT_DIFFKEY``: a tuple-expanding
+    canonicalization leaves ``__a21__`` holding a decapsulation key on one
+    side and the whole ``(encaps, decaps)`` pair on the other, so the goal
+    demands ``__a21__{1} = __a21__{2}.`2`` on top of an already very large
+    postcondition, and ``auto => /#`` does not get there.
+
+    Declining is the honest answer. Relating the two shapes is the
+    packed-field decomposition capability, which is separate and larger.
+    """
+    bound2 = {getattr(s, "var", "") for s in run2}
+    return any(
+        v and v in bound2 and types1.get(v, "?") != types2.get(v, "??")
+        for v in (getattr(s, "var", "") for s in run1)
+    )
+
+
+def _split_invariant(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    run1: list[ec_ast.EcStmt],
+    run2: list[ec_ast.EcStmt],
+    micro_pre_text: str,
+    types1: dict[str, str],
+    types2: dict[str, str],
+) -> str:
+    """What ``seq n m`` has to establish for the branch that follows.
+
+    The leg's own coupling, plus equality of the locals BOTH runs bind at the
+    SAME declared type. A local only one side binds has nothing to be equated
+    to; a shared name at differing types cannot be equated at all, because a
+    canonicalization that expands a tuple leaves one side holding a pair where
+    the other holds a component and ``={x}`` then does not typecheck. Either
+    way :func:`_invariant_covers_reads` refuses the leg if the branch actually
+    reads what was left out. Symmetric by construction, so unlike the ``seq``
+    counts it needs no direction; names are read off the statements' own
+    targets, so nothing depends on EasyCrypt's inline renaming.
+    """
+    bound2 = {getattr(s, "var", "") for s in run2}
+    common = [
+        v
+        for v in dict.fromkeys(getattr(s, "var", "") for s in run1)
+        if v and v in bound2 and types1.get(v, "?") == types2.get(v, "??")
+    ]
+    if not common:
+        return micro_pre_text
+    return "={" + ", ".join(common) + "} /\\ " + micro_pre_text
 
 
 def _sole_branch(body: list[ec_ast.EcStmt]) -> ec_ast.If | None:
-    """``body`` as a single case split, or ``None`` if it is anything else.
-
-    A trailing ``return`` is allowed and ignored: ``proc.`` folds it into the
-    postcondition, so it is not an instruction the ``if`` rule can trip over.
-    """
-    stmts = _exec_stmts(body)
-    if not stmts or not isinstance(stmts[0], ec_ast.If):
+    """``body`` as a single case split with no work before it."""
+    cut = _branch_cut(body)
+    if cut is None or cut[0]:
         return None
-    if any(not isinstance(s, ec_ast.Return) for s in stmts[1:]):
-        return None
-    return stmts[0]
+    return cut[1]
 
 
 def _rename_tokens(text: str, fields: set[str], renaming: dict[str, str]) -> str:

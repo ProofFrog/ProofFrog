@@ -1471,6 +1471,237 @@ def _bitword_requires(
     return imports, ["BitWord"]
 
 
+_MAX_INIT_SOURCE_DEPTH = 32
+# A source expression is text a HUMAN-scale field derivation produces; anything
+# past this is a packing chain whose expansion duplicates subterms, and expanding
+# it is both useless (no partner will match) and quadratic-to-exponential in the
+# text. Refusing at a cap keeps the derivation linear in practice. Two CFRG
+# exports timed out before this existed.
+_MAX_INIT_SOURCE_TEXT = 2000
+
+
+def _holds_module_call(expr: frog_ast.Expression) -> bool:
+    """Does ``expr`` perform a module call (``K.Encaps(pk)``)?
+
+    A module call is the unit the hop's ``initialize`` leg couples with
+    ``call (_: true)``, so it is what makes a statement part of the body's
+    coupled backbone.
+    """
+    return (
+        visitors.SearchVisitor[frog_ast.FuncCall](
+            lambda n: isinstance(n, frog_ast.FuncCall)
+            and isinstance(n.func, frog_ast.FieldAccess)
+        ).visit(expr)
+        is not None
+    )
+
+
+def _expand_init_local(
+    name: str,
+    defs: dict[str, tuple[int, frog_ast.Expression]],
+    touched: set[int],
+    depth: int,
+    memo: dict[str, tuple[str, frozenset[int]] | None],
+) -> str | None:
+    """One local's expansion, memoized. ``None`` when it does not resolve."""
+    if name not in defs:
+        return None
+    if name not in memo:
+        # The in-flight marker doubles as the cycle guard: a definition that
+        # refers back to itself resolves to "unresolvable" rather than recursing.
+        memo[name] = None
+        index, value = defs[name]
+        own: set[int] = {index}
+        text = _expand_init_source(value, defs, own, depth + 1, memo)
+        memo[name] = (
+            None
+            if text is None or len(text) > _MAX_INIT_SOURCE_TEXT
+            else (text, frozenset(own))
+        )
+    cached = memo[name]
+    if cached is None:
+        return None
+    touched |= cached[1]
+    return cached[0]
+
+
+def _expand_init_source(  # pylint: disable=too-many-return-statements,too-many-branches
+    expr: frog_ast.Expression,
+    defs: dict[str, tuple[int, frog_ast.Expression]],
+    touched: set[int],
+    depth: int,
+    memo: dict[str, tuple[str, frozenset[int]] | None],
+) -> str | None:
+    """``expr`` rewritten in terms of this body's module calls only, as text, or
+    ``None`` when some part of it does not resolve.
+
+    Every local is replaced by its defining expression, recording that
+    statement's index in ``touched`` so the caller can check the operations the
+    result depends on. A tuple literal indexed by a constant FOLDS
+    (``[a, b][1]`` -> ``b``) -- without that, a packed ``Initialize`` return
+    would drag the calls of the components a field does NOT take into the text
+    and two endpoints holding the same value would not look alike.
+
+    ``None`` (refuse) for anything whose reading is not forced: a name with no
+    single defining assignment in this body (a field, a parameter, a sampled
+    value), a non-constant index, a call on a local rather than a module, or any
+    other expression form. Refusing is the safe direction -- the caller only
+    ever states a relation between two texts it derived in full.
+
+    ``memo`` caches each local's expansion (text and the statements it touched)
+    so a name used twice is expanded once; a body that packs and repacks would
+    otherwise duplicate subterms at every level.
+    """
+    if depth > _MAX_INIT_SOURCE_DEPTH:
+        return None
+    if isinstance(expr, frog_ast.Variable):
+        return _expand_init_local(expr.name, defs, touched, depth, memo)
+    if isinstance(expr, frog_ast.Integer):
+        return str(expr.num)
+    if isinstance(expr, frog_ast.Tuple):
+        parts = [
+            _expand_init_source(v, defs, touched, depth + 1, memo) for v in expr.values
+        ]
+        if any(p is None for p in parts):
+            return None
+        out = "[" + ", ".join(p for p in parts if p is not None) + "]"
+        return None if len(out) > _MAX_INIT_SOURCE_TEXT else out
+    if isinstance(expr, frog_ast.ArrayAccess):
+        if not isinstance(expr.index, frog_ast.Integer):
+            return None
+        base = expr.the_array
+        # Resolve the indexed value through this body's locals FIRST, so a
+        # literal tuple can be folded rather than rendered whole.
+        seen = 0
+        while isinstance(base, frog_ast.Variable) and base.name in defs:
+            seen += 1
+            if seen > _MAX_INIT_SOURCE_DEPTH:
+                return None
+            index, value = defs[base.name]
+            touched.add(index)
+            base = value
+        if isinstance(base, frog_ast.Tuple):
+            if not 0 <= expr.index.num < len(base.values):
+                return None
+            return _expand_init_source(
+                base.values[expr.index.num], defs, touched, depth + 1, memo
+            )
+        inner = _expand_init_source(base, defs, touched, depth + 1, memo)
+        if inner is None:
+            return None
+        out = f"{inner}[{expr.index.num}]"
+        return None if len(out) > _MAX_INIT_SOURCE_TEXT else out
+    if (
+        isinstance(expr, frog_ast.FuncCall)
+        and isinstance(expr.func, frog_ast.FieldAccess)
+        and isinstance(expr.func.the_object, frog_ast.Variable)
+        and expr.func.the_object.name not in defs
+    ):
+        args = [
+            _expand_init_source(a, defs, touched, depth + 1, memo) for a in expr.args
+        ]
+        if any(a is None for a in args):
+            return None
+        callee = f"{expr.func.the_object.name}.{expr.func.name}"
+        out = f"{callee}({', '.join(a for a in args if a is not None)})"
+        return None if len(out) > _MAX_INIT_SOURCE_TEXT else out
+    return None
+
+
+def _init_source_texts(game: frog_ast.Game | None) -> dict[str, str]:
+    """Each field's ``Initialize`` SOURCE EXPRESSION, expanded through the body's
+    own locals, as text -- with no entry for a field that has no such source.
+
+    Two endpoints whose fields expand to the SAME text hold the same value once
+    the hop's ``initialize`` leg has coupled the calls that produce it, which is
+    what makes a coupling conjunct between them DERIVED rather than guessed.
+    Everything that could make that reading wrong is refused instead of
+    approximated:
+
+    * a name written more than once -- the text would describe only one write;
+    * a name that is not a local of this body (see ``_expand_init_source``);
+    * a field whose defining operations are not an INITIAL SEGMENT of the body's
+      own call/sample backbone. Only a prefix is coupled pairwise by the leg's
+      tail-to-front peel, so an operation happening in between on one side alone
+      breaks the pairing and the derived equality would not be provable.
+
+    A sampled field is excluded by the same rule that excludes any non-local
+    name: its value is not forced by the two bodies' shared calls.
+    """
+    if game is None:
+        return {}
+    init = next(
+        (m for m in game.methods if m.signature.name.lower() == "initialize"), None
+    )
+    if init is None:
+        return {}
+    statements = list(init.block.statements)
+    writes: dict[str, int] = {}
+    defs: dict[str, tuple[int, frog_ast.Expression]] = {}
+    backbone: list[int] = []
+    for i, stmt in enumerate(statements):
+        if isinstance(stmt, (frog_ast.Sample, frog_ast.UniqueSample)):
+            backbone.append(i)
+            if isinstance(stmt.var, frog_ast.Variable):
+                writes[stmt.var.name] = writes.get(stmt.var.name, 0) + 1
+            continue
+        if not isinstance(stmt, frog_ast.Assignment) or not isinstance(
+            stmt.var, frog_ast.Variable
+        ):
+            continue
+        if _holds_module_call(stmt.value):
+            backbone.append(i)
+        writes[stmt.var.name] = writes.get(stmt.var.name, 0) + 1
+        defs[stmt.var.name] = (i, stmt.value)
+    # A name written twice cannot stand for one value; drop it from the
+    # resolvable set entirely rather than let an expansion pick a write.
+    defs = {name: d for name, d in defs.items() if writes.get(name, 0) == 1}
+    position = {stmt_index: k for k, stmt_index in enumerate(backbone)}
+    memo: dict[str, tuple[str, frozenset[int]] | None] = {}
+    out: dict[str, str] = {}
+    for field in game.fields:
+        if field.name not in defs:
+            continue
+        touched: set[int] = {defs[field.name][0]}
+        text = _expand_init_source(defs[field.name][1], defs, touched, 0, memo)
+        if text is None:
+            continue
+        used = sorted(position[i] for i in touched if i in position)
+        if used != list(range(len(used))):
+            continue
+        out[field.name] = text
+    return out
+
+
+def _shared_source_field_pairs(
+    left: frog_ast.Game | None,
+    right: frog_ast.Game | None,
+    left_allowed: set[str],
+    right_allowed: set[str],
+) -> list[tuple[str, str]]:
+    """``(left_field, right_field)`` pairs whose ``Initialize`` source
+    expressions are the SAME expanded text -- the pairs a coupling conjunct may
+    be derived from.
+
+    A text shared by more than one field on either side is DROPPED, not
+    resolved: two fields of one endpoint holding the same value is exactly the
+    shape (a state and a copy of it) where picking a partner would be a guess.
+    ``*_allowed`` restricts each side to the fields the endpoint's own module
+    declares, so a field absorbed from a composed challenger -- which lives in
+    another module and is spelled differently there -- is never named.
+    """
+    ltexts = {f: t for f, t in _init_source_texts(left).items() if f in left_allowed}
+    rtexts = {f: t for f, t in _init_source_texts(right).items() if f in right_allowed}
+    pairs: list[tuple[str, str]] = []
+    for text in sorted(set(ltexts.values()) & set(rtexts.values())):
+        lf = [f for f, t in ltexts.items() if t == text]
+        rf = [f for f, t in rtexts.items() if t == text]
+        if len(lf) != 1 or len(rf) != 1:
+            continue
+        pairs.append((lf[0], rf[0]))
+    return pairs
+
+
 # pylint: disable=too-many-locals,too-many-statements,too-many-branches
 def export_proof_file(proof_path: str) -> str:
     """Parse ``proof_path`` and return the EC source as a string.
@@ -15862,6 +16093,92 @@ def export_proof_file(proof_path: str) -> str:
         ro_reprog_memo[memo_key] = got
         return got
 
+    def _endpoint_own_fields(step: frog_ast.Step) -> set[str]:
+        """The field names the endpoint's OWN emitted module declares.
+
+        A composed endpoint's game AST also carries the fields it absorbed from
+        its inner challenger (spelled ``challenger@sk``); those live in another
+        EC module under another name, so a coupling may not name them through
+        this base.
+        """
+        if step.reduction is not None:
+            red = _get_reduction(step.reduction.name)
+            return {f.name for f in red.fields} if red is not None else set()
+        # pylint: disable=protected-access
+        game = engine._get_game_ast(step.challenger, None)
+        # pylint: enable=protected-access
+        return {f.name for f in game.fields} if game is not None else set()
+
+    # ``_live_state_coupling`` is re-run for every lemma of a hop, so the AST
+    # walk behind the derivation is memoized per endpoint PAIR. Without it the
+    # slowest CFRG exports gain enough wall-clock to cross the regression
+    # sweep's per-export cap.
+    shared_source_memo: dict[tuple[int, int], tuple[str, str, list[str]]] = {}
+
+    def _shared_init_source_coupling(
+        step_a: frog_ast.Step, step_b: frog_ast.Step, coupled: str
+    ) -> list[str]:
+        """Conjuncts for a field pair the two endpoints DERIVE the same way.
+
+        The single-live-field path states one field equality and leaves the
+        endpoints' other state unrelated. When a post-init oracle READS that
+        other state -- ``Decaps`` branching on ``c = ctStar`` -- the hop lemma it
+        is the precondition of is then FALSE, and no bridge or tactic can rescue
+        it: EasyCrypt's own message is that ``c{1} = ctStar{1} <=> c{2} =
+        ctStar{2}`` does not follow. Measured on ``KEMPRF_INDCCA``'s ``hop_3`` and
+        ``hop_5``, whose ``decaps`` lemmas were admitted for exactly this reason.
+
+        The missing conjuncts are DERIVED, never guessed: both fields must expand
+        to the same ``Initialize`` source expression (see ``_init_source_texts``),
+        which is what makes them equal once the hop's ``initialize`` leg has
+        coupled the calls producing that value -- and that leg, whose
+        postcondition this coupling is, is the obligation that has to carry the
+        new conjunct. Restricted to a pair of endpoints the coupling ALREADY
+        relates, so this completes a correspondence rather than inventing one,
+        and to fields some post-init oracle reads on both sides, because a dead
+        field is dropped mid-chain and its equality could not be threaded.
+        """
+        key = (id(step_a), id(step_b))
+        if key not in shared_source_memo:
+            shared_source_memo[key] = _shared_init_source_conjuncts(step_a, step_b)
+        left_base, right_base, conjuncts = shared_source_memo[key]
+        if f"{left_base}." not in coupled or f"{right_base}." not in coupled:
+            return []
+        return conjuncts
+
+    def _shared_init_source_conjuncts(
+        step_a: frog_ast.Step, step_b: frog_ast.Step
+    ) -> tuple[str, str, list[str]]:
+        """``(left base, right base, conjuncts)`` for the derivation above,
+        without the already-related gate (which depends on the coupling text and
+        so cannot be memoized with the rest)."""
+        # pylint: disable=protected-access
+        left = engine._get_game_ast(step_a.challenger, step_a.reduction)
+        right = engine._get_game_ast(step_b.challenger, step_b.reduction)
+        # pylint: enable=protected-access
+        left_base = pt.module_base_name(resolver.resolve(step_a).module_expr)
+        right_base = pt.module_base_name(resolver.resolve(step_b).module_expr)
+        if left is None or right is None:
+            return left_base, right_base, []
+        pairs = _shared_source_field_pairs(
+            left,
+            right,
+            _endpoint_own_fields(step_a),
+            _endpoint_own_fields(step_b),
+        )
+        out: list[str] = []
+        for left_field, right_field in pairs:
+            if not _field_read_post_init(left, left_field) or not _field_read_post_init(
+                right, right_field
+            ):
+                continue
+            # pylint: disable=protected-access
+            left_ref = f"{left_base}.{mt._ec_field_name(left_field)}{{1}}"
+            right_ref = f"{right_base}.{mt._ec_field_name(right_field)}{{2}}"
+            # pylint: enable=protected-access
+            out.append(f"{left_ref} = {right_ref}")
+        return left_base, right_base, out
+
     def _live_state_coupling(step_a: frog_ast.Step, step_b: frog_ast.Step) -> str:
         base = _live_state_coupling_base(step_a, step_b)
         extra = _ro_challenger_materialization(step_a, step_b)
@@ -16072,6 +16389,17 @@ def export_proof_file(proof_path: str) -> str:
                         if f.replace("{rf}", other[1]) not in kept
                     ]
                 )
+        # LAST, and deduped MODULO ORIENTATION against everything above: the
+        # field pairs the two endpoints derive the same way in ``Initialize``,
+        # which the single-field path leaves unrelated. Empty unless the two
+        # endpoints are already related and a pair is derived in full, so every
+        # other proof is byte-identical.
+        for cand in _shared_init_source_coupling(step_a, step_b, coupled):
+            if _unordered_pair(cand) in {
+                _unordered_pair(c) for c in coupled.split(" /\\ ")
+            }:
+                continue
+            coupled = f"{coupled} /\\ {cand}"
         return f"{coupled} /\\ {reprog}" if reprog else coupled
 
     # Per-hop memo of the multi-oracle chain emission. ``translate_hops``

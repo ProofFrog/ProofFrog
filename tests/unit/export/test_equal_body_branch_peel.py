@@ -179,3 +179,43 @@ def test_written_state_fields_sees_branch_writes() -> None:
         ),
     ]
     assert _written_state_fields(body, {"f00", "f01", "f02"}) == {"f00", "f01"}
+
+
+def _three_level_body() -> list[ec_ast.EcStmt]:
+    """The measured residue: branches nested three deep."""
+    innermost = ec_ast.If(
+        guard="t = ctStar",
+        then_body=[_assign("r", "None")],
+        else_body=[_call("c", "K.combine", "a, b"), _assign("r", "Some (c)")],
+    )
+    middle = ec_ast.If(
+        guard="t = ctStar",
+        then_body=[_assign("r", "None")],
+        else_body=[_call("b", "K.decaps", "dk_1, t"), innermost],
+    )
+    return [
+        ec_ast.If(
+            guard="ct = ctStar",
+            then_body=[_assign("r", "None")],
+            else_body=[
+                _assign("t", "ct"),
+                _call("a", "K.decaps", "dk_0, t"),
+                middle,
+            ],
+        ),
+        ec_ast.Return(expr="r"),
+    ]
+
+
+def test_descent_recurses_and_accumulates_the_invariant() -> None:
+    """Three levels, and each ``seq`` invariant carries every local bound so
+    far -- exactly what the next guard and its arms read."""
+    got = _equal_body_peel_tactic(_three_level_body(), SEQ_PRE)
+    assert got is not None
+    seqs = [ln for ln in got if ln.startswith("seq ")]
+    assert len(seqs) == 2, got
+    assert seqs[0].startswith("seq 2 2 : (={t, a} /\\ ")
+    # The second level ADDS the local its own leading call binds.
+    assert seqs[1].startswith("seq 1 1 : (={t, a, b} /\\ ")
+    assert got.count("if.") == 3
+    assert got[-1] == "auto => /#."

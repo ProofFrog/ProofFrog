@@ -19156,94 +19156,76 @@ def _equal_body_peel_tactic(
     if _peel_reaches_every_event(body):
         return ["proc.", *_backbone_peel(body), "auto => /#."]
     stmts = _exec_stmts(body)
-    branches = [s for s in stmts if isinstance(s, ec_ast.If)]
-    if len(branches) != 1 or len(stmts) - len(branches) > 1:
-        return None
-    if any(not isinstance(s, (ec_ast.If, ec_ast.Return)) for s in stmts):
-        return None
-    branch = branches[0]
-    if not _peel_reaches_every_event(branch.then_body):
-        return None
-    head = [
-        "proc.",
-        "if.",
-        # The guards are the same expression on both sides, so their
-        # equivalence follows from the coupling.
-        "+ move => &1 &2 /#.",
-        "+ " + " ".join([*_backbone_peel(branch.then_body), "auto => /#."]),
-    ]
-    if _peel_reaches_every_event(branch.else_body):
-        return [*head, *_backbone_peel(branch.else_body), "auto => /#."]
-    inner = _seq_split_descent(branch.else_body, micro_pre_text)
-    if inner is None:
-        return None
-    return [*head, *inner]
+    inner = _branch_descent(stmts, micro_pre_text, [])
+    return None if inner is None else ["proc.", *inner]
 
 
-def _seq_split_descent(
-    arm: list[ec_ast.EcStmt], micro_pre_text: str
+def _branch_descent(
+    stmts: list[ec_ast.EcStmt], micro_pre_text: str, bound: list[str]
 ) -> list[str] | None:
-    """Descend into an arm shaped ``<leading run>; if (..) {..} else {..}``.
+    """The descent for ``<leading run>? ; if (..) {..} else {..}``, recursive.
 
-    ``if`` is a FIRST-instruction rule, so applying it straight to such an
-    arm is refused -- *invalid first instruction*, measured on the 39 corpus
-    legs whose arm is ``[Assign, Call, If]``. Split the leading run off with
-    ``seq`` instead: its own goal is peeled normally, and the residue starts
-    at the inner ``if``, where the descent recurses.
+    One level emits, in EasyCrypt's own goal order:
 
-    The ``seq`` invariant is the leg's coupling plus equality of every local
-    the leading run BINDS -- exactly what the inner guard and its arms read.
-    Those names are the exporter's own rendered names, read off the leading
-    statements' targets rather than predicted, so nothing here depends on
+    * when a leading run precedes the branch, ``seq n n : (<invariant>)``
+      splitting it off, then that run's own peel. ``if`` is a
+      FIRST-instruction rule, so without the split it is refused outright --
+      *invalid first instruction*, measured on the corpus legs whose arm is
+      ``[Assign, Call, If]``;
+    * ``if``, whose first goal is the guards' equivalence. The two sides run
+      the SAME program, so the two guards are the same expression and it
+      closes from the coupling;
+    * the ``then`` arm's peel;
+    * the ``else`` arm -- peeled if its backbone is reachable, else
+      DESCENDED INTO, which is where this recurses.
+
+    ``bound`` accumulates the locals every leading run has bound so far, and
+    each level's invariant is those locals' equality plus the leg's coupling
+    -- exactly what the next guard and its arms read. The names are read off
+    the statements' own targets rather than predicted, so nothing depends on
     EasyCrypt's inline renaming.
 
-    Declines when the coupling is unusable as an invariant (``true``), when
-    the arm holds more than one branch, or when either inner arm is itself
-    unreachable -- the peel would be too short and EasyCrypt would answer
-    *invalid last instruction*.
-
-    Probe: ``.ec-tmp/bystander/branchpeel_seq_probe.ec``, with a
-    proof-level negative control that drops one coupling conjunct from the
-    ``seq`` invariant and is rejected with *cannot prove goal (strict)* at
-    the inner guard.
+    Measured need for the recursion: the corpus legs nest three deep (outer
+    branch; a leading run and a branch; another branch inside that arm).
+    Probes ``.ec-tmp/bystander/branchpeel_probe.ec`` (one level),
+    ``branchpeel_seq_probe.ec`` (two) and ``branchpeel3_probe.ec`` (three),
+    each with a proof-level negative control that is rejected at a guard.
     """
-    if micro_pre_text == "true":
+    core: list[ec_ast.EcStmt] = [s for s in stmts if not isinstance(s, ec_ast.Return)]
+    branches = [s for s in core if isinstance(s, ec_ast.If)]
+    if len(branches) != 1 or core[-1] is not branches[0]:
         return None
-    stmts = _exec_stmts(arm)
-    inner = [s for s in stmts if isinstance(s, ec_ast.If)]
-    if len(inner) != 1 or stmts[-1] is not inner[0]:
-        return None
-    lead = stmts[:-1]
-    if not lead or not _peel_reaches_every_event(lead):
-        return None
-    branch = inner[0]
+    lead: list[ec_ast.EcStmt] = core[:-1]
+    branch = branches[0]
+    out: list[str] = []
+    if lead:
+        # The invariant IS the coupling, so there is nothing to carry across
+        # the split when the precondition is ``true``.
+        if micro_pre_text == "true" or not _peel_reaches_every_event(lead):
+            return None
+        for stmt in lead:
+            target = getattr(stmt, "var", None)
+            if not isinstance(target, str) or not target:
+                return None
+            head = _RENAME_TOKEN_RE.match(target)
+            if head is None or head.group(0) != target:
+                return None
+            if target not in bound:
+                bound.append(target)
+        if not bound:
+            return None
+        n = len(lead)
+        out.append(f"seq {n} {n} : (={{{', '.join(bound)}}} /\\ {micro_pre_text}).")
+        out.append("+ " + " ".join([*_backbone_peel(lead), "auto => /#."]))
     if not _peel_reaches_every_event(branch.then_body):
         return None
-    if not _peel_reaches_every_event(branch.else_body):
-        return None
-    bound: list[str] = []
-    for stmt in lead:
-        target = getattr(stmt, "var", None)
-        if not isinstance(target, str) or not target:
-            return None
-        head = _RENAME_TOKEN_RE.match(target)
-        if head is None or head.group(0) != target:
-            return None
-        if target not in bound:
-            bound.append(target)
-    if not bound:
-        return None
-    n = len(lead)
-    invariant = "={" + ", ".join(bound) + "} /\\ " + micro_pre_text
-    return [
-        f"seq {n} {n} : ({invariant}).",
-        "+ " + " ".join([*_backbone_peel(lead), "auto => /#."]),
-        "if.",
-        "+ move => &1 &2 /#.",
-        "+ " + " ".join([*_backbone_peel(branch.then_body), "auto => /#."]),
-        *_backbone_peel(branch.else_body),
-        "auto => /#.",
-    ]
+    out.append("if.")
+    out.append("+ move => &1 &2 /#.")
+    out.append("+ " + " ".join([*_backbone_peel(branch.then_body), "auto => /#."]))
+    if _peel_reaches_every_event(branch.else_body):
+        return [*out, *_backbone_peel(branch.else_body), "auto => /#."]
+    rest = _branch_descent(branch.else_body, micro_pre_text, bound)
+    return None if rest is None else [*out, *rest]
 
 
 def _same_memory_conjunct_fields(pre_text: str, fields: set[str]) -> set[str]:

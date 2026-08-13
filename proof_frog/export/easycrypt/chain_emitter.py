@@ -3503,6 +3503,11 @@ def _plain_plumbing_peel_step(  # pylint: disable=too-many-arguments,too-many-po
       identity. Only a field-wise coupling that actually names a rename
       widens anything.
 
+      Finally, provably-DEAD assignments are ignored: ``Remove Redundant
+      Copies`` leaves copies of fields in locals nothing ever reads, which
+      move the multiset without moving the program. See
+      :func:`_field_orders_agree`, which owns all three readings.
+
     Last in the dispatch, so every route above it stays byte-identical: this
     can only convert a decline into a close.
     """
@@ -3533,21 +3538,123 @@ def _plain_plumbing_peel_step(  # pylint: disable=too-many-arguments,too-many-po
     if _same_callee_arg_crossing(body1, body2):
         return None
     fields = {v.name for v in mod1.module_vars} | {v.name for v in mod2.module_vars}
-    if _field_reference_order(body1, fields) != _field_reference_order(body2, fields):
-        renaming = _coupled_field_renaming(
+    if not _field_orders_agree(
+        body1,
+        body2,
+        fields,
+        _coupled_field_renaming(
             micro_pre_text, _ref_base(left_ref), _ref_base(right_ref)
-        )
-        if not renaming:
-            return None
-        if _field_reference_order(body1, fields, renaming) != _field_reference_order(
-            body2, fields, renaming
-        ):
-            return None
+        ),
+    ):
+        return None
     return (
         ["proc.", *_backbone_peel(body1), "auto => /#."],
         MicroRequests(),
         SYNTH_PARAM,
     )
+
+
+def _field_orders_agree(
+    body1: list[ec_ast.EcStmt],
+    body2: list[ec_ast.EcStmt],
+    fields: set[str],
+    renaming: dict[str, str],
+) -> bool:
+    """Do the two bodies reference the state's fields the same way?
+
+    Three readings, tried in order, each a strict widening of the one before,
+    so a pair that agreed under an earlier reading is never re-judged:
+
+    1. **By name.** The historical test, and the one that keeps the role-swap
+       leg out (see :func:`_plain_plumbing_peel_step`).
+    2. **Through the coupling.** A leg whose transform RENAMED the fields
+       fails (1) by construction; its precondition states the rename, so the
+       names are read through :func:`_coupled_field_renaming` first. Empty
+       for a whole-glob coupling, which is what keeps this from reaching the
+       role swap.
+    3. **Ignoring provably-DEAD assignments.** ``Remove Redundant Copies``
+       drops copies of fields into locals nobody ever reads
+       (``__a18__ <- challenger_ek0;``). Those lines mention a field, so they
+       change what (1) and (2) compare, yet the peel's ``wp`` sweeps a dead
+       local away without it ever reaching the goal -- confirmed by reading
+       the goal in ``.ec-tmp/bystander/deadassign_probe.ec``, where the
+       dropped assignments sit in the residual program and appear nowhere in
+       the postcondition. Its negative control drops a load-bearing coupling
+       conjunct and EasyCrypt answers *cannot prove goal (strict)*.
+
+    Reading (3) is what the deadness analysis buys, and it is deliberately
+    the smallest of the three: measured over three binding proofs, 2 of the
+    41 legs dying at this gate have that shape.
+    """
+    if _field_reference_order(body1, fields) == _field_reference_order(body2, fields):
+        return True
+    if renaming and _field_reference_order(
+        body1, fields, renaming
+    ) == _field_reference_order(body2, fields, renaming):
+        return True
+    dead1 = _dead_local_assignments(body1, fields)
+    dead2 = _dead_local_assignments(body2, fields)
+    if not dead1 and not dead2:
+        return False
+    live1 = [s for s in body1 if s not in dead1]
+    live2 = [s for s in body2 if s not in dead2]
+    return _field_reference_order(live1, fields, renaming) == _field_reference_order(
+        live2, fields, renaming
+    )
+
+
+def _dead_local_assignments(
+    body: list[ec_ast.EcStmt], fields: set[str]
+) -> list[ec_ast.EcStmt]:
+    """Top-level assignments whose target is a local nothing ever reads.
+
+    Dead means the target name occurs EXACTLY ONCE in the whole body -- as
+    this statement's own target. That single count is what makes the test
+    sound without a liveness walk: one occurrence rules out a later read, a
+    read in either arm of any ``if``, a read in its own right-hand side, and
+    a second write to the same name (which would make neither of the two
+    droppable). A state field is never dead, since another procedure may read
+    it.
+
+    Declines wholesale on a body containing a ``while``, and that is not
+    caution but a real gap: :func:`_stmt_all_text` yields nothing for a
+    ``While``, so a name read only in a loop GUARD would count zero times and
+    look dead. Rather than special-case the guard, the whole shape declines.
+    """
+    if _contains_while(body):
+        return []
+    counts = _token_occurrences(body)
+    return [
+        stmt
+        for stmt in _exec_stmts(body)
+        if isinstance(stmt, ec_ast.Assign)
+        and stmt.var
+        and stmt.var not in fields
+        and counts[stmt.var] == 1
+    ]
+
+
+def _contains_while(body: list[ec_ast.EcStmt]) -> bool:
+    """Is there a ``while`` anywhere in ``body``, branch arms included?"""
+    for stmt in _exec_stmts(body):
+        if isinstance(stmt, ec_ast.While):
+            return True
+        if isinstance(stmt, ec_ast.If) and (
+            _contains_while(stmt.then_body) or _contains_while(stmt.else_body)
+        ):
+            return True
+    return False
+
+
+def _token_occurrences(body: list[ec_ast.EcStmt]) -> Counter[str]:
+    """How often each identifier appears in ``body``, branch arms included."""
+    counts: Counter[str] = Counter()
+    for stmt in _exec_stmts(body):
+        counts.update(_RENAME_TOKEN_RE.findall(_stmt_all_text(stmt)))
+        if isinstance(stmt, ec_ast.If):
+            counts.update(_token_occurrences(stmt.then_body))
+            counts.update(_token_occurrences(stmt.else_body))
+    return counts
 
 
 def _field_reference_order(

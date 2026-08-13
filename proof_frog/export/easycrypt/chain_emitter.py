@@ -2895,6 +2895,9 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
         method_return_types,
         modules,
         flat_params,
+        micro_pre_text,
+        left_ref,
+        right_ref,
     )
 
 
@@ -3403,13 +3406,16 @@ def _isuv_align_step(  # pylint: disable=too-many-arguments,too-many-positional-
     return tac, MicroRequests(), SYNTH_PARAM
 
 
-def _plain_plumbing_peel_step(
+def _plain_plumbing_peel_step(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     pb: frog_ast.Game,
     pa: frog_ast.Game,
     external_module_types: dict[str, str],
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     modules: mt.ModuleTranslator,
     flat_params: list[ec_ast.ModuleParam],
+    micro_pre_text: str = "true",
+    left_ref: str = "",
+    right_ref: str = "",
 ) -> tuple[list[str], MicroRequests, str] | None:
     """A leg that rewrites only DETERMINISTIC plumbing around an unchanged
     abstract-call backbone.
@@ -3475,6 +3481,28 @@ def _plain_plumbing_peel_step(
       declines a leg that merely commutes two field operands, which is a
       loss rather than a bug.
 
+      That comparison reads the fields by NAME, so a transform that RENAMES
+      them (``Standardize Field Names``, ``Field Lex-Min By RHS``) fails it by
+      construction even where the two programs agree. Such a leg's coupling
+      states the rename explicitly, as ``A.f{1} = B.g{2}`` conjuncts, so on
+      failure the fields are re-read through
+      :func:`_coupled_field_renaming` -- each name replaced by a
+      representative of the class the coupling proves it equal to -- and the
+      comparison retried. Substituting within a coupled class is sound
+      because the closer has that very equality: the probe
+      ``.ec-tmp/bystander/renamepeel_probe.ec`` peels two calls whose key
+      argument is a renamed field, and its negative control (one rename
+      conjunct dropped) answers *cannot prove goal (strict)* with the missing
+      equality visible in the goal.
+
+      The retry cannot resurrect the role swap above, and that was measured
+      rather than assumed: across three binding proofs EVERY leg of that
+      shape carries a WHOLE-GLOB coupling (``(glob A){1} = (glob B){2}``)
+      over two states whose field names are identical, so there are no
+      per-field conjuncts, the class map is empty, and the retry is the
+      identity. Only a field-wise coupling that actually names a rename
+      widens anything.
+
     Last in the dispatch, so every route above it stays byte-identical: this
     can only convert a decline into a close.
     """
@@ -3506,7 +3534,15 @@ def _plain_plumbing_peel_step(
         return None
     fields = {v.name for v in mod1.module_vars} | {v.name for v in mod2.module_vars}
     if _field_reference_order(body1, fields) != _field_reference_order(body2, fields):
-        return None
+        renaming = _coupled_field_renaming(
+            micro_pre_text, _ref_base(left_ref), _ref_base(right_ref)
+        )
+        if not renaming:
+            return None
+        if _field_reference_order(body1, fields, renaming) != _field_reference_order(
+            body2, fields, renaming
+        ):
+            return None
     return (
         ["proc.", *_backbone_peel(body1), "auto => /#."],
         MicroRequests(),
@@ -3515,7 +3551,9 @@ def _plain_plumbing_peel_step(
 
 
 def _field_reference_order(
-    body: list[ec_ast.EcStmt], fields: set[str]
+    body: list[ec_ast.EcStmt],
+    fields: set[str],
+    renaming: dict[str, str] | None = None,
 ) -> list[list[str]]:
     """Which state fields ``body`` mentions, per PEEL SEGMENT.
 
@@ -3538,11 +3576,19 @@ def _field_reference_order(
     (``CG_expanded_LEAK_BIND_K_PK``, where the closer was handed
     ``concat(.., field1{1}) = concat(.., field2{2})`` against a precondition
     coupling the globs by name -- a FALSE subgoal, not a hard one).
+
+    ``renaming`` reads each field through a coupling class map
+    (:func:`_coupled_field_renaming`), which is how a leg that merely renames
+    its fields is compared: two names the precondition proves equal collapse
+    to one representative, so the segments agree exactly when the two
+    programs read equal values in the same places. Omitted, the names are
+    compared as they stand.
     """
+    ren = renaming or {}
     out: list[list[str]] = []
     run: list[str] = []
     for stmt in _exec_stmts(body):
-        toks = [tok for tok in _stmt_tokens(stmt) if tok in fields]
+        toks = [ren.get(tok, tok) for tok in _stmt_tokens(stmt) if tok in fields]
         if isinstance(stmt, ec_ast.Call):
             out.append(sorted(run))
             out.append(sorted(toks))
@@ -3550,12 +3596,12 @@ def _field_reference_order(
             continue
         run.extend(toks)
         if isinstance(stmt, ec_ast.If):
-            for seg in _field_reference_order(stmt.then_body, fields):
+            for seg in _field_reference_order(stmt.then_body, fields, renaming):
                 run.extend(seg)
-            for seg in _field_reference_order(stmt.else_body, fields):
+            for seg in _field_reference_order(stmt.else_body, fields, renaming):
                 run.extend(seg)
         elif isinstance(stmt, ec_ast.While):
-            for seg in _field_reference_order(stmt.body, fields):
+            for seg in _field_reference_order(stmt.body, fields, renaming):
                 run.extend(seg)
     out.append(sorted(run))
     return out

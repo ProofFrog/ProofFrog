@@ -15,12 +15,15 @@ makes EasyCrypt answer *cannot prove goal (strict)*.
 
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 
 from proof_frog.export.easycrypt import ec_ast
 from proof_frog.export.easycrypt.chain_emitter import (
     _backbone_peel,
+    _bridge_specs_compose,
     _coupled_field_renaming,
+    _coupled_guard_descent,
     _dead_local_assignments,
     _field_orders_agree,
     _field_reference_order,
@@ -39,9 +42,7 @@ LEFT_FIELDS = {"dk0_0", "dk0_1"}
 RIGHT_FIELDS = {"field3", "field4"}
 ALL_FIELDS = LEFT_FIELDS | RIGHT_FIELDS
 
-RENAME_PRE = (
-    "={ct0} /\\ S_L.dk0_0{1} = S_R.field3{2} /\\ S_L.dk0_1{1} = S_R.field4{2}"
-)
+RENAME_PRE = "={ct0} /\\ S_L.dk0_0{1} = S_R.field3{2} /\\ S_L.dk0_1{1} = S_R.field4{2}"
 
 
 def _left_body() -> list[ec_ast.EcStmt]:
@@ -259,3 +260,178 @@ def test_dead_copies_tactic_matches_the_ec_validated_template() -> None:
     ]
     emitted = ["proc.", *_backbone_peel(_dead_copies_body()), "auto => /#."]
     assert emitted == expected
+
+
+# --- the coupled-guard branch descent -------------------------------------
+
+GUARD_PRE = (
+    "={ct} /\\ S_L.dk0{1} = S_R.dk0{2} /\\ S_L.ctStar_0{1} = S_R.field2{2}"
+    " /\\ S_L.ctStar_1{1} = S_R.field4{2}"
+)
+GUARD_FIELDS = {"dk0", "ctStar_0", "ctStar_1", "field2", "field4"}
+
+
+def _guard_left() -> list[ec_ast.EcStmt]:
+    return [
+        ec_ast.If(
+            guard="ct = (ctStar_0, ctStar_1)",
+            then_body=[_assign("out", "witness")],
+            else_body=[
+                _call("r0", "K.decaps", "dk0, ct.`1"),
+                _call("r1", "H.evaluate", "comb r0 ct.`2"),
+                _assign("out", "r1"),
+            ],
+        ),
+        ec_ast.Return(expr="out"),
+    ]
+
+
+def _guard_right() -> list[ec_ast.EcStmt]:
+    """Same program, guard fields renamed, plumbing differs in the else arm."""
+    return [
+        ec_ast.If(
+            guard="ct = (field2, field4)",
+            then_body=[_assign("out", "witness")],
+            else_body=[
+                _assign("c0", "ct.`1"),
+                _call("r0", "K.decaps", "dk0, c0"),
+                _call("r1", "H.evaluate", "comb r0 ct.`2"),
+                _assign("out", "r1"),
+            ],
+        ),
+        ec_ast.Return(expr="out"),
+    ]
+
+
+def test_coupled_guard_descent_fires_on_the_measured_shape() -> None:
+    renaming = _coupled_field_renaming(GUARD_PRE, "S_L", "S_R")
+    assert (
+        _coupled_guard_descent(_guard_left(), _guard_right(), GUARD_FIELDS, renaming)
+        is not None
+    )
+
+
+def test_coupled_guard_descent_matches_the_ec_validated_template() -> None:
+    """Lockstep: what the row emits is what EasyCrypt accepted."""
+    renaming = _coupled_field_renaming(GUARD_PRE, "S_L", "S_R")
+    got = _coupled_guard_descent(_guard_left(), _guard_right(), GUARD_FIELDS, renaming)
+    assert got is not None
+    template = (
+        Path(__file__).parents[2]
+        / "integration"
+        / "ec_templates"
+        / "plumbing_peel_coupled_guard_descent.ec"
+    ).read_text()
+    block = template.split("lemma guard_coupled_descent :", 1)[1]
+    proof_body = block.split("proof.\n", 1)[1].split("qed.", 1)[0]
+    assert got[0] == textwrap.dedent(proof_body).strip().splitlines()
+
+
+def test_guards_the_coupling_does_not_relate_decline() -> None:
+    """A genuinely different test must not be paired: goal one would be FALSE."""
+    renaming = _coupled_field_renaming(
+        "={ct} /\\ S_L.dk0{1} = S_R.dk0{2}", "S_L", "S_R"
+    )
+    assert (
+        _coupled_guard_descent(_guard_left(), _guard_right(), GUARD_FIELDS, renaming)
+        is None
+    )
+
+
+def test_a_leading_run_before_the_branch_declines() -> None:
+    """``if`` is a first-instruction rule; a leading run needs its own split."""
+    renaming = _coupled_field_renaming(GUARD_PRE, "S_L", "S_R")
+    left = [_assign("t", "ct.`1"), *_guard_left()]
+    assert _coupled_guard_descent(left, _guard_right(), GUARD_FIELDS, renaming) is None
+
+
+def test_an_arm_that_branches_again_declines() -> None:
+    """Nested splits are the recursive row, deliberately not this one."""
+    renaming = _coupled_field_renaming(GUARD_PRE, "S_L", "S_R")
+    left = _guard_left()
+    assert isinstance(left[0], ec_ast.If)
+    left[0].else_body = [
+        ec_ast.If(
+            guard="g",
+            then_body=[_call("r0", "K.decaps", "dk0, ct.`1")],
+            else_body=[],
+        )
+    ]
+    assert _coupled_guard_descent(left, _guard_right(), GUARD_FIELDS, renaming) is None
+
+
+def test_an_arm_whose_calls_are_reordered_declines() -> None:
+    """A reordered arm needs a reorder route, which this row does not have."""
+    renaming = _coupled_field_renaming(GUARD_PRE, "S_L", "S_R")
+    right = _guard_right()
+    assert isinstance(right[0], ec_ast.If)
+    right[0].else_body = [
+        _call("r1", "H.evaluate", "comb r0 ct.`2"),
+        _call("r0", "K.decaps", "dk0, ct.`1"),
+        _assign("out", "r1"),
+    ]
+    assert _coupled_guard_descent(_guard_left(), right, GUARD_FIELDS, renaming) is None
+
+
+# --- the bridge-composition gate ------------------------------------------
+
+
+def _glob_bridge(left: str, right: str) -> str:
+    return f"(glob {left}){{1}} = (glob {right}){{2}}"
+
+
+FLAT_FIELDS = {"Step_3L_state_0": ["sk", "ctStar"], "Step_3R_state_0": ["sk", "ctStar"]}
+
+
+def test_a_hop_coupling_that_leaves_a_field_unrelated_declines() -> None:
+    """The measured KEMPRF shape: states carry sk and ctStar, hop pins sk."""
+    assert not _bridge_specs_compose(
+        _glob_bridge,
+        "G_RandKey(K, F)",
+        "Step_3L_state_0(K, F)",
+        "Step_3R_state_0(K, F)",
+        "={glob K} /\\ ={glob F} /\\ G_RandKey.sk{1} = R_MultiPRF.sk{2}",
+        FLAT_FIELDS,
+    )
+
+
+def test_a_hop_coupling_relating_every_field_composes() -> None:
+    """The measured 7_13_Backward shape, which is CLEAN today: must not move."""
+    assert _bridge_specs_compose(
+        _glob_bridge,
+        "E_c.INDCPA_MultiChal_Left(E)",
+        "Step_0L_state_0(E)",
+        "Step_0R_state_0(E)",
+        "={glob E} /\\ E_c.INDCPA_MultiChal_Left.k{1} = E_c.Challenge_Left.k{2}",
+        {"Step_0L_state_0": ["k"], "Step_0R_state_0": ["challenger_k", "k"]},
+    )
+
+
+def test_a_seam_mangled_field_counts_as_related() -> None:
+    """`challenger_k` in the flat state IS `E_c.Challenge_Left.k` in the hop."""
+    assert _bridge_specs_compose(
+        _glob_bridge,
+        "E_c.INDCPA_MultiChal_Left(E)",
+        "Step_0L_state_0(E)",
+        "Step_0R_state_0(E)",
+        "={glob E} /\\ E_c.INDCPA_MultiChal_Left.k{1} = E_c.Challenge_Left.k{2}",
+        {"Step_0L_state_0": ["challenger_k"], "Step_0R_state_0": ["challenger_k"]},
+    )
+
+
+def test_a_fieldwise_bridge_composes_via_its_explicit_witnesses() -> None:
+    """A field-wise bridge gets witnesses from `_precond_witness`; leave it."""
+
+    def fieldwise(left: str, right: str) -> str:
+        return f"{left}.a{{1}} = {right}.a{{2}}"
+
+    assert _bridge_specs_compose(
+        fieldwise, "L", "M", "R", "L.a{1} = R.a{2}", {"M": ["a", "b"], "R": ["a"]}
+    )
+
+
+def test_no_hop_coupling_at_all_composes() -> None:
+    """Unknown couplings answer True: the gate only declines what it knows."""
+    assert _bridge_specs_compose(
+        _glob_bridge, "L", "M", "R", None, {"M": ["a"], "R": ["a"]}
+    )

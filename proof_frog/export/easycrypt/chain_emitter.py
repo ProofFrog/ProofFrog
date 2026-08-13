@@ -3527,31 +3527,140 @@ def _plain_plumbing_peel_step(  # pylint: disable=too-many-arguments,too-many-po
     if not mod1.procs or not mod2.procs:
         return None
     body1, body2 = mod1.procs[0].body, mod2.procs[0].body
+    if body1 == body2:
+        return None
+    fields = {v.name for v in mod1.module_vars} | {v.name for v in mod2.module_vars}
+    renaming = _coupled_field_renaming(
+        micro_pre_text, _ref_base(left_ref), _ref_base(right_ref)
+    )
+    descent = _coupled_guard_descent(body1, body2, fields, renaming)
+    if descent is not None:
+        return descent
     if not [s for s in _exec_stmts(body1) if isinstance(s, ec_ast.Call)]:
         return None
     if _call_sample_backbone(body1) != _call_sample_backbone(body2):
-        return None
-    if body1 == body2:
         return None
     if not _peel_reaches_every_event(body1) or not _peel_reaches_every_event(body2):
         return None
     if _same_callee_arg_crossing(body1, body2):
         return None
-    fields = {v.name for v in mod1.module_vars} | {v.name for v in mod2.module_vars}
-    if not _field_orders_agree(
-        body1,
-        body2,
-        fields,
-        _coupled_field_renaming(
-            micro_pre_text, _ref_base(left_ref), _ref_base(right_ref)
-        ),
-    ):
+    if not _field_orders_agree(body1, body2, fields, renaming):
         return None
     return (
         ["proc.", *_backbone_peel(body1), "auto => /#."],
         MicroRequests(),
         SYNTH_PARAM,
     )
+
+
+def _coupled_guard_descent(
+    body1: list[ec_ast.EcStmt],
+    body2: list[ec_ast.EcStmt],
+    fields: set[str],
+    renaming: dict[str, str],
+) -> tuple[list[str], MicroRequests, str] | None:
+    """Descend through a case split whose two GUARDS differ by a rename.
+
+    The IND-CCA ``decaps`` oracle refuses the challenge ciphertext, so its
+    whole body is one case split and both arms call. A top-level peel cannot
+    see those calls -- EasyCrypt answers *invalid last instruction* -- so
+    every leg of every one of those chains declines. Measured over
+    ``CG_expanded_INDCCA_PQ``, ``CK_INDCCA_PreQuantum`` and
+    ``GHP18_INDCCA_First``: 74 incomplete chains, all 74 free of the reorder
+    shape that blocks the binding family, and all 720 declining legs carrying
+    this one.
+
+    The arms can only be paired if the two guards are equivalent, and measured
+    over the family they are never syntactically equal -- a transform has
+    renamed the fields the guard reads (``ct = (ctStar_0, ctStar_1)`` against
+    ``ct = (field2, field4)``). The coupling states that rename, so the guards
+    are compared through :func:`_coupled_field_renaming`, the same class map
+    the flat peel's field gate uses.
+
+    EasyCrypt's ``if`` rule yields the guards' equivalence first and then one
+    goal per arm, so the emitted tactic is ``proc. if.`` followed by three
+    bullets: ``move => &1 &2 /#`` for the guards, discharged from the
+    coupling, then each arm's own backbone peel. Probed standalone in
+    ``.ec-tmp/bystander/guardcoupled_probe.ec`` -- guards renamed, a plumbing
+    difference inside the else arm -- with a proof-level negative control that
+    drops one rename conjunct and answers *cannot prove goal (strict)* AT THE
+    GUARD GOAL, with the missing equality printed.
+
+    Gates, each failing closed:
+
+    * each body must be exactly a case split, optionally followed by a
+      ``return``. ``if`` is a FIRST-instruction rule, and a ``return`` is not
+      an instruction (``proc.`` folds it into the postcondition), so this is
+      the shape a bare ``if.`` accepts. A leading run would need its own
+      ``seq`` split first, which this row does not do;
+    * the two guards must agree once read through the coupling. A guard the
+      coupling does not relate is a genuinely different test, and the first
+      goal would be FALSE rather than hard;
+    * every arm must itself be peelable and must align with its counterpart's
+      call and sample backbone. An arm that branches again needs the recursive
+      descent and an arm whose calls are reordered needs a reorder route --
+      340 of the 424 legs measured, both deliberately outside this row;
+    * each arm must pass the same field-reference and argument-crossing checks
+      the flat peel applies to a whole body, since each arm IS a flat peel
+      once the split is done.
+    """
+    if1, if2 = _sole_branch(body1), _sole_branch(body2)
+    if if1 is None or if2 is None:
+        return None
+    if _rename_tokens(if1.guard, fields, renaming) != _rename_tokens(
+        if2.guard, fields, renaming
+    ):
+        return None
+    arms = (
+        (if1.then_body, if2.then_body),
+        (if1.else_body, if2.else_body),
+    )
+    for arm1, arm2 in arms:
+        if not _peel_reaches_every_event(arm1) or not _peel_reaches_every_event(arm2):
+            return None
+        if _call_sample_backbone(arm1) != _call_sample_backbone(arm2):
+            return None
+        if _same_callee_arg_crossing(arm1, arm2):
+            return None
+        if not _field_orders_agree(arm1, arm2, fields, renaming):
+            return None
+    tactic = ["proc.", "if.", "+ move => &1 &2 /#."]
+    for arm1, _arm2 in arms:
+        tactic.extend(_bulleted([*_backbone_peel(arm1), "auto => /#."]))
+    return (tactic, MicroRequests(), SYNTH_PARAM)
+
+
+def _sole_branch(body: list[ec_ast.EcStmt]) -> ec_ast.If | None:
+    """``body`` as a single case split, or ``None`` if it is anything else.
+
+    A trailing ``return`` is allowed and ignored: ``proc.`` folds it into the
+    postcondition, so it is not an instruction the ``if`` rule can trip over.
+    """
+    stmts = _exec_stmts(body)
+    if not stmts or not isinstance(stmts[0], ec_ast.If):
+        return None
+    if any(not isinstance(s, ec_ast.Return) for s in stmts[1:]):
+        return None
+    return stmts[0]
+
+
+def _rename_tokens(text: str, fields: set[str], renaming: dict[str, str]) -> str:
+    """``text`` with every state field replaced by its coupling-class name."""
+    if not renaming:
+        return text
+    return _RENAME_TOKEN_RE.sub(
+        lambda m: (
+            renaming.get(m.group(0), m.group(0)) if m.group(0) in fields else m.group(0)
+        ),
+        text,
+    )
+
+
+def _bulleted(lines: list[str]) -> list[str]:
+    """One EasyCrypt bullet: ``+`` on the first line, the rest indented."""
+    if not lines:
+        return ["+ done."]
+    return [f"+ {lines[0]}", *[f"  {ln}" for ln in lines[1:]]]
 
 
 def _field_orders_agree(
@@ -10146,6 +10255,20 @@ def _emit_one_oracle_chain(
             "proc; inline *; auto => /#.",
             "qed.",
         ]
+    elif not _bridge_specs_compose(
+        coupling, left_wrapper_expr, l0, r0, full_coupling, fields_by_base
+    ):
+        # The chain closed every leg, but its wrapper<->flat bridge cannot
+        # compose with this hop's own precondition, so emitting it would
+        # REPLACE an honest admission with a REJECTED FILE. Keep the admission.
+        # Measured on `KEMPRF_INDCCA` `hop_3_decaps`, whose chain first
+        # completed on 2026-08-13: the hop states `G_RandKey.sk{1} =
+        # R_MultiPRF.sk{2}` while the two bridge legs together demand the two
+        # wrappers' WHOLE globs equal, which also covers `ctStar` -- nothing
+        # relates it, so EasyCrypt refuses `transitivity` outright and prints
+        # the goal UNCHANGED. That is a false obligation, not a hard one, so
+        # no stronger tactic rescues it.
+        outer_body = _oracle_pending_admit(hop_index, oracle_name, full_coupling or "")
     else:
         outer_body = [
             "(* Per-transform: bridge wrappers to flat states, chain through. *)",
@@ -10484,6 +10607,76 @@ def _oracle_is_pure_of_args(game: frog_ast.Game, oracle_name: str) -> bool:
         is not None
     )
     return not has_call and not has_field and not has_sample
+
+
+def _bridge_specs_compose(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    coupling: CouplingFn,
+    left_wrapper: str,
+    first_flat: str,
+    last_flat: str,
+    full_coupling: str | None,
+    fields_by_base: dict[str, list[str]],
+) -> bool:
+    """Can the chain's wrapper<->flat bridge compose with the hop's own spec?
+
+    The outer hop lemma is proved by two ``transitivity`` steps through the
+    chain's endpoint flat states. Composing their middle specs yields, at the
+    seam, exactly the coupling the bridge states between the two WRAPPERS. So
+    the hop's own precondition has to be at least that strong.
+
+    When the two flat states have the same field set the bridge coupling is
+    the WHOLE-GLOB equality, and composing the legs demands the two wrappers'
+    whole globs equal. A hop whose own coupling is FIELD-WISE -- because the
+    two wrappers hold different fields -- does not supply that, and the
+    obligation is FALSE rather than hard: EasyCrypt refuses ``transitivity``
+    and reprints the goal unchanged. Emitting the chain there converts an
+    honest admission into a rejected file, which is the worst state this
+    exporter has, so the caller keeps the admission instead.
+
+    The test is therefore whether the hop's coupling relates EVERY field the
+    chain's endpoint states carry. That distinction was measured, not guessed,
+    on the two cases that separate it:
+
+    * ``7_13_Backward`` is CLEAN today. Each of its wrappers holds one field
+      and the hop couples it -- ``E_c.INDCPA_MultiChal_Left.k{1} =
+      E_c.Challenge_Left.k{2}`` -- so its field-wise coupling says everything
+      the whole-glob equality does and the legs compose. An earlier version of
+      this gate compared conjuncts syntactically instead, declined here, and
+      would have taken that proof from 0 admissions to 3.
+    * ``KEMPRF_INDCCA`` states ``G_RandKey.sk{1} = R_MultiPRF.sk{2}`` while
+      those states also carry ``ctStar``. One field is left unrelated, so the
+      obligation is false.
+
+    True (compose) whenever the bridge is NOT whole-glob -- a field-wise
+    bridge gets its explicit witnesses from :func:`_precond_witness` -- or
+    when every endpoint field is mentioned by the hop's coupling. An absent
+    hop coupling answers True, so this only ever declines a shape it has
+    positively identified.
+    """
+    if not full_coupling:
+        return True
+    if not _WHOLE_GLOB_EQ_RE.fullmatch(coupling(left_wrapper, first_flat).strip()):
+        return True
+    needed = set(fields_by_base.get(_ref_base(first_flat), ())) | set(
+        fields_by_base.get(_ref_base(last_flat), ())
+    )
+    mentioned = set(_RENAME_TOKEN_RE.findall(full_coupling))
+    # A flat state MANGLES a field it absorbed from a composed challenger
+    # (``challenger_k``), while the hop's coupling names that same field
+    # through its owning module (``E_c.Challenge_Left.k{2}``) -- the two spell
+    # one field across the game/challenger seam. Matching the trailing
+    # component as well as the whole name is what stops the gate declining
+    # ``7_13_Backward``, whose only unmatched name was exactly that. Erring
+    # permissive is the safe direction here: a missed catch leaves today's
+    # behaviour, while a false catch would add admissions to a clean proof.
+    return all(f in mentioned or f.rsplit("_", 1)[-1] in mentioned for f in needed)
+
+
+# ``.*`` rather than ``[^)]*``: a flat state is a FUNCTOR reference and carries
+# its own parentheses (``glob Step_3L_state_0(K, F)``), so a paren-excluding
+# class stops at the wrong one and the match silently fails -- which would make
+# the gate answer "composes" for exactly the shape it exists to catch.
+_WHOLE_GLOB_EQ_RE = re.compile(r"\(glob .*\)\{1\} = \(glob .*\)\{2\}")
 
 
 def _precond_witness(

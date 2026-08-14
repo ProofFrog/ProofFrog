@@ -582,11 +582,14 @@ def test_a_branch_reading_an_uncarried_local_declines() -> None:
 
 
 def test_invariant_coverage_is_asked_of_the_rendered_text() -> None:
-    """It poses the question the closer faces, so the two cannot drift."""
+    """It poses the question the closer faces, so the two cannot drift.
+
+    The locals are passed as the set IN SCOPE, which is every one this run or
+    any enclosing one binds -- ``seq`` discards them all alike.
+    """
     branch = ec_ast.If(guard="x = y", then_body=[], else_body=[])
-    run = [_assign("x", "1")]
-    assert _invariant_covers_reads("={x} /\\ true", run, branch)
-    assert not _invariant_covers_reads("={z} /\\ true", run, branch)
+    assert _invariant_covers_reads("={x} /\\ true", {"x"}, branch)
+    assert not _invariant_covers_reads("={z} /\\ true", {"x"}, branch)
 
 
 def test_a_prefix_whose_calls_differ_declines() -> None:

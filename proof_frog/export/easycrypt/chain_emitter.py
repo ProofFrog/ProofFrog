@@ -3618,6 +3618,47 @@ def _coupled_guard_descent(
     return (["proc.", *lines], MicroRequests(), SYNTH_PARAM)
 
 
+@dataclass(frozen=True)
+class _DescentScope:
+    """What one level of the guard descent inherits from the levels above it.
+
+    Two things go wrong when a level is built from the fragment it is handed
+    rather than from this record, and both were measured:
+
+    * **Declared types.** ``_decl_types`` reads ``VarDecl``s, and only the whole
+      procedure body has them -- EasyCrypt lifts an arm's declarations to the
+      procedure top, so an arm carries NONE. Re-deriving them one level down
+      returns ``{}``, and :func:`_type_mismatched_common_local` then compares
+      its two different defaults, so EVERY common local below depth 0 looks
+      type-mismatched and the split path always declines.
+    * **The invariant.** ``seq n m : (I)`` DISCARDS everything about the prefix
+      except ``I``. An inner level that restates only the leg's coupling throws
+      away the enclosing run's locals, which are still in scope and may still be
+      read; the closer is then handed a goal missing exactly those equalities.
+      Probed both ways: ``.ec-tmp/nestedrun_probe.ec`` accumulates and is
+      ACCEPTED, ``.ec-tmp/nestedrun_negctl.ec`` drops one enclosing local and
+      EasyCrypt answers *cannot prove goal (strict)*, printing the missing
+      ``a{1} = a{2}`` in the goal.
+
+    These two are one change, not two: fixing the type lookup alone lets the
+    split path fire one level down while the invariant is still un-accumulated,
+    which is how the route came to admit legs EasyCrypt rejects.
+
+    ``bound`` is every local an enclosing run binds, so the coverage gate can
+    ask about all of them rather than only this level's.
+    """
+
+    types1: dict[str, str]
+    types2: dict[str, str]
+    invariant: str
+    bound: frozenset[str]
+
+
+def _run_targets(run: list[ec_ast.EcStmt]) -> set[str]:
+    """The locals a straight-line run binds."""
+    return {v for v in (getattr(s, "var", "") for s in run) if v}
+
+
 def _guard_descent_lines(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-return-statements
     body1: list[ec_ast.EcStmt],
     body2: list[ec_ast.EcStmt],
@@ -3625,6 +3666,7 @@ def _guard_descent_lines(  # pylint: disable=too-many-arguments,too-many-positio
     renaming: dict[str, str],
     micro_pre_text: str,
     reversed_dir: bool,
+    scope: _DescentScope | None = None,
 ) -> list[str] | None:
     """One level of the descent, splitting off any work before the branch.
 
@@ -3649,6 +3691,12 @@ def _guard_descent_lines(  # pylint: disable=too-many-arguments,too-many-positio
     GOAL: ``.ec-tmp/bystander/leadrun_probe.ec`` (runs of different lengths),
     ``nesteddescent_probe.ec`` (two levels), ``guardcoupled_probe.ec``.
     """
+    here = scope or _DescentScope(
+        types1=_decl_types(body1),
+        types2=_decl_types(body2),
+        invariant=micro_pre_text,
+        bound=frozenset(),
+    )
     cut1, cut2 = _branch_cut(body1), _branch_cut(body2)
     if cut1 is None or cut2 is None:
         return None
@@ -3657,16 +3705,28 @@ def _guard_descent_lines(  # pylint: disable=too-many-arguments,too-many-positio
     if pre1 or pre2:
         if not _prefix_peelable(pre1, pre2, fields, renaming):
             return None
-        types1, types2 = _decl_types(body1), _decl_types(body2)
-        if _type_mismatched_common_local(pre1, pre2, types1, types2):
+        if _type_mismatched_common_local(pre1, pre2, here.types1, here.types2):
             return None
-        invariant = _split_invariant(pre1, pre2, micro_pre_text, types1, types2)
+        invariant = _split_invariant(
+            pre1, pre2, here.invariant, here.types1, here.types2
+        )
+        # Every local IN SCOPE, not only the ones this run binds: ``seq``
+        # discards the prefix entirely, so an enclosing run's local that the
+        # branch below still reads is gone unless the accumulated invariant
+        # carries it.
+        bound = here.bound | {v for v in _run_targets(pre1) | _run_targets(pre2) if v}
         if not _invariant_covers_reads(
-            invariant, pre1, if1
-        ) or not _invariant_covers_reads(invariant, pre2, if2):
+            invariant, bound, if1
+        ) or not _invariant_covers_reads(invariant, bound, if2):
             return None
         inner = _guard_descent_lines(
-            [if1], [if2], fields, renaming, micro_pre_text, reversed_dir
+            [if1],
+            [if2],
+            fields,
+            renaming,
+            micro_pre_text,
+            reversed_dir,
+            _DescentScope(here.types1, here.types2, invariant, bound),
         )
         if inner is None:
             return None
@@ -3686,7 +3746,7 @@ def _guard_descent_lines(  # pylint: disable=too-many-arguments,too-many-positio
         (if1.else_body, if2.else_body),
     ):
         arm = _guard_descent_arm(
-            arm1, arm2, fields, renaming, micro_pre_text, reversed_dir
+            arm1, arm2, fields, renaming, micro_pre_text, reversed_dir, here
         )
         if arm is None:
             return None
@@ -3701,6 +3761,7 @@ def _guard_descent_arm(  # pylint: disable=too-many-arguments,too-many-positiona
     renaming: dict[str, str],
     micro_pre_text: str,
     reversed_dir: bool,
+    scope: _DescentScope | None = None,
 ) -> list[str] | None:
     """One arm: its own peel, or -- when it branches -- its own descent.
 
@@ -3714,7 +3775,7 @@ def _guard_descent_arm(  # pylint: disable=too-many-arguments,too-many-positiona
             return None
         return [*_backbone_peel(arm1), "auto => /#."]
     return _guard_descent_lines(
-        arm1, arm2, fields, renaming, micro_pre_text, reversed_dir
+        arm1, arm2, fields, renaming, micro_pre_text, reversed_dir, scope
     )
 
 
@@ -3747,10 +3808,19 @@ def _prefix_peelable(
 ) -> bool:
     """Can this pair of straight-line runs be closed by the backbone peel?
 
-    The same three checks a whole body pays: the call and sample backbones
-    must match, no two calls on one callee may cross their arguments, and the
-    two runs must reference the state's fields the same way.
+    The same FOUR checks a whole body pays: each run must be one the peel can
+    actually reach every event of, the call and sample backbones must match, no
+    two calls on one callee may cross their arguments, and the two runs must
+    reference the state's fields the same way.
+
+    The first is the one a leading RUN needs and a whole body already had: a
+    ``while``, or a branch whose arms call, is ``wp``-opaque, so the closing
+    ``auto`` stops in front of it and leaves the goal open. Measured on
+    ``CG_expanded_INDCCA_T``, whose ``decaps`` computes a map lookup with a
+    ``while`` before splitting -- the peel ran and the prefix goal survived.
     """
+    if not _peel_reaches_every_event(run1) or not _peel_reaches_every_event(run2):
+        return False
     if _call_sample_backbone(run1) != _call_sample_backbone(run2):
         return False
     if _same_callee_arg_crossing(run1, run2):
@@ -3765,16 +3835,20 @@ def _decl_types(body: list[ec_ast.EcStmt]) -> dict[str, str]:
 
 def _invariant_covers_reads(
     invariant: str,
-    run: list[ec_ast.EcStmt],
+    bound: set[str] | frozenset[str],
     rest: ec_ast.If,
 ) -> bool:
-    """Does the invariant carry every local the branch goes on to READ?
+    """Does the invariant carry every local IN SCOPE that the branch READS?
 
     ``seq`` discards everything about the prefix except the invariant, so a
     local the branch reads that the invariant does not mention is simply gone,
-    and ``auto => /#`` is handed a goal it cannot discharge. This one
-    condition subsumes three separate ways that happened, each found by
-    compiling and each a real defect:
+    and ``auto => /#`` is handed a goal it cannot discharge. ``bound`` is every
+    local bound by this run OR by any enclosing one: asking only about this
+    level's is what let an inner split throw away an outer local and still be
+    accepted. This one condition subsumes four separate ways that happened,
+    each found by compiling and each a real defect:
+
+    * a local an ENCLOSING run bound, still in scope and still read;
 
     * a local only ONE run binds (``__cse_ct0_0__ <- ct0.`1`` extracted on one
       side only), which has nothing to be equated to;
@@ -3787,7 +3861,6 @@ def _invariant_covers_reads(
     ought to have equated, is deliberate: it poses the question the closer will
     actually face, so the two cannot drift apart.
     """
-    bound = {v for v in (getattr(s, "var", "") for s in run) if v}
     if not bound:
         return True
     read = set(_RENAME_TOKEN_RE.findall(rest.guard))
@@ -3826,7 +3899,7 @@ def _type_mismatched_common_local(
 def _split_invariant(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     run1: list[ec_ast.EcStmt],
     run2: list[ec_ast.EcStmt],
-    micro_pre_text: str,
+    enclosing: str,
     types1: dict[str, str],
     types2: dict[str, str],
 ) -> str:
@@ -3849,8 +3922,8 @@ def _split_invariant(  # pylint: disable=too-many-arguments,too-many-positional-
         if v and v in bound2 and types1.get(v, "?") == types2.get(v, "??")
     ]
     if not common:
-        return micro_pre_text
-    return "={" + ", ".join(common) + "} /\\ " + micro_pre_text
+        return enclosing
+    return "={" + ", ".join(common) + "} /\\ " + enclosing
 
 
 def _sole_branch(body: list[ec_ast.EcStmt]) -> ec_ast.If | None:

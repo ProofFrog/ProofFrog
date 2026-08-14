@@ -1841,6 +1841,44 @@ def _init_source_map(game: frog_ast.Game) -> dict[str, str]:
     return out
 
 
+def _init_packed_components(game: frog_ast.Game) -> dict[str, list[str]]:
+    """Each field whose ``initialize`` source is a TUPLE LITERAL, mapped to its
+    components' source strings.
+
+    ``ctStar <- [v1[1], v2]`` says the field HOLDS that pair, so a state that
+    keeps the two components in SEPARATE fields holds the same value split in
+    two -- and, because the components are named by their own source
+    expressions, the two states can be related without guessing. Only a literal
+    tuple counts; any other source names no components.
+
+    Keyed by EC field name and last-write-wins, exactly like
+    :func:`_init_source_map`, whose strings these are compared against. A field
+    later reassigned from a non-tuple loses its entry rather than keeping a
+    stale one.
+    """
+    # pylint: disable=protected-access
+    field_ec = {f.name: mt._ec_field_name(f.name) for f in game.fields}
+    init = next(
+        (m for m in game.methods if m.signature.name.lower() == "initialize"),
+        None,
+    )
+    out: dict[str, list[str]] = {}
+    if init is None:
+        return out
+    for stmt in init.block.statements:
+        if (
+            isinstance(stmt, frog_ast.Assignment)
+            and isinstance(stmt.var, frog_ast.Variable)
+            and stmt.var.name in field_ec
+        ):
+            name = field_ec[stmt.var.name]
+            if isinstance(stmt.value, frog_ast.Tuple) and len(stmt.value.values) > 1:
+                out[name] = [str(v) for v in stmt.value.values]
+            else:
+                out.pop(name, None)
+    return out
+
+
 def _dataflow_field_pairs(
     before: frog_ast.Game,
     after: frog_ast.Game,
@@ -1883,6 +1921,8 @@ def _make_field_aware_coupling(
     type_sig_by_base: dict[str, tuple[str, ...]] | None = None,
     outer_globs: frozenset[str] | None = None,
     hoist_conjuncts: dict[str, list[str]] | None = None,
+    init_source_by_base: dict[str, dict[str, str]] | None = None,
+    packed_components_by_base: dict[str, dict[str, list[str]]] | None = None,
 ) -> CouplingFn:
     """Build a coupling closure that is field-aware for cardinality-differing states.
 
@@ -1930,6 +1970,8 @@ def _make_field_aware_coupling(
     ro_arrow = ro_by_arrow or {}
     ro_challenger = ro_challenger_by_base or {}
     type_sigs = type_sig_by_base or {}
+    init_src = init_source_by_base or {}
+    packed_comp = packed_components_by_base or {}
     composite = set(qualified)
 
     def role(f: str) -> str:
@@ -2033,6 +2075,48 @@ def _make_field_aware_coupling(
                         f"{qualify(lb, f)}" "{1}" f" = {qualify(rb, g)}" "{2}"
                     )
                     paired_r.add(g)
+        # PACKED value against its COMPONENTS. A canonicalization step that
+        # splits a tuple-valued field into one field per component leaves the
+        # two adjacent states with no field in common for it, so neither the
+        # same-name nor the same-role pairing above relates it -- and a
+        # ``decaps`` that tests ``ct = ctStar`` on one side against
+        # ``ct = (ctStar_0, ctStar_1)`` on the other then cannot be shown to
+        # take the same branch.
+        #
+        # DERIVED, not matched by name or shape: the packed field's own
+        # ``initialize`` source must be a literal tuple, and each of its
+        # components must be the source of EXACTLY ONE field on the other side
+        # (:func:`_init_packed_components` against :func:`_init_source_map`).
+        # Anything short of that -- a component no field holds, a source two
+        # fields share, a repeated partner, or a packed name the other side also
+        # declares -- refuses, because each of those would make the choice of
+        # partner a guess rather than a reading.
+        for pbase, pside, cbase, cside, pfields, cfields in (
+            (lb, "1", rb, "2", fl, fr),
+            (rb, "2", lb, "1", fr, fl),
+        ):
+            for f in pfields:
+                comps = packed_comp.get(pbase, {}).get(f)
+                if not comps or f in cfields:
+                    continue
+                csrc = init_src.get(cbase, {})
+                parts: list[str] = []
+                for comp in comps:
+                    owners = [h for h in cfields if csrc.get(h) == comp]
+                    if len(owners) != 1:
+                        parts = []
+                        break
+                    parts.append(owners[0])
+                if not parts or len(set(parts)) != len(parts):
+                    continue
+                tup = "(" + ", ".join(qualify(cbase, g) for g in parts) + ")"
+                packed_ref = f"{qualify(pbase, f)}{{{pside}}}"
+                comp_ref = f"{tup}{{{cside}}}"
+                fields_conj.append(
+                    f"{packed_ref} = {comp_ref}"
+                    if pside == "1"
+                    else f"{comp_ref} = {packed_ref}"
+                )
         # Within-side survivor invariants, both sides, emitted CONSISTENTLY (for
         # every field whose survivor source is also present on that side, not only
         # where a field was removed across this pair). The survivor map -- not the
@@ -2686,7 +2770,7 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
             # such legs across the four census proofs. Everything else still
             # declines here, so the fallback can only convert a decline into
             # a close.
-            return _equal_rendered_body_peel(
+            equal_body = _equal_rendered_body_peel(
                 pb,
                 pa,
                 modules,
@@ -2697,6 +2781,30 @@ def _oracle_step_tactic(  # pylint: disable=too-many-arguments,too-many-position
                 left_ref,
                 right_ref,
                 use_canonical_fields,
+            )
+            if equal_body is not None:
+                return equal_body
+            # A SECOND shape survives it: a case split on a PACKED field
+            # against the same split on that field's COMPONENTS. The two
+            # bodies are not equal under any RENAMING -- one reads a field the
+            # other has not got, which is what the gate above catches -- but
+            # they are the same program once the packed field is EXPANDED into
+            # the components the coupling relates it to, and a case split is
+            # the guard descent's shape rather than this peel's. Route it
+            # there instead of declining. Gated on the coupling actually
+            # carrying the derived packed relation, so a leg without one keeps
+            # its decline exactly as before.
+            return _packed_guard_descent_step(
+                pb,
+                pa,
+                external_module_types,
+                method_return_types,
+                modules,
+                flat_params,
+                micro_pre_text,
+                left_ref,
+                right_ref,
+                reversed_dir,
             )
         # Couple each abstract call (``call (_: true)``) / sample (``rnd``) of the
         # shared backbone, tail-to-front, then close with a single ``auto.``.
@@ -3407,6 +3515,79 @@ def _isuv_align_step(  # pylint: disable=too-many-arguments,too-many-positional-
     return tac, MicroRequests(), SYNTH_PARAM
 
 
+def _packed_guard_descent_step(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    pb: frog_ast.Game,
+    pa: frog_ast.Game,
+    external_module_types: dict[str, str],
+    method_return_types: dict[tuple[str, str], frog_ast.Type],
+    modules: mt.ModuleTranslator,
+    flat_params: list[ec_ast.ModuleParam],
+    micro_pre_text: str,
+    left_ref: str,
+    right_ref: str,
+    reversed_dir: bool,
+) -> tuple[list[str], MicroRequests, str] | None:
+    """A field-count-changing leg whose oracle is a case split on a PACKED
+    field, taken as a case split rather than as a peel.
+
+    The survivor peel above requires the two bodies to be the same program
+    modulo a field RENAMING, and a packed field against its components is not
+    one: the name on either side does not exist on the other. It IS the same
+    program once the packed name is expanded into the component tuple the
+    coupling relates it to, and the shape that then remains -- one split whose
+    guard tests the challenge value -- is exactly what
+    :func:`_coupled_guard_descent` was built for.
+
+    Gated on the coupling carrying a DERIVED packed relation
+    (:func:`_coupled_packed_expansion`, which reads only conjuncts the coupling
+    builder derived from the two states' ``initialize`` sources), so a leg
+    whose coupling states no such relation declines exactly as before. The
+    descent applies its own gates on top, and declines whenever an arm is not
+    peelable.
+
+    Tactic shape probed standalone in ``.ec-tmp/packedguard_probe.ec``
+    (EasyCrypt OK) with a proof-level negative control beside it
+    (``packedguard_negctl.ec``): dropping the packed conjunct makes EasyCrypt
+    answer *cannot prove goal (strict)* at the guard-equivalence goal
+    ``ct{1} = ctStar{1} <=> ct{2} = (ctStar_0{2}, ctStar_1{2})``.
+    """
+
+    def render(name: str, game: frog_ast.Game) -> ec_ast.Module:
+        return _flat_state_module(
+            modules,
+            name,
+            game,
+            external_module_types,
+            method_return_types,
+            flat_params,
+            emit_state_vars=True,
+        )
+
+    mod1, mod2 = render("Step_pk_1", pb), render("Step_pk_2", pa)
+    if not mod1.procs or not mod2.procs:
+        return None
+    body1, body2 = mod1.procs[0].body, mod2.procs[0].body
+    if body1 == body2:
+        return None
+    renaming = _coupled_field_renaming(
+        micro_pre_text, _ref_base(left_ref), _ref_base(right_ref)
+    )
+    packed = _coupled_packed_expansion(
+        micro_pre_text, _ref_base(left_ref), _ref_base(right_ref), renaming
+    )
+    if not packed:
+        return None
+    fields = {v.name for v in mod1.module_vars} | {v.name for v in mod2.module_vars}
+    return _coupled_guard_descent(
+        body1,
+        body2,
+        fields,
+        {**renaming, **packed},
+        micro_pre_text,
+        reversed_dir,
+    )
+
+
 def _plain_plumbing_peel_step(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     pb: frog_ast.Game,
     pa: frog_ast.Game,
@@ -3535,8 +3716,21 @@ def _plain_plumbing_peel_step(  # pylint: disable=too-many-arguments,too-many-po
     renaming = _coupled_field_renaming(
         micro_pre_text, _ref_base(left_ref), _ref_base(right_ref)
     )
+    # The descent -- and only the descent -- also reads the PACKED/components
+    # relation, which is an expansion rather than a rename (see
+    # :func:`_coupled_packed_expansion`). It is what lets a case split on a
+    # packed value be paired with the same split on its components; every other
+    # gate below keeps the rename-only map, so their behaviour is unchanged.
+    packed = _coupled_packed_expansion(
+        micro_pre_text, _ref_base(left_ref), _ref_base(right_ref), renaming
+    )
     descent = _coupled_guard_descent(
-        body1, body2, fields, renaming, micro_pre_text, reversed_dir
+        body1,
+        body2,
+        fields,
+        {**renaming, **packed} if packed else renaming,
+        micro_pre_text,
+        reversed_dir,
     )
     if descent is not None:
         return descent
@@ -9597,6 +9791,14 @@ def _emit_one_oracle_chain(
         type_sig_by_base=type_sig_by_base,
         outer_globs=outer_globs,
         hoist_conjuncts=hoist_conjuncts or None,
+        init_source_by_base={
+            _ref_base(mod_ref(name)): _init_source_map(game)
+            for name, game in norm_by_name.items()
+        },
+        packed_components_by_base={
+            _ref_base(mod_ref(name)): _init_packed_components(game)
+            for name, game in norm_by_name.items()
+        },
     )
 
     def micro_pre(left_ref: str, right_ref: str) -> str:
@@ -20844,6 +21046,69 @@ def _coupled_field_renaming(
         if ra != rb:
             parent[max(ra, rb)] = min(ra, rb)
     return {name: find(name) for name in parent}
+
+
+_PACKED_LEFT_RE = re.compile(r"([\w.]+)\.(\w+)\{\d\} = \(([^()]+)\)\{\d\}")
+_PACKED_RIGHT_RE = re.compile(r"\(([^()]+)\)\{\d\} = ([\w.]+)\.(\w+)\{\d\}")
+_QUALIFIED_FIELD_RE = re.compile(r"^([\w.]+)\.(\w+)$")
+
+
+def _coupled_packed_expansion(
+    pre_text: str, side1_base: str, side2_base: str, renaming: dict[str, str]
+) -> dict[str, str]:
+    """Map each PACKED field to the text of its component tuple.
+
+    A conjunct ``<L>.ctStar{1} = (<R>.ctStar_0, <R>.ctStar_1){2}`` says the one
+    field holds exactly what the two fields hold, so a read of the packed field
+    may be REWRITTEN as the tuple when comparing the two programs -- which is
+    what makes ``ct = ctStar`` and ``ct = (ctStar_0, ctStar_1)`` the same test.
+    Unlike :func:`_coupled_field_renaming` this is an expansion rather than a
+    rename, so it is kept separate and merged only by the route that needs it.
+
+    Components are spelled through the renaming already in force, so the two
+    sides normalize to the same text. A packed name that ALSO appears in a plain
+    field equality is left alone: that says the name denotes a field on both
+    sides, so expanding it would rewrite the wrong side's read as well, and it
+    says some other route already related the two.
+    """
+    bases = {side1_base, side2_base}
+    related_plainly = {
+        name
+        for mb1, f, _s1, mb2, g, _s2 in _FIELD_EQ_RE.findall(pre_text)
+        if mb1 in bases and mb2 in bases
+        for name in (f, g)
+    }
+    out: dict[str, str] = {}
+    for part in (p.strip() for p in pre_text.split("/\\")):
+        left = _PACKED_LEFT_RE.fullmatch(part)
+        right = _PACKED_RIGHT_RE.fullmatch(part)
+        if left is not None:
+            packed_base, packed, components = (
+                left.group(1),
+                left.group(2),
+                left.group(3),
+            )
+        elif right is not None:
+            packed_base, packed, components = (
+                right.group(2),
+                right.group(3),
+                right.group(1),
+            )
+        else:
+            continue
+        if packed_base not in bases:
+            continue
+        names: list[str] = []
+        for component in (c.strip() for c in components.split(",")):
+            match = _QUALIFIED_FIELD_RE.fullmatch(component)
+            if match is None or match.group(1) not in bases:
+                names = []
+                break
+            names.append(match.group(2))
+        if not names or packed in related_plainly:
+            continue
+        out[packed] = "(" + ", ".join(renaming.get(n, n) for n in names) + ")"
+    return out
 
 
 def _bodies_equal_under_field_map(  # pylint: disable=too-many-arguments,too-many-positional-arguments

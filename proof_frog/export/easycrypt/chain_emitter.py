@@ -16,7 +16,6 @@ translator can consume the canonical AST.
 from __future__ import annotations
 
 import copy
-import itertools
 import re
 from collections import Counter
 from collections.abc import Sequence
@@ -33,8 +32,8 @@ from ...visitors import (
     Visitor,
 )
 from . import ec_ast
-from .challenge_common import paren as cc_paren
-from .challenge_common import split_top_args as cc_split_top_args
+from .expr_text import paren as cc_paren
+from .expr_text import split_top_args as cc_split_top_args
 from . import module_translator as mt
 from . import type_collector as tc
 from .canonical_form import _normalize_for_ec, masked_shape
@@ -2304,30 +2303,6 @@ _MICRO_FIELD_PAIR_RE = re.compile(
 )
 
 
-def _coupling_field_map(
-    micro_pre_text: str, left_base: str, right_base: str
-) -> dict[str, str]:
-    """The coupling's side-1 field -> side-2 field pairing.
-
-    A field-wise micro precondition can pair ``S1.f00{1} = S2.f01{2}`` -- the
-    canonical ``f<NN>`` naming is type-ordered, so a step that changes one
-    field's type (``Split Opaque Tuple Field`` replaces a packed tuple field
-    by a component) shifts the indices of everything after it. ``sim`` relates
-    two modules' globals BY NAME and cannot infer an equality set across such
-    a pairing ("cannot infer the set of equalities"), so a route that closes
-    with ``sim`` must know when it is looking at one. Empty when the coupling
-    is whole-glob (name-identity by construction -- EC only accepts the
-    equality when the two glob signatures agree) or the refs are unknown.
-    """
-    if not left_base or not right_base:
-        return {}
-    return {
-        m.group(2): m.group(4)
-        for m in _MICRO_FIELD_PAIR_RE.finditer(micro_pre_text)
-        if m.group(1) == left_base and m.group(3) == right_base
-    }
-
-
 def _split_conjuncts(text: str) -> list[str]:
     """Split a rendered pRHL formula on its TOP-LEVEL ``/\\``."""
     out: list[str] = []
@@ -2432,17 +2407,6 @@ class _LocalBinderScan(Visitor[None]):
     def result(self) -> None:
         return None
 
-    @staticmethod
-    def _names_in(*nodes: frog_ast.ASTNode | None) -> set[str]:
-        out: set[str] = set()
-        for node in nodes:
-            if node is None:
-                continue
-            collector = VariableCollectionVisitor()
-            collector.visit(node)
-            out |= {v.name for v in collector.result()}
-        return out
-
     def _maybe_bind(
         self,
         the_type: frog_ast.Type | None,
@@ -2481,6 +2445,17 @@ class _LocalBinderScan(Visitor[None]):
 
     def visit_variable(self, node: frog_ast.Variable) -> None:
         self.seen.add(node.name)
+
+    @staticmethod
+    def _names_in(*nodes: frog_ast.ASTNode | None) -> set[str]:
+        out: set[str] = set()
+        for node in nodes:
+            if node is None:
+                continue
+            collector = VariableCollectionVisitor()
+            collector.visit(node)
+            out |= {v.name for v in collector.result()}
+        return out
 
 
 def _rename_equal_projection(pb: frog_ast.Game, pa: frog_ast.Game) -> bool:
@@ -3083,96 +3058,9 @@ class _DescentScope:
     bound: frozenset[str]
 
 
-def _branch_cut(
-    body: list[ec_ast.EcStmt],
-) -> tuple[list[ec_ast.EcStmt], ec_ast.If] | None:
-    """``body`` as (work before the branch, the branch), or ``None``.
-
-    A trailing ``return`` after the branch is allowed and dropped: ``proc.``
-    folds it into the postcondition, so it is not an instruction the ``if``
-    rule can trip over. Anything else after the branch, or no branch at all,
-    declines.
-    """
-    stmts = _exec_stmts(body)
-    idx = next((i for i, s in enumerate(stmts) if isinstance(s, ec_ast.If)), None)
-    if idx is None:
-        return None
-    if any(not isinstance(s, ec_ast.Return) for s in stmts[idx + 1 :]):
-        return None
-    branch = stmts[idx]
-    assert isinstance(branch, ec_ast.If)
-    return stmts[:idx], branch
-
-
 def _decl_types(body: list[ec_ast.EcStmt]) -> dict[str, str]:
     """Each local's declared type, by name, as rendered text."""
     return {s.name: str(s.type) for s in body if isinstance(s, ec_ast.VarDecl)}
-
-
-def _invariant_covers_reads(
-    invariant: str,
-    bound: set[str] | frozenset[str],
-    rest: ec_ast.If,
-) -> bool:
-    """Does the invariant carry every local IN SCOPE that the branch READS?
-
-    ``seq`` discards everything about the prefix except the invariant, so a
-    local the branch reads that the invariant does not mention is simply gone,
-    and ``auto => /#`` is handed a goal it cannot discharge. ``bound`` is every
-    local bound by this run OR by any enclosing one: asking only about this
-    level's is what let an inner split throw away an outer local and still be
-    accepted. This one condition subsumes four separate ways that happened,
-    each found by compiling and each a real defect:
-
-    * a local an ENCLOSING run bound, still in scope and still read;
-
-    * a local only ONE run binds (``__cse_ct0_0__ <- ct0.`1`` extracted on one
-      side only), which has nothing to be equated to;
-    * a local both runs bind at DIFFERENT types, which
-      :func:`_split_invariant` must skip because ``={x}`` would not typecheck
-      -- EasyCrypt answers *this expression has type*, a TYPE error;
-    * anything else the invariant happens not to carry.
-
-    Asking the RENDERED invariant text, rather than re-deriving which locals it
-    ought to have equated, is deliberate: it poses the question the closer will
-    actually face, so the two cannot drift apart.
-    """
-    if not bound:
-        return True
-    read = set(_RENAME_TOKEN_RE.findall(rest.guard))
-    for stmt in _flatten_stmts([rest]):
-        read.update(_RENAME_TOKEN_RE.findall(_stmt_all_text(stmt)))
-    return not (bound & read) - set(_RENAME_TOKEN_RE.findall(invariant))
-
-
-def _split_invariant(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-    run1: list[ec_ast.EcStmt],
-    run2: list[ec_ast.EcStmt],
-    enclosing: str,
-    types1: dict[str, str],
-    types2: dict[str, str],
-) -> str:
-    """What ``seq n m`` has to establish for the branch that follows.
-
-    The leg's own coupling, plus equality of the locals BOTH runs bind at the
-    SAME declared type. A local only one side binds has nothing to be equated
-    to; a shared name at differing types cannot be equated at all, because a
-    canonicalization that expands a tuple leaves one side holding a pair where
-    the other holds a component and ``={x}`` then does not typecheck. Either
-    way :func:`_invariant_covers_reads` refuses the leg if the branch actually
-    reads what was left out. Symmetric by construction, so unlike the ``seq``
-    counts it needs no direction; names are read off the statements' own
-    targets, so nothing depends on EasyCrypt's inline renaming.
-    """
-    bound2 = {getattr(s, "var", "") for s in run2}
-    common = [
-        v
-        for v in dict.fromkeys(getattr(s, "var", "") for s in run1)
-        if v and v in bound2 and types1.get(v, "?") == types2.get(v, "??")
-    ]
-    if not common:
-        return enclosing
-    return "={" + ", ".join(common) + "} /\\ " + enclosing
 
 
 def _rename_tokens(text: str, fields: set[str], renaming: dict[str, str]) -> str:
@@ -3185,86 +3073,6 @@ def _rename_tokens(text: str, fields: set[str], renaming: dict[str, str]) -> str
         ),
         text,
     )
-
-
-def _field_orders_agree(
-    body1: list[ec_ast.EcStmt],
-    body2: list[ec_ast.EcStmt],
-    fields: set[str],
-    renaming: dict[str, str],
-) -> bool:
-    """Do the two bodies reference the state's fields the same way?
-
-    Three readings, tried in order, each a strict widening of the one before,
-    so a pair that agreed under an earlier reading is never re-judged:
-
-    1. **By name.** The historical test, and the one that keeps the role-swap
-       leg out (see :func:`_plain_plumbing_peel_step`).
-    2. **Through the coupling.** A leg whose transform RENAMED the fields
-       fails (1) by construction; its precondition states the rename, so the
-       names are read through :func:`_coupled_field_renaming` first. Empty
-       for a whole-glob coupling, which is what keeps this from reaching the
-       role swap.
-    3. **Ignoring provably-DEAD assignments.** ``Remove Redundant Copies``
-       drops copies of fields into locals nobody ever reads
-       (``__a18__ <- challenger_ek0;``). Those lines mention a field, so they
-       change what (1) and (2) compare, yet the peel's ``wp`` sweeps a dead
-       local away without it ever reaching the goal -- confirmed by reading
-       the goal in ``.ec-tmp/bystander/deadassign_probe.ec``, where the
-       dropped assignments sit in the residual program and appear nowhere in
-       the postcondition. Its negative control drops a load-bearing coupling
-       conjunct and EasyCrypt answers *cannot prove goal (strict)*.
-
-    Reading (3) is what the deadness analysis buys, and it is deliberately
-    the smallest of the three: measured over three binding proofs, 2 of the
-    41 legs dying at this gate have that shape.
-    """
-    if _field_reference_order(body1, fields) == _field_reference_order(body2, fields):
-        return True
-    if renaming and _field_reference_order(
-        body1, fields, renaming
-    ) == _field_reference_order(body2, fields, renaming):
-        return True
-    dead1 = _dead_local_assignments(body1, fields)
-    dead2 = _dead_local_assignments(body2, fields)
-    if not dead1 and not dead2:
-        return False
-    live1 = [s for s in body1 if s not in dead1]
-    live2 = [s for s in body2 if s not in dead2]
-    return _field_reference_order(live1, fields, renaming) == _field_reference_order(
-        live2, fields, renaming
-    )
-
-
-def _dead_local_assignments(
-    body: list[ec_ast.EcStmt], fields: set[str]
-) -> list[ec_ast.EcStmt]:
-    """Top-level assignments whose target is a local nothing ever reads.
-
-    Dead means the target name occurs EXACTLY ONCE in the whole body -- as
-    this statement's own target. That single count is what makes the test
-    sound without a liveness walk: one occurrence rules out a later read, a
-    read in either arm of any ``if``, a read in its own right-hand side, and
-    a second write to the same name (which would make neither of the two
-    droppable). A state field is never dead, since another procedure may read
-    it.
-
-    Declines wholesale on a body containing a ``while``, and that is not
-    caution but a real gap: :func:`_stmt_all_text` yields nothing for a
-    ``While``, so a name read only in a loop GUARD would count zero times and
-    look dead. Rather than special-case the guard, the whole shape declines.
-    """
-    if _contains_while(body):
-        return []
-    counts = _token_occurrences(body)
-    return [
-        stmt
-        for stmt in _exec_stmts(body)
-        if isinstance(stmt, ec_ast.Assign)
-        and stmt.var
-        and stmt.var not in fields
-        and counts[stmt.var] == 1
-    ]
 
 
 def _contains_while(body: list[ec_ast.EcStmt]) -> bool:
@@ -3345,42 +3153,6 @@ def _field_reference_order(
                 run.extend(seg)
     out.append(sorted(run))
     return out
-
-
-def _raw_single_site(
-    mb: frog_ast.Method, ma: frog_ast.Method
-) -> tuple[str, frog_ast.Expression, frog_ast.Expression] | None:
-    """The single differing expression site of two raw oracle bodies.
-
-    Returns ``("guard", cond_b, cond_a)`` when the two top-level statement
-    lists are identical except one ``if`` statement's (single) condition,
-    ``("return", expr_b, expr_a)`` when identical except the value of one
-    return statement, else ``None``.
-    """
-    sb, sa = mb.block.statements, ma.block.statements
-    if len(sb) != len(sa):
-        return None
-    diffs = [i for i, (x, y) in enumerate(zip(sb, sa)) if x != y]
-    if len(diffs) != 1:
-        return None
-    x, y = sb[diffs[0]], sa[diffs[0]]
-    if (
-        isinstance(x, frog_ast.ReturnStatement)
-        and isinstance(y, frog_ast.ReturnStatement)
-        and x.expression is not None
-        and y.expression is not None
-    ):
-        return ("return", x.expression, y.expression)
-    if (
-        isinstance(x, frog_ast.IfStatement)
-        and isinstance(y, frog_ast.IfStatement)
-        and len(x.conditions) == 1
-        and len(y.conditions) == 1
-        and x.blocks == y.blocks
-        and x.conditions[0] != y.conditions[0]
-    ):
-        return ("guard", x.conditions[0], y.conditions[0])
-    return None
 
 
 def _schema_reflexive(lhs: frog_ast.Expression, rhs: frog_ast.Expression) -> bool:
@@ -3497,69 +3269,6 @@ _PURE_SITE_SCHEMAS: tuple[Callable[..., bool], ...] = (
 _EC_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
-def _frog_det_call_assign(
-    stmt: frog_ast.Statement, det_methods: dict[str, set[str]]
-) -> bool:
-    """True for a raw ``T v = M.m(...)`` where ``M.m`` is a declared det method."""
-    if not isinstance(stmt, frog_ast.Assignment) or not isinstance(
-        stmt.value, frog_ast.FuncCall
-    ):
-        return False
-    func = stmt.value.func
-    if not isinstance(func, frog_ast.FieldAccess) or not isinstance(
-        func.the_object, frog_ast.Variable
-    ):
-        return False
-    mod = func.the_object.name.split("@", 1)[0]
-    return func.name.lower() in det_methods.get(mod, set())
-
-
-def _raw_guard_delta_site(
-    mb: frog_ast.Method, ma: frog_ast.Method, det_methods: dict[str, set[str]]
-) -> bool:
-    """True when the two raw bodies are identical except (a) det-call
-    assignments present on one side only and (b) exactly one ``if``
-    statement's (single) condition. The IES-class raw shape: the transform's
-    Gap-D binding resolution inlines det calls into the rewritten guard,
-    which the renderer re-hoists -- so the sides genuinely differ by whole
-    det-call statements plus the guard."""
-    sb, sa = list(mb.block.statements), list(ma.block.statements)
-    i = j = 0
-    guard_diffs = 0
-    delta = 0
-    while i < len(sb) and j < len(sa):
-        x, y = sb[i], sa[j]
-        if x == y:
-            i += 1
-            j += 1
-            continue
-        if (
-            isinstance(x, frog_ast.IfStatement)
-            and isinstance(y, frog_ast.IfStatement)
-            and len(x.conditions) == 1
-            and len(y.conditions) == 1
-            and x.blocks == y.blocks
-        ):
-            guard_diffs += 1
-            i += 1
-            j += 1
-            continue
-        if _frog_det_call_assign(x, det_methods):
-            delta += 1
-            i += 1
-            continue
-        if _frog_det_call_assign(y, det_methods):
-            delta += 1
-            j += 1
-            continue
-        return False
-    for stmt in sb[i:] + sa[j:]:
-        if not _frog_det_call_assign(stmt, det_methods):
-            return False
-        delta += 1
-    return guard_diffs == 1 and delta > 0
-
-
 class _EvEnv:  # pylint: disable=too-many-instance-attributes
     """Symbolic ev-term environment over one rendered oracle prefix.
 
@@ -3603,16 +3312,6 @@ class _EvEnv:  # pylint: disable=too-many-instance-attributes
         # into a ``wp.`` per run at emission).
         self.drains: list[str | None] = []
         self.det_used: set[tuple[str, str]] = set()
-
-    def _pin(self, expr: str) -> str:
-        if expr not in self.pins:
-            self.pins[expr] = f"kv{len(self.pins)}"
-        return self.pins[expr]
-
-    def _glob_pin(self, module: str) -> str:
-        if module not in self.glob_pins:
-            self.glob_pins[module] = f"gv{len(self.glob_pins)}"
-        return self.glob_pins[module]
 
     def _subst(self, text: str) -> str | None:
         """Rewrite locals to their terms and fields/params to pins."""
@@ -3667,6 +3366,16 @@ class _EvEnv:  # pylint: disable=too-many-instance-attributes
             self.det_used.add((mod, meth.lower()))
             return True
         return False
+
+    def _pin(self, expr: str) -> str:
+        if expr not in self.pins:
+            self.pins[expr] = f"kv{len(self.pins)}"
+        return self.pins[expr]
+
+    def _glob_pin(self, module: str) -> str:
+        if module not in self.glob_pins:
+            self.glob_pins[module] = f"gv{len(self.glob_pins)}"
+        return self.glob_pins[module]
 
 
 @dataclass(frozen=True)
@@ -4134,45 +3843,6 @@ def _stmt_all_text(stmt: ec_ast.EcStmt) -> str:
     return ""
 
 
-def _fold_guard_formula(
-    guard: str,
-    side: str,
-    base: str,
-    global_names: set[str],
-    foreign_names: frozenset[str] = frozenset(),
-) -> str | None:
-    """``guard`` (rendered program syntax) as a one-sided pRHL formula.
-
-    Every identifier gets the ``{side}`` memory selector (module fields
-    qualified through ``base``); ``&&``/``||`` become ``/\\``/``\\/``.
-    ``global_names`` must be ``base``'s own module variables and
-    ``foreign_names`` the other state's; a foreign token cannot be
-    qualified through ``base`` and cannot safely be read as a local
-    either, so it declines. ``None`` also when the guard uses syntax
-    outside the boolean-comparison fragment this rewrite is known to
-    preserve (decline-don't-guess).
-    """
-    if re.fullmatch(r"[A-Za-z0-9_\s=<>!&|().`]*", guard) is None:
-        return None
-    text = guard.replace("&&", "/\\").replace("||", "\\/")
-    out: list[str] = []
-    pos = 0
-    for m in _EC_IDENT_RE.finditer(text):
-        out.append(text[pos : m.start()])
-        tok = m.group(0)
-        if tok in ("true", "false", "witness"):
-            out.append(tok)
-        elif tok in global_names:
-            out.append(f"{base}.{tok}{{{side}}}")
-        elif tok in foreign_names:
-            return None
-        else:
-            out.append(f"{tok}{{{side}}}")
-        pos = m.end()
-    out.append(text[pos:])
-    return "(" + "".join(out) + ")"
-
-
 def _stmts_have_event(stmts: Sequence[ec_ast.EcStmt]) -> bool:
     """True if any call/sample occurs in ``stmts``, descending into ifs."""
     for s in stmts:
@@ -4183,49 +3853,6 @@ def _stmts_have_event(stmts: Sequence[ec_ast.EcStmt]) -> bool:
         ):
             return True
     return False
-
-
-def _fold_shape(
-    ex_if: list[ec_ast.EcStmt],
-    ex_st: list[ec_ast.EcStmt],
-    n: int,
-) -> tuple[ec_ast.If, list[ec_ast.EcStmt]] | None:
-    """Match the Fold pair at divergence ``n``: the if side's remainder is
-    ``if (P) { rv <- X } else { B*; rv <- Y }; return rv`` and the straight
-    side's is ``B*; return Y`` (statement-identical ``B*``, same ``Y``).
-    Returns ``(the if, the else body)`` or ``None``."""
-    if n >= len(ex_if):
-        return None
-    stmt_if = ex_if[n]
-    if not isinstance(stmt_if, ec_ast.If):
-        return None
-    then_b = _exec_stmts(stmt_if.then_body)
-    else_b = _exec_stmts(stmt_if.else_body)
-    tail_if = ex_if[n + 1 :]
-    tail_st = ex_st[n:]
-    if len(then_b) != 1 or not else_b or len(tail_if) != 1:
-        return None
-    then_assign, else_assign = then_b[0], else_b[-1]
-    ret_if = tail_if[0]
-    if not (
-        isinstance(then_assign, ec_ast.Assign)
-        and isinstance(else_assign, ec_ast.Assign)
-        and isinstance(ret_if, ec_ast.Return)
-    ):
-        return None
-    rv = then_assign.var
-    if else_assign.var != rv or ret_if.expr.strip() != rv:
-        return None
-    if len(tail_st) != len(else_b):
-        return None
-    if any(x != y for x, y in zip(else_b[:-1], tail_st[:-1])):
-        return None
-    ret_st = tail_st[-1]
-    if not isinstance(ret_st, ec_ast.Return):
-        return None
-    if ret_st.expr.strip() != else_assign.rhs.strip():
-        return None
-    return stmt_if, else_b
 
 
 def _oracle_pending_admit(
@@ -4542,62 +4169,6 @@ def _init_legmid_inv(  # pylint: disable=too-many-locals,too-many-arguments,too-
     return " /\\ ".join(conj)
 
 
-def _init_legmid_flat_tactic(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
-    game_body_ev: list[ec_ast.EcStmt],
-    red_body_ev: list[ec_ast.EcStmt],
-    keygen_callee: str,
-    glob_names: list[str],
-    red_mod: str,
-    red_fields: set[str],
-) -> list[str] | None:
-    """The FLAT middle-leg ``FG_ev ~ FR_ev`` tactic for the PK nested route.
-
-    Both endpoints are ``ev``-ASSIGNMENT twins (the NG calls already
-    functionalized), so the only backbone events are the shared keygens and
-    samples and everything after the last sample is a pure deterministic
-    assignment run. Assembles the same probabilistic-prefix machinery as
-    :func:`_init_legmid_tactic` (grouping ``swap{1}``s + ``seq`` with the coupling
-    invariant + the aligned prefix peel) but closes with a FLAT ``sp. skip => /#``
-    instead of functionalizing NG suffixes: ``sp`` runs both sides' identical
-    ``ev``-assignment/packing suffix and the residual is ground (no nested
-    ``forall r, (r = ev ...) => ...`` chain, so ``/#`` scales to the PK
-    shared-``ek_T`` packing). Returns ``None`` if the invariant cannot be built.
-    """
-    swaps, grouped_game = _init_group_backbone(game_body_ev, keygen_callee, side=1)
-    red_exec: list[ec_ast.EcStmt] = [
-        s for s in _exec_stmts(red_body_ev) if not isinstance(s, ec_ast.Return)
-    ]
-    game_plen = _init_prefix_len(grouped_game)
-    red_plen = _init_prefix_len(red_exec)
-    game_prefix = grouped_game[:game_plen]
-    red_prefix = red_exec[:red_plen]
-    inv = _init_legmid_inv(
-        game_prefix,
-        red_prefix,
-        keygen_callee,
-        glob_names,
-        red_mod,
-        red_fields,
-        include_ek_seam=True,
-    )
-    if inv is None:
-        return None
-    game_seeds = [s.var for s in game_prefix if isinstance(s, ec_ast.Sample)]
-    n_kg = len(
-        [
-            s
-            for s in game_prefix
-            if isinstance(s, ec_ast.Call) and s.callee == keygen_callee
-        ]
-    )
-    tac: list[str] = ["proc.", *swaps, f"seq {game_plen} {red_plen} : ({inv})."]
-    tac += ["rnd."] * len(game_seeds)
-    tac += ["wp.", "call (_: true)."] * n_kg
-    tac += ["auto."]
-    tac += ["sp.", "skip => /#."]
-    return tac
-
-
 def _init_legmid_tactic(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
     game_body: list[ec_ast.EcStmt],
     red_body: list[ec_ast.EcStmt],
@@ -4683,389 +4254,6 @@ def _init_legmid_tactic(  # pylint: disable=too-many-arguments,too-many-position
     # packing too.
     tac += ["sp.", "skip.", "move => * /=.", "smt()."]
     return tac
-
-
-def _ev_twin_module(
-    base: ec_ast.Module,
-    new_name: str,
-    det_pred: Callable[[str, str], bool],
-    clone_of: Callable[[str], str | None],
-) -> ec_ast.Module:
-    """A copy of ``base`` renamed to ``new_name`` whose single procedure has its
-    deterministic NG calls replaced by their ``ev_<m>`` assignments (via
-    :func:`_ec_functionalize`). The ``ev``-assignment twin of an NG-calling flat
-    state; keeps the fields, params, and interface identical so it plugs into the
-    same transitivity chain."""
-    proc = base.procs[0]
-    ev_body = _ec_functionalize(proc.body, det_pred, clone_of)
-    ev_proc = ec_ast.Proc(proc.name, proc.params, proc.return_type, ev_body)
-    return ec_ast.Module(
-        new_name,
-        [ev_proc],
-        list(base.params),
-        base.implements,
-        list(base.module_vars),
-    )
-
-
-def _pk_nested_middle(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
-    fgmod: ec_ast.Module,
-    frmod: ec_ast.Module,
-    keygen_callee: str,
-    glob_names: list[str],
-    globs: str,
-    fg_name: str,
-    fr_name: str,
-    hop_index: int,
-    q3: str,
-    clone_alias: dict[str, str],
-    det_pred: Callable[[str, str], bool],
-) -> tuple[list[str], list[ec_ast.Module]] | None:
-    """The NESTED middle leg ``FG_ng ~ FR_ng : globs ==> q3`` for the PK
-    shared-``ek_T`` init shape, routed through two ``ev``-assignment twins:
-    ``FG_ng ~ FG_ev ~ FR_ev ~ FR_ng``.
-
-    The outer NG-calling twins (``fgmod``/``frmod``) keep their name-independent
-    backbone-peel legs (unchanged, in the caller). This middle leg instead nests:
-
-    * ``FG_ng ~ FG_ev`` and ``FR_ev ~ FR_ng`` -- :func:`_det_topdown_leg`
-      functionalizes each NG-calling side's det calls top-down; the twins share
-      local names (``FG_ev`` is ``FG_ng`` with NG calls turned to ``ev``
-      assignments), so the name-dependent per-statement coupling matches.
-    * ``FG_ev ~ FR_ev`` -- both ``ev``-assignment, so the middle is the FLAT
-      :func:`_init_legmid_flat_tactic` (swap-group + ``seq`` + prefix peel +
-      ``sp. skip => /#``), whose ground residual scales to the shared ``ek_T``.
-
-    The sub-leg posts are derived from ``q3`` by renaming the twin bases
-    (``fg_name`` -> ``FG_ev``, ``fr_name`` -> ``FR_ev``) so the transitivity
-    composition (the ``smt().`` side conditions) threads the packed-field
-    couplings and the challenger seam automatically. Returns
-    ``(middle_tactic, [FG_ev, FR_ev])`` or ``None`` if the flat leg's invariant
-    cannot be built."""
-    fgev_name = f"FG_ev_{hop_index}"
-    frev_name = f"FR_ev_{hop_index}"
-    args = ", ".join(glob_names)
-    glob_items = [f"glob {m}" for m in glob_names]
-
-    def _clone_of(m: str) -> str | None:
-        return clone_alias.get(m)
-
-    game_body = fgmod.procs[0].body
-    red_body = frmod.procs[0].body
-    fgev = _ev_twin_module(fgmod, fgev_name, det_pred, _clone_of)
-    frev = _ev_twin_module(frmod, frev_name, det_pred, _clone_of)
-    red_fields = {v.name for v in frmod.module_vars}
-    flat = _init_legmid_flat_tactic(
-        fgev.procs[0].body,
-        frev.procs[0].body,
-        keygen_callee,
-        glob_names,
-        frev_name,
-        red_fields,
-    )
-    if flat is None:
-        return None
-    game_flds = [v.name for v in fgmod.module_vars]
-    red_flds = [v.name for v in frmod.module_vars]
-    # ``res{1} = res{2}`` must ride on EVERY sub-leg post: the ``transitivity``
-    # composition threads the final ``res`` equality through the middle memory,
-    # so a leg that omits it leaves ``res{1} = res{m}`` (or ``res{m} = res{2}``)
-    # underivable and the composition ``smt()`` fails.
-    res_eq = "res{1} = res{2}"
-    qa = (
-        globs
-        + "".join(f" /\\ {fg_name}.{f}{{1}} = {fgev_name}.{f}{{2}}" for f in game_flds)
-        + f" /\\ {res_eq}"
-    )
-    qd = (
-        globs
-        + "".join(f" /\\ {frev_name}.{f}{{1}} = {fr_name}.{f}{{2}}" for f in red_flds)
-        + f" /\\ {res_eq}"
-    )
-    qb = q3.replace(fg_name, fgev_name)
-    qc = qb.replace(fr_name, frev_name)
-    ctr = [0]
-    game_field_set = set(game_flds)
-    red_field_set = set(red_flds)
-    # leg_g: FG_ng (side1, NG calls) ~ FG_ev (side2); leg_r: FR_ev (side1) ~
-    # FR_ng (side2, NG calls). The NG-calling side is the ``call_side``.
-    leg_g = _init_topdown_leg(
-        game_body, 1, glob_items, det_pred, ctr, fg_name, fgev_name, game_field_set
-    )
-    leg_r = _init_topdown_leg(
-        red_body, 2, glob_items, det_pred, ctr, frev_name, fr_name, red_field_set
-    )
-    middle = [
-        f"transitivity {fgev_name}({args}).initialize "
-        f"({globs} ==> {qa}) ({globs} ==> {qb}).",
-        "smt().",
-        "smt().",
-        *leg_g,
-        f"transitivity {frev_name}({args}).initialize "
-        f"({globs} ==> {qc}) ({globs} ==> {qd}).",
-        "smt().",
-        "smt().",
-        *flat,
-        *leg_r,
-    ]
-    return middle, [fgev, frev]
-
-
-def _two_sided_ek_functionalize_peel(  # pylint: disable=too-many-locals
-    l_body: list[ec_ast.EcStmt],
-    r_body: list[ec_ast.EcStmt],
-    glob_items: list[str],
-    det_pred: Callable[[str, str], bool],
-    clone_alias: dict[str, str],
-    left_mod: str,
-    right_mod: str,
-    left_fields: set[str],
-    right_fields: set[str],
-) -> list[str] | None:
-    """Lockstep ``seq`` peel functionalizing BOTH sides' keygen det-calls, for the
-    FLAT ``FG_calls ~ FR_calls`` middle leg of :func:`_synth_init_ek_twin`.
-
-    Applied to concrete flat-state modules (``proc.`` -- NO ``inline *`` -- so the
-    body's local names are exactly what EC sees, dodging the inline-name wall). At
-    each det call, functionalize both sides (``exists* (glob M){i}, arg{i}; elim*;
-    call{i} (M_m_det g a)``); the running invariant carries ``={glob..., seeds}``
-    (NEVER dropped -- the post's cross-side field equalities need the seed
-    couplings), per-local one-level ev/rhs facts, and per-field-store QUALIFIED
-    facts (``left_mod.lf{1}=lrhs{1} /\\ right_mod.rf{2}=rrhs{2}`` -- interspersed
-    field stores with different names per side). Validated:
-    ``ec_templates/init_ek_two_key_interspersed.ec`` + the transitivity tripwire.
-    ``None`` if the bodies differ in length or a det clone alias is unknown."""
-    l_exec = [s for s in _exec_stmts(l_body) if not isinstance(s, ec_ast.Return)]
-    r_exec = [s for s in _exec_stmts(r_body) if not isinstance(s, ec_ast.Return)]
-    if len(l_exec) != len(r_exec) or not l_exec:
-        return None
-    loc_eqs = list(glob_items)
-    locals_set: set[str] = set()
-    inv_conj: list[str] = []
-    ctr = 0
-    tac: list[str] = ["proc."]
-
-    def _tag(expr: str, side: int) -> str:
-        return re.sub(
-            r"[A-Za-z_]\w*",
-            lambda m: (
-                f"{m.group(0)}{{{side}}}" if m.group(0) in locals_set else m.group(0)
-            ),
-            expr,
-        )
-
-    def _pr(e: str) -> str:
-        e = e.strip()
-        if e.startswith("(") and e.endswith(")"):
-            return e
-        return f"({e})" if " " in e else e
-
-    def _inv() -> str:
-        parts = (["={" + ", ".join(loc_eqs) + "}"] if loc_eqs else []) + inv_conj
-        return " /\\ ".join(parts) if parts else "true"
-
-    i, n = 0, len(l_exec)
-    while i < n:
-        ls = l_exec[i]
-        if isinstance(ls, ec_ast.Sample):
-            loc_eqs.append(ls.var)
-            locals_set.add(ls.var)
-            tac.append(f"seq 1 1 : ({_inv()}).")
-            tac.append("+ rnd; skip => />.")
-            i += 1
-        elif isinstance(ls, ec_ast.Call):
-            parts = _callee_parts(ls.callee)
-            if parts is None or not det_pred(*parts) or parts[0] not in clone_alias:
-                return None
-            mod, meth = parts
-            clone = clone_alias[mod]
-            cargs = _split_top_args(ls.args)
-            for side in (1, 2):
-                applied = "".join(f" {_pr(_tag(a, side))}" for a in cargs)
-                inv_conj.append(f"{ls.var}{{{side}}} = ({clone}.ev_{meth}{applied})")
-            locals_set.add(ls.var)
-            tac.append(f"seq 1 1 : ({_inv()}).")
-            binders = [f"g{ctr}"] + [f"a{ctr}_{k}" for k in range(len(cargs))]
-            for side in (1, 2):
-                cap = ", ".join(
-                    [f"(glob {mod}){{{side}}}"] + [f"({a}){{{side}}}" for a in cargs]
-                )
-                bs = [f"{b}_{side}" for b in binders]
-                tac.append(f"exists* {cap}; elim* => {' '.join(bs)}.")
-                tac.append(f"call{{{side}}} ({mod}_{meth}_det {' '.join(bs)}).")
-            tac.append("skip => />.")
-            ctr += 1
-            i += 1
-        elif isinstance(ls, ec_ast.Assign):
-            j = i
-            while j < n:
-                la, ra = l_exec[j], r_exec[j]
-                if not isinstance(la, ec_ast.Assign) or not isinstance(
-                    ra, ec_ast.Assign
-                ):
-                    break
-                if la.var in left_fields or ra.var in right_fields:
-                    inv_conj.append(f"{left_mod}.{la.var}{{1}} = {_tag(la.rhs, 1)}")
-                    inv_conj.append(f"{right_mod}.{ra.var}{{2}} = {_tag(ra.rhs, 2)}")
-                else:
-                    inv_conj.append(f"{la.var}{{1}} = {_tag(la.rhs, 1)}")
-                    locals_set.add(la.var)
-                    inv_conj.append(f"{ra.var}{{2}} = {_tag(ra.rhs, 2)}")
-                j += 1
-            tac.append(f"seq {j - i} {j - i} : ({_inv()}).")
-            tac.append("+ wp; skip => />.")
-            i = j
-        else:
-            return None
-    tac.append("skip => /#.")
-    return tac
-
-
-def _synth_init_ek_twin(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
-    modules: mt.ModuleTranslator,
-    oracle_name: str,
-    left_state0: frog_ast.Game,
-    right_state0: frog_ast.Game,
-    external_module_types: dict[str, str],
-    method_return_types: dict[tuple[str, str], frog_ast.Type],
-    flat_params: list[ec_ast.ModuleParam],
-    det_methods: dict[str, set[str]],
-    clone_alias: dict[str, str],
-    full_coupling: str,
-    hop_index: int = 0,
-) -> tuple[list[str], list[str], set[tuple[str, str]]] | None:
-    """Single-R ek-derivation init route: ``RawGame ~ FG_calls ~ FR_calls ~
-    RawReduction`` transitivity. The reduction self-generates keygens and HOLDS
-    the EncapsKey; the coupling states ``(R.ek, R.seed) = DeriveKeyPair_ev(R.seed)``
-    (contains ``ev_``), which ``proc; inline *`` cannot prove (unpredictable inline
-    names). Route through flat-state twins (CONTROLLED names): the outer legs
-    backbone-peel name-independently, the middle ``FG_calls ~ FR_calls`` peel
-    functionalizes both sides' det calls to prove the coupling. Mirrors
-    :func:`_synth_init_twin_reorder` (non-reorder, no decomposition). ``None``
-    off-shape (caller falls through to the abstract peel / admit)."""
-    fg_name = f"FG_calls_{hop_index}"
-    fr_name = f"FR_calls_{hop_index}"
-    lproj = _project_to_method(left_state0, oracle_name)
-    rproj = _project_to_method(right_state0, oracle_name)
-    if lproj is None or rproj is None:
-        return None
-
-    def _det_pred(mod: str, meth: str) -> bool:
-        return meth in det_methods.get(mod, set())
-
-    # The REDUCTION base + its side come from the ek-derivation conjunct
-    # ``(R.ek{s}, R.seed{s}) = ...ev...`` (R holds the EncapsKey). ``game`` is the
-    # other side. hop_0 has the game on side 1 (``game_is_left``); the mirrored
-    # hop_2 has it on side 2 -- flip the coupling ``{1}<->{2}`` and prepend
-    # ``symmetry`` so the same game-on-the-left assembly applies (mirrors
-    # ``_synth_init_twin_reorder``).
-    dm = re.search(
-        r"\(([\w.]+)\.\w+\{([12])\}, [\w.]+\.\w+\{[12]\}\) = ", full_coupling
-    )
-    if dm is None:
-        return None
-    red_base, red_side = dm.group(1), dm.group(2)
-    game_is_left = red_side == "2"
-
-    def _flip_sides(s: str) -> str:
-        return s.replace("{1}", "\x00").replace("{2}", "{1}").replace("\x00", "{2}")
-
-    coupling = full_coupling if game_is_left else _flip_sides(full_coupling)
-    conj = [p.strip() for p in coupling.split(" /\\ ")]
-    globs = " /\\ ".join(p for p in conj if p.startswith("={glob"))
-    body = " /\\ ".join(p for p in conj if not p.startswith("={glob"))
-    game_base: str | None = None
-    for cj in conj:
-        m = re.match(r"^([\w.]+)\.\w+\{1\} = ([\w.]+)\.\w+\{2\}$", cj)
-        if m is not None and m.group(2) == red_base:
-            game_base = m.group(1)
-            break
-    if game_base is None or not globs:
-        return None
-
-    # FG_calls is always the GAME flat state, FR_calls the REDUCTION -- swap the
-    # projections for the mirrored orientation.
-    game_proj, red_proj = (lproj, rproj) if game_is_left else (rproj, lproj)
-    fgmod = _flat_state_module(
-        modules,
-        fg_name,
-        game_proj,
-        external_module_types,
-        method_return_types,
-        flat_params,
-        emit_state_vars=True,
-    )
-    frmod = _flat_state_module(
-        modules,
-        fr_name,
-        red_proj,
-        external_module_types,
-        method_return_types,
-        flat_params,
-        emit_state_vars=True,
-    )
-    if not fgmod.procs or not frmod.procs:
-        return None
-    game_body, red_body = fgmod.procs[0].body, frmod.procs[0].body
-    glob_names = [p.name for p in flat_params]
-    args = ", ".join(glob_names)
-    game_flds = [v.name for v in fgmod.module_vars]
-    red_flds = [v.name for v in frmod.module_vars]
-    glob_items = [f"glob {m}" for m in glob_names]
-    mid = _two_sided_ek_functionalize_peel(
-        game_body,
-        red_body,
-        glob_items,
-        _det_pred,
-        clone_alias,
-        fg_name,
-        fr_name,
-        set(game_flds),
-        set(red_flds),
-    )
-    if mid is None:
-        return None
-    res_eq = "res{1} = res{2}"
-    q1_eqs = " /\\ ".join(
-        f"{game_base}.{f}{{1}} = {fg_name}.{f}{{2}}" for f in game_flds
-    )
-    q4_eqs = " /\\ ".join(f"{fr_name}.{f}{{1}} = {red_base}.{f}{{2}}" for f in red_flds)
-    q1 = f"{globs} /\\ {q1_eqs} /\\ {res_eq}"
-    q2 = f"{body.replace(game_base, fg_name)} /\\ {globs} /\\ {res_eq}"
-    q3 = (
-        f"{body.replace(game_base, fg_name).replace(red_base, fr_name)}"
-        f" /\\ {globs} /\\ {res_eq}"
-    )
-    q4 = f"{globs} /\\ {q4_eqs} /\\ {res_eq}"
-
-    def _outer_leg(b: list[ec_ast.EcStmt]) -> list[str]:
-        leg = ["proc.", "inline *.", *_backbone_peel(b)]
-        if _leads_with_det(b):
-            leg.append("wp.")
-        leg.append("auto.")
-        return leg
-
-    outer = [
-        _res_tag(SYNTH_PARAM),
-        *([] if game_is_left else ["symmetry."]),
-        f"transitivity {fg_name}({args}).initialize "
-        f"({globs} ==> {q1}) ({globs} ==> {q2}).",
-        "smt().",
-        "smt().",
-        *_outer_leg(game_body),
-        f"transitivity {fr_name}({args}).initialize "
-        f"({globs} ==> {q3}) ({globs} ==> {q4}).",
-        "smt().",
-        "smt().",
-        *mid,
-        *_outer_leg(red_body),
-        "qed.",
-    ]
-    extra = [
-        "\n".join(_render_module_decl(fgmod)),
-        "\n".join(_render_module_decl(frmod)),
-    ]
-    return extra, outer, set()
 
 
 def _ev_sig(stmt: ec_ast.EcStmt) -> tuple[str, str]:
@@ -5683,267 +4871,6 @@ def _synth_delegate_correctness_init(  # pylint: disable=too-many-arguments,too-
     return extra, outer, pres
 
 
-def _synth_init_twin_reorder(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
-    modules: mt.ModuleTranslator,
-    oracle_name: str,
-    left_state0: frog_ast.Game,
-    right_state0: frog_ast.Game,
-    external_module_types: dict[str, str],
-    method_return_types: dict[tuple[str, str], frog_ast.Type],
-    flat_params: list[ec_ast.ModuleParam],
-    det_methods: dict[str, set[str]],
-    clone_alias: dict[str, str],
-    init_coupling: str | None = None,
-    hop_index: int = 0,
-) -> tuple[list[str], list[str], set[tuple[str, str]]] | None:
-    """The functional-twin reorder route for a CFRG init hop whose two endpoints
-    run the SAME keygen/sample/NG-call multiset in DIFFERENT order (the game
-    interleaves per index; the reduction groups). Builds the 3-leg transitivity
-    ``RawGame ~ FG_calls ~ FR_calls ~ RawReduction`` (the outer legs by ``proc;
-    inline*; sim``, the middle by :func:`_init_legmid_tactic`), with the two flat
-    twins as extra module decls and the leg posts derived from ``init_coupling``.
-    Handles both orientations: hop_0 (interleaved game on the left, challenger
-    seam) directly, and the mirrored hop_4 (game on the right, no seam) by
-    flipping the coupling and prepending ``symmetry``. Off-shape hops (e.g. the PK
-    shared-component decomposition) return ``None`` (caller admits).
-    Returns ``(extra_decls, outer_body, pres)`` or ``None`` off-shape."""
-    if init_coupling is None:
-        return None
-    # Per-hop unique twin names: several init hops (hop_0, hop_4) each emit their
-    # own twin pair, so a fixed ``FG_calls``/``FR_calls`` would collide ("symbol
-    # already exists"). The exporter's declare-module restriction scan picks up
-    # any ``transitivity <name>(`` name, so suffixed names stay restricted.
-    fg_name = f"FG_calls_{hop_index}"
-    fr_name = f"FR_calls_{hop_index}"
-    lproj = _project_to_method(left_state0, oracle_name)
-    rproj = _project_to_method(right_state0, oracle_name)
-    if lproj is None or rproj is None:
-        return None
-
-    def _det_pred(mod: str, meth: str) -> bool:
-        return meth in det_methods.get(mod, set())
-
-    def _keygen_callee(body: list[ec_ast.EcStmt]) -> str | None:
-        for s in _exec_stmts(body):
-            if isinstance(s, ec_ast.Call):
-                parts = _callee_parts(s.callee)
-                if parts is not None and not _det_pred(*parts):
-                    return s.callee
-        return None
-
-    def _grouped(body: list[ec_ast.EcStmt], kg: str) -> bool:
-        seen = False
-        for s in _exec_stmts(body):
-            if isinstance(s, ec_ast.Sample):
-                seen = True
-            elif isinstance(s, ec_ast.Call) and s.callee == kg and seen:
-                return False
-        return True
-
-    # Detect orientation: the interleaved (per-index keygen; sample; NG) endpoint
-    # is the GAME; the grouped endpoint is the reduction. hop_0 has the game on
-    # the left; hop_4 mirrors it (reduction R_KDF on the left, game on the right,
-    # no challenger seam). We always build FG_calls from the game and FR_calls
-    # from the reduction and, for the mirrored hop_4, prepend ``symmetry`` so the
-    # transitivity runs in the same game-on-the-left frame as hop_0.
-    def _build(proj: frog_ast.Game, name: str) -> ec_ast.Module | None:
-        m = _flat_state_module(
-            modules,
-            name,
-            proj,
-            external_module_types,
-            method_return_types,
-            flat_params,
-            emit_state_vars=True,
-        )
-        return m if m.procs else None
-
-    # Build each side once (left->FG_calls, right->FR_calls) to detect the
-    # interleaved (game) side. hop_0 keeps these directly; the mirrored hop_4
-    # rebuilds with the twin names swapped so FG_calls is always the game.
-    lmod = _build(lproj, fg_name)
-    rmod = _build(rproj, fr_name)
-    if lmod is None or rmod is None:
-        return None
-    kg_probe = _keygen_callee(lmod.procs[0].body) or _keygen_callee(rmod.procs[0].body)
-    if kg_probe is None:
-        return None
-    l_interleaved = not _grouped(lmod.procs[0].body, kg_probe)
-    r_interleaved = not _grouped(rmod.procs[0].body, kg_probe)
-    if l_interleaved == r_interleaved:
-        return None  # need exactly one interleaved (game) + one grouped (reduction)
-    game_is_left = l_interleaved
-    fgmod: ec_ast.Module
-    frmod: ec_ast.Module
-    if game_is_left:
-        fgmod, frmod = lmod, rmod
-    else:
-        fg = _build(rproj, fg_name)
-        fr = _build(lproj, fr_name)
-        if fg is None or fr is None:
-            return None
-        fgmod, frmod = fg, fr
-    game_body, red_body = fgmod.procs[0].body, frmod.procs[0].body
-    keygen_callee = _keygen_callee(game_body)
-    if keygen_callee is None:
-        return None
-    ng_mod = next(
-        (
-            _callee_parts(c)[0]  # type: ignore[index]
-            for k, c in _call_sample_backbone(game_body)
-            if k == "call"
-            and c is not None
-            and (p := _callee_parts(c)) is not None
-            and _det_pred(*p)
-        ),
-        None,
-    )
-    if ng_mod is None or ng_mod not in clone_alias:
-        return None
-    glob_names = [p.name for p in flat_params]
-    args = ", ".join(glob_names)
-    red_fields = {v.name for v in frmod.module_vars}
-    legmid = _init_legmid_tactic(
-        game_body,
-        red_body,
-        keygen_callee,
-        glob_names,
-        fr_name,
-        red_fields,
-        clone_alias[ng_mod],
-        _det_pred,
-    )
-    if legmid is None:
-        return None
-
-    # Parse the decomposition coupling into (game-field -> component tuple) and
-    # the challenger seam (reduction dk field = challenger field), on the side-1
-    # game / side-2 reduction orientation. For the mirrored hop_4 the raw coupling
-    # has the game on side 2, so flip ``{1}<->{2}`` (and later prepend
-    # ``symmetry``) to reuse the hop_0-oriented assembly.
-    def _flip_sides(s: str) -> str:
-        return s.replace("{1}", "\x00").replace("{2}", "{1}").replace("\x00", "{2}")
-
-    coupling = init_coupling if game_is_left else _flip_sides(init_coupling)
-    conj = [p.strip() for p in coupling.split(" /\\ ")]
-    globs = " /\\ ".join(p for p in conj if p.startswith("={glob"))
-    body = " /\\ ".join(p for p in conj if not p.startswith("={glob"))
-    decomp: list[tuple[str, list[str]]] = []
-    seam: list[tuple[str, str]] = []
-    for cj in conj:
-        m = re.match(r"^(\S+)\{1\} = \((.+)\)\{2\}$", cj)
-        if m is not None:
-            decomp.append((m.group(1), [c.strip() for c in m.group(2).split(",")]))
-            continue
-        m = re.match(r"^(\S+)\{2\} = (\S+)\{2\}$", cj)
-        if m is not None:
-            seam.append((m.group(1), m.group(2)))
-    if not decomp:
-        return None
-    # The *flat* functionalizing middle leg (``_init_legmid_tactic``) leaves a
-    # deep nested-forall ``smt`` goal whose size the closer cannot discharge once
-    # one NG-derived component (the hybrid ephemeral ``ek_T``) is SHARED across
-    # two decomposed game fields (the PK ``ek0``+``dk0`` packing). CT's ``dk``-only
-    # decomposition has disjoint components, so its flat middle leg closes. The PK
-    # shared-component shape instead routes the middle leg through a NESTED
-    # transitivity ``FG_ng ~ FG_ev ~ FR_ev ~ FR_ng`` (:func:`_pk_nested_middle`):
-    # the NG calls are functionalized in the sub-legs (name-matched twins), and
-    # the innermost ``FG_ev ~ FR_ev`` leg is a FLAT ``sp. skip => /#`` with no
-    # nested foralls -- so ``smt`` scales to the shared ``ek_T``.
-    _components = [c for _, comps in decomp for c in comps]
-    pk_shared = len(_components) != len(set(_components))
-    game_base = decomp[0][0].rsplit(".", 1)[0]
-    red_base = decomp[0][1][0].rsplit(".", 1)[0]
-    chal_base = seam[0][1].rsplit(".", 1)[0] if seam else None
-
-    def _fld(full: str) -> str:
-        return full.rsplit(".", 1)[1]
-
-    def _fg(s: str) -> str:
-        return s.replace(game_base, fg_name)
-
-    def _fr(s: str) -> str:
-        out = _fg(s)
-        if chal_base is not None:
-            out = out.replace(chal_base + ".", fr_name + ".challenger_")
-        return out.replace(red_base, fr_name)
-
-    res_eq = "res{1} = res{2}"
-    q1_eqs = " /\\ ".join(f"{gf}{{1}} = {fg_name}.{_fld(gf)}{{2}}" for gf, _ in decomp)
-    q4_eqs = " /\\ ".join(
-        [f"{fr_name}.{_fld(c)}{{1}} = {c}{{2}}" for _, comps in decomp for c in comps]
-        + [f"{fr_name}.challenger_{_fld(cf)}{{1}} = {cf}{{2}}" for _, cf in seam]
-    )
-    q1 = f"{globs} /\\ {q1_eqs} /\\ {res_eq}"
-    q2 = f"{_fg(body)} /\\ {globs} /\\ {res_eq}"
-    q3 = f"{_fr(body)} /\\ {globs} /\\ {res_eq}"
-    q4 = f"{globs} /\\ {q4_eqs} /\\ {res_eq}"
-
-    def _outer_leg(body: list[ec_ast.EcStmt]) -> list[str]:
-        # RawGame ~ FG_calls (and FR_calls ~ RawReduction) relate a flat state's
-        # fields to a *different* module's fields across an identical-order
-        # backbone, so ``sim`` cannot infer the cross-module equality set (and it
-        # declines the abstract deterministic NG calls outright). Peel the shared
-        # call+sample backbone name-independently -- the same composite-bridge
-        # pattern ``_composite_bridge_tactic`` uses: ``call (_: true)`` couples
-        # each abstract call, ``rnd`` each sample, ``wp`` clears the deterministic
-        # field-write plumbing, and ``auto`` discharges the residual couplings.
-        leg = ["proc.", "inline *.", *_backbone_peel(body)]
-        if _leads_with_det(body):
-            leg.append("wp.")
-        leg.append("auto.")
-        return leg
-
-    # Choose the middle leg (``FG_ng ~ FR_ng : globs ==> q3``). CT keeps the flat
-    # functionalizing ``legmid``; the PK shared-``ek_T`` shape nests two more
-    # (``ev``-functionalized) twins so the innermost leg is a flat ``skip => /#``.
-    ev_modules: list[ec_ast.Module] = []
-    if pk_shared:
-        nested = _pk_nested_middle(
-            fgmod,
-            frmod,
-            keygen_callee,
-            glob_names,
-            globs,
-            fg_name,
-            fr_name,
-            hop_index,
-            q3,
-            clone_alias,
-            _det_pred,
-        )
-        if nested is None:
-            return None
-        middle, ev_modules = nested
-    else:
-        middle = legmid
-
-    outer = [
-        _res_tag(SYNTH_PARAM),
-        # hop_4 (game on side 2) is the mirror of hop_0: flip it into the
-        # game-on-the-left frame so the same transitivity + leg posts apply.
-        *([] if game_is_left else ["symmetry."]),
-        f"transitivity {fg_name}({args}).initialize "
-        f"({globs} ==> {q1}) ({globs} ==> {q2}).",
-        "smt().",
-        "smt().",
-        *_outer_leg(game_body),
-        f"transitivity {fr_name}({args}).initialize "
-        f"({globs} ==> {q3}) ({globs} ==> {q4}).",
-        "smt().",
-        "smt().",
-        *middle,
-        *_outer_leg(red_body),
-        "qed.",
-    ]
-    extra = [
-        "\n".join(_render_module_decl(fgmod)),
-        "\n".join(_render_module_decl(frmod)),
-        *("\n".join(_render_module_decl(m)) for m in ev_modules),
-    ]
-    return extra, outer, set()
-
-
 def _synth_init_plain_reorder(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches
     modules: mt.ModuleTranslator,
     oracle_name: str,
@@ -6198,9 +5125,6 @@ def _synth_init_plain_reorder(  # pylint: disable=too-many-arguments,too-many-po
         *leg_c,
     ]
 
-    def _n_calls(b: list[ec_ast.EcStmt]) -> int:
-        return sum(1 for k, _ in _call_sample_backbone(b) if k == "call")
-
     def _hoare_arm(mem: list[str], b: list[ec_ast.EcStmt]) -> list[str]:
         # Close a conseq hoare arm. A TRIVIAL (``true``) side is a degenerate
         # phoare that ``proc`` rejects -- close it directly with ``auto``. A real
@@ -6294,32 +5218,6 @@ def _synth_init_plain_reorder(  # pylint: disable=too-many-arguments,too-many-po
     return extra, outer, set()
 
 
-def _is_reprogram_if(stmt: ec_ast.EcStmt) -> bool:
-    """True if ``stmt`` is a lazy-RO *reprogramming* ``if`` (always-true).
-
-    Shape: ``if (<seed> = <s0>) { ... concat_... y0_pq y0_t ... } else { ... <h>
-    <seed> ... }`` -- an equality guard whose then-branch USES a ``concat`` of the
-    reprogrammed samples. This is the reprogramming that
-    :func:`_call_sample_backbone` cannot see through (it buries the KEM/NG
-    backbone). Excludes the flat-state early-return artifact ``if (! _r2) {...}``
-    (negation guard, no ``concat`` then-branch) so only the genuine
-    reprogramming ``if``s -- the ones EC's ``inline *`` reproduces from the
-    challenger's ``hash`` -- are counted.
-
-    The reprogrammed value does not always surface as its own assignment: when
-    the canonicalizer sinks the seed-consuming computation INTO the branch, the
-    ``concat`` appears only as a sub-expression of a call argument
-    (``derivekeypair (slice (concat y0_pq y0_t) ...)``), and the branch may nest
-    further ``if``s. So the search is over every assignment RHS and call argument
-    in the branch, recursively.
-    """
-    if not isinstance(stmt, ec_ast.If):
-        return False
-    if "=" not in stmt.guard or stmt.guard.lstrip().startswith("!"):
-        return False
-    return _branch_uses_concat(stmt.then_body)
-
-
 def _branch_uses_concat(stmts: Sequence[ec_ast.EcStmt]) -> bool:
     """True when some assignment RHS or call argument in ``stmts`` (descending
     into nested ``if``s) references a ``concat_`` op."""
@@ -6334,11 +5232,6 @@ def _branch_uses_concat(stmts: Sequence[ec_ast.EcStmt]) -> bool:
         ):
             return True
     return False
-
-
-def _count_reprogram_ifs(body: list[ec_ast.EcStmt]) -> int:
-    """Number of reprogramming ``if``s at the top level of ``body``."""
-    return sum(1 for s in _exec_stmts(body) if _is_reprogram_if(s))
 
 
 def _collapse_all_ifs(body: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
@@ -6358,77 +5251,6 @@ def _collapse_all_ifs(body: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
     return out
 
 
-def _slice_concat_axioms(collapsed: list[ec_ast.EcStmt]) -> list[str]:
-    """The ``slice_concat_left/right`` axiom names for the reprogramming concat.
-
-    The reprogramming then-branch uses ``concat_<MID>_to_<Z> a b`` -- as its own
-    assignment RHS, or (when the canonicalizer sank the seed-consuming
-    computation into the branch) only as a sub-expression of a call argument.
-    The exporter emits ``slice_concat_left_<MID>_<Z>`` / ``..._right_...`` (see
-    the binding-proof axiom preamble). Discharges the derived-seed argument
-    equalities ``slice_pq (concat y0_pq y0_t) = y0_pq`` at the closing ``smt``.
-    """
-    axioms: list[str] = []
-    for stmt in _exec_stmts(collapsed):
-        if isinstance(stmt, ec_ast.Assign):
-            text = stmt.rhs
-        elif isinstance(stmt, ec_ast.Call):
-            text = stmt.args
-        else:
-            continue
-        for op in re.findall(r"\bconcat_\w+", text):
-            if "_to_" not in op:
-                continue
-            mid, _, z = op[len("concat_") :].partition("_to_")
-            axioms.append(f"slice_concat_left_{mid}_{z}")
-            axioms.append(f"slice_concat_right_{mid}_{z}")
-    # preserve order, drop duplicates
-    seen: set[str] = set()
-    unique: list[str] = []
-    for a in axioms:
-        if a not in seen:
-            seen.add(a)
-            unique.append(a)
-    return unique
-
-
-def _lazyro_front_swaps(
-    body: list[ec_ast.EcStmt], target_distrs: list[str], side: int
-) -> list[str] | None:
-    """``swap{side}`` tactics hoisting ``body``'s samples to the front in
-    ``target_distrs`` order.
-
-    The reprogramming-Lazy hop's two init bodies draw the same multiset of
-    samples but in different positions (the ``KeyGen`` side interleaves its
-    ``derivekeypair`` between the PQ seed and the ``lambda``/``T`` seeds). To
-    couple them tail-to-front with ``rnd`` the samples must be positionally
-    distribution-aligned; a ``<$`` draw is glob/data-independent of everything
-    before it, so hoisting it up is always an EC-valid ``swap``.
-
-    Each swap addresses a sample by its *occurrence* among the samples
-    (``^ <${k}`` -- the k-th sample, a code-position pattern) and moves it to
-    gap ``0`` (the block front). This is position-ROBUST: it depends only on the
-    sample ordering, not on how many deterministic tuple-unpack assigns EC's
-    ``inline *`` interposes (which the engine's flat state does not reproduce
-    faithfully). Hoisting in *reverse* target order lands the samples at the
-    front in target order. Requires ``target_distrs`` distinct (so the ordering
-    is determined by distribution); returns ``None`` if it cannot align.
-    """
-    cur = [s.distr for s in _exec_stmts(body) if isinstance(s, ec_ast.Sample)]
-    if cur == target_distrs:
-        return []
-    swaps: list[str] = []
-    for distr in reversed(target_distrs):
-        if distr not in cur:
-            return None
-        occ = cur.index(distr) + 1  # 1-indexed occurrence among current samples
-        swaps.append(f"swap{{{side}}} ^ <${{{occ}}} @ 0.")
-        cur.insert(0, cur.pop(occ - 1))
-    if cur != target_distrs:
-        return None
-    return swaps
-
-
 def _front_swaps_stable(
     cur_samples: list[tuple[str, str]], target_distrs: list[str], side: int
 ) -> list[str] | None:
@@ -6438,7 +5260,7 @@ def _front_swaps_stable(
     ``seed_1 <$ d \\ pred1 seed_0`` that reads an earlier sample).
 
     ``cur_samples`` is the ``(var, distr)`` sequence of the body's samples in
-    program order. Unlike :func:`_lazyro_front_swaps` (which addresses each
+    program order. Unlike :func:`_sample_front_swaps` (which addresses each
     sample by its distribution and so requires the distributions distinct), this
     matches the ``k``-th occurrence of a distribution to the ``k``-th occurrence
     in ``target_distrs`` -- a stable pairing, correct for the two-keypair binding
@@ -6454,7 +5276,7 @@ def _front_swaps_stable(
     placed together -- the dependency ``@ 0`` and the dependent ``@ 1`` -- then
     subsequent front hoists push the pair to its slot. Returns ``None`` on a
     non-permutation or an unhandled dependency. For DISTINCT distributions with no
-    dependency it emits the identical swap list as :func:`_lazyro_front_swaps`.
+    dependency it emits the identical swap list as :func:`_sample_front_swaps`.
     """
 
     def _norm(d: str) -> str:
@@ -6528,284 +5350,6 @@ def _front_swaps_stable(
             if swap is not None:
                 swaps.append(swap)
     return swaps
-
-
-def _collapse_to_true(
-    body: list[ec_ast.EcStmt],
-) -> tuple[list[ec_ast.EcStmt], list[tuple[str, bool]]] | None:
-    """Collapse every always-decidable ``if`` in ``body`` to its TRUE branch,
-    returning ``(collapsed_stmts, rconds)`` where ``rconds`` is the ordered list
-    of ``("rcondt"|"rcondf", prefix_has_call)`` selectors for the genuine
-    reprogramming ``if``s only. ``prefix_has_call`` is True when an abstract
-    module call precedes the ``if`` on the taken path, so the caller knows the
-    ``rcond`` side condition needs a call peel before ``auto`` (``auto`` cannot
-    cross an abstract call).
-
-    The two-seed reprogramming init nests reprogramming ``if``s whose always-true
-    branch is NOT always the then-branch: ``if (seed_1 = s0) {concat y0} else {
-    if (seed_1 = s1) {concat y1} else {h}}`` takes the ELSE (``seed_1 = s1``, since
-    ``seed_1`` is the second seed) then the inner then. Each guard is evaluated
-    against the body's own assign chain (built incrementally as the taken branches
-    are descended, so a nested early-return flag is resolvable) + the
-    distinct-sample fact (two different ``<$`` seeds are distinct -- for the lambda
-    seeds provably so via the exclusion sampling; EC re-checks each ``rcondf`` so a
-    wrong pick just rejects).
-
-    An ``rcondt``/``rcondf`` is emitted ONLY for a seed-EQUALITY guard (a genuine
-    reprogramming ``if``). The flat-state ``! _rN`` / bare-``_rN`` early-return
-    artifacts are NOT present in the rendered EC module, so a rcond for them would
-    land on the next real ``if`` and mis-collapse it -- they are collapsed SILENTLY.
-    A single-keypair (SAMEKEY) reprogram yields one ``rcondt``. Returns ``None`` if
-    any guard cannot be decided.
-    """
-    assign_map: dict[str, str] = {}
-    sample_vars: set[str] = set()
-
-    def _split_commas(inner: str) -> list[str]:
-        parts, depth, cur = [], 0, ""
-        for ch in inner:
-            if ch in "([":
-                depth += 1
-            elif ch in ")]":
-                depth -= 1
-            if ch == "," and depth == 0:
-                parts.append(cur)
-                cur = ""
-            else:
-                cur += ch
-        parts.append(cur)
-        return [p.strip() for p in parts]
-
-    def _resolve_tuple(expr: str) -> list[str] | None:
-        expr = expr.strip()
-        if expr in assign_map:
-            return _resolve_tuple(assign_map[expr])
-        if expr.startswith("(") and expr.endswith(")"):
-            return _split_commas(expr[1:-1])
-        return None
-
-    def _resolve(expr: str, depth: int = 0) -> str | None:
-        expr = expr.strip()
-        if depth > 8 or not expr:
-            return None
-        if expr in sample_vars:
-            return expr
-        proj = re.match(r"^(.+)\.`(\d+)$", expr)
-        if proj is not None:
-            comps = _resolve_tuple(proj.group(1))
-            idx = int(proj.group(2))
-            if comps is not None and 1 <= idx <= len(comps):
-                return _resolve(comps[idx - 1], depth + 1)
-            return None
-        if expr in assign_map:
-            return _resolve(assign_map[expr], depth + 1)
-        return None
-
-    def _resolve_bool(expr: str, depth: int = 0) -> bool | None:
-        expr = expr.strip()
-        if depth > 8:
-            return None
-        if expr == "true":
-            return True
-        if expr == "false":
-            return False
-        if expr in assign_map:
-            return _resolve_bool(assign_map[expr], depth + 1)
-        return None
-
-    def _guard_true(guard: str) -> bool | None:
-        g = guard.strip()
-        if g.startswith("!"):
-            val = _resolve_bool(g[1:])
-            return (not val) if val is not None else None
-        if "=" in g and "<>" not in g:
-            lhs, rhs = g.split("=", 1)
-            lv, rv = _resolve(lhs), _resolve(rhs)
-            if lv is not None and rv is not None:
-                if lv == rv:
-                    return True
-                if lv in sample_vars and rv in sample_vars:
-                    return False  # two distinct samples (EC re-checks via rcondf)
-            return None
-        return _resolve_bool(g)  # a bare bool var early-return guard
-
-    seen_call = [False]  # abstract calls emitted so far on the taken path
-
-    def _walk(
-        stmts: list[ec_ast.EcStmt],
-    ) -> tuple[list[ec_ast.EcStmt], list[tuple[str, bool]]] | None:
-        out: list[ec_ast.EcStmt] = []
-        rconds: list[tuple[str, bool]] = []
-        for stmt in stmts:
-            if isinstance(stmt, ec_ast.Sample):
-                sample_vars.add(stmt.var)
-                out.append(stmt)
-            elif isinstance(stmt, ec_ast.Assign):
-                assign_map[stmt.var] = stmt.rhs
-                out.append(stmt)
-            elif isinstance(stmt, ec_ast.If):
-                truth = _guard_true(stmt.guard)
-                if truth is None:
-                    return None
-                g = stmt.guard.strip()
-                if "=" in g and "<>" not in g and not g.startswith("!"):
-                    rconds.append(("rcondt" if truth else "rcondf", seen_call[0]))
-                branch = stmt.then_body if truth else (stmt.else_body or [])
-                sub = _walk(branch)
-                if sub is None:
-                    return None
-                out.extend(sub[0])
-                rconds.extend(sub[1])
-            else:
-                if isinstance(stmt, ec_ast.Call):
-                    seen_call[0] = True
-                out.append(stmt)
-        return out, rconds
-
-    return _walk(body)
-
-
-def _rcond_discharge(selector: str, prefix_has_call: bool) -> str:
-    """The tactic closing one reprogramming-``if`` rcond side condition.
-
-    ``rcondt`` guards are definitionally true (``auto``); ``rcondf`` guards are
-    ``seed_k <> s0`` from the exclusion sampling, discharged with
-    ``smt(supp_dexcepted)``. A reprogramming ``if`` for the SECOND component key
-    sits BEHIND the first component's abstract ``derivekeypair``, which ``auto``
-    cannot cross -- peel every intervening call count-independently. ``auto``
-    leads because the side goal is a ``forall &m, hoare[..]`` and ``wp``/``call``
-    cannot cross the binder; the guard is established by assignments the calls do
-    not touch, so ``(call (_: true); auto)*`` reaches it."""
-    body = "auto"
-    if prefix_has_call:
-        body += "; do? (call (_: true); auto)"
-    if selector == "rcondf":
-        body += "; smt(supp_dexcepted)"
-    return body
-
-
-def _synth_reprogram_lazy_init(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
-    modules: mt.ModuleTranslator,
-    oracle_name: str,
-    left_state0: frog_ast.Game,
-    right_state0: frog_ast.Game,
-    external_module_types: dict[str, str],
-    method_return_types: dict[tuple[str, str], frog_ast.Type],
-) -> tuple[list[str], set[tuple[str, str]], str] | None:
-    """Closing tactic for the CGLazyRO *reprogramming-Lazy* init equiv.
-
-    One side (the materialized ``_Mat`` challenger reduction) reprograms the RO
-    at a fresh seed inside an always-true ``if`` -- ``if (seed = s0) { y <-
-    concat y0_pq y0_t } else { y <- h seed }`` -- then derives the key from the
-    slices; the other side (the ``KeyGen`` reduction) samples the derived seeds
-    directly. :func:`_synth_init_backbone_peel` mis-handles this: the ``if``
-    hides the KEM/NG backbone from :func:`_call_sample_backbone`, so the two
-    sides look like ``[S,S,S]`` vs ``[S,C,S,S,C,C,C]`` and it emits a spurious
-    one-sided dead-call drop.
-
-    This route instead:
-
-    * collapses the always-true reprogramming ``if`` with ``rcondt{i} ^if`` (a
-      code-position selector -- no fragile absolute index), exposing the buried
-      backbone;
-    * reorders the ``KeyGen`` side's samples to the reprogramming side's
-      distribution order (:func:`_lazyro_front_swaps`);
-    * peels the now-common ``derivekeypair; randomscalar; generator; exp``
-      backbone tail-to-front (:func:`_backbone_peel`), coupling each abstract
-      call name-independently and each sample with ``rnd``;
-    * discharges the derived-seed argument equalities
-      (``slice (concat ..) = ..``) with the emitted ``slice_concat`` axioms.
-
-    Gated on exactly one side carrying a reprogramming ``if`` with an aligned
-    backbone, so every other init stays byte-identical. Returns ``None`` where
-    the shape does not match (the caller falls through to the regular peel).
-    """
-    lproj = _project_to_method(left_state0, oracle_name)
-    rproj = _project_to_method(right_state0, oracle_name)
-    if lproj is None or rproj is None:
-        return None
-    lmod = _flat_state_module(
-        modules, "Init_rp_L", lproj, external_module_types, method_return_types, []
-    )
-    rmod = _flat_state_module(
-        modules, "Init_rp_R", rproj, external_module_types, method_return_types, []
-    )
-    if not lmod.procs or not rmod.procs:
-        return None
-    l_body, r_body = lmod.procs[0].body, rmod.procs[0].body
-    l_reprog = _count_reprogram_ifs(l_body)
-    r_reprog = _count_reprogram_ifs(r_body)
-    if (l_reprog > 0) == (r_reprog > 0):
-        return None  # exactly one side must carry the reprogramming if(s)
-    if l_reprog > 0:
-        if_side, other_side, if_body, other_body = 1, 2, l_body, r_body
-    else:
-        if_side, other_side, if_body, other_body = 2, 1, r_body, l_body
-    # Guard-aware collapse of BOTH sides: the two-seed reprogramming nests ``if``s
-    # whose always-true branch is not always the then-branch (keypair-1's
-    # ``if(seed_1 = s0)`` is FALSE -> its ``concat y1`` is in the else). The KeyGen
-    # side may carry a ``! _rN`` early-return wrapper too. ``_collapse_to_true``
-    # picks the true branch per guard and returns the ordered ``rcondt``/``rcondf``
-    # selectors for the seed-equality reprogramming ``if``s only; a single-keypair
-    # reprogram (SAMEKEY) yields one ``rcondt`` on the if side and ``[]`` on the
-    # KeyGen side -- byte-identical.
-    if_collapse = _collapse_to_true(if_body)
-    other_collapse = _collapse_to_true(other_body)
-    if if_collapse is None or other_collapse is None:
-        return None
-    collapsed, rconds_if = if_collapse
-    collapsed_other, rconds_other = other_collapse
-    if_bb = _call_sample_backbone(collapsed)
-    other_bb = _call_sample_backbone(collapsed_other)
-    # the abstract-call callee subsequence must match on both sides
-    if [c for k, c in if_bb if k == "call"] != [c for k, c in other_bb if k == "call"]:
-        return None
-    if_distrs = [
-        s.distr for s in _exec_stmts(collapsed) if isinstance(s, ec_ast.Sample)
-    ]
-    other_samples = [
-        (s.var, s.distr)
-        for s in _exec_stmts(collapsed_other)
-        if isinstance(s, ec_ast.Sample)
-    ]
-    # Reorder the KeyGen side's samples to the reprogram side's distribution order,
-    # stable on repeated distributions and safe with the exclusion (dependent)
-    # lambda seed (:func:`_front_swaps_stable`).
-    swaps = _front_swaps_stable(other_samples, if_distrs, other_side)
-    if swaps is None:
-        return None
-    axioms = _slice_concat_axioms(collapsed)
-    tac = ["proc.", "inline *."]
-    for side, rconds in ((if_side, rconds_if), (other_side, rconds_other)):
-        if not rconds:
-            continue
-        selectors = {sel for sel, _ in rconds}
-        needs_peel = any(has_call for _, has_call in rconds)
-        if len(selectors) == 1:
-            # Count-INDEPENDENT collapse. The rcond list is read off the CANONICAL
-            # flat state, whose reprogramming-``if`` count can exceed the rendered
-            # module's: the canonicalizer inlines the hash result into each use
-            # site (three ``Hash(seed_0)`` occurrences where the EC module reuses
-            # one local twice). A fixed-length list then over-runs
-            # ("invalid split index: ^if"). When every selector agrees, repeat one
-            # collapse until no reprogramming ``if`` is left, which is right for
-            # any count. A wrong repetition cannot sneak through -- the discharge
-            # must close the side goal or the whole iteration reverts, leaving the
-            # ``if`` for the backbone peel to reject.
-            sel = rconds[0][0]
-            tac.append(
-                f"do! ({sel}{{{side}}} ^if; "
-                f"first ({_rcond_discharge(sel, needs_peel)}))."
-            )
-            continue
-        for rcond, prefix_has_call in rconds:
-            tac.append(f"{rcond}{{{side}}} ^if.")
-            tac.append(f"+ {_rcond_discharge(rcond, prefix_has_call)}.")
-    tac += swaps
-    tac += _backbone_peel(collapsed)
-    tac.append("auto => />.")
-    tac.append(f"smt({' '.join(axioms)})." if axioms else "smt().")
-    return (tac, set(), SYNTH_PARAM)
 
 
 def _has_side_local_projection(coupling: str | None) -> bool:
@@ -7161,9 +5705,9 @@ def _synth_init_backbone_peel(  # pylint: disable=too-many-arguments,too-many-po
         # match its sample order, leaving both ``[samples; calls]``.
         align_swaps: list[str] | None
         if _samples_contiguous_front(r_body):
-            align_swaps = _lazyro_front_swaps(l_body, r_distrs, 1)
+            align_swaps = _sample_front_swaps(l_body, r_distrs, 1)
         elif _samples_contiguous_front(l_body):
-            align_swaps = _lazyro_front_swaps(r_body, l_distrs, 2)
+            align_swaps = _sample_front_swaps(r_body, l_distrs, 2)
         else:
             align_swaps = None
         if align_swaps is not None:
@@ -7420,18 +5964,12 @@ def emit_multi_oracle_chain_for_hop(
     init_reduction_repacks: bool = False,
     init_decomposition: bool = False,
     clone_alias: dict[str, str] | None = None,
-    init_coupling: str | None = None,
     full_coupling: str | None = None,
     use_canonical_fields: bool = False,
     stateless_wrapper_bases: frozenset[str] | set[str] | None = None,
-    is_lazyro_honest: bool = False,
-    is_ro_handoff: bool = False,
-    drop_globs: frozenset[str] = frozenset(),
     micro_leg_lookup: (
         Callable[[str, frog_ast.Game, frog_ast.Game, str], list[str] | None] | None
     ) = None,
-    init_tac_override: list[str] | None = None,
-    oracle_tac_override: dict[str, list[str]] | None = None,
     outer_globs: frozenset[str] | None = None,
 ) -> MultiOracleHopChainInfo:
     """Emit the per-oracle per-transform chains for one multi-oracle hop.
@@ -7560,7 +6098,6 @@ def emit_multi_oracle_chain_for_hop(
             det_methods=det_methods or {},
             init_repacks=init_reduction_repacks,
             init_decomposition=init_decomposition,
-            init_coupling=init_coupling,
             full_coupling=full_coupling,
             clone_alias=clone_alias or {},
             inj_acc=inj_methods,
@@ -7568,16 +6105,10 @@ def emit_multi_oracle_chain_for_hop(
             types=types,
             inj_methods_by_module=inj_methods_by_module or {},
             decaps_val_acc=decaps_val_schemes,
-            state_mod_acc=state_modules,
             aux_lemma_acc=aux_lemma_lines,
-            init_tac_override=init_tac_override,
-            oracle_tac_override=oracle_tac_override,
             use_canonical_fields=use_canonical,
             glob_info_by_base=glob_info_by_base,
             stateless_wrapper_bases=stateless_wrapper_bases,
-            is_lazyro_honest=is_lazyro_honest,
-            is_ro_handoff=is_ro_handoff,
-            drop_globs=drop_globs,
             outer_globs=outer_globs,
             micro_leg_lookup=micro_leg_lookup,
         )
@@ -7640,7 +6171,6 @@ def _emit_one_oracle_chain(
     det_methods: dict[str, set[str]],
     init_repacks: bool = False,
     init_decomposition: bool = False,
-    init_coupling: str | None = None,
     full_coupling: str | None = None,
     clone_alias: dict[str, str] | None = None,
     inj_acc: set[tuple[str, str]] | None = None,
@@ -7648,23 +6178,17 @@ def _emit_one_oracle_chain(
     types: tc.TypeCollector | None = None,
     inj_methods_by_module: dict[str, set[str]] | None = None,
     decaps_val_acc: set[str] | None = None,
-    state_mod_acc: set[str] | None = None,
     # Unused since `_challenge_casesplit_route` was retired (2026-08-11): that
     # route was its only consumer, and it is the accumulator the route's shared
     # concat aux-lemmas were emitted through. Kept in the signature because the
     # route itself is kept as a reference and would need it back verbatim; the
     # exporter still threads it, so nothing else has to change either way.
     aux_lemma_acc: list[str] | None = None,  # pylint: disable=unused-argument
-    init_tac_override: list[str] | None = None,
-    oracle_tac_override: dict[str, list[str]] | None = None,
     use_canonical_fields: bool = False,
     glob_info_by_base: (
         dict[str, tuple[tuple[tuple[str, str], ...], frozenset[str]]] | None
     ) = None,
     stateless_wrapper_bases: frozenset[str] | set[str] | None = None,
-    is_lazyro_honest: bool = False,
-    is_ro_handoff: bool = False,
-    drop_globs: frozenset[str] = frozenset(),
     outer_globs: frozenset[str] | None = None,
     micro_leg_lookup: (
         Callable[[str, frog_ast.Game, frog_ast.Game, str], list[str] | None] | None
@@ -7680,16 +6204,8 @@ def _emit_one_oracle_chain(
     oracle-suffixed artifacts).
     """
     # Lazy-RO Honest hashg is trivial: the game answers ``return RO_G_RO.h x`` and
-    # the reduction ``challenger.Hash(x)`` = ``return Honest.h x``; under the pre's
-    # ``RO_G_RO.h{1} = Honest.h{2}`` (every other glob + the derived-key coupling
-    # preserved, since hashg writes nothing) a DIRECT ``proc; inline *; auto``
-    # closes it. The field-threading transitivity (the default per-oracle tactic)
-    # instead breaks here -- its flat-state intermediate specs can't re-establish
-    # the derived-key coupling the pr-lemma's ``call`` invariant carries. Gated on
-    # the lazy-RO Honest hop, so every other proof keeps the transitivity
-    # byte-identical. (Validated on ``.ec-tmp/cg_test.ec``.)
-    if is_lazyro_honest and not is_init and oracle_name == "hashg":
-        return [], [_res_tag(SYNTH_PARAM), "proc. inline *. auto.", "qed."], set()
+    # (A lazy-RO ``hashg`` special case lived here — a construction- and
+    # ORACLE-NAME-keyed closure. Removed under R9.)
     # Inline-equivalent endpoints (the P5 identical-state finding at oracle
     # granularity): when the two endpoints' CANONICAL bodies for this oracle
     # are identical, the raw wrapper modules are inline-equivalent, so a single
@@ -7850,59 +6366,16 @@ def _emit_one_oracle_chain(
     # state-0; a FunctionType one whose EC arrow type is the shared RO's is
     # materialized. Sound: the LazyRO Honest ``initialize`` sets ``rF`` from the
     # shared RO. Empty for non-composite / non-ROM (byte-identical).
+    # (The RO-challenger materialization DETECTOR that populated this map
+    # — a lazy-RO modeling-pattern recognizer — was removed under R9
+    # together with the coupling builders it fed. Left empty, the bridge
+    # specs state no cross-form RO conjuncts, so they never demand a
+    # relation the hop's weakened precondition cannot supply.)
     ro_challenger_by_base: dict[str, list[tuple[str, str]]] = {}
-    for wrapper_expr, raw_state0 in (
-        (left_wrapper_expr, left_states[0]),
-        (right_wrapper_expr, right_states[0]),
-    ):
-        wrapper_base = _ref_base(wrapper_expr)
-        chal_arg = next(
-            (a for a in reversed(_top_level_args(wrapper_expr)) if "(" in a), None
-        )
-        if wrapper_base not in qualified_ref_by_base or chal_arg is None:
-            continue
-        chal_base = _ref_base(chal_arg)
-        pairs: list[tuple[str, str]] = []
-        for fld in raw_state0.fields:
-            if not fld.name.startswith("challenger@") or not isinstance(
-                fld.type, frog_ast.FunctionType
-            ):
-                continue
-            ro_ref = ro_by_arrow.get(modules.types.translate_type(fld.type).text)
-            if ro_ref is not None:
-                own = fld.name[len("challenger@") :]
-                # pylint: disable-next=protected-access
-                pairs.append((f"{chal_base}.{mt._ec_field_name(own)}", ro_ref))
-        if pairs:
-            ro_challenger_by_base[wrapper_base] = pairs
 
-    # LAZY-RO Honest hop cross-coupling (wall 3n-CT-b). The reduction side reads a
-    # FRESH RO sampled inside its Honest challenger (``<Chal>.h``); the game side
-    # reads the pre-existing shared RO (``RO_G_RO.h``). These are DISTINCT RO
-    # values, so the same-side ``<Chal>.h{s} = RO_G_RO.h{s}`` the composite path
-    # emits is FALSE. Replace it with the CROSS identity ``RO_G_RO.h{1} =
-    # <Chal>.h{2}`` (established by the ``hop_N_pr`` byequiv's RO coupling), keyed
-    # by which flat/wrapper bases are reduction-derived. ``lazyro_cross`` = (shared
-    # RO ref, challenger RO ref, reduction-side base set).
+    # (The lazy-RO cross-identity coupling special case was removed under
+    # R9 with the flag that fed it.)
     lazyro_cross: tuple[str, str, frozenset[str]] | None = None
-    if is_lazyro_honest:
-        shared_ro_ref = next(iter(ro_by_arrow.values()), None)
-        # The composite reduction wrapper is the one carrying an RO-materialized
-        # challenger field; its detected ``(<Chal>.h, RO_G_RO.h)`` pair names the
-        # challenger RO ref, and its wrapper base tells us which side is reduction.
-        red_wrapper = next(iter(ro_challenger_by_base), None)
-        chal_h_ref = (
-            ro_challenger_by_base[red_wrapper][0][0]
-            if red_wrapper is not None and ro_challenger_by_base[red_wrapper]
-            else None
-        )
-        if shared_ro_ref is not None and chal_h_ref is not None:
-            red_is_right = red_wrapper == _ref_base(right_wrapper_expr)
-            red_mods = right_mods if red_is_right else left_mods
-            red_wrapper_expr = right_wrapper_expr if red_is_right else left_wrapper_expr
-            red_bases = {_ref_base(mod_ref(m)) for m in red_mods}
-            red_bases.add(_ref_base(red_wrapper_expr))
-            lazyro_cross = (shared_ro_ref, chal_h_ref, frozenset(red_bases))
     # Hoist-pair cache invariants (Move 3c). ROM chains (canonical field
     # naming) are out of the v1 scope -- their consumers then decline via
     # the enabling-coupling gate, an honest admit. Empty for every chain
@@ -7927,7 +6400,7 @@ def _emit_one_oracle_chain(
     coupling = _make_field_aware_coupling(
         fields_by_base,
         survivor_map,
-        [p.name for p in flat_params if p.name not in drop_globs] + ro_module_names,
+        [p.name for p in flat_params] + ro_module_names,
         _chain_role_map(norm_left, norm_right, survivor_map),
         qualified_ref_by_base,
         canonical_by_base,
@@ -8203,25 +6676,8 @@ def _emit_one_oracle_chain(
         return _mark_evidence_only(kept)
 
     if is_init:
-        if init_tac_override is not None:
-            # Exporter-computed whole-init tactic (the two-KEM reprogram-equiv
-            # hop, built off the RENDERED modules -- flat-state positions/names
-            # provably diverge there). Validated by hand on both toolchains.
-            # A ``transitivity``-headed override is a PROC-level tactic and
-            # must not sit under ``proc.`` (the tail-gap seed-split init).
-            _o0 = init_tac_override[0].lstrip()
-            _o1 = init_tac_override[1].lstrip() if len(init_tac_override) > 1 else ""
-            hdr = (
-                []
-                if _o0.startswith("transitivity")
-                or (_o0 == "symmetry." and _o1.startswith("transitivity"))
-                else ["proc."]
-            )
-            return (
-                _evidence_only_chunks(),
-                [_res_tag(SYNTH_PARAM), *hdr, *init_tac_override, "qed."],
-                set(),
-            )
+        # (The exporter-computed whole-init override consumption lived
+        # here; the channel was removed under R9.)
         proj_l = _project_to_method(left_states[-1], oracle_name)
         proj_r = _project_to_method(right_states[-1], oracle_name)
         last_states_match = (
@@ -8229,50 +6685,9 @@ def _emit_one_oracle_chain(
             and proj_r is not None
             and proj_l.methods[0] == proj_r.methods[0]
         )
-        # Seedbased PK binding: the coupling carries the ek-DERIVATION
-        # ``(R.ek, R.seed) = DeriveKeyPair_ev(R.seed)`` (contains ``ev_``),
-        # which ``proc; inline *`` cannot prove (unpredictable inline names).
-        # Route through the flat-state ev-twin transitivity. Gated on the
-        # ev-form so every non-ek init is byte-identical.
-        if (
-            last_states_match
-            and full_coupling is not None
-            and "ev_" in full_coupling
-            and clone_alias
-        ):
-            ek_twin = _synth_init_ek_twin(
-                modules,
-                oracle_name,
-                left_states[0],
-                right_states[0],
-                external_module_types,
-                method_return_types,
-                flat_params,
-                det_methods,
-                clone_alias,
-                full_coupling,
-                hop_index=hop_index,
-            )
-            if ek_twin is not None:
-                return ek_twin
-        # CGLazyRO reprogramming-Lazy init: one side reprograms the RO inside an
-        # always-true ``if`` (hiding the KEM/NG backbone from the backbone peel,
-        # which would emit a spurious one-sided dead-call drop). Collapse the
-        # ``if`` (``rcondt ^if``), reorder the KeyGen side's samples, and peel
-        # the now-common backbone. Gated on exactly one side carrying the
-        # reprogramming ``if`` with an aligned backbone, so every other init is
-        # byte-identical.
-        reprogram = _synth_reprogram_lazy_init(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-        )
-        if reprogram is not None:
-            tactic, pres, rung = reprogram
-            return _evidence_only_chunks(), [_res_tag(rung), *tactic, "qed."], pres
+        # (The construction-keyed init closers that stood here — the
+        # ek-derivation twin, the reprogramming-lazy collapse — were
+        # removed under R9.)
         # The backbone peel operates on the FIRST flat states (the raw wrappers
         # the init lemma actually relates), so it is valid even when the LAST
         # states diverge: a chain transform can unpack one side's packed key
@@ -8367,111 +6782,12 @@ def _emit_one_oracle_chain(
                 [_res_tag(SYNTH_PARAM), *reorder, "qed."],
                 set(),
             )
-        # KDF-key substitution: the reorder above declines because the two sides
-        # do NOT run the same calls -- one carries an extra `deterministic
-        # injective` encoding whose result is the other's directly-drawn key. It
-        # is the ESTABLISHING hop of the IND-CCA `initialize` front, so it also
-        # has to relate two differently-bracketed KDF inputs. ``None`` off-shape,
-        # so every other init stays byte-identical.
-        substitution = _synth_kdf_key_substitution(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            flat_params,
-            det_methods,
-            inj_methods_by_module or {},
-            clone_alias or {},
-            types,
-            bij_acc,
-            left_wrapper_expr,
-            right_wrapper_expr,
-        )
-        if substitution is not None:
-            return (
-                _evidence_only_chunks(),
-                [_res_tag(SYNTH_PARAM), *substitution, "qed."],
-                set(),
-            )
-        # KDF-key substitution through FLAT TWINS: the same shape when the swap
-        # aligner above cannot fire at all -- a same-module encode reorder one
-        # way, the challenger-repack travel conflict the other (the two-KEM
-        # CK/UK cells). ``None`` off-shape, so every other init and every
-        # single-KEM cell stays byte-identical.
-        twin_sub = _synth_kdf_substitution_twin(
-            modules,
-            oracle_name,
-            left_states[0],
-            right_states[0],
-            external_module_types,
-            method_return_types,
-            flat_params,
-            det_methods,
-            inj_methods_by_module or {},
-            clone_alias or {},
-            types,
-            bij_acc,
-            left_wrapper_expr,
-            right_wrapper_expr,
-            full_coupling,
-            hop_index,
-        )
-        if twin_sub is not None:
-            ks_extra, ks_body, ks_names = twin_sub
-            if state_mod_acc is not None:
-                state_mod_acc.update(ks_names)
-            return ks_extra, [_res_tag(SYNTH_PARAM), *ks_body, "qed."], set()
-        # ek-twin fallback when the last states diverge. The ek-derivation twin
-        # route (tried above only when ``last_states_match``) builds its
-        # transitivity entirely off the FIRST flat states -- the raw-wrapper
-        # ``initialize`` the lemma actually relates -- so a divergent LAST state
-        # is irrelevant to it. The seedbased PK Breakable game unpacks its packed
-        # DecapsKey in ``Challenge`` (a post-init oracle), so the canonicalizer
-        # splits that field in the LAST state (``last_states_match=False``) while
-        # the raw-wrapper init is unchanged; without this fallback that hop_0
-        # admits though the identical hop_2 (Unbreakable, no unpack) closes. Same
-        # first-state reasoning as the backbone peel's last-states-diverge relax.
-        if (
-            not last_states_match
-            and full_coupling is not None
-            and "ev_" in full_coupling
-            and clone_alias
-        ):
-            ek_twin = _synth_init_ek_twin(
-                modules,
-                oracle_name,
-                left_states[0],
-                right_states[0],
-                external_module_types,
-                method_return_types,
-                flat_params,
-                det_methods,
-                clone_alias,
-                full_coupling,
-                hop_index=hop_index,
-            )
-            if ek_twin is not None:
-                return ek_twin
+        # (The KDF-substitution init closers that stood here were
+        # removed under R9.)
+        # (The divergent-last-state ek-twin fallback was removed under R9.)
         if last_states_match:
-            # Backbone reorder (same multiset, different order, functionalizable
-            # NG det calls): the functional-twin route.
-            twin = _synth_init_twin_reorder(
-                modules,
-                oracle_name,
-                left_states[0],
-                right_states[0],
-                external_module_types,
-                method_return_types,
-                flat_params,
-                det_methods,
-                clone_alias or {},
-                init_coupling,
-                hop_index=hop_index,
-            )
-            if twin is not None:
-                return twin
+            # (The construction-keyed twin-reorder init closer was
+            # removed under R9.)
             if full_coupling is not None and clone_alias:
                 plain = _synth_init_plain_reorder(
                     modules,
@@ -8514,46 +6830,16 @@ def _emit_one_oracle_chain(
                 )
                 if deleg is not None:
                     return deleg
-            reprog_init = _synth_init_ro_reprogram(
-                modules,
-                oracle_name,
-                left_states[0],
-                right_states[0],
-                external_module_types,
-                method_return_types,
-                flat_params,
-                det_methods,
-                clone_alias or {},
-                types,
-                full_coupling,
-                left_wrapper_expr,
-                right_wrapper_expr,
-                hop_index,
-            )
-            if reprog_init is not None:
-                if state_mod_acc is not None:
-                    state_mod_acc.add(f"Mid_{hop_index}")
-                return reprog_init
+            # (The RO-reprogramming init closer was removed under R9.)
             return (
                 _evidence_only_chunks(),
                 _init_backbone_admit(hop_index, oracle_name),
                 set(),
             )
 
-    # Exporter-computed whole-oracle tactic, keyed by oracle name. Used where the
-    # tactic needs the RENDERED WRAPPER bodies: EC's ``seq``/``rcondt`` indices
-    # count wrapper statements, and the flat states cannot supply them once the
-    # engine has inlined a challenger oracle into the body (each inlined call
-    # collapses to one flat statement but expands to three under EC's ``inline``).
-    # Same rationale as ``init_tac_override``, one level finer.
-    if not is_init and oracle_tac_override and oracle_name in oracle_tac_override:
-        body = oracle_tac_override[oracle_name]
-        # A partial override -- one that carries the derivation as far as it is
-        # proven and leaves the rest open -- is a GUIDED ADMIT, not synth-param.
-        # Tagging it synth-param would inflate the ladder tally for a body that
-        # still admits.
-        rung = ADMIT_GUIDED if any(t.strip() == "admit." for t in body) else SYNTH_PARAM
-        return ([], [_res_tag(rung), "proc.", *body, "qed."], set())
+    # (The per-oracle tactic-override consumption lived here — the
+    # exporter-computed whole-oracle bodies. The channel was removed
+    # under R9: the exporter knows languages, not cryptography.)
 
     # ALL TWELVE WHOLE-ORACLE ENDPOINT ROUTES ARE RETIRED (2026-08-11).
     #
@@ -8807,8 +7093,7 @@ def _emit_one_oracle_chain(
             "qed.",
         ]
     elif rom_stateless_oracle and (
-        is_ro_handoff
-        or _ref_base(left_wrapper_expr) in (stateless_wrapper_bases or set())
+        _ref_base(left_wrapper_expr) in (stateless_wrapper_bases or set())
         or _ref_base(right_wrapper_expr) in (stateless_wrapper_bases or set())
     ):
         # Stateless RO oracle where one wrapper is a STATELESS reduction (holds no
@@ -8854,7 +7139,14 @@ def _emit_one_oracle_chain(
             "qed.",
         ]
     elif not _bridge_specs_compose(
-        coupling, left_wrapper_expr, l0, r0, full_coupling, fields_by_base
+        coupling,
+        left_wrapper_expr,
+        right_wrapper_expr,
+        l0,
+        r0,
+        full_coupling,
+        fields_by_base,
+        glob_info_by_base,
     ):
         # The chain closed every leg, but its wrapper<->flat bridge cannot
         # compose with this hop's own precondition, so emitting it would
@@ -9010,10 +7302,14 @@ def _oracle_is_pure_of_args(game: frog_ast.Game, oracle_name: str) -> bool:
 def _bridge_specs_compose(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     coupling: CouplingFn,
     left_wrapper: str,
+    right_wrapper: str,
     first_flat: str,
     last_flat: str,
     full_coupling: str | None,
     fields_by_base: dict[str, list[str]],
+    glob_info_by_base: (
+        dict[str, tuple[tuple[tuple[str, str], ...], frozenset[str]]] | None
+    ) = None,
 ) -> bool:
     """Can the chain's wrapper<->flat bridge compose with the hop's own spec?
 
@@ -9053,7 +7349,59 @@ def _bridge_specs_compose(  # pylint: disable=too-many-arguments,too-many-positi
     """
     if not full_coupling:
         return True
-    if not _WHOLE_GLOB_EQ_RE.fullmatch(coupling(left_wrapper, first_flat).strip()):
+    # FIELD COVERAGE of the two wrapper<->flat bridges. A FIELD-WISE
+    # bridge whose spec leaves an endpoint flat field unmentioned states
+    # an obligation nothing supplies: the flat state carries the field
+    # (e.g. a challenger-absorbed ``Function`` value) but no conjunct
+    # relates it to the wrapper side, so the bridge leg's closing tactic
+    # runs and leaves the goal open -- a 0-new-admit file EasyCrypt
+    # rejects. Declining keeps the honest admission instead. Erring
+    # toward declining is the safe direction: a false decline adds a
+    # visible admission; a false accept rejects the whole file.
+    # WHOLE-GLOB middle spec between endpoint flat states whose glob
+    # SIGNATURES differ is ILL-TYPED (EC: "no matching operator, named
+    # `='" -- a typing failure that reads like a solver one). Refuse.
+    if glob_info_by_base is not None:
+        sig_l = glob_info_by_base.get(_ref_base(first_flat))
+        sig_r = glob_info_by_base.get(_ref_base(last_flat))
+        if (
+            sig_l is not None
+            and sig_r is not None
+            and sig_l != sig_r
+            and _WHOLE_GLOB_EQ_RE.fullmatch(coupling(first_flat, last_flat).strip())
+        ):
+            return False
+    left_bridge = coupling(left_wrapper, first_flat).strip()
+    right_bridge = coupling(last_flat, right_wrapper).strip()
+    # PACKED-vs-COMPONENT seam: when the hop's own coupling PROJECTS a
+    # wrapper field's components (``ek0{1}.`1 = ...``) the field is a
+    # product the chain has split; a bridge conjunct that pairs the same
+    # field UNPROJECTED with one flat field is ill-typed (EC: "no
+    # matching operator, named `='"). The relation between the packed
+    # value and its components was the deleted builders' content, so
+    # decline to the honest admit.
+    projected = set(
+        re.findall(r"\.(\w+)\{\d\}\.`\d", full_coupling)
+        + re.findall(r"\.(\w+)\.`\d\{\d\}", full_coupling)
+    )
+    if projected:
+        for text in (left_bridge, right_bridge):
+            for packed_field in projected:
+                if re.search(r"\." + re.escape(packed_field) + r"\{\d\}(?!\.`)", text):
+                    return False
+    for flat_ref, bridge_text in (
+        (first_flat, left_bridge),
+        (last_flat, right_bridge),
+    ):
+        if _WHOLE_GLOB_EQ_RE.fullmatch(bridge_text):
+            continue
+        mentioned_bridge = set(_RENAME_TOKEN_RE.findall(bridge_text))
+        if any(
+            f not in mentioned_bridge and f.rsplit("_", 1)[-1] not in mentioned_bridge
+            for f in fields_by_base.get(_ref_base(flat_ref), ())
+        ):
+            return False
+    if not _WHOLE_GLOB_EQ_RE.fullmatch(left_bridge):
         return True
     needed = set(fields_by_base.get(_ref_base(first_flat), ())) | set(
         fields_by_base.get(_ref_base(last_flat), ())
@@ -10118,1041 +8466,7 @@ def _real_name(var: str, name_map: dict[str, str], delegate: str) -> str | None:
     return None if delegate and var.startswith(f"{delegate}_") else var
 
 
-def _synth_kdf_key_substitution(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
-    modules: mt.ModuleTranslator,
-    oracle_name: str,
-    left_state0: frog_ast.Game,
-    right_state0: frog_ast.Game,
-    external_module_types: dict[str, str],
-    method_return_types: dict[tuple[str, str], frog_ast.Type],
-    flat_params: list[ec_ast.ModuleParam],
-    det_methods: dict[str, set[str]],
-    inj_methods_by_module: dict[str, set[str]],
-    clone_alias: dict[str, str],
-    types: tc.TypeCollector | None,
-    bij_acc: set[tuple[str, str, str, str]] | None,
-    left_wrapper_expr: str = "",
-    right_wrapper_expr: str = "",
-    key_conj_out: list[str] | None = None,
-) -> list[str] | None:
-    """Closing tactic for a KDF-KEY-SUBSTITUTION init hop, or ``None``.
-
-    The IND-CCA ``initialize`` shape where one endpoint derives the KDF key by
-    ENCODING a challenger-drawn shared secret and the other draws that key
-    directly. Its three components, all of which have to line up at once:
-
-    1. a REORDER -- the two sides run the same abstract calls, but one draws the
-       key before its key generation and the other after its encapsulation
-       (:func:`_event_align_swaps`, which unlike the bundled-delegate reorder
-       must move a SAMPLE as well as a call);
-    2. a one-sided ``deterministic injective`` ENCODING call, dropped with its
-       ``_det`` axiom once its result has been characterized;
-    3. the two KDF inputs built from the same leaves under DIFFERENT bracketings
-       -- the encoding side nests everything to the left, the other prepends its
-       key to a separately-built ``rest`` -- closed by the requested N-piece
-       regrouping law.
-
-    The cryptographic content is (2)+(3)'s coupling: the two draws agree because
-    an injective ENDO-map on a finite type is bijective, so encoding a uniform
-    shared secret is uniform. That bijectivity is DERIVED from the licensed
-    ``_inj`` axiom (``bij_acc``), not assumed.
-
-    Everything is read off the FIRST FLAT STATES, which already have the
-    delegate inlined -- they ARE the post-``inline *`` bodies, statement for
-    statement -- and every correspondence (which local pairs with which, which
-    state variables hold equal values) is derived by RESOLVING assignments back
-    to backbone events (:func:`_assign_env`), never by matching names.
-
-    Declines to ``None`` off-shape, so every other init stays byte-identical.
-
-    ``key_conj_out`` switches the route to PROBE mode: the substitution conjunct
-    (see :func:`kdf_substitution_key_conjunct`) is appended to it and the route
-    returns ``None`` without registering its lemma requests or building a
-    tactic. The hop's COUPLING has to state that conjunct -- the consuming
-    ``decaps`` lemma needs it and only this derivation knows the two variables --
-    but the coupling is computed before any tactic, so it cannot be recovered
-    from the emitted body.
-    """
-    if types is None or bij_acc is None:
-        return None
-    lproj = _project_to_method(left_state0, oracle_name)
-    rproj = _project_to_method(right_state0, oracle_name)
-    if lproj is None or rproj is None:
-        return None
-    lmod = _flat_state_module(
-        modules, "Init_ks_L", lproj, external_module_types, method_return_types, []
-    )
-    rmod = _flat_state_module(
-        modules, "Init_ks_R", rproj, external_module_types, method_return_types, []
-    )
-    if not lmod.procs or not rmod.procs:
-        return None
-
-    def _body(mod: ec_ast.Module) -> tuple[list[ec_ast.EcStmt], str]:
-        body = _exec_stmts(mod.procs[0].body)
-        ret = next((s.expr for s in body if isinstance(s, ec_ast.Return)), "")
-        return [s for s in body if not isinstance(s, ec_ast.Return)], ret
-
-    (l_exec, l_ret), (r_exec, r_ret) = _body(lmod), _body(rmod)
-
-    # --- (1) which side carries the extra encoding call ----------------------
-    l_calls = Counter(s.callee for s in l_exec if isinstance(s, ec_ast.Call))
-    r_calls = Counter(s.callee for s in r_exec if isinstance(s, ec_ast.Call))
-    extra_l, extra_r = l_calls - r_calls, r_calls - l_calls
-    if sum(extra_l.values()) == 1 and not extra_r:
-        enc_side, oth_side = 1, 2
-    elif sum(extra_r.values()) == 1 and not extra_l:
-        enc_side, oth_side = 2, 1
-    else:
-        return None
-    enc_exec, oth_exec = (l_exec, r_exec) if enc_side == 1 else (r_exec, l_exec)
-    enc_ret, oth_ret = (l_ret, r_ret) if enc_side == 1 else (r_ret, l_ret)
-    callee = next(iter((extra_l or extra_r).elements()))
-    enc_calls = [
-        s for s in enc_exec if isinstance(s, ec_ast.Call) and s.callee == callee
-    ]
-    if len(enc_calls) != 1:
-        return None
-    enc_call = enc_calls[0]
-    if "." not in callee:
-        return None
-    mod_name, meth = callee.rsplit(".", 1)
-    if meth not in det_methods.get(mod_name, set()):
-        return None
-    if meth not in inj_methods_by_module.get(mod_name, set()):
-        return None
-    if len(_app_args(enc_call.args.replace(",", " "))) != 1:
-        return None  # the endo-map argument must be the method's ONLY one
-    alias = clone_alias.get(mod_name)
-    if alias is None:
-        return None
-
-    # --- (2) align the two backbones ----------------------------------------
-    enc_ev, oth_ev = _bd_events(enc_exec), _bd_events(oth_exec)
-    enc_stmt_ev = [s for s in enc_exec if _is_bb_stmt(s)]
-    pos = enc_stmt_ev.index(enc_call)
-    enc_ev_noe = enc_ev[:pos] + enc_ev[pos + 1 :]
-    if sorted(enc_ev_noe) != sorted(oth_ev):
-        return None
-    swaps: list[str] = []
-    if enc_ev_noe != oth_ev:
-        got = _event_align_swaps(oth_exec, enc_ev_noe, oth_side)
-        if got is not None:
-            swaps, oth_exec = got
-        else:
-            got = _event_align_swaps(
-                enc_exec, oth_ev[:pos] + [enc_ev[pos]] + oth_ev[pos:], enc_side
-            )
-            if got is None:
-                return None
-            swaps, enc_exec = got
-        enc_ev, oth_ev = _bd_events(enc_exec), _bd_events(oth_exec)
-        enc_stmt_ev = [s for s in enc_exec if _is_bb_stmt(s)]
-        pos = enc_stmt_ev.index(enc_call)
-        if enc_ev[:pos] + enc_ev[pos + 1 :] != oth_ev:
-            return None
-    oth_stmt_ev = [s for s in oth_exec if _is_bb_stmt(s)]
-
-    # --- (3) the coupled draw: the encoding's argument IS a sampled value ----
-    env_e, env_o = _assign_env(enc_exec), _assign_env(oth_exec)
-    arg_src = _resolve_expr(enc_call.args, env_e)
-    coupled = next(
-        (
-            j
-            for j, s in enumerate(enc_stmt_ev)
-            if isinstance(s, ec_ast.Sample) and s.var == arg_src
-        ),
-        None,
-    )
-    if coupled is None or coupled >= pos:
-        return None
-    sample_e = enc_stmt_ev[coupled]
-    sample_o = oth_stmt_ev[coupled]
-    if not isinstance(sample_e, ec_ast.Sample) or not isinstance(
-        sample_o, ec_ast.Sample
-    ):
-        return None
-    if sample_o.distr != sample_e.distr:
-        return None
-
-    # --- (4) the two KDF inputs, and the regrouping law that relates them ----
-    op_names = types.concat_op_names()
-    kdf_e, kdf_o = enc_stmt_ev[-1], oth_stmt_ev[-1]
-    if not isinstance(kdf_e, ec_ast.Call) or not isinstance(kdf_o, ec_ast.Call):
-        return None
-    chain_e = _concat_chain(_resolve_expr(kdf_e.args, env_e), op_names)
-    whole_o = _resolve_expr(kdf_o.args, env_o)
-    head_o, rest_o = _app_head(whole_o)
-    if chain_e is None or head_o not in op_names:
-        return None
-    pre_args = _app_args(rest_o)
-    if len(pre_args) != 2 or _strip_outer_parens(pre_args[0]) != sample_o.var:
-        return None
-    chain_o = _concat_chain(_strip_outer_parens(pre_args[1]), op_names)
-    left_ops, left_leaves = chain_e
-    if chain_o is None or left_leaves[0] != enc_call.var:
-        return None
-    # Compare the two leaf lists by the EVENT that produced each leaf, not by
-    # name: the same encode/get call is `_r4` on one side and `_r3` on the
-    # other, and the encoding call the encoding side carries shifts every event
-    # index after it, so the enc-side slots are numbered with it removed.
-    slot_e = {
-        s.var: j
-        for j, s in enumerate(enc_stmt_ev[:pos] + enc_stmt_ev[pos + 1 :])
-        if isinstance(s, (ec_ast.Call, ec_ast.Sample))
-    }
-    slot_o = {
-        s.var: j
-        for j, s in enumerate(oth_stmt_ev)
-        if isinstance(s, (ec_ast.Call, ec_ast.Sample))
-    }
-    if [slot_e.get(v, v) for v in left_leaves[1:]] != [
-        slot_o.get(v, v) for v in chain_o[1]
-    ]:
-        return None
-    regroup = types.probe_concat_regroup(tuple(left_ops), head_o)
-    if regroup is None:
-        return None
-    bs_name = next(
-        (left for op, left, _r, _res in types.concat_ops_seen() if op == left_ops[0]),
-        None,
-    )
-    if bs_name is None:
-        return None
-    # Both REQUESTS are deferred to the end of the route: a gate below can still
-    # decline, and a lemma emitted for a hop that then admits is dead weight in
-    # every export that reaches this shape without closing.
-
-    def _register() -> None:
-        types.request_concat_regroup(tuple(left_ops), head_o)
-        bij_acc.add((mod_name, meth, bs_name, alias))
-
-    # --- (5) the post-``inline *`` names -------------------------------------
-    # Structure came off the flat states; NAMES cannot. The canonicalizer
-    # flattens the reduction's own state and its inlined delegate's into one
-    # field list, while EasyCrypt keeps them qualified by owning module. Resolve
-    # each flat variable to what EasyCrypt will call it, and DROP any conjunct
-    # whose variable is a delegate-inlined local -- EasyCrypt renames those and
-    # no correspondence is recoverable.
-    if pos == 0:
-        return None  # nothing to couple before the encoding call
-    enc_wrap, oth_wrap = (
-        (left_wrapper_expr, right_wrapper_expr)
-        if enc_side == 1
-        else (right_wrapper_expr, left_wrapper_expr)
-    )
-    enc_state, oth_state = (
-        (left_state0, right_state0) if enc_side == 1 else (right_state0, left_state0)
-    )
-    bases = (
-        _module_head(enc_wrap),
-        _wrapper_delegate(enc_wrap),
-        _module_head(oth_wrap),
-        _wrapper_delegate(oth_wrap),
-    )
-    if not all(bases):
-        return None
-    map_e, deleg_e = _flat_name_map(enc_state, bases[0], bases[1])
-    map_o, deleg_o = _flat_name_map(oth_state, bases[2], bases[3])
-    if not deleg_e or not deleg_o:
-        # The delegate object's name is recoverable only from an ``@``-marked
-        # FIELD. Without one, a delegate-inlined LOCAL is indistinguishable from
-        # a reduction local, and the route would name a variable EasyCrypt has
-        # renamed -- so decline rather than emit a tactic that cannot resolve.
-        return None
-    fields_e, fields_o = set(map_e), set(map_o)
-
-    def _enc_name(var: str) -> str | None:
-        return _real_name(var, map_e, deleg_e)
-
-    def _oth_name(var: str) -> str | None:
-        return _real_name(var, map_o, deleg_o)
-
-    # --- (6) the tactic ------------------------------------------------------
-    ev_op = f"{alias}.ev_{meth}"
-    globs = ", ".join(f"glob {p.name}" for p in flat_params)
-    cut_e = enc_exec.index(enc_call)
-    cut_o = oth_exec.index(oth_stmt_ev[pos - 1]) + 1
-    tail_e, tail_o = enc_exec[cut_e + 1 :], oth_exec[cut_o:]
-    live_e = _kdf_live_vars(tail_e, enc_ret)
-    live_o = _kdf_live_vars(tail_o, oth_ret)
-    canon_e = _kdf_canonical(enc_exec[:cut_e], enc_stmt_ev[:pos])
-    canon_o = _kdf_canonical(oth_exec[:cut_o], oth_stmt_ev[:pos])
-    # The coupled draw is a delegate local on at least one side, so state the
-    # coupling over a NAMEABLE variable holding the same value at the cut.
-    key_e = _kdf_holder(canon_e, f"#{coupled}", _enc_name)
-    key_o = _kdf_holder(canon_o, f"#{coupled}", _oth_name)
-    enc_arg = _enc_name(enc_call.args.strip())
-    enc_res = _enc_name(enc_call.var)
-    if key_e is None or key_o is None or enc_arg is None or enc_res is None:
-        return None
-    conj = [f"={{{globs}}}", f"{key_o}{{{oth_side}}} = {ev_op} {key_e}{{{enc_side}}}"]
-    # The coupled draw is the ONE value the two sides do not hold in common --
-    # they hold it up to the encoding. Pairing it as an equality here would
-    # state something false, and the peel would then fail to establish it.
-    coupled_slot = f"#{coupled}"
-
-    def _component_of(val: str) -> tuple[str, str] | None:
-        """``(other-side variable, projection suffix)`` when ``val`` is a
-        COMPONENT of some other-side variable's value, or ``None``.
-
-        The two sides need not store a bundled result the same way: a reduction
-        that runs its own key generation keeps the whole ``(ek, dk)`` pair in one
-        field, while the one that delegates keeps only the key its inlined
-        challenger stored. Canonically those are ``#k`` and ``#k.`2`` -- never
-        equal as whole strings -- so a whole-variable pairing silently loses the
-        correspondence. MEASURED: that loss is exactly why the (green)
-        `hop_5_initialize` could not establish the decapsulation-key premise its
-        `decaps` counterpart consumes.
-        """
-        m = re.fullmatch(r"(.*?)((?:\.`\d+)+)", val)
-        if m is None:
-            return None
-        head, proj = m.group(1), m.group(2)
-        for cand in sorted(k for k, v in canon_o.items() if v == head):
-            if (cand in live_o or cand in fields_o) and _oth_name(cand) is not None:
-                return cand, proj
-        return None
-
-    for var_e, val in sorted(canon_e.items()):
-        if val == coupled_slot:
-            continue
-        name_e = _enc_name(var_e)
-        if name_e is None or not (var_e in live_e or var_e in fields_e):
-            continue
-        paired = False
-        for var_o in sorted(k for k, v in canon_o.items() if v == val):
-            name_o = _oth_name(var_o)
-            if name_o is not None and (var_o in live_o or var_o in fields_o):
-                conj.append(f"{name_e}{{{enc_side}}} = {name_o}{{{oth_side}}}")
-                paired = True
-                break
-        if paired:
-            continue
-        comp = _component_of(val)
-        if comp is not None:
-            conj.append(
-                f"{name_e}{{{enc_side}}} = "
-                f"{_oth_name(comp[0])}{{{oth_side}}}{comp[1]}"
-            )
-    # STATE-LEVEL correspondences: the same pairing restricted to variables that
-    # are FIELDS on BOTH sides. These are the facts that survive the oracle's
-    # return, so they are the ones the hop's COUPLING can state and a later
-    # oracle can consume; the loop above prefers whichever variable holds the
-    # value first, which is often a LOCAL (``RB.ek_PQ{1} = ek_PQ{2}``) and is
-    # therefore unusable outside this lemma.
-    #
-    # They are appended to ``conj`` as well, not only reported: without the field
-    # form in the ``seq`` invariant the tail peel loses the local's relation to
-    # the field it was projected from, and the post cannot be re-derived.
-    # MEASURED on the UG cells, whose KDF input carries an ENCAPSULATION key the
-    # CG one does not -- their `decaps` challenge branch needs
-    # ``RB.ek_PQ{1} = RD.pq_keys{2}.`1`` and got "nothing to rewrite" without it,
-    # because the residual goal was a CONJUNCTION rather than the regrouping
-    # equality.
-    field_names_e, field_names_o = set(map_e.values()), set(map_o.values())
-    state_conj: list[str] = []
-    if key_e in field_names_e and key_o in field_names_o:
-        state_conj.append(conj[1])
-    for var_e, val in sorted(canon_e.items()):
-        if val == coupled_slot or var_e not in fields_e:
-            continue
-        name_e = _enc_name(var_e)
-        if name_e is None:
-            continue
-        hit = next(
-            (
-                k
-                for k in sorted(canon_o)
-                if canon_o[k] == val and k in fields_o and _oth_name(k) is not None
-            ),
-            None,
-        )
-        if hit is not None:
-            state_conj.append(
-                f"{name_e}{{{enc_side}}} = {_oth_name(hit)}{{{oth_side}}}"
-            )
-            continue
-        m = re.fullmatch(r"(.*?)((?:\.`\d+)+)", val)
-        if m is None:
-            continue
-        head = next(
-            (
-                k
-                for k in sorted(canon_o)
-                if canon_o[k] == m.group(1)
-                and k in fields_o
-                and _oth_name(k) is not None
-            ),
-            None,
-        )
-        if head is not None:
-            state_conj.append(
-                f"{name_e}{{{enc_side}}} = "
-                f"{_oth_name(head)}{{{oth_side}}}{m.group(2)}"
-            )
-    conj.extend(c for c in state_conj if c not in conj)
-    if key_conj_out is not None:
-        # PROBE mode: the coupling builder wants the state-level conjuncts only.
-        # Return before ``_register()`` so a probe on a hop this route would not
-        # ultimately close leaves no orphan lemma request behind.
-        key_conj_out.extend(dict.fromkeys(state_conj))
-        return None
-    for var_a, val in sorted(canon_e.items()):
-        if val == coupled_slot or var_a not in fields_e or _enc_name(var_a) is None:
-            continue
-        for var_b in sorted(
-            k
-            for k, v in canon_e.items()
-            if v == val and k > var_a and k in fields_e and _enc_name(k) is not None
-        ):
-            conj.append(
-                f"{_enc_name(var_a)}{{{enc_side}}} = {_enc_name(var_b)}{{{enc_side}}}"
-            )
-    pred = "\n                 /\\ ".join(dict.fromkeys(conj))
-    seq_l, seq_r = (cut_e, cut_o) if enc_side == 1 else (cut_o, cut_e)
-    drop_l, drop_r = (1, 0) if enc_side == 1 else (0, 1)
-    tail_peel: list[str] = []
-    for stmt in reversed([s for s in tail_e if _is_bb_stmt(s)]):
-        tail_peel.append("wp.")
-        tail_peel.append("call (_: true)." if isinstance(stmt, ec_ast.Call) else "rnd.")
-    peel: list[str] = []
-    for j in range(pos - 1, -1, -1):
-        peel.append("  wp.")
-        if j == coupled:
-            peel.append(f"  rnd {ev_op} _bij_g.")
-        elif isinstance(enc_stmt_ev[j], ec_ast.Call):
-            peel.append("  call (_: true).")
-        else:
-            peel.append("  rnd.")
-    _register()
-    return [
-        f"have [_bij_g [_bij_can _bij_inv]] := {mod_name}_{meth}_bij.",
-        "proc.",
-        "inline *.",
-        *swaps,
-        f"seq {seq_l} {seq_r} : ({pred}).",
-        *peel,
-        "  wp.",
-        "  skip => /#.",
-        f"seq {drop_l} {drop_r} : ({pred}",
-        f"                 /\\ {enc_res}{{{enc_side}}} = {key_o}{{{oth_side}}}).",
-        f"+ exists* (glob {mod_name}){{{enc_side}}}, {enc_arg}{{{enc_side}}};"
-        " elim* => _g0 _a0.",
-        f"  call{{{enc_side}}} ({mod_name}_{meth}_det _g0 _a0); skip => /#.",
-        *tail_peel,
-        "skip => /> *.",
-        f"exact {regroup}.",
-    ]
-
-
-def _single_stmt_align_swaps(
-    stmts: list[ec_ast.EcStmt], target: list[tuple[str, str]], side: int
-) -> tuple[list[str], list[ec_ast.EcStmt]] | None:
-    """``swap{side}`` hoists of SINGLE backbone statements into ``target``
-    order, or ``None``.
-
-    The travel-block aligner (:func:`_event_align_swaps`) glues a moved event
-    to its feeding and unpacking assignments, which wedges when a CONSUMER (the
-    CK challenger repack, a tuple literal over three differently-timed
-    components) is glued to a sample that must rise above the assignments
-    feeding the consumer's other components. Here only the event statement
-    itself moves -- sound exactly when it reads nothing a crossed statement
-    writes, which ``_ec_indep`` validates pairwise -- so an argless event (a
-    sample, a nullary keygen) hoists freely while everything glued around it
-    stays put. Declines on any conflict rather than emitting a swap EasyCrypt
-    would reject.
-    """
-    local = _ec_local_vars(stmts)
-    cur = list(stmts)
-    swaps: list[str] = []
-    for slot, want in enumerate(target):
-        events = [(i, s) for i, s in enumerate(cur) if _is_bb_stmt(s)]
-        if len(events) != len(target):
-            return None
-        if _bd_events([events[slot][1]])[0] == want:
-            continue
-        src = next(
-            (i for i, s in events[slot + 1 :] if _bd_events([s])[0] == want), None
-        )
-        if src is None:
-            return None
-        ins = 0 if slot == 0 else events[slot - 1][0] + 1
-        if ins > src:
-            return None
-        moved, crossed = cur[src], cur[ins:src]
-        if not all(_ec_indep(moved, x, local) for x in crossed):
-            return None
-        swaps.append(f"swap{{{side}}} {src + 1} -{src - ins}.")
-        cur = cur[:ins] + [moved] + crossed + cur[src + 1 :]
-    return swaps, cur
-
-
 _PROJ_ARG = re.compile(r"[A-Za-z_]\w*(?:\.`\d+)*")
-
-
-def _one_sided_det_steps(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
-    side: int,
-    stmts: list[ec_ast.EcStmt],
-    stop: ec_ast.Call,
-    q: Callable[[str], str],
-    all_vars: set[str],
-    assigned: set[str],
-    ctr: list[int],
-    clone_alias: dict[str, str],
-) -> list[str] | None:
-    """One ``seq 1 0`` / ``seq 0 1`` step per statement of ``stmts`` up to (not
-    including) ``stop``, functionalizing each det call one-sided.
-
-    A det call gets ``exists* (glob M){i}, <args>{i}; call{i} (M_m_det ...)``
-    with the resulting ``ev_`` fact in the invariant; an assignment gets a
-    ``wp``-proved step stating its rhs (side-tagged, ``q``-qualified). Each
-    call's args must already be ASSIGNED at its own cut (``exists*`` freezes at
-    the cut's initial memory) and be a plain variable or a tuple projection of
-    one -- anything else declines. The memory tag lands on the VARIABLE, before
-    any projection (``RB.t_keys{1}.`1``), which the token-wise tagger produces
-    naturally. Shared by the init twin route and the decaps consumer walk.
-    """
-
-    def _tag(expr: str) -> str:
-        return _IDENT_TOKENS.sub(
-            lambda m: (
-                f"{q(m.group(0))}{{{side}}}"
-                if m.group(0).split(".", 1)[0] in all_vars
-                else m.group(0)
-            ),
-            expr,
-        )
-
-    cut_l, cut_r = ("1", "0") if side == 1 else ("0", "1")
-    steps: list[str] = []
-    for stmt in stmts:
-        if stmt is stop:
-            break
-        if isinstance(stmt, ec_ast.Call):
-            parts = _callee_parts(stmt.callee)
-            if parts is None or parts[0] not in clone_alias:
-                return None
-            cmod, cmeth = parts
-            calias = clone_alias[cmod]
-            args = _split_top_args(stmt.args)
-            if any(not _PROJ_ARG.fullmatch(a) for a in args):
-                return None
-            if any(a.split(".", 1)[0] not in assigned for a in args):
-                return None
-            fact = f"{q(stmt.var)}{{{side}}} = {calias}.ev_{cmeth}" + "".join(
-                f" ({_tag(a)})" for a in args
-            )
-            n = ctr[0]
-            ctr[0] += 1
-            binders = " ".join([f"_g{n}"] + [f"_a{n}_{k}" for k in range(len(args))])
-            cap = ", ".join([f"(glob {cmod}){{{side}}}"] + [_tag(a) for a in args])
-            steps.append(f"seq {cut_l} {cut_r} : (#pre /\\ {fact}).")
-            steps.append(f"+ exists* {cap}; elim* => {binders}.")
-            steps.append(
-                f"  call{{{side}}} ({cmod}_{cmeth}_det {binders}); skip => /#."
-            )
-        elif isinstance(stmt, ec_ast.Assign):
-            fact = f"{q(stmt.var)}{{{side}}} = {_tag(stmt.rhs)}"
-            steps.append(f"seq {cut_l} {cut_r} : (#pre /\\ {fact}).")
-            steps.append("+ wp; skip => /#.")
-        else:
-            return None
-        assigned.add(stmt.var)
-    return steps
-
-
-def _synth_kdf_substitution_twin(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
-    modules: mt.ModuleTranslator,
-    oracle_name: str,
-    left_state0: frog_ast.Game,
-    right_state0: frog_ast.Game,
-    external_module_types: dict[str, str],
-    method_return_types: dict[tuple[str, str], frog_ast.Type],
-    flat_params: list[ec_ast.ModuleParam],
-    det_methods: dict[str, set[str]],
-    inj_methods_by_module: dict[str, set[str]],
-    clone_alias: dict[str, str],
-    types: tc.TypeCollector | None,
-    bij_acc: set[tuple[str, str, str, str]] | None,
-    left_wrapper_expr: str,
-    right_wrapper_expr: str,
-    coupling: str | None,
-    hop_index: int,
-) -> tuple[list[str], list[str], set[str]] | None:
-    """KDF-key substitution through VERBATIM FLAT TWINS, or ``None``.
-
-    The shape :func:`_synth_kdf_key_substitution` closes when its swap aligner
-    can put the two whole backbones in one order -- which the two-KEM cells
-    (CK/UK ``hop_5_initialize``) can NEVER satisfy: one direction needs a
-    SAME-MODULE encode reorder EC's ``swap`` refuses outright, and the other
-    needs the challenger repack to rise above the encapsulation feeding its own
-    third component. Both obstructions dissolve by routing through two flat
-    twins (``left ~ FL ~ FR ~ right``):
-
-    * the outer legs couple each raw wrapper to its own verbatim flat copy --
-      same backbone, same order -- with the name-free backbone peel, so EC's
-      ``inline *`` renaming never surfaces;
-    * only the PROBABILISTIC prefixes need aligning, by hoisting SINGLE argless
-      statements (:func:`_single_stmt_align_swaps`) -- the repack never moves;
-    * the suffix det calls are functionalized ONE-SIDED through their ``_det``
-      axioms, each in its own ``seq`` cut (``exists*`` freezes at the
-      judgment's initial memory, so the args must predate the cut -- gated);
-    * the coupled draw takes the same ``rnd <ev> _bij_g`` bijection, and the
-      final goal is the KDF regrouping -- through the SPLIT2 law when the
-      drawn key is prepended one level deep (``KDFFirstKeyPRF``).
-
-    Derivation + three negative controls on the real CK export:
-    ``ec_templates/indcca_kdf_substitution_twin_TACTIC.txt``. Declines to
-    ``None`` off-shape, so every other init stays byte-identical.
-    """
-    if types is None or bij_acc is None or not coupling:
-        return None
-    lproj = _project_to_method(left_state0, oracle_name)
-    rproj = _project_to_method(right_state0, oracle_name)
-    if lproj is None or rproj is None:
-        return None
-    fl_name = f"KS_FE_{hop_index}"
-    fr_name = f"KS_FO_{hop_index}"
-    lmod = _flat_state_module(
-        modules,
-        fl_name,
-        lproj,
-        external_module_types,
-        method_return_types,
-        flat_params,
-        emit_state_vars=True,
-        no_shadow_fields=True,
-    )
-    rmod = _flat_state_module(
-        modules,
-        fr_name,
-        rproj,
-        external_module_types,
-        method_return_types,
-        flat_params,
-        emit_state_vars=True,
-        no_shadow_fields=True,
-    )
-    if not lmod.procs or not rmod.procs:
-        return None
-
-    def _split(mod: ec_ast.Module) -> tuple[list[ec_ast.EcStmt], str]:
-        body = _exec_stmts(mod.procs[0].body)
-        ret = next((s.expr for s in body if isinstance(s, ec_ast.Return)), "")
-        return [s for s in body if not isinstance(s, ec_ast.Return)], ret
-
-    (l_exec, l_ret), (r_exec, r_ret) = _split(lmod), _split(rmod)
-
-    def _is_det_call(stmt: ec_ast.EcStmt) -> bool:
-        if not isinstance(stmt, ec_ast.Call):
-            return False
-        parts = _callee_parts(stmt.callee)
-        return (
-            parts is not None
-            and parts[1] in det_methods.get(parts[0], set())
-            and parts[0] in clone_alias
-        )
-
-    # --- the extra encoding call (same detection as the swap route) ----------
-    l_calls = Counter(s.callee for s in l_exec if isinstance(s, ec_ast.Call))
-    r_calls = Counter(s.callee for s in r_exec if isinstance(s, ec_ast.Call))
-    extra_l, extra_r = l_calls - r_calls, r_calls - l_calls
-    if sum(extra_l.values()) != 1 or extra_r:
-        # The RIGHT-encoding orientation is a shape to derive, not to guess at
-        # -- every hop this route is validated on encodes on the left.
-        return None
-    enc_exec, oth_exec = l_exec, r_exec
-    enc_ret, oth_ret = l_ret, r_ret
-    enc_mod, oth_mod = lmod, rmod
-    callee = next(iter(extra_l.elements()))
-    enc_calls = [
-        s for s in enc_exec if isinstance(s, ec_ast.Call) and s.callee == callee
-    ]
-    if len(enc_calls) != 1:
-        return None
-    enc_call = enc_calls[0]
-    if "." not in callee:
-        return None
-    mod_name, meth = callee.rsplit(".", 1)
-    if meth not in det_methods.get(mod_name, set()):
-        return None
-    if meth not in inj_methods_by_module.get(mod_name, set()):
-        return None
-    if len(_app_args(enc_call.args.replace(",", " "))) != 1:
-        return None
-    alias = clone_alias.get(mod_name)
-    if alias is None:
-        return None
-
-    # --- prefix/suffix split: everything from the first det call on ----------
-    def _cut(ex: list[ec_ast.EcStmt]) -> int | None:
-        idx = next((i for i, s in enumerate(ex) if _is_det_call(s)), None)
-        return idx
-
-    cut_e, cut_o = _cut(enc_exec), _cut(oth_exec)
-    if cut_e is None or cut_o is None:
-        return None
-    if enc_exec.index(enc_call) < cut_e:
-        return None
-    suffix_e, suffix_o = enc_exec[cut_e:], oth_exec[cut_o:]
-    # The final shared KDF call: last Call on each side, same callee, det.
-    kdf_e = next((s for s in reversed(suffix_e) if isinstance(s, ec_ast.Call)), None)
-    kdf_o = next((s for s in reversed(suffix_o) if isinstance(s, ec_ast.Call)), None)
-    if kdf_e is None or kdf_o is None or kdf_e.callee != kdf_o.callee:
-        return None
-    for stmt in itertools.chain(suffix_e, suffix_o):
-        if isinstance(stmt, ec_ast.Sample):
-            return None
-        if isinstance(stmt, ec_ast.Call) and stmt not in (kdf_e, kdf_o):
-            if not _is_det_call(stmt):
-                return None
-    if any(
-        isinstance(s, ec_ast.Call)
-        for s in suffix_e[suffix_e.index(kdf_e) + 1 :]
-        + suffix_o[suffix_o.index(kdf_o) + 1 :]
-    ):
-        return None
-
-    # --- align the probabilistic prefixes by single-statement hoists ---------
-    pre_e, pre_o = enc_exec[:cut_e], oth_exec[:cut_o]
-    ev_pre_e, ev_pre_o = _bd_events(pre_e), _bd_events(pre_o)
-    if sorted(ev_pre_e) != sorted(ev_pre_o):
-        return None
-    enc_swap_side, oth_swap_side = 1, 2
-    aligned_e, aligned_o = pre_e, pre_o
-    swaps: list[str] = []
-    if ev_pre_e != ev_pre_o:
-        got = _single_stmt_align_swaps(pre_o, ev_pre_e, oth_swap_side)
-        if got is not None:
-            swaps, aligned_o = got
-        else:
-            got = _single_stmt_align_swaps(pre_e, ev_pre_o, enc_swap_side)
-            if got is None:
-                return None
-            swaps, aligned_e = got
-    target_events = _bd_events(aligned_e)
-    if target_events != _bd_events(aligned_o):
-        return None
-
-    # --- the coupled draw: exactly one sample per prefix, same distribution --
-    samples_e = [s for s in aligned_e if isinstance(s, ec_ast.Sample)]
-    samples_o = [s for s in aligned_o if isinstance(s, ec_ast.Sample)]
-    if len(samples_e) != 1 or len(samples_o) != 1:
-        return None
-    sample_e, sample_o = samples_e[0], samples_o[0]
-    if sample_e.distr != sample_o.distr:
-        return None
-    env_e = _assign_env(enc_exec)
-    if _resolve_expr(enc_call.args, env_e) != sample_e.var:
-        return None
-
-    # --- cross-side canonical values, numbered by the ALIGNED prefix ---------
-    # TWO maps per side: the PREFIX-ONLY one drives the seq-invariant pairing
-    # (a suffix-produced local is unassigned at the cut -- pairing it states an
-    # ill-typed or unprovable equality, both measured on the first CK compile),
-    # while the full-body one only resolves suffix det-call ARGS for the leaf
-    # correspondence below.
-    ev_stmts_e = [s for s in aligned_e if _is_bb_stmt(s)]
-    ev_stmts_o = [s for s in aligned_o if _is_bb_stmt(s)]
-    canon_e = _kdf_canonical(list(aligned_e), ev_stmts_e)
-    canon_o = _kdf_canonical(list(aligned_o), ev_stmts_o)
-    canon_full_e = _kdf_canonical(list(aligned_e) + suffix_e, ev_stmts_e)
-    canon_full_o = _kdf_canonical(list(aligned_o) + suffix_o, ev_stmts_o)
-    coupled_slot = canon_e[sample_e.var]
-    fields_e = {v.name for v in enc_mod.module_vars}
-    fields_o = {v.name for v in oth_mod.module_vars}
-
-    def _q_e(var: str) -> str:
-        return f"{fl_name}.{var}" if var in fields_e else var
-
-    def _q_o(var: str) -> str:
-        return f"{fr_name}.{var}" if var in fields_o else var
-
-    live_e = _kdf_live_vars(suffix_e, enc_ret)
-    live_o = _kdf_live_vars(suffix_o, oth_ret)
-
-    # --- the two KDF inputs and the regrouping law ---------------------------
-    op_names = types.concat_op_names()
-    env_o = _assign_env(oth_exec)
-    chain_e = _concat_chain(_resolve_expr(kdf_e.args, env_e), op_names)
-    whole_o = _resolve_expr(kdf_o.args, env_o)
-    head_o, rest_o = _app_head(whole_o)
-    if chain_e is None or head_o not in op_names:
-        return None
-    left_ops, left_leaves = chain_e
-    if left_leaves[0] != enc_call.var:
-        return None
-    pre_args = _app_args(rest_o)
-    if len(pre_args) != 2:
-        return None
-    first_o = _strip_outer_parens(pre_args[0])
-    oth_leaves: list[str]
-    if first_o == sample_o.var:
-        # k=1: the bare drawn key is prepended -- the ordinary regroup law.
-        chain_o = _concat_chain(_strip_outer_parens(pre_args[1]), op_names)
-        if chain_o is None:
-            return None
-        oth_leaves = chain_o[1]
-        split2 = False
-        regroup = types.probe_concat_regroup(tuple(left_ops), head_o)
-    else:
-        # k=2: the drawn key rides inside the innermost link (KDFFirstKeyPRF's
-        # ``Head (L1 k x) rest`` bracketing) -- the SPLIT2 law.
-        in_head, in_rest = _app_head(first_o)
-        in_args = _app_args(in_rest)
-        if in_head != left_ops[0] or len(in_args) != 2:
-            return None
-        if _strip_outer_parens(in_args[0]) != sample_o.var:
-            return None
-        chain_o = _concat_chain(_strip_outer_parens(pre_args[1]), op_names)
-        if chain_o is None:
-            return None
-        oth_leaves = [_strip_outer_parens(in_args[1])] + chain_o[1]
-        split2 = True
-        regroup = types.probe_concat_regroup_split2(tuple(left_ops), head_o)
-    if regroup is None:
-        return None
-    bs_name = next(
-        (left for op, left, _r, _res in types.concat_ops_seen() if op == left_ops[0]),
-        None,
-    )
-    if bs_name is None:
-        # The bijection lemma is emitted off ``bij_acc``; a tactic naming it
-        # without that registration references a lemma that will not exist.
-        return None
-    # Leaves correspond by the EVENT that produced them: each is a suffix det
-    # call's result, matched by callee + canonically-resolved args over the
-    # aligned prefix slots (names differ per side; slots do not).
-    by_var_e = {s.var: s for s in suffix_e if isinstance(s, ec_ast.Call)}
-    by_var_o = {s.var: s for s in suffix_o if isinstance(s, ec_ast.Call)}
-
-    def _leaf_sig(
-        var: str, by_var: dict[str, ec_ast.Call], canon: dict[str, str]
-    ) -> tuple[str, ...] | None:
-        call = by_var.get(var)
-        if call is None:
-            return None
-        args = tuple(canon.get(a, a) for a in _split_top_args(call.args))
-        return (call.callee,) + args
-
-    if len(left_leaves) != len(oth_leaves) + 1:
-        return None
-    for leaf_e, leaf_o in zip(left_leaves[1:], oth_leaves):
-        sig_e = _leaf_sig(leaf_e, by_var_e, canon_full_e)
-        sig_o = _leaf_sig(leaf_o, by_var_o, canon_full_o)
-        if sig_e is None or sig_e != sig_o:
-            return None
-
-    # --- the middle-leg seq invariant ----------------------------------------
-    globs_list = " /\\ ".join(f"={{glob {p.name}}}" for p in flat_params)
-    globs_set = "={" + ", ".join(f"glob {p.name}" for p in flat_params) + "}"
-    key_e = _kdf_holder(
-        canon_e, coupled_slot, lambda v: _q_e(v) if v in fields_e else None
-    )
-    if key_e is None or sample_o.var not in fields_o:
-        return None
-    ev_op = f"{alias}.ev_{meth}"
-    key_fact = f"{_q_o(sample_o.var)}{{2}} = {ev_op} {key_e}{{1}}"
-    conj: list[str] = [globs_set, key_fact]
-    for var_e, val in sorted(canon_e.items()):
-        if val == coupled_slot:
-            continue
-        if not (var_e in live_e or var_e in fields_e):
-            continue
-        for var_o in sorted(k for k, v in canon_o.items() if v == val):
-            if var_o in live_o or var_o in fields_o:
-                conj.append(f"{_q_e(var_e)}{{1}} = {_q_o(var_o)}{{2}}")
-                break
-        m = re.fullmatch(r"(.*?)((?:\.`\d+)+)", val)
-        if m is None or var_e not in fields_e:
-            continue
-        head_var = next(
-            (k for k in sorted(canon_o) if canon_o[k] == m.group(1) and k in fields_o),
-            None,
-        )
-        if head_var is not None:
-            conj.append(f"{_q_e(var_e)}{{1}} = {_q_o(head_var)}{{2}}{m.group(2)}")
-    for var_a, val in sorted(canon_e.items()):
-        if val == coupled_slot or var_a not in fields_e:
-            continue
-        for var_b in sorted(
-            k for k, v in canon_e.items() if v == val and k > var_a and k in fields_e
-        ):
-            conj.append(f"{_q_e(var_a)}{{1}} = {_q_e(var_b)}{{1}}")
-    inv1 = " /\\ ".join(dict.fromkeys(conj))
-
-    # --- the four leg posts --------------------------------------------------
-    def _real_pairs(
-        state0: frog_ast.Game, wrap: str, mod: ec_ast.Module, twin: str
-    ) -> list[tuple[str, str]] | None:
-        base, deleg = _module_head(wrap), _wrapper_delegate(wrap)
-        if not base or not deleg:
-            return None
-        name_map, deleg_name = _flat_name_map(state0, base, deleg)
-        if not deleg_name:
-            return None
-        out: list[tuple[str, str]] = []
-        for var in mod.module_vars:
-            real = _real_name(var.name, name_map, deleg_name)
-            if real is None:
-                return None
-            out.append((real, f"{twin}.{var.name}"))
-        return out
-
-    pairs_e = _real_pairs(left_state0, left_wrapper_expr, enc_mod, fl_name)
-    pairs_o = _real_pairs(right_state0, right_wrapper_expr, oth_mod, fr_name)
-    if pairs_e is None or pairs_o is None:
-        return None
-
-    def _sub(text: str, pairs: list[tuple[str, str]]) -> str:
-        for real, twin in sorted(pairs, key=lambda p: -len(p[0])):
-            text = text.replace(real, twin)
-        return text
-
-    p1post = " /\\ ".join(
-        ["={res}", globs_list] + [f"{r}{{1}} = {t}{{2}}" for r, t in pairs_e]
-    )
-    p3post = " /\\ ".join(
-        ["={res}", globs_list] + [f"{r}{{2}} = {t}{{1}}" for r, t in pairs_o]
-    )
-    p2post = "={res} /\\ " + _sub(coupling, pairs_e)
-    mpost = "={res} /\\ " + _sub(_sub(coupling, pairs_e), pairs_o)
-
-    # --- the middle-leg suffix steps -----------------------------------------
-    all_vars_e = fields_e | {
-        getattr(s, "var", "") for s in enc_exec if getattr(s, "var", "")
-    }
-    all_vars_o = fields_o | {
-        getattr(s, "var", "") for s in oth_exec if getattr(s, "var", "")
-    }
-    ctr = [0]
-    assigned_e = {getattr(s, "var", "") for s in aligned_e} | fields_e
-    assigned_o = {getattr(s, "var", "") for s in aligned_o} | fields_o
-    steps_e = _one_sided_det_steps(
-        1, suffix_e, kdf_e, _q_e, all_vars_e, assigned_e, ctr, clone_alias
-    )
-    steps_o = _one_sided_det_steps(
-        2, suffix_o, kdf_o, _q_o, all_vars_o, assigned_o, ctr, clone_alias
-    )
-    if steps_e is None or steps_o is None:
-        return None
-
-    # --- the prefix peel -----------------------------------------------------
-    peel: list[str] = []
-    for stmt in reversed([s for s in aligned_e if _is_bb_stmt(s)]):
-        peel.append("  wp.")
-        if isinstance(stmt, ec_ast.Call):
-            peel.append("  call (_: true).")
-        elif stmt is sample_e:
-            peel.append(f"  rnd {ev_op} _bij_g.")
-        else:
-            peel.append("  rnd.")
-
-    def _outer(mod: ec_ast.Module) -> list[str]:
-        leg = ["proc.", "inline *.", *_backbone_peel(mod.procs[0].body)]
-        if _leads_with_det(mod.procs[0].body):
-            leg.append("wp.")
-        leg.append("auto.")
-        return leg
-
-    args_txt = ", ".join(p.name for p in flat_params)
-    tactic: list[str] = [
-        f"have [_bij_g [_bij_can _bij_inv]] := {mod_name}_{meth}_bij.",
-        f"transitivity {fl_name}({args_txt}).{oracle_name}",
-        f"  ({globs_list} ==> {p1post})",
-        f"  ({globs_list} ==> {p2post}).",
-        "smt().",
-        "smt().",
-        *_outer(enc_mod),
-        f"transitivity {fr_name}({args_txt}).{oracle_name}",
-        f"  ({globs_list} ==> {mpost})",
-        f"  ({globs_list} ==> {p3post}).",
-        "smt().",
-        "smt().",
-        "proc.",
-        *swaps,
-        f"seq {cut_e} {cut_o} : ({inv1}).",
-        "+" + peel[0][1:],
-        *peel[1:],
-        "  skip => /#.",
-        *steps_e,
-        *steps_o,
-        "wp. call (_: true). wp. skip => />.",
-        f"smt({regroup}).",
-        *_outer(oth_mod),
-    ]
-    if split2:
-        types.request_concat_regroup_split2(tuple(left_ops), head_o)
-    else:
-        types.request_concat_regroup(tuple(left_ops), head_o)
-    bij_acc.add((mod_name, meth, bs_name, alias))
-    return (
-        [
-            "\n".join(_render_module_decl(enc_mod)),
-            "\n".join(_render_module_decl(oth_mod)),
-        ],
-        tactic,
-        {fl_name, fr_name},
-    )
-
-
-def kdf_substitution_key_conjunct(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-    oracle_name: str,
-    left_game: frog_ast.Game,
-    right_game: frog_ast.Game,
-    left_wrapper_expr: str,
-    right_wrapper_expr: str,
-    types: tc.TypeCollector,
-    type_of_factory: Callable[
-        [dict[str, frog_ast.Type], dict[str, str]],
-        Callable[[frog_ast.Expression], frog_ast.Type],
-    ],
-    external_module_types: dict[str, str],
-    method_return_types: dict[tuple[str, str], frog_ast.Type],
-    flat_module_params: list[ec_ast.ModuleParam] | None = None,
-    det_methods: dict[str, set[str]] | None = None,
-    inj_methods_by_module: dict[str, set[str]] | None = None,
-    clone_alias: dict[str, str] | None = None,
-) -> list[str]:
-    """The KDF-SUBSTITUTION conjuncts for this hop's coupling; ``[]`` off-shape.
-
-    The STATE-level facts the hop's ``initialize`` route proves: the key
-    substitution itself (``<other>.<key>{i} = <M>_c.ev_<enc> <field>{j}`` -- the
-    one value the two endpoints do not share outright, since they hold it up to
-    the deterministic injective ENCODING one of them applies) plus every
-    field-to-field correspondence, including a field paired to a COMPONENT of the
-    other side's bundled one. :func:`_synth_kdf_key_substitution` derives and
-    PROVES all of them, but the coupling is built before any tactic runs, so it
-    is recomputed here through the same derivation rather than restated by a
-    second one that could drift.
-
-    MEASURED CONSEQUENCE, and it is why this exists: without these conjuncts the
-    establishing ``initialize`` hop is happily green -- it proves the facts
-    INTERNALLY and then drops them -- while the consuming ``decaps`` hop's
-    challenge branch is left with exactly them, under a concat congruence, and
-    nothing to discharge them with. A coupling can be too WEAK as well as too
-    strong, and only the consumer reveals the former.
-    """
-    acc: list[str] = []
-    _synth_kdf_key_substitution(
-        mt.ModuleTranslator(types, type_of_factory),
-        oracle_name,
-        left_game,
-        right_game,
-        external_module_types,
-        method_return_types,
-        list(flat_module_params) if flat_module_params else [],
-        det_methods or {},
-        inj_methods_by_module or {},
-        clone_alias or {},
-        types,
-        set(),
-        left_wrapper_expr,
-        right_wrapper_expr,
-        key_conj_out=acc,
-    )
-    return acc
 
 
 def dead_draw_bijection_conjunct(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -11197,67 +8511,6 @@ def dead_draw_bijection_conjunct(  # pylint: disable=too-many-arguments,too-many
         right_wrapper_expr,
     )
     return list(spec.conjuncts) if spec is not None else []
-
-
-def _kdf_holder(
-    canon: dict[str, str], slot: str, real: Callable[[str], str | None]
-) -> str | None:
-    """A NAMEABLE variable holding the value produced by backbone event ``slot``.
-
-    The coupled draw itself is a delegate-inlined local on at least one side --
-    EasyCrypt renames those -- but the value it produced is also held by a
-    reduction field or a reduction local, which survive ``inline *`` under a
-    name the exporter can compute. Deterministic: candidates are scanned in
-    sorted order, so the emitted coupling never depends on dict ordering.
-    """
-    for var in sorted(k for k, v in canon.items() if v == slot):
-        name = real(var)
-        if name is not None:
-            return name
-    return None
-
-
-def _kdf_live_vars(tail: list[ec_ast.EcStmt], ret: str) -> set[str]:
-    """Variables the tail statements or the return expression READ.
-
-    These are the ones a mid-body coupling has to carry across the ``seq``; a
-    variable neither side looks at again needs no conjunct.
-    """
-    out: set[str] = set(_IDENT_TOKENS.findall(ret))
-    for stmt in tail:
-        if isinstance(stmt, ec_ast.Assign):
-            out |= set(_IDENT_TOKENS.findall(stmt.rhs))
-        elif isinstance(stmt, ec_ast.Call):
-            out |= set(_IDENT_TOKENS.findall(stmt.args))
-    return out
-
-
-def _kdf_canonical(
-    prefix: list[ec_ast.EcStmt], events: list[ec_ast.EcStmt]
-) -> dict[str, str]:
-    """``var -> value`` over a CROSS-SIDE vocabulary, for the hop's prefix.
-
-    Each variable is resolved back to the backbone events that produced it
-    (:func:`_assign_env`), then every event result is replaced by its POSITION
-    in the backbone. Two variables -- on the same side or on opposite sides --
-    hold the same value exactly when their canonical strings match, which is how
-    the coupling is built without matching any name.
-    """
-    env = _assign_env(prefix)
-    slots = {
-        s.var: f"#{j}"
-        for j, s in enumerate(events)
-        if isinstance(s, (ec_ast.Call, ec_ast.Sample))
-    }
-    for stmt in prefix:
-        if isinstance(stmt, (ec_ast.Call, ec_ast.Sample)):
-            env.setdefault(stmt.var, stmt.var)
-    out: dict[str, str] = {}
-    for var, val in env.items():
-        out[var] = _IDENT_TOKENS.sub(lambda m: slots.get(m.group(0), m.group(0)), val)
-    for var, slot in slots.items():
-        out[var] = slot
-    return out
 
 
 # A qualified identifier. The dot must be FOLLOWED by a word character: an EC
@@ -11925,18 +9178,6 @@ def _loop_leaf(body: list[ec_ast.EcStmt], chal_side: str) -> list[str]:
     ]
 
 
-def _drop_witness_seeds(stmts: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
-    """``stmts`` without its leading ``<var> <- witness`` seeds."""
-    i = 0
-    while (
-        i < len(stmts)
-        and isinstance(stmts[i], ec_ast.Assign)
-        and cast(ec_ast.Assign, stmts[i]).rhs.strip() == "witness"
-    ):
-        i += 1
-    return stmts[i:]
-
-
 def _if_prefixes_agree(
     game_body: list[ec_ast.EcStmt], red_body: list[ec_ast.EcStmt]
 ) -> bool:
@@ -12198,420 +9439,6 @@ class _GuardedBody(NamedTuple):
 
     guard: str
     body: list[ec_ast.EcStmt]
-
-
-def _guarded_oracle_body(proc: ec_ast.Proc) -> _GuardedBody | None:
-    """``(guard, else-branch)`` for a proc whose whole executable body is ONE
-    ``if`` with an event-free then-branch (the challenge-ciphertext refusal), or
-    ``None`` for any other shape."""
-    stmts = _drop_witness_seeds(
-        [s for s in _exec_stmts(proc.body) if not isinstance(s, ec_ast.Return)]
-    )
-    if len(stmts) != 1 or not isinstance(stmts[0], ec_ast.If):
-        return None
-    node = stmts[0]
-    if not node.else_body or any(_is_bb_stmt(s) for s in node.then_body):
-        return None
-    return _GuardedBody(node.guard, list(node.else_body))
-
-
-def _first_inner_if(body: list[ec_ast.EcStmt]) -> int | None:
-    """Index of the first top-level ``If`` in ``body``, or ``None``."""
-    for i, s in enumerate(body):
-        if isinstance(s, ec_ast.If):
-            return i
-    return None
-
-
-def kdf_substitution_decaps_walk_tacs(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches,too-many-statements
-    lmod: ec_ast.Module,
-    rmod: ec_ast.Module,
-    oracle_name: str,
-    coupling: str,
-    det_methods: dict[str, set[str]],
-    clone_alias: dict[str, str],
-    types: tc.TypeCollector,
-) -> list[str] | None:
-    """The KDF-substitution ``decaps`` WALK, on the two RENDERED reduction
-    modules, or ``None`` off-shape.
-
-    The flat-state route (:func:`_synth_kdf_substitution_decaps`) cannot see
-    the two-KEM cells at all: their KDF-side flat state nests the shared-secret
-    ENCODING inside the challenger ``lookup``'s argument, a position the
-    flat-state renderer cannot express, so the whole method falls back to
-    ``return witness`` and every shape gate reads an empty body. The RENDERED
-    reduction modules carry the same bodies with the calls hoisted and NAMED --
-    the names the tactic's ``seq`` facts must use, since the lemma runs on
-    these very modules -- so this variant reads them instead (the
-    ``oracle_tac_override`` channel, same rationale as the twin-prefix binding
-    route). The challenge branch is walked one det call per ``seq`` cut
-    (:func:`_one_sided_det_steps` -- the same-module encode reorder makes any
-    aligned ladder impossible), the shared KDF call is coupled at the end
-    under the regroup law, and the non-challenge branch keeps the count-free
-    ``do ? rcondf`` + ``do !`` ladder. Derivation + negative controls:
-    ``ec_templates/indcca_kdf_substitution_twin_TACTIC.txt`` (the decaps
-    section).
-    """
-    procs = [
-        next((p for p in m.procs if p.name == oracle_name), None) for m in (lmod, rmod)
-    ]
-    if procs[0] is None or procs[1] is None:
-        return None
-    conj_all = [p.strip() for p in coupling.split(" /\\ ")]
-    params = [p.name for p in procs[0].params]
-    if not params or [p.name for p in procs[1].params] != params:
-        return None
-    fields = [{v.name for v in m.module_vars} for m in (lmod, rmod)]
-    bases = [lmod.name, rmod.name]
-    shapes = [_guarded_oracle_body(cast(ec_ast.Proc, p)) for p in procs]
-    if shapes[0] is None or shapes[1] is None:
-        return None
-    cuts = [_first_inner_if(s.body) for s in shapes]  # type: ignore[union-attr]
-    if cuts[0] is None or cuts[1] is None:
-        return None
-
-    def _guard_ok(gl: str, gr: str) -> bool:
-        def _field(g: str, flds: set[str]) -> str | None:
-            lhs, eq, rhs = g.partition(" = ")
-            if not eq:
-                return None
-            hits = [x for x in (lhs.strip(), rhs.strip()) if x in flds]
-            return hits[0] if len(hits) == 1 else None
-
-        fl, fr = _field(gl, fields[0]), _field(gr, fields[1])
-        if fl is None or fr is None:
-            return False
-        return (
-            f"{bases[1]}.{fr}{{2}} = {bases[0]}.{fl}{{1}}" in conj_all
-            or f"{bases[0]}.{fl}{{1}} = {bases[1]}.{fr}{{2}}" in conj_all
-        )
-
-    if not _guard_ok(shapes[0].guard, shapes[1].guard):  # type: ignore[union-attr]
-        return None
-    ifs = [
-        cast(ec_ast.If, shapes[i].body[cuts[i]])  # type: ignore[union-attr,index]
-        for i in (0, 1)
-    ]
-    if not _guard_ok(ifs[0].guard, ifs[1].guard):
-        return None
-
-    # --- shared prefix -------------------------------------------------------
-    pre = [shapes[i].body[: cuts[i]] for i in (0, 1)]  # type: ignore[union-attr,index]
-    ev = [[s for s in p if _is_bb_stmt(s)] for p in pre]
-    if any(not isinstance(s, ec_ast.Call) for s in ev[0] + ev[1]) or not ev[0]:
-        return None
-    if [s.callee for s in ev[0] if isinstance(s, ec_ast.Call)] != [
-        s.callee for s in ev[1] if isinstance(s, ec_ast.Call)
-    ]:
-        return None
-    if len(pre[0]) != len(pre[1]) or any(
-        type(a) is not type(b) for a, b in zip(pre[0], pre[1])
-    ):
-        return None
-    bound = [
-        (a, b)
-        for a, b in zip(pre[0], pre[1])
-        if isinstance(a, (ec_ast.Call, ec_ast.Assign))
-        and isinstance(b, (ec_ast.Call, ec_ast.Assign))
-        and a.var == b.var
-    ]
-    if not bound:
-        return None
-    pre_names = [a.var for a, _b in bound]
-    tac: list[str] = [
-        "inline *.",
-        "if; 1: smt().",
-        "auto.",
-        f"seq {len(pre[0])} {len(pre[1])} : (#pre /\\ ={{{', '.join(pre_names)}}}).",
-        "+ " + " ".join(["wp; call (_: true);"] * len(ev[0])) + " wp; skip => /#.",
-        "if; 1: smt().",
-    ]
-
-    # --- challenge branch: the per-det-call walk -----------------------------
-    thens = [list(ifs[i].then_body) for i in (0, 1)]
-    elses = [list(ifs[i].else_body) for i in (0, 1)]
-    if not elses[0] or not elses[1]:
-        return None
-    t_ev = [[s for s in t if _is_bb_stmt(s)] for t in thens]
-    if any(not isinstance(s, ec_ast.Call) for s in t_ev[0] + t_ev[1]):
-        return None
-    t_callees = [[cast(ec_ast.Call, s).callee for s in e] for e in t_ev]
-    kdf = [cast(ec_ast.Call, t_ev[i][-1]) for i in (0, 1)]
-    # Each side's TAIL call is its own spelling of the shared KDF evaluation
-    # (the encoding side calls the KDF directly, the other its challenger's
-    # ``lookup``), so it is set aside before the multisets are compared: the
-    # one surplus call left is the substitution encoding itself.
-    cnt_l = Counter(t_callees[0][:-1])
-    cnt_r = Counter(t_callees[1][:-1])
-    extra_l, extra_r = cnt_l - cnt_r, cnt_r - cnt_l
-    if sum(extra_l.values()) == 1 and not extra_r:
-        enc_side = 1
-    elif sum(extra_r.values()) == 1 and not extra_l:
-        enc_side = 2
-    else:
-        return None
-    enc_callee = next(iter((extra_l or extra_r).elements()))
-    enc_cands = [
-        cast(ec_ast.Call, s)
-        for s in t_ev[enc_side - 1][:-1]
-        if cast(ec_ast.Call, s).callee == enc_callee
-    ]
-    if len(enc_cands) != 1:
-        return None
-    enc_call = enc_cands[0]
-    parts = _callee_parts(enc_call.callee)
-    if parts is None or parts[0] not in clone_alias:
-        return None
-    enc_mod, enc_meth = parts
-    if enc_meth not in det_methods.get(enc_mod, set()):
-        return None
-    enc_args = _split_top_args(enc_call.args)
-    if len(enc_args) != 1:
-        return None
-    arg = enc_args[0].strip()
-    if arg not in fields[enc_side - 1]:
-        return None
-    arg_ref = f"{bases[enc_side - 1]}.{arg}{{{enc_side}}}"
-    want = _ws(f"{clone_alias[enc_mod]}.ev_{enc_meth} {arg_ref}")
-    if not any(want in _ws(c) for c in conj_all):
-        return None
-
-    # --- the regroup law, read off the ENC side + the lookup's arity ---------
-    # The other side's bracketing lives inside its challenger's ``lookup``
-    # body, which this builder never renders; but the enc-side chain fixes the
-    # law's leaves, and the lookup's ARITY decides between the bare-key (one
-    # argument: the rest) and first-key (two: key2 + rest) forms.
-    env_e = _assign_env(thens[enc_side - 1])
-    chain_e = _concat_chain(
-        _resolve_expr(kdf[enc_side - 1].args, env_e), types.concat_op_names()
-    )
-    if chain_e is None or chain_e[1][0] != enc_call.var:
-        return None
-    # KEYED lookups only (two arguments: key2 + rest -- the split2 law). The
-    # bare-key shape is owned by the flat-state route, which fires later in the
-    # dispatch and already closes CG/UG; accepting it here would rewrite those
-    # cells' landed tactics for nothing.
-    oth_tail = kdf[2 - enc_side]
-    if not oth_tail.callee.startswith("Challenger."):
-        return None
-    if len(_split_top_args(oth_tail.args)) != 2:
-        return None
-    head_o = types.head_op_for_regroup(tuple(chain_e[0]), split2=True)
-    if head_o is None:
-        return None
-    regroup = types.probe_concat_regroup_split2(tuple(chain_e[0]), head_o)
-    if regroup is None:
-        return None
-    types.request_concat_regroup_split2(tuple(chain_e[0]), head_o)
-
-    walk_ctr = [0]
-    walk_steps: list[str] = []
-    for w_side in (enc_side, 3 - enc_side):
-        idx = w_side - 1
-        w_flds = fields[idx]
-        w_base = bases[idx]
-
-        def _q(v: str, _f: set[str] = w_flds, _b: str = w_base) -> str:
-            return f"{_b}.{v}" if v in _f else v
-
-        w_vars = (
-            w_flds
-            | set(params)
-            | {getattr(s, "var", "") for s in pre[idx]}
-            | {getattr(s, "var", "") for s in thens[idx]}
-        )
-        w_assigned = {getattr(s, "var", "") for s in pre[idx]} | set(params) | w_flds
-        got = _one_sided_det_steps(
-            w_side,
-            thens[idx],
-            kdf[idx],
-            _q,
-            w_vars,
-            w_assigned,
-            walk_ctr,
-            clone_alias,
-        )
-        if got is None:
-            return None
-        walk_steps += got
-    tac += [
-        *walk_steps,
-        "wp. call (_: true). wp. skip => />.",
-        f"smt({regroup}).",
-    ]
-
-    # --- non-challenge branch: dead guards, then the count-free ladder -------
-    dead = [any(isinstance(s, ec_ast.If) for s in e) for e in elses]
-    if dead[0] == dead[1]:
-        return None
-    dead_side = 1 if dead[0] else 2
-    lin = [s for s in elses[2 - dead_side] if _is_bb_stmt(s)]
-    if not lin or any(not isinstance(s, ec_ast.Call) for s in lin):
-        return None
-    tac += [
-        f"do ? (rcondf{{{dead_side}}} ^if; first by auto => /#).",
-        "do ! (wp; call (_: true)).",
-        "wp; skip => /#.",
-    ]
-    return tac
-
-
-def keyed_reprogram_decaps_walk_tacs(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches
-    lmod: ec_ast.Module,
-    rmod: ec_ast.Module,
-    oracle_name: str,
-    coupling: str,
-    det_methods: dict[str, set[str]],
-    clone_alias: dict[str, str],
-    hop_index: int,
-    inj_acc: set[tuple[str, str]] | None,
-) -> list[str] | None:
-    """The KEYED-reprogramming ``decaps`` consumer, on the RENDERED modules,
-    or ``None`` off-shape.
-
-    Under the weakened (quantified) hop_7 coupling the old ``sim`` closers
-    cannot run, and the flat-state consumer route cannot SEE the hop at all --
-    the KDF-side flat ``decaps`` nests the shared-secret encoding inside the
-    challenger ``lookup``'s argument and stubs to ``return witness``. Both
-    endpoints read their own random function at the SAME coupled pair, so the
-    branch closes two-sided: functionalize the CT-ENCODING leaf (its result is
-    what the separation projection reads), couple the remaining calls
-    pairwise, and discharge the off-point application from the coupling's
-    forall via the projection lemma + the licensed encode injectivity. The
-    prefix ``seq`` MUST carry the queried ciphertext's projections
-    (``ct_PQ = ct.`1``) -- without them the refusal guard says nothing about
-    the T-component. Validated on the zero-admit CK probe
-    (``ec_templates/indcca_keyed_reprogramming_TACTIC.txt``, delta 6).
-    """
-    m = re.search(r"forall \(p : [^)]*\*[^)]*\), .*?<> (\S+)\.ev_(\w+) ", coupling)
-    if m is None:
-        return None
-    enc_alias, enc_meth = m.group(1), m.group(2)
-    enc_mod = next((mod for mod, al in clone_alias.items() if al == enc_alias), None)
-    if enc_mod is None or enc_meth not in det_methods.get(enc_mod, set()):
-        return None
-    procs = [
-        next((p for p in mm.procs if p.name == oracle_name), None)
-        for mm in (lmod, rmod)
-    ]
-    if procs[0] is None or procs[1] is None:
-        return None
-    shapes = [_guarded_oracle_body(cast(ec_ast.Proc, p)) for p in procs]
-    if shapes[0] is None or shapes[1] is None:
-        return None
-    cuts = [_first_inner_if(s.body) for s in shapes]  # type: ignore[union-attr]
-    if cuts[0] is None or cuts[1] is None:
-        return None
-    pre = [shapes[i].body[: cuts[i]] for i in (0, 1)]  # type: ignore[union-attr,index]
-    if len(pre[0]) != len(pre[1]) or any(
-        type(a) is not type(b) for a, b in zip(pre[0], pre[1])
-    ):
-        return None
-    pre_names = [
-        a.var
-        for a, b in zip(pre[0], pre[1])
-        if isinstance(a, (ec_ast.Call, ec_ast.Assign))
-        and isinstance(b, (ec_ast.Call, ec_ast.Assign))
-        and a.var == b.var
-    ]
-    n_pre_calls = sum(1 for s in pre[0] if isinstance(s, ec_ast.Call))
-    if not pre_names or n_pre_calls != 1:
-        return None
-    param = procs[0].params[0].name if procs[0].params else ""
-    if not param:
-        return None
-    projs = [
-        f"{s.var}{{1}} = {param}{{1}}{mm.group(1)}"
-        for s in pre[0]
-        if isinstance(s, ec_ast.Assign)
-        and (mm := re.fullmatch(rf"{re.escape(param)}((?:\.`\d+)+)", s.rhs.strip()))
-    ]
-    if not projs:
-        return None
-    ifs = [
-        cast(ec_ast.If, shapes[i].body[cuts[i]])  # type: ignore[union-attr,index]
-        for i in (0, 1)
-    ]
-    thens = [list(ifs[i].then_body) for i in (0, 1)]
-    t_calls = [[s for s in t if isinstance(s, ec_ast.Call)] for t in thens]
-    enc_calls = [
-        [c for c in cs if c.callee == f"{enc_mod}.{enc_meth}"] for cs in t_calls
-    ]
-    if len(enc_calls[0]) != 1 or len(enc_calls[1]) != 1:
-        return None
-    if enc_calls[0][0].var != enc_calls[1][0].var:
-        return None
-    enc_var = enc_calls[0][0].var
-    enc_args = [_split_top_args(c[0].args) for c in enc_calls]
-    if any(len(a) != 1 for a in enc_args):
-        return None
-    # both sides' enc argument is a shared prefix local
-    if any(a[0].strip() not in pre_names for a in enc_args):
-        return None
-    enc_arg = enc_args[0][0].strip()
-    # remaining pairwise couples: the branch calls after the encoding on the
-    # GAME side (its read is an application, not a call, so its call list is
-    # the shorter and safer count)
-    # The branch segments BEFORE the encoding pair 1-1 (same statement kinds,
-    # same callees/vars -- UK's KDF input opens with its PQ encodes before the
-    # T-ciphertext one CK leads with), and are coupled by a plain peel; empty
-    # for the CK shape, whose emitted tactic is byte-identical.
-    enc_pos = [t.index(enc_calls[i][0]) for i, t in enumerate(thens)]
-    pre_b = [thens[i][: enc_pos[i]] for i in (0, 1)]
-    if len(pre_b[0]) != len(pre_b[1]):
-        return None
-    for a, b in zip(pre_b[0], pre_b[1]):
-        if type(a) is not type(b):
-            return None
-        if isinstance(a, ec_ast.Call) and (
-            a.callee != cast(ec_ast.Call, b).callee or a.var != cast(ec_ast.Call, b).var
-        ):
-            return None
-        if isinstance(a, ec_ast.Assign) and a.var != cast(ec_ast.Assign, b).var:
-            return None
-    n_pre_b_calls = sum(1 for x in pre_b[0] if isinstance(x, ec_ast.Call))
-    pre_b_vars = [
-        x.var for x in pre_b[0] if isinstance(x, (ec_ast.Call, ec_ast.Assign))
-    ]
-    n_rest = min(len(cs) for cs in t_calls) - n_pre_b_calls - 1
-    if n_rest < 0:
-        return None
-    if inj_acc is not None:
-        inj_acc.add((enc_mod, enc_meth))
-    tag = f"rr{hop_index}"
-    return [
-        "inline *.",
-        "if; 1: smt().",
-        "auto.",
-        f"seq {len(pre[0])} {len(pre[1])} : (#pre /\\ ={{{', '.join(pre_names)}}}"
-        + "".join(f" /\\ {pj}" for pj in projs)
-        + ").",
-        "+ wp; call (_: true).",
-        "  wp; skip => /#.",
-        "if; 1: smt().",
-        *(
-            [
-                f"seq {len(pre_b[0])} {len(pre_b[1])} : "
-                f"(#pre /\\ ={{{', '.join(pre_b_vars)}}}).",
-                "+ "
-                + " ".join(["wp; call (_: true);"] * n_pre_b_calls)
-                + " wp; skip => /#.",
-            ]
-            if pre_b[0]
-            else []
-        ),
-        f"seq 1 1 : (#pre /\\ ={{{enc_var}}} /\\ "
-        f"{enc_var}{{2}} = {enc_alias}.ev_{enc_meth} {enc_arg}{{2}}).",
-        f"+ exists* (glob {enc_mod}){{1}}, {enc_arg}{{1}}; elim* => g1 a1.",
-        f"  call{{1}} ({enc_mod}_{enc_meth}_det g1 a1).",
-        f"  exists* (glob {enc_mod}){{2}}, {enc_arg}{{2}}; elim* => g2 a2.",
-        f"  call{{2}} ({enc_mod}_{enc_meth}_det g2 a2).",
-        "  skip => /#.",
-        *["wp; call (_: true)." for _ in range(n_rest)],
-        f"wp; skip => />; smt({tag}_proj {enc_mod}_{enc_meth}_inj).",
-        "do ! (wp; call (_: true)).",
-        "wp; skip => /#.",
-    ]
 
 
 def _bd_sample_dead(
@@ -15903,32 +12730,6 @@ def _concat_path_to(tree: object, leaf: str) -> list[tuple[str, bool]] | None:
     return None
 
 
-def _slice_steps_for(
-    path: list[tuple[str, bool]], types: tc.TypeCollector
-) -> tuple[tuple[str, str, str], ...] | None:
-    """``(slice_op, lo, hi)`` per concat level of ``path``, matching the index
-    expressions of the ``slice_concat_left``/``_right`` round-trip laws the
-    exporter emits for each concat triple. Registers each slice op, since the
-    projection may reach a component no oracle body slices out on its own."""
-    steps: list[tuple[str, str, str]] = []
-    for op, take_right in path:
-        parts = types.concat_components(op)
-        if parts is None:
-            return None
-        left, right, result = parts
-        len_l = types.bs_length_for(left)
-        len_r = types.bs_length_for(right)
-        if len_l is None or len_r is None:
-            return None
-        dst = right if take_right else left
-        types.register_slice(result, dst)
-        if take_right:
-            steps.append((f"slice_{result}_to_{dst}", len_l, f"{len_l} + {len_r}"))
-        else:
-            steps.append((f"slice_{result}_to_{dst}", "0", len_l))
-    return tuple(steps)
-
-
 class RoReprogramCoupling(NamedTuple):
     """What an RO-REPROGRAMMING hop's coupling must say instead of full function
     equality.
@@ -15948,968 +12749,74 @@ class RoReprogramCoupling(NamedTuple):
     add_fmt: tuple[str, ...]
 
 
-def _ro_reprogram_shape(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches
-    left_state0: frog_ast.Game,
-    right_state0: frog_ast.Game,
-    l_exec: list[ec_ast.EcStmt],
-    r_exec: list[ec_ast.EcStmt],
-    l_ret: str,
-    r_ret: str,
-    types: tc.TypeCollector,
-    det_methods: dict[str, set[str]],
-    clone_alias: dict[str, str],
-) -> _RoReprogram | None:
-    """The RO-reprogramming shape of this init hop, or ``None`` off-shape.
-
-    Matched on FOUR facts, none of them a name:
-
-    1. both sides draw the SAME arrow distribution into a state field;
-    2. exactly one side APPLIES that field to a computed argument;
-    3. the other side SAMPLES at the same slot of the returned tuple;
-    4. the applied argument is a concat whose leaves include the deterministic
-       ENCODING of a component of a stored tuple field -- which is what makes
-       "off the challenge point" a statement about the challenge ciphertext, and
-       so what the consuming ``decaps`` hop can actually use.
-
-    Fact 2 is the whole gate. The MIRROR hop of this pair draws fresh on BOTH
-    sides, matches at 1 and 3 but not 2, and is correctly left alone: there full
-    function equality holds and the stock ladder already proves it.
-    """
-    arrow: list[tuple[str, str]] = []  # (field, dfun op) per side
-    for exec_ in (l_exec, r_exec):
-        draws = [
-            s
-            for s in exec_
-            if isinstance(s, ec_ast.Sample) and s.distr.startswith("dfun_")
-        ]
-        if len(draws) != 1:
-            return None
-        arrow.append((draws[0].var, draws[0].distr))
-    if arrow[0][1] != arrow[1][1]:
-        return None
-    dfun_op = arrow[0][1]
-    dom_cod = next(
-        ((d, c) for n, d, c in types.function_distrs_seen() if n == dfun_op), None
-    )
-    if dom_cod is None:
-        return None
-    dom_ty, cod_ty = dom_cod
-
-    def _apply(exec_: list[ec_ast.EcStmt], rf: str) -> ec_ast.Assign | None:
-        hits = []
-        for s in exec_:
-            if not isinstance(s, ec_ast.Assign):
-                continue
-            parts = _split_app(s.rhs)
-            if len(parts) != 2 or parts[0] != rf:
-                continue
-            arg = parts[1]
-            if arg.isidentifier():
-                hits.append(s)  # flat: ``rF rest``
-                continue
-            # keyed: ``rF (key, rest)`` -- a two-identifier tuple literal
-            inner = cc_split_top_args(_strip_parens(arg))
-            if len(inner) == 2 and all(p.strip().isidentifier() for p in inner):
-                hits.append(s)
-        return hits[0] if len(hits) == 1 else None
-
-    l_app, r_app = _apply(l_exec, arrow[0][0]), _apply(r_exec, arrow[1][0])
-    if (l_app is None) == (r_app is None):
-        return None  # both read, or neither: not this shape
-    reader_side = 1 if l_app is not None else 2
-    app = cast(ec_ast.Assign, l_app if l_app is not None else r_app)
-    rd_exec, sm_exec = (l_exec, r_exec) if reader_side == 1 else (r_exec, l_exec)
-    rd_ret, sm_ret = (l_ret, r_ret) if reader_side == 1 else (r_ret, l_ret)
-    rd_state, sm_state = (
-        (left_state0, right_state0) if reader_side == 1 else (right_state0, left_state0)
-    )
-    reader_rf_flat = arrow[reader_side - 1][0]
-    sampler_rf_flat = arrow[2 - reader_side][0]
-    # (3) the sampler draws the read value's SLOT of the returned tuple.
-    rd_slots, sm_slots = cc_split_top_args(rd_ret), cc_split_top_args(sm_ret)
-    if len(rd_slots) != len(sm_slots) or app.var not in rd_slots:
-        return None
-    sample_var = sm_slots[rd_slots.index(app.var)]
-    cod_draw = next(
-        (s for s in sm_exec if isinstance(s, ec_ast.Sample) and s.var == sample_var),
-        None,
-    )
-    if cod_draw is None:
-        return None
-    # (4) the pin point's concat leaves, and the encoded stored component. For
-    # a KEYED function the applied argument is the tuple ``(key, rest)``: the
-    # concat (and hence the separation projection) lives in the REST component,
-    # and the key rides alongside as ``pin_key_var``.
-    app_arg = _split_app(app.rhs)[1]
-    pin_key_var: str | None = None
-    if app_arg.isidentifier():
-        pin_var = app_arg
-    else:
-        inner_args = [p.strip() for p in cc_split_top_args(_strip_parens(app_arg))]
-        pin_key_var, pin_var = inner_args[0], inner_args[1]
-    pin_asn = next(
-        (s for s in rd_exec if isinstance(s, ec_ast.Assign) and s.var == pin_var),
-        None,
-    )
-    if pin_asn is None:
-        return None
-    tree = _concat_tree(pin_asn.rhs, types)
-    if isinstance(tree, str):
-        return None
-    rd_fields = {f.name for f in rd_state.fields}
-    sm_fields = {f.name for f in sm_state.fields}
-    found: (
-        tuple[
-            str,
-            str,
-            str,
-            str,
-            str,
-            int,
-            str,
-            int,
-            tuple[tuple[str, str, str], ...],
-            tuple[tuple[str, bool], ...],
-        ]
-        | None
-    ) = None
-    for stmt in rd_exec:
-        if not isinstance(stmt, ec_ast.Call) or "." not in stmt.callee:
-            continue
-        mod, _, meth = stmt.callee.partition(".")
-        if meth not in det_methods.get(mod, set()) or mod not in clone_alias:
-            continue
-        path = _concat_path_to(tree, stmt.var)
-        if path is None:
-            continue
-        arg = stmt.args.strip()
-        tup = next(
-            (
-                s
-                for s in rd_exec
-                if isinstance(s, ec_ast.Assign)
-                and s.var in rd_fields
-                and s.var in sm_fields
-                and arg in cc_split_top_args(_strip_parens(s.rhs))
-                and len(cc_split_top_args(_strip_parens(s.rhs))) > 1
-            ),
-            None,
-        )
-        if tup is None:
-            continue
-        comps = cc_split_top_args(_strip_parens(tup.rhs))
-        other = next(
-            (
-                (c, i + 1)
-                for i, c in enumerate(comps)
-                if c != arg and c in rd_fields and c in sm_fields
-            ),
-            None,
-        )
-        if other is None:
-            continue
-        steps = _slice_steps_for(path, types)
-        if steps is None:
-            continue
-        found = (
-            f"{clone_alias[mod]}.ev_{meth}",
-            stmt.callee,
-            stmt.var,
-            pin_var,
-            tup.var,
-            comps.index(arg) + 1,
-            other[0],
-            other[1],
-            steps,
-            tuple(path),
-        )
-        break
-    if found is None:
-        return None
-    (
-        enc_op,
-        enc_callee,
-        enc_res_var,
-        pin,
-        ct_field,
-        ct_comp,
-        kem_field,
-        kem_comp,
-        steps,
-        pin_path,
-    ) = found
-    return _RoReprogram(
-        reader_side=reader_side,
-        reader_rf=reader_rf_flat,
-        sampler_rf=sampler_rf_flat,
-        dfun_op=dfun_op,
-        cod_distr=cod_draw.distr,
-        dom_ty=dom_ty,
-        cod_ty=cod_ty,
-        # The MUF clone alias mirrors ``type_collector``'s: the flat name for a
-        # flat domain, the sanitized pair text for a keyed one.
-        muf=f"MUF_{re.sub(_NON_IDENT, '_', dom_ty).strip('_')}",
-        pin_var=pin,
-        read_var=app.var,
-        sample_var=sample_var,
-        ct_field=ct_field,
-        ct_component=ct_comp,
-        kem_field=kem_field,
-        kem_component=kem_comp,
-        enc_op=enc_op,
-        enc_callee=enc_callee,
-        enc_res=enc_res_var,
-        slice_steps=steps,
-        pin_path=pin_path,
-        pin_key_var=pin_key_var,
-    )
-
-
 _NON_IDENT = re.compile(r"\W+")
 
 
-def ro_reprogram_conjunct(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
-    oracle_name: str,
-    left_game: frog_ast.Game,
-    right_game: frog_ast.Game,
-    left_wrapper_expr: str,
-    right_wrapper_expr: str,
-    types: tc.TypeCollector,
-    type_of_factory: Callable[
-        [dict[str, frog_ast.Type], dict[str, str]],
-        Callable[[frog_ast.Expression], frog_ast.Type],
-    ],
-    external_module_types: dict[str, str],
-    method_return_types: dict[tuple[str, str], frog_ast.Type],
-    det_methods: dict[str, set[str]] | None = None,
-    clone_alias: dict[str, str] | None = None,
-) -> RoReprogramCoupling | None:
-    """What an RO-REPROGRAMMING hop's coupling must say; ``None`` off-shape.
+def _ev_twin_module(
+    base: ec_ast.Module,
+    new_name: str,
+    det_pred: Callable[[str, str], bool],
+    clone_of: Callable[[str], str | None],
+) -> ec_ast.Module:
+    """A copy of ``base`` renamed to ``new_name`` whose single procedure has its
+    deterministic NG calls replaced by their ``ev_<m>`` assignments (via
+    :func:`_ec_functionalize`). The ``ev``-assignment twin of an NG-calling flat
+    state; keeps the fields, params, and interface identical so it plugs into the
+    same transitivity chain."""
+    proc = base.procs[0]
+    ev_body = _ec_functionalize(proc.body, det_pred, clone_of)
+    ev_proc = ec_ast.Proc(proc.name, proc.params, proc.return_type, ev_body)
+    return ec_ast.Module(
+        new_name,
+        [ev_proc],
+        list(base.params),
+        base.implements,
+        list(base.module_vars),
+    )
 
-    Full function equality is not merely hard here but UNESTABLISHABLE: one
-    endpoint's returned shared secret IS its random function at the challenge KDF
-    input, the other's is an independent draw, and ``={res}`` already ties the
-    two. So the arrow-field equality has to be REPLACED, by
 
-      * agreement OFF the challenge point -- everything the consuming ``decaps``
-        hop can legitimately use, since every query it answers is off it; and
-      * the stored challenge ciphertext's first component, which that hop's
-        challenge branch compares against.
+def _drop_witness_seeds(stmts: list[ec_ast.EcStmt]) -> list[ec_ast.EcStmt]:
+    """``stmts`` without its leading ``<var> <- witness`` seeds."""
+    i = 0
+    while (
+        i < len(stmts)
+        and isinstance(stmts[i], ec_ast.Assign)
+        and cast(ec_ast.Assign, stmts[i]).rhs.strip() == "witness"
+    ):
+        i += 1
+    return stmts[i:]
 
-    Derived through the same shape detector the ``initialize`` ROUTE uses, so the
-    conjuncts and the tactic that proves them cannot drift apart.
+
+def _sample_front_swaps(
+    body: list[ec_ast.EcStmt], target_distrs: list[str], side: int
+) -> list[str] | None:
+    """``swap{side}`` tactics hoisting ``body``'s samples to the front in
+    ``target_distrs`` order.
+
+    Two bodies drawing the same multiset of samples in different positions
+    must be positionally distribution-aligned before a tail-to-front ``rnd``
+    coupling; a ``<$`` draw is glob/data-independent of everything
+    before it, so hoisting it up is always an EC-valid ``swap``.
+
+    Each swap addresses a sample by its *occurrence* among the samples
+    (``^ <${k}`` -- the k-th sample, a code-position pattern) and moves it to
+    gap ``0`` (the block front). This is position-ROBUST: it depends only on the
+    sample ordering, not on how many deterministic tuple-unpack assigns EC's
+    ``inline *`` interposes (which the engine's flat state does not reproduce
+    faithfully). Hoisting in *reverse* target order lands the samples at the
+    front in target order. Requires ``target_distrs`` distinct (so the ordering
+    is determined by distribution); returns ``None`` if it cannot align.
     """
-    lproj = _project_to_method(left_game, oracle_name)
-    rproj = _project_to_method(right_game, oracle_name)
-    if lproj is None or rproj is None:
-        return None
-    modules = mt.ModuleTranslator(types, type_of_factory)
-    lmod = _flat_state_module(
-        modules, "Init_rr_L", lproj, external_module_types, method_return_types, []
-    )
-    rmod = _flat_state_module(
-        modules, "Init_rr_R", rproj, external_module_types, method_return_types, []
-    )
-    if not lmod.procs or not rmod.procs:
-        return None
-
-    def _split(mod: ec_ast.Module) -> tuple[list[ec_ast.EcStmt], str]:
-        body = _exec_stmts(mod.procs[0].body)
-        ret = next((s.expr for s in body if isinstance(s, ec_ast.Return)), "")
-        return [s for s in body if not isinstance(s, ec_ast.Return)], ret
-
-    (l_exec, l_ret), (r_exec, r_ret) = _split(lmod), _split(rmod)
-    spec = _ro_reprogram_shape(
-        left_game,
-        right_game,
-        l_exec,
-        r_exec,
-        _tuple_body(l_ret),
-        _tuple_body(r_ret),
-        types,
-        det_methods or {},
-        clone_alias or {},
-    )
-    if spec is None:
-        return None
-    rd_state, sm_state = (
-        (left_game, right_game) if spec.reader_side == 1 else (right_game, left_game)
-    )
-    rd_wrap, sm_wrap = (
-        (left_wrapper_expr, right_wrapper_expr)
-        if spec.reader_side == 1
-        else (right_wrapper_expr, left_wrapper_expr)
-    )
-    rd_bases = (_module_head(rd_wrap), _wrapper_delegate(rd_wrap))
-    sm_bases = (_module_head(sm_wrap), _wrapper_delegate(sm_wrap))
-    if not rd_bases[0] or not sm_bases[0]:
-        return None
-    map_rd, deleg_rd = _flat_name_map(
-        _project_to_method(rd_state, oracle_name) or rd_state, *rd_bases
-    )
-    map_sm, deleg_sm = _flat_name_map(
-        _project_to_method(sm_state, oracle_name) or sm_state, *sm_bases
-    )
-    rd_rf = _real_name(spec.reader_rf, map_rd, deleg_rd)
-    sm_ct = _real_name(spec.ct_field, map_sm, deleg_sm)
-    sm_kem = _real_name(spec.kem_field, map_sm, deleg_sm)
-    if rd_rf is None or sm_ct is None or sm_kem is None:
-        return None
-    if rd_rf not in map_rd.values():
-        return None  # a delegate LOCAL: EasyCrypt renames it, so decline
-    i, j = spec.reader_side, 3 - spec.reader_side
-    ct_ref = f"{sm_ct}{{{j}}}"
-    return RoReprogramCoupling(
-        reader_ref=f"{rd_rf}{{{i}}}",
-        add_fmt=(
-            f"{ct_ref}.`{spec.kem_component} = {sm_kem}{{{j}}}",
-            f"(forall (p : {spec.dom_ty}), "
-            f"{spec.proj_of('p')} <> {spec.enc_op} ({ct_ref}.`{spec.ct_component})"
-            f" => {rd_rf}{{{i}}} p = {{rf}} p)",
-        ),
-    )
-
-
-def _tuple_body(ret: str) -> str:
-    """``a, b, c`` for a rendered return tuple ``(a, b, c)``; ``ret`` unchanged
-    when it is not one."""
-    inner = _strip_parens(ret)
-    return inner if len(cc_split_top_args(inner)) > 1 else ret.strip()
-
-
-def _reprogram_helpers(spec: _RoReprogram, tag: str, types: tc.TypeCollector) -> str:
-    """The pin-parametrised reprogramming helper lemmas, all DERIVED from
-    ``MUniFinFun`` -- no axiom.
-
-    The small-scale proof of this argument states them with the pin point a
-    global ``op``; here it is a RUNTIME value, so every one takes it as a
-    parameter and the route reaches it with ``exists*``. The last one reads the
-    challenge ciphertext's ENCODING back out of the KDF input, from the
-    round-trip slice laws the exporter already emits for each concat triple --
-    which is what makes the separation cost no new axiom.
-    """
-    d, c, muf, dfun, dd = (
-        spec.dom_ty,
-        spec.cod_ty,
-        spec.muf,
-        spec.dfun_op,
-        spec.cod_distr,
-    )
-    fn, pair = f"{d} -> {c}", f"({d} -> {c}) * {c}"
-    pinned = f"{muf}.dfun (fun (_ : {d}) => {dd}).[x0 <- dunit v]"
-    pind = (
-        f"dlet ({pinned})\n         (fun (g : {fn}) => "
-        f"dmap {dd} (fun (y : {c}) => (g, y)))"
-    )
-    # The projection lemma's statement: rebuild the concat around fresh leaves,
-    # bottom-up, so the slice chain has something to slice.
-    leaves: list[tuple[str, str]] = []
-
-    def _fresh(ty: str) -> str:
-        nm = chr(ord("a") + len(leaves))
-        leaves.append((nm, ty))
-        return nm
-
-    expr, target = "", ""
-    for op, take_right in reversed(spec.pin_path):
-        parts = types.concat_components(op)
-        if parts is None:
-            return ""
-        left, right, _res = parts
-        if not expr:
-            lo, ro = _fresh(left), _fresh(right)
-            expr, target = f"({op} {lo} {ro})", (ro if take_right else lo)
-        elif take_right:
-            expr = f"({op} {_fresh(left)} {expr})"
-        else:
-            expr = f"({op} {expr} {_fresh(right)})"
-    if not target:
-        return ""
-    args = " ".join(f"({n} : {t})" for n, t in leaves)
-    laws = [
-        f"slice_concat_{'right' if tr else 'left'}_"
-        f"{op[len('concat_'):].replace('_to_', '_', 1)}"
-        for op, tr in spec.pin_path
-    ]
-    return f"""  (* ---- {tag}: reprogramming helpers, pin point taken as a PARAMETER.
-     All derived from MUniFinFun; no axiom. ---- *)
-
-  lemma {tag}_fupd2 (x0 : {d}) (f : {fn}) (a b : {c}) :
-    f.[x0 <- a].[x0 <- b] = f.[x0 <- b].
-  proof. by apply fun_ext => z; rewrite !fupdateE; case: (x0 = z). qed.
-
-  lemma {tag}_fupd_id (x0 : {d}) (f : {fn}) : f.[x0 <- f x0] = f.
-  proof. by apply fun_ext => z; rewrite fupdateE; case: (x0 = z) => [->|]. qed.
-
-  lemma {tag}_pin_supp (x0 : {d}) (v : {c}) (g : {fn}) :
-    g \\in {pinned} => g x0 = v.
-  proof. by move/{muf}.dfun_supp => /(_ x0); rewrite fupdate_eq supp_dunit. qed.
-
-  lemma {tag}_pinR_supp (x0 : {d}) (v : {c}) (p : {pair}) :
-    p \\in {pind} =>
-    p.`1 x0 = v.
-  proof.
-  by move/supp_dlet => [g] [hg] /supp_dmap [y] [_ ->] /=;
-     exact ({tag}_pin_supp x0 v g hg).
-  qed.
-
-  lemma {tag}_fold_eq_pin (x0 : {d}) (v : {c}) :
-      dmap ({pind})
-           (fun (p : {pair}) => (p.`1.[x0 <- p.`2], p.`2))
-    = dmap {dfun} (fun (f : {fn}) => (f, f x0)).
-  proof.
-  have -> :
-      dmap ({pind})
-           (fun (p : {pair}) => (p.`1.[x0 <- p.`2], p.`2))
-    = dmap (dlet ({pinned})
-                 (fun (g : {fn}) => dmap {dd} (fun (y : {c}) => g.[x0 <- y])))
-           (fun (f : {fn}) => (f, f x0)).
-  + rewrite !dmap_dlet; apply eq_dlet => // g; rewrite !dmap_comp /(\\o) /=;
-    apply eq_dmap => y /=; rewrite fupdate_eq //.
-  congr; rewrite /{dfun}
-    ({muf}.dlet_dfun_fupdate_ll (fun (_ : {d}) => {dd}) x0 v) //.
-  qed.
-
-  lemma {tag}_dfn_at (f : {fn}) (z : {d}) : f \\in {dfun} => f z \\in {dd}.
-  proof. by rewrite /{dfun} => /{muf}.dfun_supp /(_ z). qed.
-
-  lemma {tag}_dL_supp (x0 : {d}) (p : {pair}) :
-    p \\in dmap {dfun} (fun (f : {fn}) => (f, f x0)) =>
-    p.`1 \\in {dfun} /\\ p.`2 = p.`1 x0.
-  proof. by move/supp_dmap => [f] [hf ->]. qed.
-
-  lemma {tag}_pinD_mem (x0 : {d}) (v : {c}) (f : {fn}) (y : {c}) :
-    f \\in {dfun} => y \\in {dd} =>
-    (f.[x0 <- v], y) \\in {pind}.
-  proof.
-  move=> hf hy; apply/supp_dlet; exists (f.[x0 <- v]); split.
-  + apply/{muf}.dfun_supp => z; rewrite !fupdateE; case: (x0 = z) => [_|_].
-    + exact supp_dunit.
-    by move: hf; rewrite /{dfun} => /{muf}.dfun_supp /(_ z).
-  by apply/supp_dmap; exists y.
-  qed.
-
-  (* The challenge ciphertext's ENCODING, read back out of the KDF input. *)
-  lemma {tag}_proj {args} :
-    {spec.proj_slices_of(expr)} = {target}.
-  proof. by rewrite {' '.join(laws)}. qed.
-"""
-
-
-def _reprogram_twin(  # pylint: disable=too-many-arguments,too-many-positional-arguments
-    modules: mt.ModuleTranslator,
-    oracle_name: str,
-    reader_state: frog_ast.Game,
-    external_module_types: dict[str, str],
-    method_return_types: dict[tuple[str, str], frog_ast.Type],
-    flat_params: list[ec_ast.ModuleParam],
-    spec: _RoReprogram,
-    name: str,
-) -> ec_ast.Module | None:
-    """The reprogramming TWIN: the reading endpoint's ``initialize`` with its
-    random-function draw moved to the tail and PINNED at the KDF input it
-    computes.
-
-    It exists because ``rnd f finv`` demands a support BIJECTION and the direct
-    map is not one -- the drawing endpoint's function carries entropy at the pin
-    point that the post discards. Splitting that entropy off as an EXPLICIT
-    statement is what makes the remaining map injective, and a distribution
-    rewrite cannot do it: on either side the surplus stays inside one sample,
-    where a one-sided ``rnd`` cannot reach it.
-
-    The twin therefore has to COMPUTE the pin point, which the drawing endpoint
-    never does -- hence the extra deterministic calls it carries, which drop
-    one-sided through their ``_pres`` axioms in the second leg.
-    """
-    proj = _project_to_method(reader_state, oracle_name)
-    if proj is None:
-        return None
-    mod = _flat_state_module(
-        modules,
-        name,
-        proj,
-        external_module_types,
-        method_return_types,
-        flat_params,
-        emit_state_vars=True,
-        no_shadow_fields=True,
-    )
-    if not mod.procs:
-        return None
-    fn_ty = f"{spec.dom_ty} -> {spec.cod_ty}"
-    mod.module_vars = [v for v in mod.module_vars if v.name != spec.reader_rf]
-    mod.module_vars.append(ec_ast.VarDecl("rF", ec_ast.EcType(fn_ty)))
-    body: list[ec_ast.EcStmt] = []
-    for stmt in mod.procs[0].body:
-        if isinstance(stmt, ec_ast.Sample) and stmt.var == spec.reader_rf:
-            continue
-        if isinstance(stmt, ec_ast.Assign) and stmt.var == spec.read_var:
-            body += [
-                ec_ast.Sample("_pinv", spec.cod_distr),
-                ec_ast.Sample(
-                    "rF",
-                    f"{spec.muf}.dfun (fun (_ : {spec.dom_ty}) => "
-                    f"{spec.cod_distr}).[{spec.pin_expr} <- dunit _pinv]",
-                ),
-                ec_ast.Sample(spec.read_var, spec.cod_distr),
-            ]
-            continue
-        body.append(stmt)
-    idx = max(
-        (i for i, s in enumerate(body) if isinstance(s, ec_ast.VarDecl)), default=-1
-    )
-    body.insert(idx + 1, ec_ast.VarDecl("_pinv", ec_ast.EcType(spec.cod_ty)))
-    mod.procs[0].body = body
-    return mod
-
-
-def _peel_ladder(stmts: list[ec_ast.EcStmt]) -> list[str]:
-    """One backward step per CALL or SAMPLE; assignments ride the next ``wp``.
-
-    The same shape as ``_straight_peel`` but without its trailing ``skip``, so a
-    caller can close the run its own way.
-    """
-    return [
-        "wp; call (_: true)." if isinstance(s, ec_ast.Call) else "wp; rnd."
-        for s in reversed(_exec_stmts(stmts))
-        if isinstance(s, (ec_ast.Call, ec_ast.Sample))
-    ]
-
-
-def _synth_init_ro_reprogram(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements
-    modules: mt.ModuleTranslator,
-    oracle_name: str,
-    left_state0: frog_ast.Game,
-    right_state0: frog_ast.Game,
-    external_module_types: dict[str, str],
-    method_return_types: dict[tuple[str, str], frog_ast.Type],
-    flat_params: list[ec_ast.ModuleParam],
-    det_methods: dict[str, set[str]],
-    clone_alias: dict[str, str],
-    types: tc.TypeCollector | None,
-    coupling: str | None,
-    left_wrapper_expr: str,
-    right_wrapper_expr: str,
-    hop_index: int,
-) -> tuple[list[str], list[str], set[tuple[str, str]]] | None:
-    """Whole-hop tactic for an RO-REPROGRAMMING ``initialize``, or ``None``.
-
-    One endpoint returns its random function READ at the KDF input it computes;
-    the other returns an independent draw. Full function equality alongside
-    ``={res}`` is unsatisfiable, so the coupling asks only for agreement OFF the
-    challenge point -- and proving THAT is a reprogramming argument, routed
-    through a twin that draws the pin value explicitly:
-
-        leg 1  reader ~ twin     bijective; on the pinned support the drawn
-                                 function's value at the pin is KNOWN, so it is
-                                 recoverable from its reprogramming
-        leg 2  twin ~ drawer     identity; drawing the pin value and then the
-                                 PINNED function IS drawing the function
-                                 (``dfunE_dlet_fix1``), for ANY pin point --
-                                 which is why the twin's extra computation
-                                 cannot disturb this leg
-
-    ``transitivity`` composes them, and its third and fourth goals ARE the two
-    leg statements.
-    """
-    if types is None or not coupling:
-        return None
-    lproj = _project_to_method(left_state0, oracle_name)
-    rproj = _project_to_method(right_state0, oracle_name)
-    if lproj is None or rproj is None:
-        return None
-    lmod = _flat_state_module(
-        modules, "Init_rr_L", lproj, external_module_types, method_return_types, []
-    )
-    rmod = _flat_state_module(
-        modules, "Init_rr_R", rproj, external_module_types, method_return_types, []
-    )
-    if not lmod.procs or not rmod.procs:
-        return None
-
-    def _split(mod: ec_ast.Module) -> tuple[list[ec_ast.EcStmt], str]:
-        body = _exec_stmts(mod.procs[0].body)
-        ret = next((s.expr for s in body if isinstance(s, ec_ast.Return)), "")
-        return [s for s in body if not isinstance(s, ec_ast.Return)], ret
-
-    (l_exec, l_ret), (r_exec, r_ret) = _split(lmod), _split(rmod)
-    spec = _ro_reprogram_shape(
-        left_state0,
-        right_state0,
-        l_exec,
-        r_exec,
-        _tuple_body(l_ret),
-        _tuple_body(r_ret),
-        types,
-        det_methods,
-        clone_alias,
-    )
-    if spec is None:
-        return None
-    tag = f"rr{hop_index}"
-    twin = _reprogram_twin(
-        modules,
-        oracle_name,
-        left_state0 if spec.reader_side == 1 else right_state0,
-        external_module_types,
-        method_return_types,
-        flat_params,
-        spec,
-        f"Mid_{hop_index}",
-    )
-    if twin is None:
-        return None
-    helpers = _reprogram_helpers(spec, tag, types)
-    if not helpers:
-        return None
-    m = re.search(r"=> (\S+)\{(\d)\} p = (\S+)\{(\d)\} p\)", coupling)
-    if m is None or spec.reader_side != 1:
-        # The reading endpoint is on the LEFT of every hop this route has been
-        # validated on, and the transitivity's leg order follows the hop's. A
-        # right-reading hop is a shape to derive, not to guess at.
-        return None
-    rd_rf, sm_rf = m.group(1), m.group(3)
-    sm_base = sm_rf.rsplit(".", 1)[0]
-    globs = " /\\ ".join(
-        c for c in coupling.split(" /\\ ") if c.strip().startswith("={glob ")
-    )
-    post = f"={{res}} /\\ {coupling}"
-    twin_expr = f"{twin.name}({', '.join(pp.name for pp in flat_params)})"
-    legs = _reprogram_legs(
-        spec,
-        tag,
-        twin,
-        f"{twin_expr}.{oracle_name}",
-        l_exec,
-        r_exec,
-        _tuple_body(r_ret),
-        post,
-        sm_base,
-        sm_rf,
-        rd_rf,
-        det_methods,
-        globs,
-        hop_index,
-    )
-    if legs is None:
-        return None
-    l1_tac, l2_tac, asm, pres = legs
-    l1_post = post.replace(f"{sm_base}.", f"{twin.name}.")
-    l2_conj = ["={res}", globs]
-    for c in post.split(" /\\ "):
-        mm = re.fullmatch(r"(\S+)\{2\} = (\S+)\{1\}", c.strip())
-        if mm is None or not mm.group(1).startswith(f"{sm_base}."):
-            continue
-        fld = mm.group(2).rsplit(".", 1)[-1]
-        if fld in [v.name for v in twin.module_vars]:
-            l2_conj.append(f"{mm.group(1)}{{2}} = {twin.name}.{fld}{{1}}")
-    l2_conj.append(f"{sm_rf}{{2}} = {twin.name}.rF{{1}}")
-
-    def _leg(nm: str, lhs: str, rhs: str, lpost: str, tac: str) -> str:
-        return (
-            f"  lemma {nm} :\n"
-            f"    equiv [ {lhs}.{oracle_name} ~ {rhs}.{oracle_name} :\n"
-            f"            {globs} ==> {lpost} ].\n"
-            f"  proof.\n{tac}\n  qed.\n"
-        )
-
-    extra = [
-        "\n".join(_render_module_decl(twin)),
-        helpers,
-        _leg(f"leg1_hop_{hop_index}", left_wrapper_expr, twin_expr, l1_post, l1_tac),
-        _leg(
-            f"leg2_hop_{hop_index}",
-            twin_expr,
-            right_wrapper_expr,
-            " /\\ ".join(l2_conj),
-            l2_tac,
-        ),
-    ]
-    return extra, [_res_tag(SYNTH_PARAM), *asm, "qed."], pres
-
-
-def _reprogram_legs(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-return-statements,too-many-branches
-    spec: _RoReprogram,
-    tag: str,
-    twin: ec_ast.Module,
-    twin_proc: str,
-    rd_exec: list[ec_ast.EcStmt],
-    sm_exec: list[ec_ast.EcStmt],
-    sm_ret: str,
-    post: str,
-    sm_base: str,
-    sm_rf: str,
-    rd_rf: str,
-    det_methods: dict[str, set[str]],
-    globs: str,
-    hop_index: int,
-) -> tuple[str, str, list[str], set[tuple[str, str]]] | None:
-    """``(leg1 text, leg2 text, assembly tactic, _pres requests)``, or ``None``.
-
-    Both legs are stated against the twin and proved on the RENDERED bodies. The
-    indices are all read off those bodies, with one correction that cannot be:
-    EasyCrypt's ``inline *`` interposes one argument-binding assignment per
-    parameter of the inlined procedure, and the flat state -- which has the
-    delegate already folded -- does not show it. That is the ``+ 1`` below, and
-    getting it wrong moves the cut into the middle of the coupled draw.
-    """
-    twin_fields = [v.name for v in twin.module_vars]
-    # ``(twin field, drawing endpoint's ref, reading endpoint's ref)`` for every
-    # field correspondence the hop's post already states. The twin's own field
-    # names are the reading endpoint's, so its side of each pair is read off
-    # there rather than assumed to match the other endpoint's spelling.
-    pairs: list[tuple[str, str, str]] = []
-    for c in post.split(" /\\ "):
-        m = re.fullmatch(r"(\S+)\{2\} = (\S+)\{1\}", c.strip())
-        if m is None or not m.group(1).startswith(f"{sm_base}."):
-            continue
-        fld = m.group(2).rsplit(".", 1)[-1]
-        if fld in twin_fields:
-            pairs.append((fld, m.group(1), m.group(2)))
-    # LEG 2's post: the same field correspondences, restated against the twin,
-    # plus FULL function equality -- which is exactly what makes this leg the
-    # identity coupling and the other leg the bijective one.
-    l2_conj = ["={res}", globs]
-    l2_conj += [f"{sm}{{2}} = {twin.name}.{f}{{1}}" for f, sm, _rd in pairs]
-    l2_conj.append(f"{sm_rf}{{2}} = {twin.name}.rF{{1}}")
-    l2_post = " /\\ ".join(l2_conj)
-    l1_post = post.replace(f"{sm_base}.", f"{twin.name}.")
-
-    # --- indices -------------------------------------------------------------
-    rd_draw = next(
-        (
-            i
-            for i, s in enumerate(rd_exec)
-            if isinstance(s, ec_ast.Sample) and s.var == spec.reader_rf
-        ),
-        None,
-    )
-    rd_read = next(
-        (
-            i
-            for i, s in enumerate(rd_exec)
-            if isinstance(s, ec_ast.Assign) and s.var == spec.read_var
-        ),
-        None,
-    )
-    sm_draw = next(
-        (
-            i
-            for i, s in enumerate(sm_exec)
-            if isinstance(s, ec_ast.Sample) and s.var == spec.sampler_rf
-        ),
-        None,
-    )
-    sm_samp = next(
-        (
-            i
-            for i, s in enumerate(sm_exec)
-            if isinstance(s, ec_ast.Sample) and s.var == spec.sample_var
-        ),
-        None,
-    )
-    if rd_draw != 0 or sm_draw != 0 or rd_read is None or sm_samp is None:
-        return None
-    prefix = rd_read - 1  # the twin's own prefix, and the reader's after the swap
-    enc_i = next(
-        (
-            i
-            for i, s in enumerate(rd_exec)
-            if isinstance(s, ec_ast.Call)
-            and s.callee == spec.enc_callee
-            and s.args.strip() != ""
-            and any(
-                isinstance(t, ec_ast.Assign)
-                and t.var == spec.pin_var
-                and s.var in t.rhs
-                for t in rd_exec
-            )
-        ),
-        None,
-    )
-    if enc_i is None or not 1 <= enc_i <= prefix:
-        return None
-    shared = sm_samp - 1  # the two sides' common backbone, before the twin's extras
-    if shared < 1 or shared > prefix:
-        return None
-
-    fn = f"{spec.dom_ty} -> {spec.cod_ty}"
-    mod, _, meth = spec.enc_callee.partition(".")
-    pres: set[tuple[str, str]] = set()
-
-    def _live(cut: int) -> str:
-        """The prefix-bound locals the tail still reads, as an ``={...}``."""
-        bound = [
-            s.var
-            for s in rd_exec[1 : cut + 1]
-            if isinstance(s, (ec_ast.Assign, ec_ast.Sample, ec_ast.Call))
-            and s.var not in twin_fields
-        ]
-        tail = " ".join(_stmt_text(s) for s in rd_exec[cut + 1 :]) + " " + sm_ret
-        names = set(re.findall(r"[A-Za-z_]\w*", tail))
-        keep = [b for b in dict.fromkeys(bound) if b in names]
-        return f" /\\ ={{{', '.join(keep)}}}" if keep else ""
-
-    early = {
-        st.var
-        for st in rd_exec[1 : prefix + 1]
-        if isinstance(st, (ec_ast.Assign, ec_ast.Sample, ec_ast.Call))
-    }
-    fields_inv = "".join(
-        f" /\\ {twin.name}.{f}{{1}} = {sm}{{2}}" for f, sm, _r in pairs if f in early
-    )
-    fields_inv_l1 = "".join(
-        f" /\\ {twin.name}.{f}{{2}} = {rd}{{1}}" for f, _s, rd in pairs if f in early
-    )
-    # ---- LEG 2: twin ~ drawer, the IDENTITY coupling ------------------------
-    l2: list[str] = [
-        "    proc.",
-        f"    swap{{2}} 1 {shared}.",
-        f"    seq {shared} {shared} : ({globs}{fields_inv}{_live(shared)}).",
-        *[
-            f"    + {t}" if i == 0 else f"      {t}"
-            for i, t in enumerate(
-                _peel_ladder(rd_exec[1 : shared + 1]) + ["skip => /#."]
-            )
-        ],
-    ]
-    for stmt in rd_exec[shared + 1 : prefix + 1]:
-        l2.append("    seq 1 0 : (#pre).")
-        if isinstance(stmt, ec_ast.Call):
-            smod, _, smeth = stmt.callee.partition(".")
-            if smeth not in det_methods.get(smod, set()):
-                return None
-            pres.add((smod, smeth))
-            l2.append(
-                f"    + exists* (glob {smod}){{1}}; elim* => g;"
-                f" call{{1}} ({smod}_{smeth}_pres g); skip => /#."
-            )
-        elif isinstance(stmt, ec_ast.Assign):
-            l2.append("    + wp; skip => /#.")
-        else:
+    cur = [s.distr for s in _exec_stmts(body) if isinstance(s, ec_ast.Sample)]
+    if cur == target_distrs:
+        return []
+    swaps: list[str] = []
+    for distr in reversed(target_distrs):
+        if distr not in cur:
             return None
-    pin_b1 = (
-        f"exists* {spec.pin_var}{{1}}; elim* => pt0"
-        if spec.pin_key_var is None
-        else f"exists* {spec.pin_key_var}{{1}}, {spec.pin_var}{{1}};"
-        " elim* => pk0 pt0"
-    )
-    pin_t = "pt0" if spec.pin_key_var is None else "(pk0, pt0)"
-    l2 += [
-        f"    {pin_b1}.",
-        f"    seq 2 1 : (#pre /\\ {twin.name}.rF{{1}} = {sm_rf}{{2}});"
-        " last by wp; rnd; skip => /#.",
-        "    rndsem*{1} 0.",
-        f"    conseq (: _ ==> {twin.name}.rF{{1}} = {sm_rf}{{2}}) => //.",
-        f"    rnd (fun (f : {fn}) => f) (fun (f : {fn}) => f); skip => />.",
-        f"    have dEq : dlet {spec.cod_distr} (fun (v : {spec.cod_ty}) =>"
-        f" dmap ({spec.muf}.dfun (fun (_ : {spec.dom_ty}) => {spec.cod_distr})"
-        f".[{pin_t} <- dunit v]) (fun (rF : {fn}) => rF)) = {spec.dfun_op}.",
-        f"    + rewrite /{spec.dfun_op} ({spec.muf}.dfunE_dlet_fix1"
-        f" (fun (_ : {spec.dom_ty}) => {spec.cod_distr}) {pin_t}) /=;",
-        "      apply eq_dlet => // v; exact dmap_id.",
-        "    by rewrite dEq.",
-    ]
-    # ---- LEG 1: reader ~ twin, the BIJECTIVE coupling -----------------------
-    pair_ty = f"({fn}) * {spec.cod_ty}"
-    n_bind = 1 if spec.pin_key_var is None else 2
-    pin_b2 = (
-        f"exists* {spec.pin_var}{{2}}, (_pinv{{2}}); elim* => pt0 v0"
-        if spec.pin_key_var is None
-        else f"exists* {spec.pin_key_var}{{2}}, {spec.pin_var}{{2}},"
-        " (_pinv{2}); elim* => pk0 pt0 v0"
-    )
-    enc_arg = cast(ec_ast.Call, rd_exec[enc_i]).args.strip()
-    enc_res = cast(ec_ast.Call, rd_exec[enc_i]).var
-    base = f"{globs}{fields_inv_l1}"
-    inv_pre = f"{base}{_live(enc_i - 1)}"
-    inv_enc = f"{base}{_live(enc_i)} /\\ {enc_res}{{2}} = {spec.enc_op} {enc_arg}{{2}}"
-    inv_full = (
-        f"{base}{_live(prefix)} /\\ "
-        f"{spec.proj_slices_of(f'{spec.pin_var}{{2}}')} = {spec.enc_op} {enc_arg}{{2}}"
-    )
-    l1: list[str] = [
-        "    proc.",
-        "    inline{1} *.",
-        f"    swap{{1}} 1 {prefix}.",
-        f"    seq {prefix} {prefix} : ({inv_full}).",
-        f"    + seq {enc_i} {enc_i} : ({inv_enc}).",
-        f"      + seq {enc_i - 1} {enc_i - 1} : ({inv_pre}).",
-        *[
-            f"        + {t}" if i == 0 else f"          {t}"
-            for i, t in enumerate(_peel_ladder(rd_exec[1:enc_i]) + ["skip => /#."])
-        ],
-        f"        exists* (glob {mod}){{1}}, ({enc_arg}{{1}}); elim* => g1 a1.",
-        f"        call{{1}} ({mod}_{meth}_det g1 a1).",
-        f"        exists* (glob {mod}){{2}}, ({enc_arg}{{2}}); elim* => g2 a2.",
-        f"        call{{2}} ({mod}_{meth}_det g2 a2).",
-        "        skip => /#.",
-        *[f"      {t}" for t in _peel_ladder(rd_exec[enc_i + 1 : prefix + 1])],
-        f"      skip => />; smt({tag}_proj).",
-        # The inline-introduced argument binding goes into the PRECONDITION
-        # rather than being named: EasyCrypt picks that name, and a tactic that
-        # spells it is one that breaks on the next proof.
-        f"    swap{{1}} 1 {n_bind}.",
-        f"    sp {n_bind} 0.",
-        f"    seq 0 1 : (#pre); first by rnd{{2}}; skip => />; smt({spec.cod_distr}_ll).",
-        f"    {pin_b2}.",
-        f"    seq 2 2 : (#pre /\\ ={{{spec.read_var}}} /\\ {rd_rf}{{1}} ="
-        f" {twin.name}.rF{{2}}.[{pin_t} <- {spec.read_var}{{2}}]).",
-        "    + rndsem*{1} 0; rndsem*{2} 0.",
-        f"      rnd (fun (p : {pair_ty}) => (p.`1.[{pin_t} <- v0], p.`2))",
-        f"          (fun (p : {pair_ty}) => (p.`1.[{pin_t} <- p.`2], p.`2)).",
-        "      skip => /> &2 _.",
-        "      split; [ | move=> _; split; [ | move=> _ ] ].",
-        f"      + move=> r hr; rewrite {tag}_fupd2"
-        f" -({tag}_pinR_supp {pin_t} v0 r hr) {tag}_fupd_id; smt().",
-        "      + move=> [f y] hr /=.",
-        f"        have hcol : f.[{pin_t} <- y].[{pin_t} <- v0] = f",
-        f"          by rewrite {tag}_fupd2"
-        f" -({tag}_pinR_supp {pin_t} v0 (f, y) hr) {tag}_fupd_id.",
-        f"        rewrite -({tag}_fold_eq_pin {pin_t} v0).",
-        f"        rewrite (in_dmap1E_can _ _"
-        f" (fun (p : {pair_ty}) => (p.`1.[{pin_t} <- v0], p.`2))) /=.",
-        f"        + by rewrite !{tag}_fupd2.",
-        "        + move=> [g w] hy /= [hy1 hy2].",
-        f"          have e1 : g = g.[{pin_t} <- w].[{pin_t} <- v0]",
-        f"            by rewrite {tag}_fupd2"
-        f" -({tag}_pinR_supp {pin_t} v0 (g, w) hy) {tag}_fupd_id.",
-        "          by rewrite hcol; smt().",
-        "        by rewrite hcol.",
-        f"      move=> l hl; case: ({tag}_dL_supp {pin_t} l hl) => h1 h2.",
-        f"      split; [ by apply {tag}_pinD_mem => //; rewrite h2;"
-        f" exact ({tag}_dfn_at l.`1 {pin_t} h1) | move=> _ ].",
-        f"      split; [ by rewrite {tag}_fupd2 h2 {tag}_fupd_id; smt() | move=> _ ].",
-        f"      by rewrite {tag}_fupd2 h2 {tag}_fupd_id.",
-        *(
-            [
-                "    wp; skip => /> &2 hproj p hp.",
-                "    have hne : pt0 <> p"
-                " by apply/negP => h; move: hp; rewrite -h hproj.",
-            ]
-            if spec.pin_key_var is None
-            else ["    wp; skip => /> *; smt(fupdate_neq)."]
-        ),
-        *(["    by rewrite fupdate_neq."] if spec.pin_key_var is None else []),
-    ]
-    asm = [
-        f"    transitivity {twin_proc}",
-        f"      ({globs} ==> {l1_post})",
-        f"      ({globs} ==> {l2_post}).",
-        "    + move=> &1 &2 h.",
-        "      exists "
-        + " ".join(f"(glob {g}){{1}}" for g in _glob_names(globs))
-        + ".",
-        "      smt().",
-        "    + move=> &1 &m &2; smt().",
-        f"    + exact leg1_hop_{hop_index}.",
-        f"    exact leg2_hop_{hop_index}.",
-    ]
-    return ("\n".join(l1), "\n".join(l2), asm, pres)
-
-
-def _glob_names(globs: str) -> list[str]:
-    r"""The abstract module names of a ``={glob X} /\ ...`` conjunction, SORTED --
-    EasyCrypt's ``transitivity`` asks for one middle-memory witness per glob and
-    orders them itself."""
-    return sorted(set(re.findall(r"=\{glob (\w+)\}", globs)))
+        occ = cur.index(distr) + 1  # 1-indexed occurrence among current samples
+        swaps.append(f"swap{{{side}}} ^ <${{{occ}}} @ 0.")
+        cur.insert(0, cur.pop(occ - 1))
+    if cur != target_distrs:
+        return None
+    return swaps

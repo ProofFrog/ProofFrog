@@ -78,10 +78,33 @@ DISPLAY = {
     BLOCKED: "Blocked - does not EC-compile",
 }
 
-TAG_RE = re.compile(r"\(\* resolution: ([\w-]+) \*\)")
-"""Matches an emitted resolution tag; group 1 is the rung token."""
+TAG_RE = re.compile(
+    r"\(\* resolution: ([\w-]+)"
+    r"(?: transform=\"([^\"]*)\")?(?: entry=\"([^\"]*)\")? \*\)"
+)
+"""Matches an emitted resolution tag.
+
+Group 1 is the rung token (unchanged since the tag's introduction, so
+every existing consumer keeps working). Groups 2 and 3 are the optional
+provenance attributes ``transform="..."`` and ``entry="..."`` — the
+transform application the closure evidences and the registered tactic
+entry that produced it (see :mod:`tactic_registry`). ``None`` on tags
+emitted before provenance landed or on non-micro bodies.
+"""
 
 
-def tag(token: str) -> str:
-    """Render the machine-readable resolution tag for one rung token."""
-    return f"(* resolution: {token} *)"
+def tag(token: str, transform: str | None = None, entry: str | None = None) -> str:
+    """Render the machine-readable resolution tag for one rung token.
+
+    ``transform``/``entry`` add the provenance attributes required on
+    micro-lemma closures by the ratified architecture (E1): which
+    transform application the lemma evidences, and which registered
+    entry produced the tactic. An admit names its transform and no
+    entry.
+    """
+    attrs = ""
+    if transform is not None:
+        attrs += f' transform="{transform}"'
+    if entry is not None:
+        attrs += f' entry="{entry}"'
+    return f"(* resolution: {token}{attrs} *)"

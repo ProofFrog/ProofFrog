@@ -49,7 +49,9 @@ from .resolution import (
     SYNTH_PARAM,
     SYNTH_STATIC,
 )
+from .resolution import TAG_RE as _RES_TAG_RE
 from .resolution import tag as _res_tag
+from . import tactic_registry
 from .tactic_cache import TacticCache, derivation_scaffold
 from .transform_buckets import PARAMETRIC_TACTIC, Bucket, classify, tactic_body
 
@@ -59,87 +61,33 @@ from .transform_buckets import PARAMETRIC_TACTIC, Bucket, classify, tactic_body
 # permutation (e.g. ``Topological Sorting`` may drop dead samples — its
 # DFS from the return ignores statements not transitively used by it),
 # we fall back to ``admit.``.
-_REORDER_TRANSFORMS = frozenset(
-    {
-        "Topological Sorting",
-        "Bubble Sort Field Assignments",
-        "Stabilize Independent Statements",
-    }
-)
-
-# Transforms that drop a local tuple and rewrite its projections to the
-# components. Their micro relates a tuple-bearing flat state to its
-# tuple-free successor; the stateless ``Ideal`` route's ``_ec_tuple_inline``
-# handles them name-independently (see ``_synth_stateless_reorder``).
-_TUPLE_INLINE_TRANSFORMS = frozenset(
-    {
-        "Inline Local Tuple Literal",
-        "Expand Tuples",
-    }
-)
-
-# Deterministic tuple-projection rewrites whose micro keeps the *whole* abstract-
-# call sequence identical (same callees, same order, same multiset) and only
-# rearranges deterministic tuple-construction/projection plumbing (e.g.
-# ``t <@ KeyGen(); x = t[0]`` <-> ``r <@ KeyGen(); t = r[0]; x = t``, or a tuple
-# literal ``ek = (a, b)`` <-> its expanded components ``ek_0 = a; ek_1 = b``).
-# There is no call reorder at all, so the swap routes have nothing to do and the
-# stateless/tuple-walk routes are single-module only; in a multi-declared-module
-# body these fall through to ``admit``. The functional-twin route closes them: in
-# the twins every det call is an ``ev_*`` assignment, so both sides hold the same
-# probabilistic calls in the same order and the identical-order ``(wp; call)*``
-# middle leg discharges the plumbing difference via ``wp`` + ``skip => /#``.
-_PLUMBING_REWRITE_TRANSFORMS = frozenset(
-    {
-        "Collapse Single-Index Tuple Access",
-        "Expand Tuples",
-        "Inline Single-Use Variables",
-        # Inlining a *pure multi-use expression* into its use sites: a local
-        # ``label <- concat ... ; F.evaluate(.., label)`` (used twice) becomes
-        # ``F.evaluate(.., concat ...)`` at each site. The abstract-call sequence
-        # is identical; only a deterministic assignment is dropped and its
-        # expression substituted into call args -- the identical-order ``(wp;
-        # call)*`` middle leg discharges the residual arg equality (``wp``
-        # collects the inlined assignment, ``skip => /#`` equates the substituted
-        # expressions). The static ``sp; wp; sim`` leaves that equality open.
-        "Inline Multi-Use Pure Expressions",
-        # The dual rewrite: a repeated deterministic tuple access
-        # (``v.`1`` used several times) is extracted to a CSE local
-        # (``__cse_v_0__ <- v.`1``) and the uses rewired to it. Again the
-        # abstract-call sequence is identical; the diff is the extra CSE
-        # assignments plus the rewired tuple-construction RHS, both absorbed by
-        # ``wp`` with ``skip => /#`` closing the construction equality.
-        "Extract Repeated Tuple Access",
-        # A deterministic copy-alias rewrite that swaps a call argument for its
-        # definitional equal (``encodeencapskey(__determ_4__.`1)`` <->
-        # ``encodeencapskey(tup_01)`` given ``tup_01 <- __determ_4__.`1``). The
-        # abstract-call *sequence* is identical (only one argument expression
-        # changed), so the identical-order ``(wp; call)*`` middle leg closes it:
-        # ``wp`` collects the alias assignment and ``skip => /#`` discharges the
-        # residual argument equality. The static ``sp; wp; sim`` otherwise leaves
-        # that equality open (a 0-admit file EC rejects).
-        "Forward Expression Alias",
-    }
-)
+# The transform-set gate constants live in ``tactic_registry`` (the
+# declarative registry the ratified architecture requires); the local
+# ``_``-prefixed names are aliases so the gate code reads unchanged.
+_REORDER_TRANSFORMS = tactic_registry.REORDER_TRANSFORMS
 
 
-# Transforms whose micros are closed by a synthesizer that lives at the
-# chain-emitter level (the ``_try_*`` routes in ``emit_chain_for_hop``), not by
-# a ``transform_buckets`` ``CANNED_TACTIC``/``PARAMETRIC_TACTIC`` entry. These
-# reach ``synth-param`` when their shape matches and fall through to cache/admit
-# otherwise -- i.e. they "degrade" like the reorder transforms. The dashboard
-# reads this set so its capability column credits them (the bucket tables alone
-# cannot see chain-emitter synthesis). Keep in sync with the ``_try_*`` gates:
-# ``_TUPLE_INLINE_TRANSFORMS`` (tuple-walk / congruence / stateless),
-# ``_PLUMBING_REWRITE_TRANSFORMS`` (the identical-call-sequence functional-twin
-# route) and ``Deduplicate Deterministic Calls`` (``_synth_dedup_det``). The
-# reorder transforms (``_synth_dead_call_drop``) are already credited via their
-# empty ``CANNED_TACTIC`` entry, so they are not repeated here.
-CHAIN_EMITTER_SYNTH_TRANSFORMS = frozenset(
-    _TUPLE_INLINE_TRANSFORMS
-    | _PLUMBING_REWRITE_TRANSFORMS
-    | {"Deduplicate Deterministic Calls"}
-)
+def _with_provenance(body: list[str], transform: str, entry: str) -> list[str]:
+    """Re-render a route-tagged tactic body with provenance attributes.
+
+    Routes that build their tactic (and its leading resolution tag)
+    internally do not know which transform application they are closing;
+    the call site does. Rewrite the leading tag with the same rung plus
+    ``transform=``/``entry=`` attributes; a body whose head is not a
+    resolution tag passes through unchanged.
+    """
+    if body and (m := _RES_TAG_RE.fullmatch(body[0])):
+        return [_res_tag(m.group(1), transform=transform, entry=entry), *body[1:]]
+    return body
+
+
+_TUPLE_INLINE_TRANSFORMS = tactic_registry.TUPLE_INLINE_TRANSFORMS
+
+_PLUMBING_REWRITE_TRANSFORMS = tactic_registry.PLUMBING_REWRITE_TRANSFORMS
+
+# Re-exported for the dashboard, which credits chain-emitter synthesis
+# from this set (the bucket tables alone cannot see it).
+CHAIN_EMITTER_SYNTH_TRANSFORMS = tactic_registry.CHAIN_EMITTER_SYNTH_TRANSFORMS
 
 
 @dataclass
@@ -479,7 +427,9 @@ def emit_chain_for_hop(
                 )
             )
             if det_re is not None:
-                return det_re
+                return _with_provenance(
+                    det_re, app.transform_name, tactic_registry.ENTRY_DET_REORDER
+                )
         # Pure-reorder transforms: synthesize a ``swap`` sequence directly
         # from the AST diff. If the diff isn't a clean permutation (e.g.
         # ``Topological Sorting`` may also drop dead samples — its DFS
@@ -508,7 +458,16 @@ def emit_chain_for_hop(
                 method_return_types,
                 flat_params,
             ):
-                return [_res_tag(SYNTH_PARAM), "proc.", *swaps, "sim."]
+                return [
+                    _res_tag(
+                        SYNTH_PARAM,
+                        transform=app.transform_name,
+                        entry=tactic_registry.ENTRY_PERM_SWAP_SIM,
+                    ),
+                    "proc.",
+                    *swaps,
+                    "sim.",
+                ]
             # The raw transform-application ASTs are normalized differently from
             # the rendered flat-state modules the micro lemma relates (the engine
             # stores a separately-canonicalized ``game_before``), so the raw-AST
@@ -529,7 +488,11 @@ def emit_chain_for_hop(
                 )
                 if ec_swaps:
                     return [
-                        _res_tag(SYNTH_PARAM),
+                        _res_tag(
+                            SYNTH_PARAM,
+                            transform=app.transform_name,
+                            entry=tactic_registry.ENTRY_RENDERED_SWAP_SIM,
+                        ),
                         "proc.",
                         *[f"{s}." for s in ec_swaps],
                         "sim.",
@@ -542,11 +505,24 @@ def emit_chain_for_hop(
                 before_hoisted, after_hoisted, types, eq_args_strong, reversed_dir
             )
             if drop is not None:
-                return [_res_tag(SYNTH_PARAM), *drop]
+                return [
+                    _res_tag(
+                        SYNTH_PARAM,
+                        transform=app.transform_name,
+                        entry=tactic_registry.ENTRY_DEAD_SAMPLE_DROP,
+                    ),
+                    *drop,
+                ]
             cached = _layer2_lookup(app, reversed_dir)
             if cached is not None:
-                return [_res_tag(CACHED_UNGUIDED), *cached]
-            return [_res_tag(ADMIT_UNGUIDED), *_layer3_admit(app, bucket, reversed_dir)]
+                return [
+                    _res_tag(CACHED_UNGUIDED, transform=app.transform_name),
+                    *cached,
+                ]
+            return [
+                _res_tag(ADMIT_UNGUIDED, transform=app.transform_name),
+                *_layer3_admit(app, bucket, reversed_dir),
+            ]
         # Try the parametric synthesizer first when registered — its
         # output is tuned to the specific AST and takes precedence over
         # the multi-module ``proc; sp; wp; sim.`` fallback below.
@@ -602,10 +578,17 @@ def emit_chain_for_hop(
                     and _needs_data_aware_reorder(left_state, right_state)
                 ):
                     return [
-                        _res_tag(ADMIT_UNGUIDED),
+                        _res_tag(ADMIT_UNGUIDED, transform=app.transform_name),
                         *_layer3_admit(app, bucket, reversed_dir),
                     ]
-                return [_res_tag(SYNTH_PARAM), *synthesized]
+                return [
+                    _res_tag(
+                        SYNTH_PARAM,
+                        transform=app.transform_name,
+                        entry=tactic_registry.param_entry_id(app.transform_name),
+                    ),
+                    *synthesized,
+                ]
         body = tactic_body(app.transform_name, app, types)
         if multi_module and bucket == Bucket.CANNED and body:
             # A reorder that transposes two abstract calls of the *same* single
@@ -616,7 +599,7 @@ def emit_chain_for_hop(
             # ``swap`` past a glob-independent sample keeps the canned path.
             if _stateless_ok and _crosses_single_module_calls(left_state, right_state):
                 return [
-                    _res_tag(ADMIT_UNGUIDED),
+                    _res_tag(ADMIT_UNGUIDED, transform=app.transform_name),
                     *_layer3_admit(app, bucket, reversed_dir),
                 ]
             # Compare hoisted forms, not raw FrogLang ASTs: the engine's
@@ -639,7 +622,16 @@ def emit_chain_for_hop(
                 before_hoisted, after_hoisted, reversed_dir=reversed_dir
             )
             if swaps is not None and swaps:
-                return [_res_tag(SYNTH_PARAM), "proc.", *swaps, "sp; wp; sim."]
+                return [
+                    _res_tag(
+                        SYNTH_PARAM,
+                        transform=app.transform_name,
+                        entry=tactic_registry.ENTRY_PERM_SWAP_SPWPSIM,
+                    ),
+                    "proc.",
+                    *swaps,
+                    "sp; wp; sim.",
+                ]
             # The raw transform-application ASTs are normalized differently
             # from the rendered flat-state modules the micro lemma actually
             # relates (separately-canonicalized ``game_before``; nested
@@ -658,7 +650,11 @@ def emit_chain_for_hop(
             )
             if ec_swaps:
                 return [
-                    _res_tag(SYNTH_PARAM),
+                    _res_tag(
+                        SYNTH_PARAM,
+                        transform=app.transform_name,
+                        entry=tactic_registry.ENTRY_RENDERED_SWAP_SPWPSIM,
+                    ),
                     "proc.",
                     *[f"{s}." for s in ec_swaps],
                     "sp; wp; sim.",
@@ -693,7 +689,11 @@ def emit_chain_for_hop(
                     ),
                 )
                 if isuv_walk is not None:
-                    return isuv_walk
+                    return _with_provenance(
+                        isuv_walk,
+                        app.transform_name,
+                        tactic_registry.ENTRY_ISUV_WALK,
+                    )
             # Generic multi-module static fallback. ``sp; wp; sim`` is right for
             # most reorder-ish CANNED micros, but a ``Symbolic Computation``
             # (or ``Normalize Commutative Chains``) micro whose two sides render
@@ -705,13 +705,30 @@ def emit_chain_for_hop(
             # for every shape that already worked and falls back to ``sim`` only
             # when ``sp; wp; sim`` *errors* -- strictly more robust (it can add a
             # closure, never remove one), mirroring the wrapper/flat bridge.
-            return [_res_tag(SYNTH_STATIC), "proc; ((sp; wp; sim) || sim)."]
+            return [
+                _res_tag(
+                    SYNTH_STATIC,
+                    transform=app.transform_name,
+                    entry=tactic_registry.ENTRY_MULTI_MODULE_STATIC,
+                ),
+                "proc; ((sp; wp; sim) || sim).",
+            ]
         if body:
-            return [_res_tag(SYNTH_STATIC), *body]
+            return [
+                _res_tag(
+                    SYNTH_STATIC,
+                    transform=app.transform_name,
+                    entry=tactic_registry.ENTRY_CANNED,
+                ),
+                *body,
+            ]
         cached = _layer2_lookup(app, reversed_dir)
         if cached is not None:
-            return [_res_tag(CACHED_UNGUIDED), *cached]
-        return [_res_tag(ADMIT_UNGUIDED), *_layer3_admit(app, bucket, reversed_dir)]
+            return [_res_tag(CACHED_UNGUIDED, transform=app.transform_name), *cached]
+        return [
+            _res_tag(ADMIT_UNGUIDED, transform=app.transform_name),
+            *_layer3_admit(app, bucket, reversed_dir),
+        ]
 
     # Stateless-scheme reorder synthesis. When a micro that would otherwise
     # admit is a reorder of abstract calls of a single declared stateless

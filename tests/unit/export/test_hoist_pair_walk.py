@@ -213,6 +213,7 @@ def _dispatch(
         _game("HB", False),
         _game("HA", True),
         oracle,
+        "Hoist Deterministic Call to Initialize",
         reversed_dir,
         EMT,
         {},
@@ -223,7 +224,6 @@ def _dispatch(
         left_ref=lref,
         right_ref=rref,
         clone_alias=ALIAS,
-        inj_methods_by_module={},
     )
 
 
@@ -244,7 +244,7 @@ def test_consumer_lockstep_with_template() -> None:
     EC-validated template (ec_templates/hoist_pair_walk.ec)."""
     step = _dispatch("challenge")
     assert step is not None
-    tac, reqs, rung = step
+    tac, reqs, rung, _entry = step
     assert rung == "synth-param"
     assert reqs.det == {("M", "f")}
     assert tac == _template_proof_body("micro_hz_L0")
@@ -253,7 +253,7 @@ def test_consumer_lockstep_with_template() -> None:
 def test_bystander_lockstep_with_template() -> None:
     step = _dispatch("guess")
     assert step is not None
-    tac, reqs, rung = step
+    tac, reqs, rung, _entry = step
     assert rung == "synth-param"
     assert reqs.det == set()
     assert tac == _template_proof_body("micro_hz_by")
@@ -272,7 +272,7 @@ def test_reversed_consumer_lockstep_with_template() -> None:
         rref="HZ_R0(E, M)",
     )
     assert step is not None
-    tac, _reqs, _rung = step
+    tac, _reqs, _rung, _entry = step
     assert tac == _template_proof_body("micro_hz_R0_rev")
 
 

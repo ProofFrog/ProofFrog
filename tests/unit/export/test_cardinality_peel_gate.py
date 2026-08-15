@@ -91,6 +91,7 @@ def _dispatch(interleaved: bool):
         _game("CB", False, interleaved),
         _game("CA", True, interleaved),
         "challenge",
+        "Remove redundant variables for fields",
         False,
         EMT,
         {},
@@ -106,7 +107,7 @@ def _dispatch(interleaved: bool):
 def test_peel_fires_on_a_pure_call_tail() -> None:
     step = _dispatch(interleaved=False)
     assert step is not None
-    tac, _reqs, rung = step
+    tac, _reqs, rung, _entry = step
     assert tac == ["proc.", "call (_: true).", "call (_: true).", "auto."]
     assert rung == "synth-param"
 
@@ -140,7 +141,7 @@ def test_interleaved_calls_take_the_paired_peel() -> None:
     # proof-level control (survivor invariant dropped) EasyCrypt rejects.
     step = _dispatch(interleaved=True)
     assert step is not None
-    tac, _reqs, rung = step
+    tac, _reqs, rung, _entry = step
     assert tac == [
         "proc.",
         "wp.",

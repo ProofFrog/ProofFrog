@@ -131,6 +131,47 @@ ENTRY_RENDERED_SWAP_SPWPSIM = "rendered-swap-spwpsim"
 ENTRY_ISUV_WALK = "isuv-walk"
 ENTRY_MULTI_MODULE_STATIC = "multi-module-static"
 
+# --- Entry ids for the multi-oracle leg moves. ---
+
+ENTRY_IDENTITY_SIM = "identity-sim"
+ENTRY_RENAME_SIM = "rename-sim"
+ENTRY_SURVIVOR_PEEL = "survivor-peel"
+ENTRY_HOIST_PAIR = "hoist-pair"
+
+# UNIVERSAL entries: registered for EVERY transform, explicitly, here.
+# Justification (the bystander rule): a chain leg projects one oracle out
+# of a whole-game step, so a transform that rewrote some OTHER oracle
+# leaves this projection equal (or equal modulo local renaming, or a pure
+# statement permutation). The tactic for such a leg -- ``proc; sim`` or
+# ``swap``+``sim`` -- is proven outright by EasyCrypt with no
+# transform-specific fact, and is the canonical closure for the property
+# "this application did not touch this oracle". Under R3 this is one
+# implementation explicitly registered for every transform, recorded
+# once, in this constant, rather than per-name table rows.
+UNIVERSAL_ENTRIES = frozenset(
+    {
+        ENTRY_IDENTITY_SIM,
+        ENTRY_RENAME_SIM,
+        ENTRY_PERM_SWAP_SIM,
+    }
+)
+
+# The survivor peel serves the field-set-changing transforms: a
+# cardinality-differing state pair can only be produced by a transform
+# that adds or removes fields, and the peel's two honest gates (unbroken
+# or paired backbone; bodies equal under the coupling's field renaming)
+# hold exactly for the remove-a-field-keep-the-survivor shape.
+FIELD_SET_TRANSFORMS = frozenset(
+    {
+        "Remove redundant variables for fields",
+        "Remove unnecessary statements and fields",
+        "Inline Single-Use Field",
+        "Localize Init-Only Field Sample",
+        "Remove Duplicate Fields",
+        "Hoist Field Pure Alias",
+    }
+)
+
 
 def param_entry_id(transform_name: str) -> str:
     """Entry id of the parametric synthesizer registered for a transform."""
@@ -180,6 +221,11 @@ def _build_registry() -> dict[str, frozenset[str]]:
     # sequence identical — the plumbing-rewrite shape, EC-checked). One
     # explicit registration per R3, never fallthrough.
     add("Normalize Commutative Chains", ENTRY_DET_REORDER)
+    # Multi-oracle leg moves (the universal sim/swap entries are handled
+    # by ``is_registered`` via UNIVERSAL_ENTRIES, not per-name rows).
+    for name in FIELD_SET_TRANSFORMS:
+        add(name, ENTRY_SURVIVOR_PEEL)
+    add("Hoist Deterministic Call to Initialize", ENTRY_HOIST_PAIR)
     return {name: frozenset(entries) for name, entries in reg.items()}
 
 
@@ -187,7 +233,14 @@ TACTIC_REGISTRY: dict[str, frozenset[str]] = _build_registry()
 
 
 def is_registered(transform_name: str, entry_id: str) -> bool:
-    """True iff ``entry_id`` is registered for ``transform_name``."""
+    """True iff ``entry_id`` is registered for ``transform_name``.
+
+    The universal entries (see :data:`UNIVERSAL_ENTRIES`) are registered
+    for every transform by policy — the bystander rule — so they are
+    accepted for any name.
+    """
+    if entry_id in UNIVERSAL_ENTRIES:
+        return True
     return entry_id in TACTIC_REGISTRY.get(transform_name, frozenset())
 
 

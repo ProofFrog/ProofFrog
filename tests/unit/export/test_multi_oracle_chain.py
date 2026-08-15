@@ -241,6 +241,7 @@ def test_oracle_step_tactic_identity_is_coupling_preserving_sim() -> None:
         g,
         _two_oracle_game("G"),
         "challenge",
+        "Alpha Rename",
         False,
         {},
         {},
@@ -252,7 +253,12 @@ def test_oracle_step_tactic_identity_is_coupling_preserving_sim() -> None:
     # with: a fixed tactic text selected by a structural gate -> synth-static.
     # Middle element: the leg's MicroRequests record (empty -- sim needs no
     # axiom families).
-    assert tac == (["proc; sim."], MicroRequests(), "synth-static")
+    assert tac == (
+        ["proc; sim."],
+        MicroRequests(),
+        "synth-static",
+        "identity-sim",
+    )
 
 
 # --- pure-of-args chain collapse -------------------------------------------
@@ -535,7 +541,8 @@ def test_multi_oracle_micros_carry_transform_and_resolution_tags() -> None:
     # the rung tag opening that micro's proof body.
     pairs = re.findall(
         r"\(\* transform: (.+?) \(bucket=\w+\) \*\)"
-        r".*?\(\* resolution: ([\w-]+) \*\)",
+        r".*?\(\* resolution: ([\w-]+)"
+        r"(?: transform=\"[^\"]*\")?(?: entry=\"[^\"]*\")? \*\)",
         text,
         re.DOTALL,
     )

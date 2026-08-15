@@ -20,8 +20,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 from proof_frog.export.easycrypt import exporter, resolution, tactic_registry
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -90,14 +88,6 @@ def test_single_oracle_textbook_micros_conform() -> None:
     _assert_conforming(OTP_SECURE_PROOF, minimum_micros=5)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "the multi-oracle leg dispatcher is not yet wired through the "
-        "tactic registry (architecture-pinning plan, Phase 3); when the "
-        "rewiring lands this xfail flips loudly and the marker comes off"
-    ),
-)
 def test_multi_oracle_micros_conform() -> None:
-    """Generic LEAK=>HON PK: multi-oracle micros must eventually conform."""
+    """Generic LEAK=>HON PK: multi-oracle micros conform (Phase 3 rewiring)."""
     _assert_conforming(GENERIC_HON_PK_PROOF, minimum_micros=20)

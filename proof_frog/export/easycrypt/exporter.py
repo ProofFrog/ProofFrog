@@ -16614,9 +16614,6 @@ def export_proof_file(proof_path: str) -> str:
                     if _is_lazyro_honest_hop(step_a, step_b) is not None
                     else frozenset()
                 ),
-                both_reductions=(
-                    step_a.reduction is not None and step_b.reduction is not None
-                ),
                 init_tac_override=reprogram_override,
                 oracle_tac_override=(
                     _twin_challenge_oracle_tacs(step_a, step_b)

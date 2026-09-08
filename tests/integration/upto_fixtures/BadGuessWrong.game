@@ -1,0 +1,37 @@
+// NOT identical until bad: Right differs outside the flagged block.
+Game Left(Set S) {
+    S target;
+    Bool bad;
+
+    Void Initialize() {
+        target <- S;
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (c == target) {
+            bad = true;
+            return true;
+        }
+        return false;
+    }
+}
+
+Game Right(Set S) {
+    S target;
+    Bool bad;
+
+    Void Initialize() {
+        target <- S;
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (c == target) {
+            bad = true;
+        }
+        return true;
+    }
+}
+
+export as BadGuessWrong;

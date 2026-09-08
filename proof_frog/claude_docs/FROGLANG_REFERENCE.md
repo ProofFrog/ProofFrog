@@ -578,6 +578,20 @@ G_B against Adversary;                                  // (4) interchangeabilit
 - Steps 2-3: Justified by the assumption that `Security(G)` holds.
 - Steps 3-4: Verified as interchangeable by the engine.
 
+### 8.5.1 Up-to-Bad Hops
+
+A side flip over a game pair that is **not** assumed can still be a valid hop when the pair is *identical until bad* and the *flag game* derived from it is in scope. This is the fundamental lemma of game playing, encoded structurally (FrogLang has no `abort`):
+
+- A pair is identical until bad when both games declare a `Bool bad` field, set `bad = false;` in `Initialize` (or initialize it to `false`), and differ only inside `if` branches whose first statement is `bad = true;`. Everything else, including the branch conditions, must be syntactically identical, and `bad` may appear nowhere else. Because the reduction is shared verbatim between the two sides, the composed games are identical until bad as well.
+- The flag game of the pair is one side of the pair (conventionally the "neutral" second game) plus exactly one extra oracle `Bool Reveal()`, returning `bad` in the flag game's first game and `false` in its second. Its advantage is the probability that `bad` is ever raised.
+
+```
+Pair(X).Left  compose R against Adversary;   // step i
+Pair(X).Right compose R against Adversary;   // step i+1: up to bad
+```
+
+The engine recognizes the hop when `Pair` passes the identical-until-bad check and a game `Flag(X)` passing the flag-game check (same arguments) is in `assume:` or proven in `lemma:`. The hop contributes `Adv^Flag(X)` to the synthesized bound. The flag game is an ordinary Left/Right pair, so its lemma is an ordinary game-hopping proof; its adversary only ever learns the flag, which is what makes it provable when the pair's own Left side reveals secrets after `bad` that no reduction could simulate. Both checks are purely syntactic on the parsed game files (`proof_frog/upto.py`). Example: `examples/Games/PubKeyEnc/OAEPAskG.game`, `OAEPAskGFlag.game`, and `examples/Proofs/PubKeyEnc/OAEP_AskG_Flag.proof`.
+
 ### 8.6 Induction
 
 Proofs may use **induction** for hybrid arguments that transition through a parameterized family of games:

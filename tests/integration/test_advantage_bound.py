@@ -49,8 +49,7 @@ def test_birthday_term_in_derived_oracle_count() -> None:
     # direction hops sum to a single count_CTXT(count_CTXT-1)/|BitString<F.in>|.
     out = _prove("examples/Proofs/SymEnc/SymEncPRF_INDCPA$_MultiChal.proof")
     assert (
-        "Adv^PRFSecurity(F)(B1) + count_CTXT*(count_CTXT - 1)/|BitString<F.in>|"
-        in out
+        "Adv^PRFSecurity(F)(B1) + count_CTXT*(count_CTXT - 1)/|BitString<F.in>|" in out
     )
     assert "Adv^DistinctSampling" not in out
 
@@ -67,3 +66,15 @@ def test_initialize_time_sampling_is_constant() -> None:
     out = _prove("examples/Proofs/Group/GapCDH_implies_GapCDH_NZ.proof")
     assert "2/G.order" in out
     assert "Adv^NonzeroSampling" not in out
+
+
+def test_lemma_bound_is_inlined_through_upto_hops() -> None:
+    """OAEP IND-CPA: the flag lemma's bound (PDOW + guessing) replaces the
+    opaque flag-game terms, with the guessing count re-derived through the
+    outer reductions and the two composed PDOW adversaries numbered."""
+    out = _prove("examples/Proofs/PubKeyEnc/OAEP_INDCPA_ROM.proof")
+    assert (
+        "<= Adv^PDOW(F, n + k1)(B1) + Adv^PDOW(F, n + k1)(B2)"
+        " + 2*count_HashG/|BitString<k0>|"
+    ) in out
+    assert "(before inlining lemma bounds: Adv^OAEPAskGFlag(F, n, k1, H)(B1)" in out

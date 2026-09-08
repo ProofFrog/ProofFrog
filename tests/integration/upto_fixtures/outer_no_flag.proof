@@ -1,0 +1,27 @@
+// No flag game in scope: the BadGuess side flip must FAIL as an equivalence.
+import 'TargetGuess.game';
+import 'BadGuess.game';
+
+proof:
+
+let:
+    Set S;
+
+theorem:
+    TargetGuess(S);
+
+games:
+    TargetGuess(S).Left against TargetGuess(S).Adversary;
+    BadGuess(S).Left  compose R(S) against TargetGuess(S).Adversary;
+    BadGuess(S).Right compose R(S) against TargetGuess(S).Adversary;
+    TargetGuess(S).Right against TargetGuess(S).Adversary;
+
+Reduction R(Set S) compose BadGuess(S) against TargetGuess(S).Adversary {
+    Void Initialize() {
+        challenger.Initialize();
+    }
+
+    Bool Eq(S c) {
+        return challenger.Eq(c);
+    }
+}

@@ -18,8 +18,10 @@ from .sampling import (
 from .sampling import (
     SplitUniformSamples,
     SingleCallFieldToLocal,
+    CounterGuardedComputedFieldToLocal,
     CounterGuardedFieldToLocal,
     SinkUniformSample,
+    LocalizeInitOnlyField,
     LocalizeInitOnlyFieldSample,
 )
 from .random_functions import (
@@ -83,6 +85,7 @@ from .structural import (
 )
 from .control_flow import (
     IfConditionAliasSubstitution,
+    PropagateLiteralAssignment,
     GuardConditionSimplification,
     IfToBooleanAssignment,
     RedundantConditionalReturn,
@@ -125,8 +128,10 @@ CORE_PIPELINE: list[TransformPass] = [
     # sites): once either fires, the split-declaration tuple spelling can
     # no longer be normalized to the decl-with-initializer route (#255).
     SplitBareTupleDeclarations(),
+    PropagateLiteralAssignment(),
     SingleCallFieldToLocal(),
     CounterGuardedFieldToLocal(),
+    CounterGuardedComputedFieldToLocal(),
     SymbolicComputation(),
     SimplifySplice(),
     SliceOfInlineConcat(),
@@ -172,6 +177,7 @@ CORE_PIPELINE: list[TransformPass] = [
     ElseUnwrap(),
     InlineSingleUseField(),
     LocalizeInitOnlyFieldSample(),
+    LocalizeInitOnlyField(),
     RemoveUnnecessaryFields(),
     CollapseAssignment(),
     SimplifyReturn(),

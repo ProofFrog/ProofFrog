@@ -1,0 +1,39 @@
+import 'BadGuessFlag.game';
+import 'RandomTargetGuessing.game';
+
+proof:
+
+let:
+    Set S;
+
+assume:
+    RandomTargetGuessing(S);
+
+theorem:
+    BadGuessFlag(S);
+
+games:
+    BadGuessFlag(S).Real against BadGuessFlag(S).Adversary;
+    RandomTargetGuessing(S).Real  compose R(S) against BadGuessFlag(S).Adversary;
+    RandomTargetGuessing(S).Ideal compose R(S) against BadGuessFlag(S).Adversary;
+    BadGuessFlag(S).Ideal against BadGuessFlag(S).Adversary;
+
+Reduction R(Set S) compose RandomTargetGuessing(S) against BadGuessFlag(S).Adversary {
+    Bool bad;
+
+    Void Initialize() {
+        challenger.Initialize();
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (challenger.Eq(c)) {
+            bad = true;
+        }
+        return false;
+    }
+
+    Bool Reveal() {
+        return bad;
+    }
+}

@@ -1,0 +1,32 @@
+// TargetGuess via an up-to-bad hop on the BadGuess pair, whose flag game
+// BadGuessFlag is assumed directly.
+import 'TargetGuess.game';
+import 'BadGuess.game';
+import 'BadGuessFlag.game';
+
+proof:
+
+let:
+    Set S;
+
+assume:
+    BadGuessFlag(S);
+
+theorem:
+    TargetGuess(S);
+
+games:
+    TargetGuess(S).Left against TargetGuess(S).Adversary;
+    BadGuess(S).Left  compose R(S) against TargetGuess(S).Adversary;
+    BadGuess(S).Right compose R(S) against TargetGuess(S).Adversary;
+    TargetGuess(S).Right against TargetGuess(S).Adversary;
+
+Reduction R(Set S) compose BadGuess(S) against TargetGuess(S).Adversary {
+    Void Initialize() {
+        challenger.Initialize();
+    }
+
+    Bool Eq(S c) {
+        return challenger.Eq(c);
+    }
+}

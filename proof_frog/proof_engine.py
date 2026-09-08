@@ -19,6 +19,7 @@ from . import visitors
 from . import dependencies
 from . import diagnostics
 from . import advantage
+from . import upto
 from .transforms._base import (
     NearMiss,
     PipelineContext,
@@ -524,6 +525,9 @@ class ProofEngine:
     ) -> None:
         self.definition_namespace: frog_ast.Namespace = {}
         self.proof_namespace: frog_ast.Namespace = {}
+        # Hints for failed side flips that could have been up-to-bad hops
+        # (keyed by step number; see `_is_by_upto`).
+        self._upto_hints: dict[int, str] = {}
         self.proof_let_types: visitors.NameTypeMap = visitors.NameTypeMap()
         self.subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]] = []
         self.equality_pairs: set[tuple[str, str]] = set()
@@ -543,6 +547,11 @@ class ProofEngine:
         self.step_assumptions: list[ProcessedAssumption] = []
         self.hop_results: list[HopResult] = []
         self.advantage_bound: advantage.AdvantageBound | None = None
+        # The bound before lemma bounds were inlined (None when identical).
+        self.advantage_bound_raw: advantage.AdvantageBound | None = None
+        # Bounds established by verified lemma proofs, keyed by the lemma's
+        # instantiated game (str), for inlining into this proof's bound.
+        self._lemma_bounds: dict[str, advantage.LemmaBound] = {}
         self.variables: dict[str, Symbol | frog_ast.Expression] = {}
         self.method_lookup: MethodLookup = {}
         self.max_calls: Optional[int] = None
@@ -692,7 +701,7 @@ class ProofEngine:
             lemma_path = os.path.join(os.path.dirname(proof_path), lemma.proof_path)
             print(f"Lemma: {lemma.game} by '{lemma.proof_path}'")
             try:
-                verify_proof_file(
+                lemma_file, lemma_engine = _verify_proof_file_with_engine(
                     lemma_path,
                     verbosity=self.verbosity,
                     no_diagnose=True,
@@ -702,6 +711,12 @@ class ProofEngine:
             except (FailedProof, Exception) as e:
                 print(f"{Fore.RED}Lemma FAILED: {e}{Fore.RESET}")
                 raise FailedProof(f"Lemma {lemma.game} failed verification") from e
+            if lemma_engine.advantage_bound is not None:
+                self._lemma_bounds[str(lemma.game)] = advantage.LemmaBound(
+                    theorem=lemma_file.theorem,
+                    bound=lemma_engine.advantage_bound,
+                    local_names=frozenset(let.name for let in lemma_file.lets),
+                )
 
             effective_assumptions.append(lemma.game)
             lemma_games.add(str(lemma.game))
@@ -744,7 +759,16 @@ class ProofEngine:
                 self.hop_results,
                 definition_lookup=self.definition_namespace,
                 max_calls=proof_file.max_calls,
+                lemma_bounds=self._lemma_bounds or None,
             )
+            if self._lemma_bounds:
+                raw = advantage.synthesize_from_hop_results(
+                    self.hop_results,
+                    definition_lookup=self.definition_namespace,
+                    max_calls=proof_file.max_calls,
+                )
+                if raw.render() != self.advantage_bound.render():
+                    self.advantage_bound_raw = raw
             self._print_advantage_bound(proof_file.theorem)
             if not self._check_claimed_bound(proof_file):
                 raise FailedProof()
@@ -812,6 +836,8 @@ class ProofEngine:
                 type_labels.append("assumption")
             elif r.kind == "by_lemma":
                 type_labels.append("lemma")
+            elif r.kind == "by_upto":
+                type_labels.append("upto")
             elif r.kind == "induction_rollover":
                 type_labels.append("rollover")
             else:
@@ -859,6 +885,8 @@ class ProofEngine:
                 result_str = Fore.CYAN + "assume" + Fore.RESET
             elif r.kind == "by_lemma":
                 result_str = Fore.CYAN + "lemma" + Fore.RESET
+            elif r.kind == "by_upto":
+                result_str = Fore.CYAN + "upto" + Fore.RESET
             elif r.valid:
                 result_str = Fore.GREEN + "ok" + Fore.RESET
             else:
@@ -900,6 +928,10 @@ class ProofEngine:
             print(f"Advantage bound: {lhs} <= (not synthesized: {bound.note})")
             return
         print(f"Advantage bound: {lhs} <= {bound.render()}")
+        if self.advantage_bound_raw is not None:
+            print(
+                f"  (before inlining lemma bounds: {self.advantage_bound_raw.render()})"
+            )
         for note in bound.notes:
             print(f"  note: {note}")
 
@@ -915,6 +947,16 @@ class ProofEngine:
         if claim is None or self.advantage_bound is None:
             return True
         result = advantage.check_claimed_bound(claim.bound, self.advantage_bound)
+        if result.status != "verified" and self.advantage_bound_raw is not None:
+            # A claim may be stated in terms of the lemma's own notion (the
+            # un-inlined form); accept whichever form verifies.
+            raw_result = advantage.check_claimed_bound(
+                claim.bound, self.advantage_bound_raw
+            )
+            if raw_result.status == "verified" or (
+                raw_result.status == "undecided" and result.status == "not_verified"
+            ):
+                result = raw_result
         if result.status == "verified":
             print(Fore.GREEN + f"Claimed bound verified: {result.detail}." + Fore.RESET)
             return True
@@ -988,7 +1030,7 @@ class ProofEngine:
         current_desc: str
         next_desc: str
         # For assumption/lemma hops:
-        kind: str = ""  # "by_assumption", "by_lemma", or "" for equivalence
+        kind: str = ""  # "by_assumption", "by_lemma", "by_upto", or "" for equivalence
         # For assumption/lemma hops, advantage-bound bookkeeping:
         justification: frog_ast.ParameterizedGame | None = None
         reduction: frog_ast.ParameterizedGame | None = None
@@ -1070,6 +1112,29 @@ class ProofEngine:
                         )
                     )
                     continue
+                flag_game, upto_hint = self._is_by_upto(
+                    current_step, next_step, assumed_indistinguishable
+                )
+                if flag_game is not None:
+                    assert isinstance(current_step.challenger, frog_ast.ConcreteGame)
+                    assert isinstance(next_step.challenger, frog_ast.ConcreteGame)
+                    prepared.append(
+                        ProofEngine._PreparedHop(
+                            step_num=step_num,
+                            current_desc=self._step_display(current_step),
+                            next_desc=self._step_display(next_step),
+                            kind="by_upto",
+                            justification=flag_game,
+                            reduction=current_step.reduction,
+                            direction=(
+                                current_step.challenger.which,
+                                next_step.challenger.which,
+                            ),
+                        )
+                    )
+                    continue
+                if upto_hint:
+                    self._upto_hints[step_num] = upto_hint
                 current_game_ast = self._get_game_ast(
                     current_step.challenger, current_step.reduction
                 )
@@ -1167,6 +1232,9 @@ class ProofEngine:
         else:
             self._print_step_status(hop_desc, "FAILED", Fore.RED)
             self._print_failure_inline(equiv_result)
+            hint = self._upto_hints.get(hop.step_num)
+            if hint:
+                print(f"{Fore.YELLOW}             Hint: {hint}{Fore.RESET}")
         self.hop_results.append(
             HopResult(
                 step_num=hop.step_num,
@@ -1187,7 +1255,9 @@ class ProofEngine:
     ) -> None:
         """Print status and append to hop_results for an assumption/lemma hop."""
         self._current_step += 1
-        hop_label = "by lemma" if hop.kind == "by_lemma" else "by assumption"
+        hop_label = {"by_lemma": "by lemma", "by_upto": "up to bad"}.get(
+            hop.kind, "by assumption"
+        )
         if self.verbosity >= Verbosity.NORMAL:
             print(f"===STEP {hop.step_num}===")
             print(f"Current: {hop.current_desc}")
@@ -1871,6 +1941,56 @@ class ProofEngine:
             return current_step.challenger.game
         return None
 
+    def _is_by_upto(
+        self,
+        current_step: frog_ast.Step,
+        next_step: frog_ast.Step,
+        assumed_indistinguishable: list[frog_ast.ParameterizedGame],
+    ) -> tuple[frog_ast.ParameterizedGame | None, str]:
+        """Return the flag game licensing this side flip up to bad, or None.
+
+        A side flip over a game pair that is NOT assumed can still be a
+        valid hop when the pair is identical until bad (see
+        :mod:`proof_frog.upto`) and the flag game derived from it is in
+        scope with the same arguments. The returned game is the hop's
+        ``justification``: its advantage is the hop's loss. When the pair
+        qualifies but no flag game is in scope, the second component is a
+        hint to print if the equivalence check then fails.
+        """
+        if not isinstance(
+            current_step.challenger, frog_ast.ConcreteGame
+        ) or not isinstance(next_step.challenger, frog_ast.ConcreteGame):
+            return None, ""
+        cur, nxt = current_step.challenger, next_step.challenger
+        if (
+            cur.game != nxt.game
+            or cur.which == nxt.which
+            or current_step.adversary != next_step.adversary
+            or current_step.reduction != next_step.reduction
+        ):
+            return None, ""
+        pair_file = self.definition_namespace.get(cur.game.name)
+        if not isinstance(pair_file, frog_ast.GameFile):
+            return None, ""
+        if upto.identical_until_bad(pair_file) is not None:
+            return None, ""
+        for candidate in assumed_indistinguishable:
+            if candidate.args != cur.game.args:
+                continue
+            flag_file = self.definition_namespace.get(candidate.name)
+            if (
+                isinstance(flag_file, frog_ast.GameFile)
+                and upto.flag_game_mismatch(pair_file, flag_file) is None
+            ):
+                return candidate, ""
+        hint = (
+            f"{cur.game.name} is identical until bad, so this side flip could be"
+            " an up-to-bad hop: put its flag game (one side of"
+            f" {cur.game.name} plus `Bool Reveal() {{ return bad; }}` versus"
+            " `return false;`) in `assume:` or prove it in `lemma:`."
+        )
+        return None, hint
+
     def sort_game(self, game: frog_ast.Game) -> frog_ast.Game:
         new_game = copy.deepcopy(game)
         for method in new_game.methods:
@@ -2037,6 +2157,20 @@ def verify_proof_file(
     skip_bound: bool = False,
 ) -> frog_ast.ProofFile:
     """Parse, load imports, and verify a proof file. Returns the ProofFile on success."""
+    proof_file, _ = _verify_proof_file_with_engine(
+        proof_path, verbosity, no_diagnose, skip_lemmas, skip_bound
+    )
+    return proof_file
+
+
+def _verify_proof_file_with_engine(
+    proof_path: str,
+    verbosity: Verbosity = Verbosity.QUIET,
+    no_diagnose: bool = True,
+    skip_lemmas: bool = False,
+    skip_bound: bool = False,
+) -> tuple[frog_ast.ProofFile, "ProofEngine"]:
+    """As :func:`verify_proof_file`, also returning the engine (for its bound)."""
     # pylint: disable=import-outside-toplevel,cyclic-import
     from . import frog_parser, semantic_analysis
 
@@ -2067,4 +2201,4 @@ def verify_proof_file(
         engine.add_definition(name, root)
 
     engine.prove(proof_file, proof_path)
-    return proof_file
+    return proof_file, engine

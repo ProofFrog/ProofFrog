@@ -1,0 +1,44 @@
+// Flag game derived from BadGuessWrong.Right.
+Game Real(Set S) {
+    S target;
+    Bool bad;
+
+    Void Initialize() {
+        target <- S;
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (c == target) {
+            bad = true;
+        }
+        return true;
+    }
+
+    Bool Reveal() {
+        return bad;
+    }
+}
+
+Game Ideal(Set S) {
+    S target;
+    Bool bad;
+
+    Void Initialize() {
+        target <- S;
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (c == target) {
+            bad = true;
+        }
+        return true;
+    }
+
+    Bool Reveal() {
+        return false;
+    }
+}
+
+export as BadGuessWrongFlag;

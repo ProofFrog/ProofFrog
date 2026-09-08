@@ -1107,22 +1107,29 @@ class RemoveUnreachableTransformer(BlockTransformer):
                 if individual_formula is None:
                     break
                 if contains_unconditional_return(statement.blocks[condition_index]):
-                    to_get_here = (
-                        individual_formula
-                        if not condition_formulae
-                        else z3.And(
-                            *(
-                                z3.Not(condition_formula)
-                                for condition_formula in condition_formulae
-                            ),
-                            individual_formula,
+                    try:
+                        to_get_here = (
+                            individual_formula
+                            if not condition_formulae
+                            else z3.And(
+                                *(
+                                    z3.Not(condition_formula)
+                                    for condition_formula in condition_formulae
+                                ),
+                                individual_formula,
+                            )
                         )
-                    )
-                    formula_so_far = (
-                        z3.Or(to_get_here, formula_so_far)
-                        if formula_so_far is not None
-                        else to_get_here
-                    )
+                        formula_so_far = (
+                            z3.Or(to_get_here, formula_so_far)
+                            if formula_so_far is not None
+                            else to_get_here
+                        )
+                    except (z3.Z3Exception, TypeError):
+                        # Defense-in-depth (third sibling of the guards above):
+                        # an ill-sorted condition formula cannot be tracked
+                        # as a return guard; stop tracking this statement's
+                        # guards, which only makes later reasoning weaker.
+                        break
                 condition_formulae.append(individual_formula)
 
             # Track conditions that lead to unconditional returns. A
@@ -1221,6 +1228,56 @@ def _count_field_assigns_recursive(node: frog_ast.ASTNode, field_name: str) -> i
 
     SearchVisitor(_counter).visit(node)
     return count
+
+
+class PropagateLiteralAssignmentTransformer(BlockTransformer):
+    """Forward-propagate a literal assigned to a name into the reads that
+    follow it in the same block, until the name is written or rebound again.
+
+    ``x = true; if (x) { ... }`` becomes ``x = true; if (true) { ... }``, so
+    that the constant-condition passes can fold the branch. The shape arises
+    when a tuple-returning oracle such as ``[hit, v] = challenger.Solve(s)``
+    is inlined branch by branch: each branch assigns the literal component
+    to a temporary that the caller then tests. Only ``Bool``/``Int`` literals
+    are propagated, and only through statements that neither write nor
+    shadow the name (``reassigns_or_rebinds``), which makes the rewrite a
+    plain value substitution: every replaced read provably holds the literal.
+    """
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        statements = list(block.statements)
+        changed = False
+        for index, stmt in enumerate(statements):
+            if not (
+                isinstance(stmt, frog_ast.Assignment)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and isinstance(stmt.value, (frog_ast.Boolean, frog_ast.Integer))
+            ):
+                continue
+            name = stmt.var.name
+            replace: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(identity=False)
+            replace.set(frog_ast.Variable(name), stmt.value)
+            substitute = SubstitutionTransformer(replace)
+            for later in range(index + 1, len(statements)):
+                target = statements[later]
+                if reassigns_or_rebinds({name}, target):
+                    break
+                if name not in referenced_variable_names(target):
+                    continue
+                rewritten = substitute.transform(target)
+                if rewritten != target:
+                    statements[later] = rewritten
+                    changed = True
+        return frog_ast.Block(statements) if changed else block
+
+
+class PropagateLiteralAssignment(TransformPass):
+    """Forward-propagate Bool/Int literal assignments into following reads."""
+
+    name = "Propagate Literal Assignment"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return PropagateLiteralAssignmentTransformer().transform(game)
 
 
 class IfConditionAliasSubstitutionTransformer(BlockTransformer):

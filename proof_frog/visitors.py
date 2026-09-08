@@ -1397,6 +1397,20 @@ class GetTypeMapVisitor(Visitor[NameTypeMap]):
         if assignment.the_type is not None:
             assert isinstance(assignment.var, frog_ast.Variable)
             self.type_map.set(assignment.var.name, assignment.the_type)
+            return
+        # An untyped assignment of a literal to a name with no recorded type
+        # still pins the name's type: the pipeline may have pruned the bare
+        # declaration (``Bool flag;``) that carried it, and downstream Z3
+        # translation needs the sort (a Bool condition translated as an
+        # opaque constant is ill-sorted and crashes ``z3.Or``/``z3.And``).
+        if (
+            isinstance(assignment.var, frog_ast.Variable)
+            and self.type_map.get(assignment.var.name) is None
+        ):
+            if isinstance(assignment.value, frog_ast.Boolean):
+                self.type_map.set(assignment.var.name, frog_ast.BoolType())
+            elif isinstance(assignment.value, frog_ast.Integer):
+                self.type_map.set(assignment.var.name, frog_ast.IntType())
 
     @_test_stop
     def visit_sample(self, sample: frog_ast.Sample) -> None:

@@ -119,6 +119,30 @@ An assumption hop can go Real→Random or Random→Real; indistinguishability
 is symmetric. In the forward half of a symmetric proof the hop often
 goes Real→Random; in the reverse half it goes Random→Real.
 
+### Up-to-bad hops (the fundamental lemma)
+
+When a hop's Left side does something *after* a bad event that no
+reduction can simulate (it returns a value only the assumption's secret
+determines), the ordinary compose-with-a-reduction encoding cannot express
+the hop. Use an **up-to-bad hop** instead:
+
+1. Write the pair so both sides carry `Bool bad;`, set `bad = false;` in
+   `Initialize`, and differ only inside `if (...) { bad = true; ... }`
+   branches (same conditions on both sides; `bad` nowhere else).
+2. Write the flag game: a copy of the pair's neutral side plus
+   `Bool Reveal() { return bad; }` (first game) / `return false;` (second).
+   Copy verbatim; the engine checks the relation structurally.
+3. Prove the flag game as its own lemma (its Left is simulatable: a
+   reduction tracks the flag from a Bool `Solve`/`Eq` answer) and list it in
+   `lemma:` (or `assume:` if its bound is a declared helper clause).
+4. Use the pair's side flip in `games:` exactly like an assumption hop. The
+   engine reports it as `upto` and charges `Adv^Flag`.
+
+If a side flip fails as an equivalence and the pair qualifies, the engine
+prints a hint naming the flag game to add. Worked example:
+`examples/Proofs/PubKeyEnc/OAEP_INDCPA_ROM.proof` with
+`OAEP_AskG_Flag.proof`.
+
 ## Assumption hygiene
 
 - If the user specifies a particular set of security assumptions to use,

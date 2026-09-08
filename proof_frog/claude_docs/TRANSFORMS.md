@@ -15,12 +15,14 @@ The core pipeline runs in a fixed-point loop until convergence.
 |---|---|
 | SingleCallFieldToLocal | Pushes field-initialized uniform samples to oracle locals when max_calls=1. |
 | CounterGuardedFieldToLocal | Converts fields to locals when only read inside counter-guarded branches. |
+| CounterGuardedComputedFieldToLocal | Sinks a field computed once in Initialize from at least one init-only sample (moving those samples and any other init-only locals it reads) into the single counter-guarded branch that reads it; an init local it reads that is also used elsewhere in Initialize is promoted to a field. |
 | SimplifySplice | Replaces slice accesses on concatenated variables with the original components. |
 | MergeUniformSamples | Merges independent uniform BitString samples used only via concatenation. |
 | MergeProductSamples | Merges independent uniform samples combined into a returned tuple. |
 | SplitUniformSamples | Splits a uniform BitString sample accessed only via non-overlapping slices. |
 | SinkUniformSample | Moves a uniform sample into the single if-branch that uses it. |
 | LocalizeInitOnlyFieldSample | Converts field samples to local samples when the field is only used in Initialize. |
+| LocalizeInitOnlyField | Converts a field assigned once in Initialize and never used elsewhere into a typed local. |
 | SliceOfInlineConcat | Rewrites slice-of-concat expressions when bounds line up with the underlying concat components. |
 
 ### Symbolic (`symbolic.py`)
@@ -115,6 +117,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | Pass | Description |
 |---|---|
 | IfConditionAliasSubstitution | Substitutes field references with local aliases inside equality-guarded if-branches. |
+| PropagateLiteralAssignment | Forward-propagates a `Bool`/`Int` literal assigned to a name into the reads that follow in the same block, until the name is written or rebound. |
 | RedundantConditionalReturn | Removes `if (c) { return X; } return X;` patterns. |
 | AbsorbRedundantEarlyReturn | Absorbs `if (P) { return X; } ... if (Q) { ... } return X;` into `if (!P && Q) { ... } return X;` (outermost-block-only). |
 | IfFalseReturnToConjunction | Absorbs `if (P) { return false; } ...; return Q;` into `...; return Q && !P;`. |

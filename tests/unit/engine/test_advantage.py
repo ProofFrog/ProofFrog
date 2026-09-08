@@ -478,14 +478,14 @@ class TestCheckClaimedBound:
 
     def test_symbolic_exponent_is_undecided(self) -> None:
         claim = _parse_claim(f"{self._ADV} + 2 ^ count_CTXT")
-        assert advantage.check_claimed_bound(claim, _mixed_bound()).status == "undecided"
+        assert (
+            advantage.check_claimed_bound(claim, _mixed_bound()).status == "undecided"
+        )
 
     def test_cardinality_name_mismatch_not_verified(self) -> None:
         # A differently-named cardinality does not cancel the synthesized term.
         claim = _parse_claim(f"{self._ADV} + count_CTXT * (count_CTXT - 1) / |S|")
-        assert (
-            advantage.check_claimed_bound(claim, _mixed_bound()).status != "verified"
-        )
+        assert advantage.check_claimed_bound(claim, _mixed_bound()).status != "verified"
 
     def test_unsupported_synthesized_bound_is_undecided(self) -> None:
         unsupported = advantage.AdvantageBound(
@@ -493,3 +493,123 @@ class TestCheckClaimedBound:
         )
         result = advantage.check_claimed_bound(_parse_claim(self._ADV), unsupported)
         assert result.status == "undecided"
+
+
+class TestDeriveOracleCountConditions:
+    def test_call_inside_if_condition_is_counted(self) -> None:
+        reduction = frog_parser.parse_reduction("""
+Reduction R(Set S) compose Guess(S) against Outer(S).Adversary {
+    Bool bad;
+
+    Void Initialize() {
+        challenger.Initialize();
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (challenger.Eq(c)) {
+            bad = true;
+        }
+        return false;
+    }
+}
+""")
+        count = advantage._derive_oracle_count(  # pylint: disable=protected-access
+            reduction, "Eq"
+        )
+        assert count == sympy.Symbol("count_Eq", nonnegative=True)
+
+
+class TestExpandLemma:
+    def test_lemma_bound_inlines_with_mapped_names_counts_and_adversaries(
+        self,
+    ) -> None:
+        # The lemma proves Flag(S) with bound Adv^Inner(S)(B1) + count_Q/|S|.
+        inner = frog_ast.ParameterizedGame("Inner", [frog_ast.Variable("S")])
+        guess = frog_ast.ParameterizedGame("Guess", [frog_ast.Variable("S")])
+        r_in = frog_ast.ParameterizedGame("R_in", [frog_ast.Variable("S")])
+        r_g = frog_ast.ParameterizedGame("R_g", [frog_ast.Variable("S")])
+        a0, a1 = sympy.Symbol("Adv_0"), sympy.Symbol("Adv_1")
+        lemma_bound = advantage.AdvantageBound(
+            expression=a0 + a1,
+            terms={
+                a0: advantage.AdvTerm(inner, "B1", r_in),
+                a1: advantage.AdvTerm(
+                    guess,
+                    "B2",
+                    r_g,
+                    statistical=sympy.Symbol("count_Q", nonnegative=True)
+                    / sympy.Symbol("|S|", positive=True),
+                ),
+            },
+        )
+        lemma = advantage.LemmaBound(
+            theorem=frog_ast.ParameterizedGame("Flag", [frog_ast.Variable("S")]),
+            bound=lemma_bound,
+            local_names=frozenset({"S"}),
+        )
+        # The parent uses Flag(T) through R_out, whose Eq queries Q twice.
+        r_out_def = frog_parser.parse_reduction("""
+Reduction R_out(Set T) compose Flag(T) against Outer(T).Adversary {
+    Void Initialize() {
+        challenger.Initialize();
+    }
+
+    Bool Eq(T c) {
+        Bool first = challenger.Q(c);
+        return first || challenger.Q(c);
+    }
+}
+""")
+        flag_t = frog_ast.ParameterizedGame("Flag", [frog_ast.Variable("T")])
+        r_out = frog_ast.ParameterizedGame("R_out", [frog_ast.Variable("T")])
+        expansion, note = advantage.expand_lemma(
+            lemma, flag_t, r_out, "by_lemma", {"R_out": r_out_def}, None
+        )
+        assert note == ""
+        assert expansion is not None
+        bound = advantage.synthesize_from_hops(
+            [
+                advantage.HopInfo("equivalent"),
+                advantage.HopInfo(
+                    "by_lemma", notion=flag_t, reduction=r_out, expansion=expansion
+                ),
+                advantage.HopInfo("equivalent"),
+            ]
+        )
+        assert bound.render() == "Adv^Inner(T)(B1) + 2*count_Eq/|T|"
+        # The leaf's Tier-3 identity is the OUTER reduction.
+        (opaque,) = [t for t in bound.terms.values() if t.statistical is None]
+        assert opaque.reduction == r_out
+
+    def test_upto_pins_reveal_count_to_one(self) -> None:
+        reveal = sympy.Symbol("count_Reveal", nonnegative=True)
+        lemma = advantage.LemmaBound(
+            theorem=frog_ast.ParameterizedGame("Flag", []),
+            bound=advantage.AdvantageBound(
+                expression=sympy.Symbol("Adv_0"),
+                terms={
+                    sympy.Symbol("Adv_0"): advantage.AdvTerm(
+                        frog_ast.ParameterizedGame("G", []),
+                        "B1",
+                        None,
+                        statistical=reveal / sympy.Symbol("|S|", positive=True),
+                    )
+                },
+            ),
+        )
+        r_out_def = frog_parser.parse_reduction("""
+Reduction R(Set T) compose Flag() against Outer(T).Adversary {
+    Void Initialize() {
+        challenger.Initialize();
+    }
+}
+""")
+        flag = frog_ast.ParameterizedGame("Flag", [])
+        r = frog_ast.ParameterizedGame("R", [frog_ast.Variable("T")])
+        expansion, _ = advantage.expand_lemma(
+            lemma, flag, r, "by_upto", {"R": r_out_def}, None
+        )
+        assert expansion is not None
+        (leaf,) = expansion.leaves.values()
+        assert leaf.statistical == 1 / sympy.Symbol("|S|", positive=True)

@@ -49,9 +49,10 @@ field / parameter / let sets and then move an expression between methods
 here closes that capture for every such pass at once. Parameters are
 re-washed to ``argN`` by ``StandardizeParameters``, so a sound proof's
 canonical form is unchanged; a renamed loop binder keeps its ``__aN__`` name,
-which only matters when the collision occurs. A colliding parameter whose name
-also occurs in the method signature's types is left alone (how those type
-references scope is not pinned down, and renaming could retype the method).
+which only matters when the collision occurs. The method signature's types are
+left as they are: the typechecker forbids them from naming the method's own
+parameters (F-340), so any name they mention here is an outer one (for
+example a game parameter that instantiation substituted in).
 """
 
 from __future__ import annotations
@@ -60,7 +61,7 @@ import copy
 import re
 
 from .. import frog_ast
-from ..visitors import Transformer, referenced_variable_names
+from ..visitors import Transformer
 from ._base import TransformPass, PipelineContext
 
 # AlphaRename's own fresh-name pattern.  These -- and ONLY these -- are left
@@ -122,16 +123,9 @@ class _AlphaRenamer:
         """Rename the method body, first giving any parameter that collides
         with an outer name a fresh name (F-339)."""
         signature = method.signature
-        signature_type_names: set[str] = set()
-        for param in signature.parameters:
-            signature_type_names |= referenced_variable_names(param.type)
-        signature_type_names |= referenced_variable_names(signature.return_type)
         param_map: dict[str, str] = {}
         for param in signature.parameters:
-            if (
-                param.name in self._outer_names
-                and param.name not in signature_type_names
-            ):
+            if param.name in self._outer_names:
                 param_map[param.name] = self._fresh()
         if not param_map:
             return frog_ast.Method(signature, self._rename_block(method.block, []))

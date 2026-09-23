@@ -232,15 +232,18 @@ def test_f339_generic_for_binder_colliding_with_field_is_renamed() -> None:
     assert "+ k;" in out
 
 
-def test_f339_parameter_named_in_signature_type_left_alone() -> None:
-    """A colliding parameter whose name also appears in the signature's types
-    is not renamed (the scoping of signature types is not pinned down)."""
+def test_f339_signature_types_keep_outer_name_when_parameter_renamed() -> None:
+    """The typechecker forbids a signature's types from naming the method's own
+    parameters (F-340), so a name there is an outer one, e.g. a game parameter
+    instantiation substituted in. The clashing parameter is renamed; the
+    signature's types keep referring to the outer name."""
     out = _apply("""
         Game G(Int n) {
             BitString<n> O(Int n, BitString<n> m) { return m; }
         }
         """)
-    assert "O(Int n, BitString<n> m)" in out
+    assert "BitString<n> O(Int __a" in out
+    assert ", BitString<n> m)" in out
 
 
 def test_f339_collision_renaming_is_idempotent() -> None:

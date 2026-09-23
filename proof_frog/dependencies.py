@@ -381,13 +381,23 @@ def remove_unnecessary_statements(
                 new_statement.block = construct_new(
                     statement.block, inner_enclosing | {binder}
                 )
-                new_statements.append(new_statement)
+                # A loop whose body pruned to nothing does nothing: drop the
+                # shell so its header stops keeping dead values alive (the
+                # header is a pure expression; like any other dead
+                # computation, its evaluation is unobservable).
+                if new_statement.block.statements:
+                    new_statements.append(new_statement)
             elif isinstance(statement, frog_ast.IfStatement):
                 new_if_statement = copy.deepcopy(statement)
                 new_if_statement.blocks = [
                     construct_new(b, inner_enclosing) for b in statement.blocks
                 ]
-                new_statements.append(new_if_statement)
+                # Likewise an `if` whose every branch pruned to nothing: it
+                # would only keep its condition's operands alive (e.g. a
+                # dead flag's `if (x != y) { bad = true; }` after the flag
+                # write is gone).
+                if any(b.statements for b in new_if_statement.blocks):
+                    new_statements.append(new_if_statement)
             elif required_map.get(statement):
                 new_statements.append(statement)
             elif (

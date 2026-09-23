@@ -94,8 +94,6 @@ from proof_frog import dependencies, frog_parser
             """,
             """
             Int f(Int x) {
-                if (True) {
-                }
                 return x;
             }
             """,

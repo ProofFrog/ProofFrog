@@ -85,6 +85,7 @@ from .structural import (
 )
 from .control_flow import (
     IfConditionAliasSubstitution,
+    PublishedFieldAlias,
     PropagateLiteralAssignment,
     GuardConditionSimplification,
     IfToBooleanAssignment,
@@ -168,6 +169,7 @@ CORE_PIPELINE: list[TransformPass] = [
     HoistDeterministicCallToInitialize(),
     SplitOpaqueTupleField(),
     IfConditionAliasSubstitution(),
+    PublishedFieldAlias(),
     GuardConditionSimplification(),
     IfToBooleanAssignment(),
     RedundantConditionalReturn(),

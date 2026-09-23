@@ -1230,6 +1230,210 @@ def _count_field_assigns_recursive(node: frog_ast.ASTNode, field_name: str) -> i
     return count
 
 
+def _and_conjuncts(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
+    if (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator is frog_ast.BinaryOperators.AND
+    ):
+        return _and_conjuncts(expr.left_expression) + _and_conjuncts(
+            expr.right_expression
+        )
+    return [expr]
+
+
+def _top_level_assignments(
+    game: frog_ast.Game,
+) -> list[tuple[frog_ast.Block, int, frog_ast.Assignment, str]]:
+    """Every plain top-level ``x = e`` assignment in every block of the game,
+    as (block, index, statement, method name)."""
+    out: list[tuple[frog_ast.Block, int, frog_ast.Assignment, str]] = []
+    for method in game.methods:
+        stack: list[frog_ast.Block] = [method.block]
+        while stack:
+            block = stack.pop()
+            for i, stmt in enumerate(block.statements):
+                if (
+                    isinstance(stmt, frog_ast.Assignment)
+                    and stmt.the_type is None
+                    and isinstance(stmt.var, frog_ast.Variable)
+                ):
+                    out.append((block, i, stmt, method.signature.name))
+                elif isinstance(stmt, frog_ast.IfStatement):
+                    stack.extend(stmt.blocks)
+                elif isinstance(stmt, (frog_ast.NumericFor, frog_ast.GenericFor)):
+                    stack.append(stmt.block)
+    return out
+
+
+class PublishedFieldAliasTransformer(Transformer):
+    """Under a publication flag, a published field equals its stable source.
+
+    When one block contains, at top level and in this order, ``P = Q;`` and
+    ``F = true;`` where ``F`` is a ``Bool`` field written nowhere else except
+    ``F = false`` in Initialize, ``Q`` is a field written only in Initialize,
+    and ``P`` is a field written only here and in Initialize (a placeholder),
+    then whenever ``F`` holds ``P == Q``: ``F`` becomes true exactly when the
+    block runs, which has just set ``P`` to ``Q``, and neither changes
+    afterwards. So inside a condition that is an ``&&``-chain containing
+    ``F``, and inside the branch that condition guards, reads of ``P`` may be
+    replaced by ``Q``. (Typical shape: a single-challenge game publishes the
+    challenge's ``sStar`` and later tests ``challenged && x == sStar``; a
+    reduction that holds ``sStar`` from Initialize compares against it
+    directly.)
+    """
+
+    def __init__(self, game: frog_ast.Game) -> None:
+        self.aliases: dict[str, dict[str, str]] = {}
+        self._analyze(game)
+
+    def _analyze(self, game: frog_ast.Game) -> None:
+        field_types = {f.name: f.type for f in game.fields if f.value is None}
+        assigns = _top_level_assignments(game)
+
+        for flag, ftype in field_types.items():
+            if not isinstance(ftype, frog_ast.BoolType):
+                continue
+            trues = [
+                (blk, i, m)
+                for blk, i, st, m in assigns
+                if isinstance(st.var, frog_ast.Variable)
+                and st.var.name == flag
+                and st.value == frog_ast.Boolean(True)
+            ]
+            if len(trues) != 1:
+                continue
+            blk, idx, method_name = trues[0]
+            if method_name == "Initialize":
+                continue
+            # Every other write to the flag is `flag = false` at Initialize top level.
+            ok = True
+            for method in game.methods:
+                for node in _walk_statements(method.block):
+                    if (
+                        isinstance(node, (frog_ast.Assignment, frog_ast.Sample))
+                        and isinstance(node.var, frog_ast.Variable)
+                        and node.var.name == flag
+                        and not (
+                            node is blk.statements[idx]
+                            or (
+                                method.signature.name == "Initialize"
+                                and isinstance(node, frog_ast.Assignment)
+                                and node.value == frog_ast.Boolean(False)
+                                and node in method.block.statements
+                            )
+                        )
+                    ):
+                        ok = False
+            if not ok:
+                continue
+            pairs: dict[str, str] = {}
+            for j in range(idx):
+                st = blk.statements[j]
+                if not (
+                    isinstance(st, frog_ast.Assignment)
+                    and st.the_type is None
+                    and isinstance(st.var, frog_ast.Variable)
+                    and isinstance(st.value, frog_ast.Variable)
+                    and st.var.name in field_types
+                    and st.value.name in field_types
+                    and st.var.name != st.value.name
+                ):
+                    continue
+                pub, src = st.var.name, st.value.name
+                if not _written_only_in(game, src, {"Initialize"}) or not (
+                    _written_only_in(game, pub, {"Initialize", method_name})
+                    and _write_count_outside_init(game, pub) == 1
+                ):
+                    continue
+                pairs[pub] = src
+            if pairs:
+                self.aliases[flag] = pairs
+
+    def transform_if_statement(
+        self, stmt: frog_ast.IfStatement
+    ) -> frog_ast.IfStatement:
+        transformed = self._transform_children(stmt)
+        assert isinstance(transformed, frog_ast.IfStatement)
+        if not self.aliases:
+            return transformed
+        conditions = list(transformed.conditions)
+        blocks = list(transformed.blocks)
+        changed = False
+        for i, cond in enumerate(conditions):
+            flags = [
+                c.name
+                for c in _and_conjuncts(cond)
+                if isinstance(c, frog_ast.Variable) and c.name in self.aliases
+            ]
+            if not flags:
+                continue
+            replace: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(identity=False)
+            names: set[str] = set()
+            for flag in flags:
+                for pub, src in self.aliases[flag].items():
+                    replace.set(frog_ast.Variable(pub), frog_ast.Variable(src))
+                    names |= {pub, src, flag}
+            if reassigns_or_rebinds(names, blocks[i]):
+                continue
+            substitute = SubstitutionTransformer(replace)
+            new_cond = substitute.transform(cond)
+            new_block = substitute.transform(blocks[i])
+            if new_cond != cond or new_block != blocks[i]:
+                conditions[i] = new_cond
+                assert isinstance(new_block, frog_ast.Block)
+                blocks[i] = new_block
+                changed = True
+        if not changed:
+            return transformed
+        return frog_ast.IfStatement(conditions, blocks)
+
+
+def _walk_statements(block: frog_ast.Block) -> list[frog_ast.Statement]:
+    out: list[frog_ast.Statement] = []
+    stack: list[frog_ast.Block] = [block]
+    while stack:
+        current = stack.pop()
+        for stmt in current.statements:
+            out.append(stmt)
+            if isinstance(stmt, frog_ast.IfStatement):
+                stack.extend(stmt.blocks)
+            elif isinstance(stmt, (frog_ast.NumericFor, frog_ast.GenericFor)):
+                stack.append(stmt.block)
+    return out
+
+
+def _written_only_in(game: frog_ast.Game, name: str, methods: set[str]) -> bool:
+    return all(
+        m.signature.name in methods or not reassigns_or_rebinds({name}, m.block)
+        for m in game.methods
+    )
+
+
+def _write_count_outside_init(game: frog_ast.Game, name: str) -> int:
+    count = 0
+    for m in game.methods:
+        if m.signature.name == "Initialize":
+            continue
+        for stmt in _walk_statements(m.block):
+            if (
+                isinstance(stmt, (frog_ast.Assignment, frog_ast.Sample))
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name == name
+            ):
+                count += 1
+    return count
+
+
+class PublishedFieldAlias(TransformPass):
+    """Replace a published field by its stable source under the publication
+    flag (``challenged && x == sStar`` -> ``challenged && x == sHid``)."""
+
+    name = "Published Field Alias"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return PublishedFieldAliasTransformer(game).transform(game)
+
+
 class PropagateLiteralAssignmentTransformer(BlockTransformer):
     """Forward-propagate a literal assigned to a name into the reads that
     follow it in the same block, until the name is written or rebound again.

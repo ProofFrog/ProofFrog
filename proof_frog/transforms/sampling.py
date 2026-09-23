@@ -1970,14 +1970,141 @@ def _localize_init_only_field_assignments(game: frog_ast.Game) -> frog_ast.Game:
     return new_game
 
 
+def _count_refs(node: frog_ast.ASTNode, name: str) -> int:
+    count = 0
+
+    def bump(n: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if isinstance(n, frog_ast.Variable) and n.name == name:
+            count += 1
+        return False
+
+    SearchVisitor(bump).visit(node)
+    return count
+
+
+def _find_single_block_write(
+    block: frog_ast.Block, name: str, total_refs: int
+) -> Optional[tuple[frog_ast.Block, int]]:
+    """Locate the one top-level plain assignment ``name = e`` in some block of
+    *block*'s tree such that every reference to *name* in the whole tree is
+    either that assignment's target or lies in a later statement of the same
+    block (a read dominated by the write, within one invocation)."""
+    stack: list[frog_ast.Block] = [block]
+    while stack:
+        current = stack.pop()
+        for i, stmt in enumerate(current.statements):
+            if (
+                isinstance(stmt, frog_ast.Assignment)
+                and stmt.the_type is None
+                and stmt.var == frog_ast.Variable(name)
+            ):
+                if _references_name(stmt.value, name):
+                    return None
+                later = sum(_count_refs(s, name) for s in current.statements[i + 1 :])
+                if later + 1 == total_refs:
+                    return current, i
+                return None
+            if isinstance(stmt, frog_ast.IfStatement):
+                stack.extend(stmt.blocks)
+            elif isinstance(stmt, (frog_ast.NumericFor, frog_ast.GenericFor)):
+                stack.append(stmt.block)
+    return None
+
+
+def _is_placeholder_write(stmt: frog_ast.Statement, name: str) -> bool:
+    """``name = e`` at top level with ``e`` not reading ``name``."""
+    return (
+        isinstance(stmt, frog_ast.Assignment)
+        and stmt.the_type is None
+        and stmt.var == frog_ast.Variable(name)
+        and not _references_name(stmt.value, name)
+    )
+
+
+def _localize_single_block_field_assignments(game: frog_ast.Game) -> frog_ast.Game:
+    """Convert a field whose only reads follow a single write inside one
+    block of one oracle into a typed local declared by that write.
+
+    The generalization of ``_localize_init_only_field_assignments`` beyond
+    Initialize: a field that is (re)written at the top level of some block and
+    read only in later statements of that block, in that one method, never
+    carries a value between invocations, so it is observationally a local.
+    Any other writes may only be top-level assignments in Initialize (a
+    placeholder initial value); those are dropped with the field.
+    """
+    if not game.has_method("Initialize"):
+        return game
+    init_method = game.get_method("Initialize")
+    for field in game.fields:
+        if field.value is not None:
+            continue
+        name = field.name
+        users = [m for m in game.methods if _references_name(m.block, name)]
+        init_writes = [
+            i
+            for i, stmt in enumerate(init_method.block.statements)
+            if _references_name(stmt, name)
+        ]
+        if not all(
+            _is_placeholder_write(init_method.block.statements[i], name)
+            for i in init_writes
+        ):
+            continue
+        others = [m for m in users if m.signature.name != "Initialize"]
+        if len(others) != 1:
+            continue
+        target = others[0]
+        if _method_binds_name(target, name) or _method_binds_name(init_method, name):
+            continue
+        if any(
+            _references_name(param.type, name) for param in target.signature.parameters
+        ) or _references_name(target.signature.return_type, name):
+            continue
+        if any(
+            other.value is not None
+            and other.name != name
+            and _references_name(other.value, name)
+            for other in game.fields
+        ):
+            continue
+        found = _find_single_block_write(
+            target.block, name, _count_refs(target.block, name)
+        )
+        if found is None:
+            continue
+        new_game = copy.deepcopy(game)
+        new_game.fields = [f for f in new_game.fields if f.name != name]
+        new_init = new_game.get_method("Initialize")
+        new_init.block = frog_ast.Block(
+            [s for i, s in enumerate(new_init.block.statements) if i not in init_writes]
+        )
+        new_target = new_game.get_method(target.signature.name)
+        located = _find_single_block_write(
+            new_target.block, name, _count_refs(new_target.block, name)
+        )
+        assert located is not None
+        blk, idx = located
+        old = blk.statements[idx]
+        assert isinstance(old, frog_ast.Assignment)
+        stmts = list(blk.statements)
+        stmts[idx] = frog_ast.Assignment(copy.deepcopy(field.type), old.var, old.value)
+        blk.statements = stmts
+        return new_game  # one field per application; the fixed point does the rest
+    return game
+
+
 class LocalizeInitOnlyField(TransformPass):
-    """Convert a field assigned once in Initialize and never used elsewhere
-    into a typed local at the same position."""
+    """Convert a field into a typed local when it never carries a value
+    between invocations: assigned once in Initialize and never used elsewhere,
+    or written at the top of one block of one oracle and read only later in
+    that block."""
 
     name = "Localize Init Only Field"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return _localize_init_only_field_assignments(game)
+        game = _localize_init_only_field_assignments(game)
+        return _localize_single_block_field_assignments(game)
 
 
 # ---------------------------------------------------------------------------
@@ -2458,7 +2585,20 @@ def _counter_guarded_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
 
     for method_name, samples in by_method.items():
         target = new_game.get_method(method_name)
-        target.block = frog_ast.Block(samples) + target.block
+        # Place the samples at the start of the single counter-guarded branch
+        # that reads the field (the field's only read site), which is the
+        # normal form the sink passes aim for anyway, and does not depend on
+        # the statements between the method start and that branch.
+        leftover: list[frog_ast.Statement] = []
+        for sample in samples:
+            assert isinstance(sample.var, frog_ast.Variable)
+            branch = _counter_guarded_reading_block(target.block, sample.var.name)
+            if branch is None:
+                leftover.append(sample)
+                continue
+            branch.statements = [sample] + list(branch.statements)
+        if leftover:
+            target.block = frog_ast.Block(leftover) + target.block
 
     return new_game
 
@@ -2507,11 +2647,57 @@ def _statement_reads(stmt: frog_ast.Statement) -> set[str]:
     return referenced_variable_names(stmt)
 
 
+def _branch_only_field_samples(
+    game: frog_ast.Game,
+    init_stmts: Sequence[frog_ast.Statement],
+    target_block: Optional[frog_ast.Block],
+) -> dict[str, int]:
+    """Fields sampled once at Initialize (plain ``f <- Type``) and read only
+    inside *target_block* or by other Initialize statements: name -> index of
+    the sample. Such a field can travel into the branch as a local sample
+    when the statements reading it at Initialize are sunk there."""
+    if target_block is None:
+        return {}
+    out: dict[str, int] = {}
+    for field in game.fields:
+        if field.value is not None:
+            continue
+        samples = [
+            i
+            for i, stmt in enumerate(init_stmts)
+            if isinstance(stmt, frog_ast.Sample)
+            and isinstance(stmt.var, frog_ast.Variable)
+            and stmt.var.name == field.name
+            and stmt.the_type is None
+            and not isinstance(stmt.sampled_from, frog_ast.Expression)
+        ]
+        if len(samples) != 1:
+            continue
+        if any(
+            m.signature.name != "Initialize"
+            and _is_written_in_recursive(m.block, field.name)
+            for m in game.methods
+        ):
+            continue
+        reads_elsewhere = sum(
+            _count_name_references(m.block, field.name)
+            for m in game.methods
+            if m.signature.name != "Initialize"
+        )
+        if reads_elsewhere != _count_name_references(target_block, field.name):
+            continue
+        if _name_shadowed_in_any_oracle(game, field.name):
+            continue
+        out[field.name] = samples[0]
+    return out
+
+
 def _init_dependency_cone(  # pylint: disable=too-many-branches,too-many-locals
     game: frog_ast.Game,
     init_stmts: Sequence[frog_ast.Statement],
     field_idx: int,
     stable_fields: set[str],
+    target_block: Optional[frog_ast.Block] = None,
 ) -> Optional[tuple[list[int], set[str]]]:
     """Initialize statements that must move with the field assignment at
     *field_idx* (the assignment itself plus every init-only local it reads,
@@ -2530,6 +2716,7 @@ def _init_dependency_cone(  # pylint: disable=too-many-branches,too-many-locals
     """
     field_names = {f.name for f in game.fields}
     init_params = {p.name for p in game.get_method("Initialize").signature.parameters}
+    branch_only = _branch_only_field_samples(game, init_stmts, target_block)
 
     def reads_ok(i: int) -> Optional[set[str]]:
         """Locals read by statement *i*; None if it reads something immovable."""
@@ -2538,6 +2725,9 @@ def _init_dependency_cone(  # pylint: disable=too-many-branches,too-many-locals
         for name in _statement_reads(stmt):
             if name in init_params:
                 return None
+            if name in branch_only:
+                locals_read.add(name)  # its Initialize sample moves too
+                continue
             if name in field_names:
                 if name not in stable_fields or any(
                     _is_written_in_recursive(init_stmts[j], name)
@@ -2553,6 +2743,11 @@ def _init_dependency_cone(  # pylint: disable=too-many-branches,too-many-locals
             locals_read.add(name)
         return locals_read
 
+    def declaration_index(name: str) -> Optional[int]:
+        if name in branch_only:
+            return branch_only[name]
+        return _init_local_declaration_index(init_stmts, name)
+
     # Transitive closure of local declarations the field assignment depends on.
     candidates: dict[str, int] = {}
     worklist = [field_idx]
@@ -2565,14 +2760,16 @@ def _init_dependency_cone(  # pylint: disable=too-many-branches,too-many-locals
         for name in locals_read:
             if name in candidates:
                 continue
-            decl = _init_local_declaration_index(init_stmts, name)
+            decl = declaration_index(name)
             assert decl is not None
             candidates[name] = decl
             if decl not in seen:
                 seen.add(decl)
                 worklist.append(decl)
     for name in candidates:
-        if _name_shadowed_in_any_oracle(game, name) or name in field_names:
+        if _name_shadowed_in_any_oracle(game, name) or (
+            name in field_names and name not in branch_only
+        ):
             return None
 
     # Fixpoint: a candidate moves iff it is read by a moved statement and by
@@ -2596,6 +2793,8 @@ def _init_dependency_cone(  # pylint: disable=too-many-branches,too-many-locals
                 j not in cone and _references_name(init_stmts[j], name)
                 for j in range(len(init_stmts))
             ):
+                if name in branch_only:
+                    return None  # a field sample cannot be promoted; give up
                 movable.discard(name)
                 promote.add(name)
                 changed = True
@@ -2720,7 +2919,13 @@ def _counter_guarded_computed_field_to_local(  # pylint: disable=too-many-locals
             target_method.block, field.name, counter_name, mutable_names
         ):
             continue
-        cone_info = _init_dependency_cone(game, init_stmts, field_idx, stable_fields)
+        cone_info = _init_dependency_cone(
+            game,
+            init_stmts,
+            field_idx,
+            stable_fields,
+            _counter_guarded_reading_block(target_method.block, field.name),
+        )
         if cone_info is None:
             if ctx is not None:
                 ctx.near_misses.append(
@@ -2774,6 +2979,8 @@ def _counter_guarded_computed_field_to_local(  # pylint: disable=too-many-locals
                     None, decl_stmt.var, decl_stmt.value
                 )
         moved: list[frog_ast.Statement] = []
+        field_types = {f.name: f.type for f in game.fields}
+        absorbed_fields: set[str] = set()
         for i in cone:
             stmt = copy.deepcopy(new_init_stmts[i])
             if i == field_idx:
@@ -2781,7 +2988,21 @@ def _counter_guarded_computed_field_to_local(  # pylint: disable=too-many-locals
                 stmt = frog_ast.Assignment(
                     copy.deepcopy(field.type), stmt.var, stmt.value
                 )
+            elif (
+                isinstance(stmt, frog_ast.Sample)
+                and stmt.the_type is None
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name in field_types
+            ):
+                # A branch-only field sample travels as a typed local sample.
+                absorbed_fields.add(stmt.var.name)
+                stmt = frog_ast.Sample(
+                    copy.deepcopy(field_types[stmt.var.name]),
+                    stmt.var,
+                    stmt.sampled_from,
+                )
             moved.append(stmt)
+        new_game.fields = [f for f in new_game.fields if f.name not in absorbed_fields]
         new_init.block = frog_ast.Block(
             [stmt for i, stmt in enumerate(new_init_stmts) if i not in cone]
         )

@@ -22,7 +22,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | SplitUniformSamples | Splits a uniform BitString sample accessed only via non-overlapping slices. |
 | SinkUniformSample | Moves a uniform sample into the single if-branch that uses it. |
 | LocalizeInitOnlyFieldSample | Converts field samples to local samples when the field is only used in Initialize. |
-| LocalizeInitOnlyField | Converts a field assigned once in Initialize and never used elsewhere into a typed local. |
+| LocalizeInitOnlyField | Converts a field into a typed local when it never carries a value between invocations: assigned once in Initialize and never used elsewhere, or written at the top of one block of one oracle and read only later in that block. |
 | SliceOfInlineConcat | Rewrites slice-of-concat expressions when bounds line up with the underlying concat components. |
 
 ### Symbolic (`symbolic.py`)
@@ -37,7 +37,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 |---|---|
 | TopologicalSort | Reorders statements by dependency graph. |
 | RemoveDuplicateFields | Removes fields with same type that always hold the same value. |
-| RemoveUnnecessaryFields | Removes unused fields and dead statements via liveness analysis. |
+| RemoveUnnecessaryFields | Removes unused fields and dead statements via liveness analysis. Also drops `if`/loop statements whose bodies were pruned to nothing. |
 | UniformBijectionElimination | Replaces `f(x)` with `x` when x is uniform and f is a deterministic injective bijection. |
 
 ### Random Functions (`random_functions.py`)
@@ -77,7 +77,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | ForwardExpressionAlias | Replaces repeated pure expressions with their named alias variable. |
 | HoistFieldPureAlias | Hoists field assignments of pure expressions before their first use. |
 | CrossMethodFieldAlias | Replaces deterministic calls in oracles with matching field references from Initialize. |
-| HoistDeterministicCallToInitialize | Hoists a deterministic call out of oracles into Initialize and caches it in a new field. |
+| HoistDeterministicCallToInitialize | Hoists a deterministic call out of oracles into Initialize and caches it in a new field. Sees through top-level single-assignment stable oracle locals (e.g. `g = NG.Generator(); NG.Exp(g, x)`), hoisting the alias-expanded call so both sides of a hop cache the same calls regardless of which already held one in a field. |
 | SplitOpaqueTupleField | Splits a `ProductType` field whose RHS is an opaque call and whose only reads are constant-indexed projections, into one fresh field per used component. |
 | HoistGroupExpToInitialize | Hoists `base ^ k` group exponentiations out of oracles into `Initialize` and caches the result in a pinned field; requires a prime-order / nonzero-exponent context. |
 | RefactorGroupElemFieldExp | Rewrites `base ^ (a * b)` as `Field2 ^ b` when a pre-existing pinned field `Field2 = base ^ a` exists. |
@@ -118,6 +118,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 |---|---|
 | IfConditionAliasSubstitution | Substitutes field references with local aliases inside equality-guarded if-branches. |
 | PropagateLiteralAssignment | Forward-propagates a `Bool`/`Int` literal assigned to a name into the reads that follow in the same block, until the name is written or rebound. |
+| PublishedFieldAlias | Under a publication flag (`P = Q; F = true;` in one block, `Q` stable, `P` otherwise only placeholder-initialized), replaces `P` by `Q` in conditions conjoined with `F` and in the branches they guard. |
 | RedundantConditionalReturn | Removes `if (c) { return X; } return X;` patterns. |
 | AbsorbRedundantEarlyReturn | Absorbs `if (P) { return X; } ... if (Q) { ... } return X;` into `if (!P && Q) { ... } return X;` (outermost-block-only). |
 | IfFalseReturnToConjunction | Absorbs `if (P) { return false; } ...; return Q;` into `...; return Q && !P;`. |

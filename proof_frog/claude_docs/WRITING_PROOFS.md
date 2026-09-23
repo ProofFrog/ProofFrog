@@ -127,8 +127,13 @@ determines), the ordinary compose-with-a-reduction encoding cannot express
 the hop. Use an **up-to-bad hop** instead:
 
 1. Write the pair so both sides carry `Bool bad;`, set `bad = false;` in
-   `Initialize`, and differ only inside `if (...) { bad = true; ... }`
-   branches (same conditions on both sides; `bad` nowhere else).
+   `Initialize`, and differ only after `bad = true;`: inside
+   `if (...) { bad = true; ... }` branches, or after a top-level
+   `bad = true;` in a block (same code before it on both sides; `bad`
+   nowhere else). The shape to use when one side must return a
+   different value: `if (x != y) { bad = true; } return x;` versus the same
+   guard followed by `return y;`. Each side's unused value is then dead
+   code, so nothing needs folding.
 2. Write the flag game: a copy of the pair's neutral side plus
    `Bool Reveal() { return bad; }` (first game) / `return false;` (second).
    Copy verbatim; the engine checks the relation structurally.
@@ -139,7 +144,17 @@ the hop. Use an **up-to-bad hop** instead:
    engine reports it as `upto` and charges `Adv^Flag`.
 
 If a side flip fails as an equivalence and the pair qualifies, the engine
-prints a hint naming the flag game to add. Worked example:
+prints a hint naming the flag game to add.
+
+Two practical points. Games are compared with their oracles in declaration
+order, so a reduction must list its oracles in the theorem game's order (a
+mismatch shows up as a diff whose only change is a moved method). And a
+flag game whose flag depends on a secret the reduction of a computational
+assumption cannot hold (e.g. `sk`) cannot be bounded by that assumption:
+split the step into a statistical pair whose flag is disabled once the
+computational event happens, and a computational pair whose flag IS that
+event and whose Right side is secret-free. See `OAEPExtractStat` /
+`OAEPExtractComp` in `examples/Games/PubKeyEnc/`. Worked example:
 `examples/Proofs/PubKeyEnc/OAEP_INDCPA_ROM.proof` with
 `OAEP_AskG_Flag.proof`.
 

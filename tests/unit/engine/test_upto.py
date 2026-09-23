@@ -140,3 +140,207 @@ class TestFlagGameOf:
 
     def test_rejects_body_drift(self) -> None:
         assert upto.flag_game_mismatch(_pair(right_tail="true"), _flag()) is not None
+
+
+SPLIT_PAIR = """
+Game Left(Set S) {{
+    S target;
+    Bool bad;
+
+    Void Initialize() {{
+        target <- S;
+        bad = false;
+    }}
+
+    S Dec(S a, S b) {{
+        if (a == target) {{
+            return b;
+        }}
+        bad = true;
+        return {left_tail};
+    }}
+}}
+
+Game Right(Set S) {{
+    S target;
+    Bool bad;
+
+    Void Initialize() {{
+        target <- S;
+        bad = false;
+    }}
+
+    S Dec(S a, S b) {{
+        if (a == target) {{
+            return b;
+        }}
+        bad = true;
+        return b;
+    }}
+}}
+
+export as Split;
+"""
+
+
+class TestTopLevelBadSplit:
+    def test_accepts_divergence_after_top_level_bad(self) -> None:
+        assert (
+            upto.identical_until_bad(_game_file(SPLIT_PAIR.format(left_tail="a")))
+            is None
+        )
+
+    def test_rejects_divergence_before_top_level_bad(self) -> None:
+        src = SPLIT_PAIR.format(left_tail="a").replace(
+            "        if (a == target) {\n            return b;\n        }\n        bad = true;\n        return a;",
+            "        if (a == target) {\n            return a;\n        }\n        bad = true;\n        return a;",
+        )
+        assert upto.identical_until_bad(_game_file(src)) is not None
+
+
+MISMATCH_PAIR = """
+Game Left(Set S) {{
+    Bool bad;
+
+    Void Initialize() {{
+        bad = false;
+    }}
+
+    S Dec(S a, S b) {{
+        if ({guard}) {{
+            bad = true;{extra}
+        }}
+        return {left_ret};
+    }}
+}}
+
+Game Right(Set S) {{
+    Bool bad;
+
+    Void Initialize() {{
+        bad = false;
+    }}
+
+    S Dec(S a, S b) {{
+        if ({guard}) {{
+            bad = true;{extra}
+        }}
+        return b;
+    }}
+}}
+
+export as Mismatch;
+"""
+
+
+class TestFlagOnMismatchThenReturn:
+    def test_accepts_return_of_either_compared_operand(self) -> None:
+        src = MISMATCH_PAIR.format(guard="a != b", extra="", left_ret="a")
+        assert upto.identical_until_bad(_game_file(src)) is None
+
+    def test_accepts_negated_equality_guard(self) -> None:
+        src = MISMATCH_PAIR.format(guard="!(a == b)", extra="", left_ret="a")
+        assert upto.identical_until_bad(_game_file(src)) is None
+
+    def test_rejects_return_of_an_uncompared_value(self) -> None:
+        src = MISMATCH_PAIR.format(guard="a != b", extra="", left_ret="b + a")
+        assert upto.identical_until_bad(_game_file(src)) is not None
+
+    def test_rejects_extra_work_inside_the_guard(self) -> None:
+        src = MISMATCH_PAIR.format(
+            guard="a != b", extra="\n            b = a;", left_ret="a"
+        )
+        assert upto.identical_until_bad(_game_file(src)) is not None
+
+    def test_rejects_unrelated_guard(self) -> None:
+        src = MISMATCH_PAIR.format(guard="a == b", extra="", left_ret="a")
+        assert upto.identical_until_bad(_game_file(src)) is not None
+
+
+GUARDED_PAIR = """
+Game Left(Set S) {{
+    S target;
+    Bool bad;
+
+    Void Initialize() {{
+        target <- S;
+        bad = false;
+    }}
+
+    Bool Mark(S c) {{
+        if (c == target) {{
+            bad = true;
+        }}
+        return false;
+    }}
+
+    S Dec(S a, S b) {{
+        if (bad) {{
+            return a;
+        }}
+        return b;
+    }}
+}}
+
+Game Right(Set S) {{
+    S target;
+    Bool bad;
+
+    Void Initialize() {{
+        target <- S;
+        bad = false;
+    }}
+
+    Bool Mark(S c) {{
+        if (c == target) {{
+            bad = true;
+        }}
+        return false;
+    }}
+
+    S Dec(S a, S b) {{{right_guard}
+        return b;
+    }}
+}}
+
+export as Guarded;
+"""
+
+
+class TestPostBadGuards:
+    def test_if_bad_block_may_exist_on_one_side_only(self) -> None:
+        src = GUARDED_PAIR.format(right_guard="")
+        assert upto.identical_until_bad(_game_file(src)) is None
+
+    def test_if_bad_blocks_may_differ(self) -> None:
+        src = GUARDED_PAIR.format(
+            right_guard="\n        if (bad) {\n            return b;\n        }"
+        )
+        assert upto.identical_until_bad(_game_file(src)) is None
+
+    def test_bad_read_outside_a_guard_is_rejected(self) -> None:
+        src = GUARDED_PAIR.format(
+            right_guard="\n        if (bad && a == b) {\n            return a;\n        }"
+        )
+        assert upto.identical_until_bad(_game_file(src)) is not None
+
+    def test_if_bad_with_else_is_not_a_post_bad_guard(self) -> None:
+        """The ``else`` of ``if (bad)`` runs exactly when the flag is down, so
+        the guard must not be skipped: differing else-bodies distinguish the
+        games on runs that never raise the flag."""
+        src = GUARDED_PAIR.format(
+            right_guard=(
+                "\n        if (bad) {\n            return b;\n        }"
+                " else {\n            return a;\n        }"
+            )
+        )
+        assert upto.identical_until_bad(_game_file(src)) is not None
+
+
+def test_flag_game_reveal_oracle_may_have_any_name() -> None:
+    flag = _flag()
+    for game in flag.games:
+        for method in game.methods:
+            if method.signature.name == "Reveal":
+                method.signature.name = "RevealBad"
+    assert upto.flag_game_mismatch(_pair(), flag) is None

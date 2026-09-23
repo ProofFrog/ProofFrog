@@ -33,9 +33,9 @@ from proof_frog.transforms.sampling import _counter_guarded_field_to_local
                 count = 0;
             }
             BitString<lambda> Oracle(BitString<lambda> x) {
-                BitString<lambda> k <- BitString<lambda>;
                 count = count + 1;
                 if (count == 1) {
+                    BitString<lambda> k <- BitString<lambda>;
                     return k + x;
                 } else {
                     BitString<lambda> r <- BitString<lambda>;
@@ -71,9 +71,9 @@ from proof_frog.transforms.sampling import _counter_guarded_field_to_local
                 count = 0;
             }
             BitString<lambda> Oracle(BitString<lambda> x) {
-                BitString<lambda> k <- BitString<lambda>;
                 count = count + 1;
                 if (count == h) {
+                    BitString<lambda> k <- BitString<lambda>;
                     return k + x;
                 } else {
                     BitString<lambda> r <- BitString<lambda>;
@@ -110,9 +110,9 @@ from proof_frog.transforms.sampling import _counter_guarded_field_to_local
                 count = 0;
             }
             BitString<lambda> Oracle(BitString<lambda> x) {
-                Function<BitString<lambda>, BitString<lambda>> RF <- Function<BitString<lambda>, BitString<lambda>>;
                 count = count + 1;
                 if (count == 1) {
+                    Function<BitString<lambda>, BitString<lambda>> RF <- Function<BitString<lambda>, BitString<lambda>>;
                     BitString<lambda> z = RF(x);
                     return z;
                 } else {
@@ -377,9 +377,9 @@ from proof_frog.transforms.sampling import _counter_guarded_field_to_local
                 count = 0;
             }
             BitString<lambda> Oracle(BitString<lambda> x) {
-                BitString<lambda> k <- BitString<lambda>;
                 count = 1 + count;
                 if (count == 1) {
+                    BitString<lambda> k <- BitString<lambda>;
                     return k + x;
                 } else {
                     BitString<lambda> r <- BitString<lambda>;
@@ -416,9 +416,9 @@ from proof_frog.transforms.sampling import _counter_guarded_field_to_local
                 count = 0;
             }
             BitString<lambda> Oracle(BitString<lambda> x) {
-                BitString<lambda> k <- BitString<lambda>;
                 count = count + 1;
                 if (1 == count) {
+                    BitString<lambda> k <- BitString<lambda>;
                     return k + x;
                 } else {
                     BitString<lambda> r <- BitString<lambda>;

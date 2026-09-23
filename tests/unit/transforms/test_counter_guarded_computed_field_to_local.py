@@ -35,11 +35,9 @@ Game Test(TDP F, Function<BitString<m>, BitString<k>> H) {
 
 POSITIVE_EXPECTED = """
 Game Test(TDP F, Function<BitString<m>, BitString<k>> H) {
-    BitString<k> r;
     Int count;
     PK pk;
     PK Initialize() {
-        r <- BitString<k>;
         count = 0;
         [PK, SK] kp = F.KeyGen();
         pk = kp[0];
@@ -49,6 +47,7 @@ Game Test(TDP F, Function<BitString<m>, BitString<k>> H) {
         count = count + 1;
         BitString<n>? result = None;
         if (count == 1) {
+            BitString<k> r <- BitString<k>;
             BitString<m> s <- BitString<m>;
             BitString<n> y = F.evaluate(pk, s || r + H(s));
             result = y;
@@ -163,8 +162,14 @@ def test_promotes_shared_init_local_to_field() -> None:
 
 
 def test_declines_without_a_moving_sample() -> None:
-    """A deterministic function of stable fields stays in Initialize (hoist form)."""
-    src = POSITIVE.replace("        BitString<m> s <- BitString<m>;\n", "").replace(
-        "y = F.evaluate(pk, s || r + H(s));", "y = F.evaluate(pk, r || r + H(r));"
+    """A deterministic function of stable fields stays in Initialize (hoist
+    form): here `r` is also read by HashH, so it cannot travel into the
+    branch, and no other sample moves."""
+    src = (
+        POSITIVE.replace("        BitString<m> s <- BitString<m>;\n", "")
+        .replace(
+            "y = F.evaluate(pk, s || r + H(s));", "y = F.evaluate(pk, r || r + H(r));"
+        )
+        .replace("        return H(x);", "        return H(x) + r;")
     )
     assert _apply(src) == str(frog_parser.parse_game(src))

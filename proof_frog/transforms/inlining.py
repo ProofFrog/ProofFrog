@@ -5249,7 +5249,18 @@ class HoistDeterministicCallToInitializeTransformer:
         ):
             init_terminal_return_idx = len(init_block_stmts) - 1
 
-        existing_aliased_calls: list[frog_ast.FuncCall] = []
+        # Calls already cached in a field, compared in alias-expanded form so
+        # that ``field8 = NG.Exp(v1, x);`` (with ``v1 = NG.Generator();``) is
+        # recognised as caching ``NG.Exp(NG.Generator(), x)``.
+        init_aliases = _build_local_stable_alias_map(
+            game.methods[init_idx],
+            field_names,
+            param_names,
+            self.proof_namespace,
+            function_var_names,
+            proof_let_names,
+        )
+        existing_aliased_calls: list[frog_ast.ASTNode] = []
         for stmt in game.methods[init_idx].block.statements:
             if (
                 isinstance(stmt, frog_ast.Assignment)
@@ -5258,13 +5269,32 @@ class HoistDeterministicCallToInitializeTransformer:
                 and stmt.var.name in field_names
                 and isinstance(stmt.value, frog_ast.FuncCall)
             ):
-                existing_aliased_calls.append(stmt.value)
+                existing_aliased_calls.append(
+                    _expand_aliases(copy.deepcopy(stmt.value), init_aliases)
+                )
 
         candidate: frog_ast.FuncCall | None = None
         candidate_return_type: frog_ast.Type | None = None
         for midx, method in enumerate(game.methods):
             if midx == init_idx:
                 continue
+            # See through the oracle's own stable locals: a top-level
+            # single-assignment local whose RHS is stable (typically the
+            # ``v = NG.Generator();`` that CSE leaves behind) does not make a
+            # call unstable, and the call is hoisted in its alias-expanded
+            # form (``NG.Exp(NG.Generator(), x)``) so Initialize never refers
+            # to an oracle local. Without this, whether ``NG.Exp(g, x)`` got
+            # cached depended on whether some *other* method happened to
+            # already hold it in a field, and the two sides of a hop could
+            # canonicalize differently.
+            oracle_aliases = _build_local_stable_alias_map(
+                method,
+                field_names,
+                param_names,
+                self.proof_namespace,
+                function_var_names,
+                proof_let_names,
+            )
             collector = _DeterministicCallCollector(
                 self.proof_namespace, function_var_names=function_var_names
             )
@@ -5287,7 +5317,7 @@ class HoistDeterministicCallToInitializeTransformer:
                 if not _call_resolves_at_game_scope(
                     call,
                     method,
-                    {},
+                    oracle_aliases,
                     field_names,
                     param_names,
                     self.proof_namespace,
@@ -5295,13 +5325,16 @@ class HoistDeterministicCallToInitializeTransformer:
                     proof_let_names,
                 ):
                     continue
-                if any(call == ea for ea in existing_aliased_calls):
+                expanded_node = _expand_aliases(copy.deepcopy(call), oracle_aliases)
+                assert isinstance(expanded_node, frog_ast.FuncCall)
+                expanded_call = expanded_node
+                if any(expanded_call == ea for ea in existing_aliased_calls):
                     continue
                 # F-338: the hoisted assignment is evaluated in Initialize,
                 # so no name in the call may be rebound there either (an
                 # Initialize local `k` would capture the field `k`).
                 if not _call_resolves_at_game_scope(
-                    call,
+                    expanded_call,
                     game.methods[init_idx],
                     {},
                     field_names,
@@ -5332,16 +5365,16 @@ class HoistDeterministicCallToInitializeTransformer:
                         )
                     continue
                 arg_fields: set[str] = set()
-                for a in call.args:
+                for a in expanded_call.args:
                     arg_fields |= _collect_field_names_in_args(a, field_names)
                 # For Function<D,R> calls, the callee variable itself is state
                 # we depend on — if it's a game field it must not be mutated
                 # outside Initialize, same requirement as the arguments.
                 if (
-                    isinstance(call.func, frog_ast.Variable)
-                    and call.func.name in field_names
+                    isinstance(expanded_call.func, frog_ast.Variable)
+                    and expanded_call.func.name in field_names
                 ):
-                    arg_fields.add(call.func.name)
+                    arg_fields.add(expanded_call.func.name)
                 mutated = self._fields_mutated_outside_init(game, init_idx, arg_fields)
                 if mutated:
                     if self._ctx is not None:
@@ -5365,7 +5398,7 @@ class HoistDeterministicCallToInitializeTransformer:
                             )
                         )
                     continue
-                candidate = call
+                candidate = expanded_call
                 candidate_return_type = return_type
                 break
             if candidate is not None:
@@ -5449,31 +5482,50 @@ class HoistDeterministicCallToInitializeTransformer:
         for midx, _ in enumerate(new_game.methods):
             if midx == init_idx:
                 continue
-            # F-338: replace only where the call means what the hoisted field
-            # caches. A method that rebinds a name the call reads (e.g. a
-            # parameter ``k`` shadowing the field ``k``) keeps its call.
-            if not _call_resolves_at_game_scope(
-                candidate,
-                new_game.methods[midx],
-                {},
-                field_names,
-                param_names,
-                self.proof_namespace,
-                function_var_names,
-                proof_let_names,
-            ):
-                continue
             while True:
+                method = new_game.methods[midx]
+                # The candidate is alias-expanded; match each oracle call in
+                # its own expanded form (``NG.Exp(v, x)`` with a top-level
+                # ``v = NG.Generator();`` matches ``NG.Exp(NG.Generator(), x)``).
+                # F-338: replace only where the call means what the hoisted
+                # field caches. A method that rebinds a name the call reads
+                # (e.g. a parameter ``k`` shadowing the field ``k``) keeps it.
+                method_aliases = _build_local_stable_alias_map(
+                    method,
+                    field_names,
+                    param_names,
+                    self.proof_namespace,
+                    function_var_names,
+                    proof_let_names,
+                )
                 collector = _DeterministicCallCollector(
                     self.proof_namespace, function_var_names=function_var_names
                 )
-                collector.visit(new_game.methods[midx].block)
-                target = next((c for c in collector.result() if c == candidate), None)
+                collector.visit(method.block)
+                target = next(
+                    (
+                        c
+                        for c in collector.result()
+                        if _expand_aliases(copy.deepcopy(c), method_aliases)
+                        == candidate
+                        and _call_resolves_at_game_scope(
+                            c,
+                            method,
+                            method_aliases,
+                            field_names,
+                            param_names,
+                            self.proof_namespace,
+                            function_var_names,
+                            proof_let_names,
+                        )
+                    ),
+                    None,
+                )
                 if target is None:
                     break
                 new_game.methods[midx] = ReplaceTransformer(
                     target, frog_ast.Variable(new_name)
-                ).transform(new_game.methods[midx])
+                ).transform(method)
 
         return new_game
 

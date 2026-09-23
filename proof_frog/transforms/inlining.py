@@ -4549,6 +4549,7 @@ def _is_stable_arg(  # pylint: disable=too-many-arguments, too-many-positional-a
             function_var_names is not None
             and isinstance(expr.func, frog_ast.Variable)
             and expr.func.name in function_var_names
+            and (shadowed_names is None or expr.func.name not in shadowed_names)
         )
         if not (is_det_primitive or is_function_var):
             return False
@@ -4657,63 +4658,66 @@ def _build_local_stable_alias_map(  # pylint: disable=too-many-arguments, too-ma
     Excluded:
     - Locals re-assigned more than once.
     - Sampled / UniqueSample-bound locals (their value is non-deterministic).
-    - Locals shadowed by fields or parameters.
+    - Names with an outer binding: game fields, game parameters, proof-level
+      let names, and the method's own parameters. Before its one top-level
+      write such a name still holds the outer value (a reassigned parameter
+      holds the caller's argument), so expanding an earlier use through the
+      RHS would be wrong (F-338).
     - Self-assignments (``x = x``), which are no-ops left by other transforms.
+    - A RHS that reads a name the method binds locally (parameter, typed
+      local, ``for`` binder) other than an earlier verified alias. Such a name
+      is per-call even when it collides with a field name, and the expanded
+      call is later evaluated at game scope, where it would mean the field
+      (F-338; the alias-RHS sibling of F-173).
+    - A RHS that reads a field written again later in the method: expanding a
+      later use through the RHS would read the stale value (F-338).
     """
-    counts: dict[str, int] = {}
+    method_params = {p.name for p in method.signature.parameters}
+    outer_names = field_names | param_names | method_params | (proof_let_names or set())
+    bound_names = _method_bound_names(method)
     bindings: dict[str, frog_ast.Expression] = {}
-    sampled: set[str] = set()
-    for stmt in method.block.statements:
-        if isinstance(stmt, (frog_ast.Sample, frog_ast.UniqueSample)) and isinstance(
-            stmt.var, frog_ast.Variable
-        ):
-            sampled.add(stmt.var.name)
-            counts[stmt.var.name] = counts.get(stmt.var.name, 0) + 1
-            continue
+    def_index: dict[str, int] = {}
+    statements = method.block.statements
+    for idx, stmt in enumerate(statements):
         if not isinstance(stmt, frog_ast.Assignment):
             continue
         if not isinstance(stmt.var, frog_ast.Variable):
             continue
         name = stmt.var.name
-        if name in field_names or name in param_names:
+        if name in outer_names:
             continue
         if isinstance(stmt.value, frog_ast.Variable) and stmt.value.name == name:
             # Skip self-assignments.
             continue
-        counts[name] = counts.get(name, 0) + 1
         bindings[name] = stmt.value
+        def_index[name] = idx
 
-    # Also count writes hidden inside nested blocks (if-branches, for-loop
-    # bodies, including the loop variable's per-iteration binding).  A name
-    # with even one such hidden write is not actually single-assignment and
-    # must be disqualified from the alias map.  Without this, a top-level
-    # `x = E_stable;` followed by an `if cond { x = h; }` would falsely admit
-    # `x -> E_stable`, and the cross-method matcher would expand uses of `x`
-    # in either branch through the stale RHS.
-    def _bump_nested(stmts: Sequence[frog_ast.Statement]) -> None:
-        for s in stmts:
-            if isinstance(
-                s, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
-            ) and isinstance(s.var, frog_ast.Variable):
-                counts[s.var.name] = counts.get(s.var.name, 0) + 1
-            if isinstance(s, frog_ast.IfStatement):
-                for blk in s.blocks:
-                    _bump_nested(blk.statements)
-            elif isinstance(s, frog_ast.NumericFor):
-                counts[s.name] = counts.get(s.name, 0) + 1
-                _bump_nested(s.block.statements)
-            elif isinstance(s, frog_ast.GenericFor):
-                counts[s.var_name] = counts.get(s.var_name, 0) + 1
-                _bump_nested(s.block.statements)
+    # Count every write anywhere in the method (nested if/for bodies, samples,
+    # element/slice/field writes via ``lvalue_base_name``, ``<-uniq[S]``
+    # growth of S, and ``for`` binders), ignoring ``x = x`` no-ops. A name
+    # with any write besides its one top-level definition is not a stable
+    # alias: expanding a use of ``x`` through a stale RHS would be wrong in
+    # either branch of an ``if (c) { x = h; }`` or after ``x[0] = v``.
+    def _write_count(name: str) -> int:
+        count = 0
 
-    for stmt in method.block.statements:
-        if isinstance(stmt, frog_ast.IfStatement):
-            for blk in stmt.blocks:
-                _bump_nested(blk.statements)
-        elif isinstance(stmt, frog_ast.NumericFor):
-            _bump_nested(stmt.block.statements)
-        elif isinstance(stmt, frog_ast.GenericFor):
-            _bump_nested(stmt.block.statements)
+        def _counter(n: frog_ast.ASTNode) -> bool:
+            nonlocal count
+            if (
+                isinstance(n, frog_ast.Assignment)
+                and isinstance(n.var, frog_ast.Variable)
+                and isinstance(n.value, frog_ast.Variable)
+                and n.var.name == n.value.name
+            ):
+                return False
+            if _stmt_mutates_var(n, name):
+                count += 1
+            return False
+
+        SearchVisitor(_counter).visit(method.block)
+        return count
+
+    single_assignment = {name for name in bindings if _write_count(name) == 1}
 
     aliases: dict[str, frog_ast.Expression] = {}
     while True:
@@ -4721,11 +4725,9 @@ def _build_local_stable_alias_map(  # pylint: disable=too-many-arguments, too-ma
         for name, expr in bindings.items():
             if name in aliases:
                 continue
-            if counts.get(name, 0) != 1:
+            if name not in single_assignment:
                 continue
-            if name in sampled:
-                continue
-            if _is_stable_arg(
+            if not _is_stable_arg(
                 expr,
                 field_names,
                 param_names,
@@ -4733,9 +4735,26 @@ def _build_local_stable_alias_map(  # pylint: disable=too-many-arguments, too-ma
                 function_var_names,
                 proof_let_names,
                 local_alias_names=set(aliases),
+                shadowed_names=bound_names,
             ):
-                aliases[name] = expr
-                changed = True
+                continue
+            # Every alias the RHS reads must be defined before it.
+            if any(
+                def_index[dep] >= def_index[name]
+                for dep in referenced_variable_names(expr) & set(aliases)
+            ):
+                continue
+            # Aliases the RHS reads were checked the same way at their own
+            # (earlier) definitions, so checking the RHS's direct field reads
+            # covers the whole expansion.
+            if _fields_assigned_after(
+                statements,
+                def_index[name],
+                _collect_field_names_in_args(expr, field_names),
+            ):
+                continue
+            aliases[name] = expr
+            changed = True
         if not changed:
             break
     return aliases
@@ -4762,6 +4781,46 @@ def _expand_aliases(
             sm.set(frog_ast.Variable(n), copy.deepcopy(v))
         current = SubstitutionTransformer(sm).transform(current)
     return current
+
+
+def _call_resolves_at_game_scope(  # pylint: disable=too-many-arguments, too-many-positional-arguments
+    call: frog_ast.FuncCall,
+    method: frog_ast.Method,
+    aliases: dict[str, frog_ast.Expression],
+    field_names: set[str],
+    param_names: set[str],
+    proof_namespace: frog_ast.Namespace | None,
+    function_var_names: set[str] | None,
+    proof_let_names: set[str] | None,
+) -> bool:
+    """True if *call*, as written in *method*, denotes the same value as its
+    alias-expanded form evaluated at game scope (in a field cached by
+    Initialize).
+
+    Every free name must be either a verified stable alias of *method* (see
+    :func:`_build_local_stable_alias_map`) or a field / game parameter / proof
+    let name that *method* does not rebind. The cross-method passes match calls
+    structurally, so a call ``E.f(k)`` in a method with a parameter ``k`` looks
+    identical to the game-scope ``E.f(k)`` over the field ``k`` while meaning
+    something else (F-338; F-173 guarded only the method a candidate was found
+    in, not the methods it was replaced in).
+    """
+    shadowed = _method_bound_names(method)
+    if isinstance(call.func, frog_ast.Variable) and call.func.name in shadowed:
+        return False
+    return all(
+        _is_stable_arg(
+            a,
+            field_names,
+            param_names,
+            proof_namespace=proof_namespace,
+            function_var_names=function_var_names,
+            proof_let_names=proof_let_names,
+            local_alias_names=set(aliases),
+            shadowed_names=shadowed,
+        )
+        for a in call.args
+    )
 
 
 class CrossMethodFieldAliasTransformer:
@@ -4955,6 +5014,13 @@ class CrossMethodFieldAliasTransformer:
         ``expand(c, target_aliases) == expand(alias_call, init_aliases)``.
         """
         del alias_call  # alias_call is referenced only via expanded_call now
+        field_names = {f.name for f in game.fields}
+        param_names = {p.name for p in game.parameters}
+        proof_let_names: set[str] = (
+            {pair.name for pair in self._proof_let_types.type_map}
+            if self._proof_let_types is not None
+            else set()
+        )
         for midx, method in enumerate(game.methods):
             if midx == alias_midx:
                 continue
@@ -4969,16 +5035,52 @@ class CrossMethodFieldAliasTransformer:
                 self.proof_namespace, self._function_var_names
             )
             collector.visit(method.block)
+            matches = [
+                c
+                for c in collector.result()
+                if _expand_aliases(copy.deepcopy(c), target_aliases) == expanded_call
+            ]
+            # F-338: a structural match is only the field's value if every
+            # name in the call means in this method what it means in
+            # Initialize (no parameter / local / binder rebinds it).
             target_call = next(
                 (
                     c
-                    for c in collector.result()
-                    if _expand_aliases(copy.deepcopy(c), target_aliases)
-                    == expanded_call
+                    for c in matches
+                    if _call_resolves_at_game_scope(
+                        c,
+                        method,
+                        target_aliases,
+                        field_names,
+                        param_names,
+                        self.proof_namespace,
+                        self._function_var_names,
+                        proof_let_names,
+                    )
                 ),
                 None,
             )
             if target_call is None:
+                if matches and self._ctx is not None:
+                    self._ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Cross Method Field Alias",
+                            reason=(
+                                f"Call matches field {alias_field_name!r} "
+                                "cached in Initialize, but a name in it is "
+                                "rebound in this method (parameter, local or "
+                                "loop binder), so it does not denote the "
+                                "field's value"
+                            ),
+                            location=matches[0].origin,
+                            suggestion=(
+                                "Rename the method's parameter or local so it "
+                                "does not reuse a game field's name"
+                            ),
+                            variable=alias_field_name,
+                            method=method.signature.name,
+                        )
+                    )
                 continue
             # Found a match — replace and return
             new_game = copy.deepcopy(game)
@@ -4987,10 +5089,7 @@ class CrossMethodFieldAliasTransformer:
             )
             new_collector.visit(new_game.methods[midx].block)
             for new_call in new_collector.result():
-                if (
-                    _expand_aliases(copy.deepcopy(new_call), target_aliases)
-                    == expanded_call
-                ):
+                if new_call == target_call:
                     new_game.methods[midx] = ReplaceTransformer(
                         new_call,
                         frog_ast.Variable(alias_field_name),
@@ -5185,20 +5284,52 @@ class HoistDeterministicCallToInitializeTransformer:
                     continue
                 if not call.args:
                     continue
-                if not all(
-                    _is_stable_arg(
-                        a,
-                        field_names,
-                        param_names,
-                        proof_namespace=self.proof_namespace,
-                        function_var_names=function_var_names,
-                        proof_let_names=proof_let_names,
-                        shadowed_names=_method_bound_names(method),
-                    )
-                    for a in call.args
+                if not _call_resolves_at_game_scope(
+                    call,
+                    method,
+                    {},
+                    field_names,
+                    param_names,
+                    self.proof_namespace,
+                    function_var_names,
+                    proof_let_names,
                 ):
                     continue
                 if any(call == ea for ea in existing_aliased_calls):
+                    continue
+                # F-338: the hoisted assignment is evaluated in Initialize,
+                # so no name in the call may be rebound there either (an
+                # Initialize local `k` would capture the field `k`).
+                if not _call_resolves_at_game_scope(
+                    call,
+                    game.methods[init_idx],
+                    {},
+                    field_names,
+                    param_names,
+                    self.proof_namespace,
+                    function_var_names,
+                    proof_let_names,
+                ):
+                    if self._ctx is not None:
+                        self._ctx.near_misses.append(
+                            NearMiss(
+                                transform_name=(
+                                    "Hoist Deterministic Call to Initialize"
+                                ),
+                                reason=(
+                                    "Cannot hoist call: Initialize rebinds a "
+                                    "name it reads (parameter or local with a "
+                                    "field's name)"
+                                ),
+                                location=call.origin,
+                                suggestion=(
+                                    "Rename the Initialize local or parameter "
+                                    "so it does not reuse a game field's name"
+                                ),
+                                variable=None,
+                                method="Initialize",
+                            )
+                        )
                     continue
                 arg_fields: set[str] = set()
                 for a in call.args:
@@ -5286,62 +5417,23 @@ class HoistDeterministicCallToInitializeTransformer:
             new_stmts = list(new_init.block.statements)
             ret_stmt = new_stmts[-1]
             assert isinstance(ret_stmt, frog_ast.ReturnStatement)
-            # Build alias map: local single-assignment bindings in Initialize
-            # (before the hoisted/terminal statements).
-            aliases: dict[str, frog_ast.Expression] = {}
-            alias_assign_counts: dict[str, int] = {}
-            for stmt in new_stmts[:-1]:
-                if stmt is hoisted_stmt:
-                    continue
-                if (
-                    isinstance(stmt, frog_ast.Assignment)
-                    and isinstance(stmt.var, frog_ast.Variable)
-                    and stmt.var.name not in field_names
-                    and stmt.var.name not in param_names
-                ):
-                    # Ignore self-assignments (``x = x;``) which are no-ops
-                    # that other transforms sometimes leave behind; counting
-                    # them would disqualify x from being treated as a stable
-                    # alias.
-                    if (
-                        isinstance(stmt.value, frog_ast.Variable)
-                        and stmt.value.name == stmt.var.name
-                    ):
-                        continue
-                    name = stmt.var.name
-                    alias_assign_counts[name] = alias_assign_counts.get(name, 0) + 1
-                    aliases[name] = stmt.value
-            # Only use aliases for variables assigned exactly once.
-            # F-170: the loop above counts only TOP-LEVEL Assignment nodes, so
-            # it misses a re-binding nested in an if/for (`if (b) { x = k2; }`)
-            # or a top-level Sample (`x <- ...`). Such a name is coin-dependent,
-            # not a stable alias -- expanding `F(x)` to `F(<top-level RHS>)`
-            # would then match a hoisted `F(k)` unsoundly. Require the COMPLETE
-            # recursive write count (nested + samples, peeling l-values) to be
-            # exactly 1.
-            init_prefix = frog_ast.Block(list(new_stmts[:-1]))
-            stable_aliases = {
-                n: v
-                for n, v in aliases.items()
-                if alias_assign_counts[n] == 1
-                and _count_assigns_recursive(init_prefix, n) == 1
-            }
+            # Stable single-assignment aliases of the original Initialize
+            # (before the hoisted statement was spliced in). The shared
+            # helper requires the complete write count to be 1 (F-170) and
+            # rejects an alias whose RHS reads a field Initialize writes again
+            # before the return (F-338: ``x = k; k = 2; return f(x);`` must
+            # not become ``return f(k)`` evaluated after ``k = 2``).
+            stable_aliases = _build_local_stable_alias_map(
+                game.methods[init_idx],
+                field_names,
+                param_names,
+                self.proof_namespace,
+                function_var_names,
+                proof_let_names,
+            )
 
             def _expand(expr: frog_ast.ASTNode) -> frog_ast.ASTNode:
-                """Recursively expand local aliases in *expr* to a fixed point."""
-                prev: frog_ast.ASTNode | None = None
-                current: frog_ast.ASTNode = expr
-                for _ in range(32):  # bound in case of pathological aliases
-                    if prev is not None and prev == current:
-                        break
-                    prev = current
-                    sm: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(
-                        identity=False
-                    )
-                    for n, v in stable_aliases.items():
-                        sm.set(frog_ast.Variable(n), copy.deepcopy(v))
-                    current = SubstitutionTransformer(sm).transform(current)
-                return current
+                return _expand_aliases(expr, stable_aliases)
 
             expanded_candidate = _expand(copy.deepcopy(candidate))
 
@@ -5356,6 +5448,20 @@ class HoistDeterministicCallToInitializeTransformer:
 
         for midx, _ in enumerate(new_game.methods):
             if midx == init_idx:
+                continue
+            # F-338: replace only where the call means what the hoisted field
+            # caches. A method that rebinds a name the call reads (e.g. a
+            # parameter ``k`` shadowing the field ``k``) keeps its call.
+            if not _call_resolves_at_game_scope(
+                candidate,
+                new_game.methods[midx],
+                {},
+                field_names,
+                param_names,
+                self.proof_namespace,
+                function_var_names,
+                proof_let_names,
+            ):
                 continue
             while True:
                 collector = _DeterministicCallCollector(

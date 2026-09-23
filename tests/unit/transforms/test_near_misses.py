@@ -2408,3 +2408,65 @@ def test_split_bare_tuple_declarations_no_near_miss_when_it_fires():
     ctx = _make_ctx()
     SplitBareTupleDeclarations().apply(game, ctx)
     assert not [nm for nm in ctx.near_misses if nm.variable == "v"]
+
+
+def test_cross_method_alias_near_miss_shadowed_match():
+    """CrossMethodFieldAlias reports a near-miss when a call matches the
+    Initialize-cached field structurally but a parameter rebinds its argument
+    (F-338)."""
+    from proof_frog.transforms.inlining import (  # pylint: disable=import-outside-toplevel
+        CrossMethodFieldAlias,
+    )
+
+    game = frog_parser.parse_game("""
+        Game Foo(G GG) {
+            BitString<n> seed;
+            BitString<n> c;
+            Void Initialize() {
+                seed <- BitString<n>;
+                c = GG.evaluate(seed);
+            }
+            BitString<n> Get(BitString<n> seed) {
+                return GG.evaluate(seed);
+            }
+        }
+        """)
+    ctx = _make_hoist_ctx()
+    out = CrossMethodFieldAlias().apply(game, ctx)
+
+    assert "return GG.evaluate(seed);" in str(out)
+    misses = [
+        nm for nm in ctx.near_misses if nm.transform_name == "Cross Method Field Alias"
+    ]
+    assert len(misses) == 1
+    assert misses[0].method == "Get"
+    assert "rebound" in misses[0].reason
+
+
+def test_hoist_near_miss_initialize_rebinds_arg():
+    """Hoist reports a near-miss when Initialize rebinds a name the call reads
+    (F-338)."""
+    game = frog_parser.parse_game("""
+        Game Foo(G GG) {
+            BitString<n> seed;
+            BitString<n> Initialize() {
+                seed <- BitString<n>;
+                BitString<n> seed = 0^n;
+                return seed;
+            }
+            BitString<n> Get1() {
+                return GG.evaluate(seed);
+            }
+        }
+        """)
+    ctx = _make_hoist_ctx()
+    out = HoistDeterministicCallToInitialize().apply(game, ctx)
+
+    assert "_hoisted" not in str(out)
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Hoist Deterministic Call to Initialize"
+    ]
+    assert len(misses) == 1
+    assert misses[0].method == "Initialize"

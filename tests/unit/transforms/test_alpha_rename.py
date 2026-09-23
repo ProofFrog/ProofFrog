@@ -7,7 +7,7 @@ names untouched.  These tests pin the scope invariants directly on the AST.
 
 from __future__ import annotations
 
-from proof_frog import frog_parser
+from proof_frog import frog_ast, frog_parser
 from proof_frog.transforms.alpha_rename import AlphaRename
 from proof_frog.transforms._base import PipelineContext
 from proof_frog.visitors import NameTypeMap
@@ -143,3 +143,116 @@ def test_f238_f239_sampled_from_and_type_follow_shadowed_local() -> None:
     assert "BitString<n>" not in body
     # The type annotation, sampled_from, and exclusion all use the fresh name.
     assert "BitString<__a" in body
+
+
+# ---------------------------------------------------------------------------
+# F-339: parameters and loop binders that collide with an OUTER name (field,
+# game parameter, proof let / namespace name) are renamed, so no later pass
+# that resolves names by field/let membership can capture them.
+# ---------------------------------------------------------------------------
+
+
+def test_f339_parameter_colliding_with_field_is_renamed() -> None:
+    """`O(Int x)` with a field `x`: the parameter and its body reads get a
+    fresh name; the field and Initialize's reads of it are untouched."""
+    out = _apply("""
+        Game G() {
+            Int x;
+            Void Initialize() { x = 1; }
+            Int O(Int x) {
+                x = x + 1;
+                return x;
+            }
+        }
+        """)
+    assert "Int O(Int x)" not in out
+    assert "Int O(Int __a" in out
+    assert "x = 1;" in out  # Initialize still writes the field
+    assert "return x;" not in out  # body read follows the renamed parameter
+
+
+def test_f339_parameter_colliding_with_let_is_renamed() -> None:
+    ctx = _ctx()
+    ctx.proof_let_types.set("k", frog_ast.IntType())
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int O(Int k) { return k; }
+        }
+        """)
+    out = str(AlphaRename().apply(game, ctx))
+    assert "Int O(Int k)" not in out
+    assert "return k;" not in out
+
+
+def test_f339_non_colliding_parameter_unchanged() -> None:
+    out = _apply("""
+        Game G() {
+            Int x;
+            Int O(Int z) { return z + x; }
+        }
+        """)
+    assert "Int O(Int z)" in out
+    assert "z + x" in out
+
+
+def test_f339_for_binder_colliding_with_field_is_renamed() -> None:
+    """A `for` binder named like a field is renamed (the F-173 shape);
+    the field read after the loop is untouched."""
+    out = _apply("""
+        Game G() {
+            Int k;
+            Int O() {
+                Int acc = 0;
+                for (Int k = 0 to 3) {
+                    acc = acc + k;
+                }
+                return acc + k;
+            }
+        }
+        """)
+    assert "for (Int k " not in out
+    assert "+ k;" in out  # the trailing field read survives
+
+
+def test_f339_generic_for_binder_colliding_with_field_is_renamed() -> None:
+    out = _apply("""
+        Game G() {
+            Int k;
+            Set<Int> S;
+            Int O() {
+                Int acc = 0;
+                for (Int k in S) {
+                    acc = acc + k;
+                }
+                return acc + k;
+            }
+        }
+        """)
+    assert "for (Int k in" not in out
+    assert "+ k;" in out
+
+
+def test_f339_parameter_named_in_signature_type_left_alone() -> None:
+    """A colliding parameter whose name also appears in the signature's types
+    is not renamed (the scoping of signature types is not pinned down)."""
+    out = _apply("""
+        Game G(Int n) {
+            BitString<n> O(Int n, BitString<n> m) { return m; }
+        }
+        """)
+    assert "O(Int n, BitString<n> m)" in out
+
+
+def test_f339_collision_renaming_is_idempotent() -> None:
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int x;
+            Int O(Int x) {
+                for (Int x = 0 to 2) { }
+                return x;
+            }
+        }
+        """)
+    once = AlphaRename().apply(game, _ctx())
+    twice = AlphaRename().apply(once, _ctx())
+    assert once == twice

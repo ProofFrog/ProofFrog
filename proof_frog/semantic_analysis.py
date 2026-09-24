@@ -70,6 +70,19 @@ def check_well_formed(
     file_name: str,
     allowed_root: Optional[str] = None,
 ) -> None:
+    try:
+        _check_well_formed(root, file_name, allowed_root)
+    except proof_engine.InstantiationCaptureError as e:
+        # A scheme/primitive field would capture a name in its instantiation
+        # arguments (F-341): report it as an ordinary type error.
+        print_error(root, str(e), file_name)
+
+
+def _check_well_formed(
+    root: frog_ast.Root,
+    file_name: str,
+    allowed_root: Optional[str] = None,
+) -> None:
     parse_cache = name_resolution(root, file_name, allowed_root=allowed_root)
 
     import_namespace: dict[str, frog_ast.Root | frog_ast.Game] = {}

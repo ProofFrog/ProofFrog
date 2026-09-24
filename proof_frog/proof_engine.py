@@ -4,6 +4,7 @@ import dataclasses
 import difflib
 import functools
 import os
+import re
 import shutil
 import warnings
 import sys
@@ -30,6 +31,7 @@ from .transforms._base import (
     _MAX_FIXED_POINT_ITERATIONS,
 )
 from .transforms.pipelines import CORE_PIPELINE, STANDARDIZATION_PIPELINE
+from .transforms.alpha_rename import rename_colliding_binders
 from .transforms.assumptions import ApplyAssumptions
 from .transforms.structural import (  # pylint: disable=unused-import
     remove_duplicate_fields,
@@ -1984,11 +1986,90 @@ class ProofEngine:
 T = TypeVar("T", bound=Union[frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game])
 
 
+class InstantiationCaptureError(Exception):
+    """Instantiation would let a scheme or primitive field capture a name in
+    an instantiation argument (F-341)."""
+
+
+_INSTANTIATION_FRESH_RE = re.compile(r"__i(\d+)__")
+
+
+def _avoid_instantiation_capture(
+    root: T,
+    args: list[frog_ast.Expression],
+    namespace: frog_ast.Namespace,
+) -> T:
+    """Rename the bindings inside *root* that the name-keyed substitutions of
+    :func:`instantiate` would otherwise capture (F-341).
+
+    ``instantiate`` replaces *root*'s parameters with *args*, then
+    ``InstantiationTransformer`` replaces names bound in *namespace* and
+    field aliases, all by name and across method bodies. So:
+
+    * a method parameter, typed local or ``for`` binder named like a root
+      parameter, a root field, a namespace name, or a free name of an argument
+      is renamed to a fresh ``__iN__`` (otherwise ``Int O(Int n) { return n; }``
+      loses its argument, or an argument ``lambda`` is captured by a parameter
+      ``lambda``);
+    * a GAME field named like a free name of an argument is renamed (fields are
+      internal to a game). A scheme or primitive field cannot be renamed (it is
+      part of the interface, read as ``E.field``), so such a collision is
+      refused unless the field just re-exports that same name, as in
+      ``Int lambda = lambda;`` instantiated with ``lambda``, which is checked
+      after substitution by :func:`instantiate`.
+    """
+    arg_names: set[str] = set()
+    for arg in args:
+        arg_names |= visitors.referenced_variable_names(arg)
+    field_names = {field.name for field in root.fields}
+    colliding = frozenset(
+        {param.name for param in root.parameters}
+        | field_names
+        | set(namespace)
+        | arg_names
+    )
+    taken = visitors.referenced_variable_names(root) | set(colliding)
+    existing = [int(m) for m in _INSTANTIATION_FRESH_RE.findall(str(root) + str(args))]
+    counter = [max(existing) + 1 if existing else 0]
+
+    def fresh() -> str:
+        while True:
+            name = f"__i{counter[0]}__"
+            counter[0] += 1
+            if name not in taken:
+                taken.add(name)
+                return name
+
+    new_root = copy.copy(root)
+    if isinstance(new_root, (frog_ast.Game, frog_ast.Scheme)):
+        new_root.methods = [
+            rename_colliding_binders(method, colliding, fresh)
+            for method in new_root.methods
+        ]
+    if isinstance(new_root, frog_ast.Game):
+        field_rename = {name: fresh() for name in sorted(field_names & arg_names)}
+        if field_rename:
+            new_root.fields = [
+                frog_ast.Field(
+                    field.type,
+                    field_rename.get(field.name, field.name),
+                    field.value,
+                )
+                for field in new_root.fields
+            ]
+            new_root = visitors.rename_value_references(new_root, field_rename)
+    return new_root
+
+
 def instantiate(
     root: T,
     args: list[frog_ast.Expression],
     namespace: frog_ast.Namespace,
 ) -> T:
+    root = _avoid_instantiation_capture(root, args, namespace)
+    arg_names: set[str] = set()
+    for arg in args:
+        arg_names |= visitors.referenced_variable_names(arg)
     ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
     for index, parameter in enumerate(root.parameters):
         ast_map.set(frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
@@ -1996,6 +2077,15 @@ def instantiate(
     # Ensure independent copy before mutation — transform may share lists
     new_root = copy.copy(new_root)
     new_root.parameters = []
+    if not isinstance(new_root, frog_ast.Game):
+        for field in new_root.fields:
+            if field.name in arg_names and field.value != frog_ast.Variable(field.name):
+                raise InstantiationCaptureError(
+                    f"Cannot instantiate {root.name}: its field '{field.name}' "
+                    f"has the same name as '{field.name}' in the instantiation "
+                    "arguments, so the argument would be read as the field. "
+                    "Rename the field or the argument."
+                )
     return visitors.InstantiationTransformer(namespace).transform(new_root)
 
 

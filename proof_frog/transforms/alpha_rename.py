@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import copy
 import re
+from typing import Callable
 
 from .. import frog_ast
 from ..visitors import Transformer
@@ -91,13 +92,28 @@ class _RefRewriter(Transformer):
 
 
 class _AlphaRenamer:
-    """Renames local binders to fresh ``__aN__`` names within one game."""
+    """Renames local binders to fresh ``__aN__`` names within one game.
 
-    def __init__(self, outer_names: frozenset[str] = frozenset()) -> None:
+    With *only_locals* set, a typed local is renamed only if its name is in
+    that set (others keep their name), and *fresh* supplies the new names;
+    :func:`rename_colliding_binders` uses this for capture-avoiding
+    instantiation.
+    """
+
+    def __init__(
+        self,
+        outer_names: frozenset[str] = frozenset(),
+        only_locals: frozenset[str] | None = None,
+        fresh: Callable[[], str] | None = None,
+    ) -> None:
         self._counter = 0
         self._outer_names: frozenset[str] = outer_names
+        self._only_locals = only_locals
+        self._fresh_fn = fresh
 
     def _fresh(self) -> str:
+        if self._fresh_fn is not None:
+            return self._fresh_fn()
         name = _FRESH.format(self._counter)
         self._counter += 1
         return name
@@ -209,6 +225,11 @@ class _AlphaRenamer:
         and are safely renamed too: their producing passes re-mint by a
         within-block counter, so a renamed temp is never re-matched.
         """
+        if self._only_locals is not None and name not in self._only_locals:
+            # Not a name being renamed: bind it to itself so it still masks a
+            # same-named outer binding inside its scope.
+            local[name] = name
+            return None
         if _FRESH_RE.fullmatch(name):
             # Already an AlphaRename fresh name: keep it (identity binding so a
             # later same-name reference resolves to it) to guarantee
@@ -351,6 +372,18 @@ class _AlphaRenamer:
             statement.block, scopes, initial={statement.var_name: name}
         )
         return frog_ast.GenericFor(statement.var_type, name, new_over, body)
+
+
+def rename_colliding_binders(
+    method: frog_ast.Method, names: frozenset[str], fresh: Callable[[], str]
+) -> frog_ast.Method:
+    """Rename every binder of *method* whose name is in *names* -- parameters,
+    typed locals and ``for`` binders -- to names from *fresh*, rewriting the
+    references that resolve to each binder under position-sensitive scoping.
+    Other binders and all references to outer names are left alone. Used to
+    make instantiation capture-avoiding (F-341)."""
+    renamer = _AlphaRenamer(outer_names=names, only_locals=names, fresh=fresh)
+    return renamer._rename_method(method)  # pylint: disable=protected-access
 
 
 class AlphaRename(TransformPass):

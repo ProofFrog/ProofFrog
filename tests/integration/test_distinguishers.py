@@ -1145,3 +1145,69 @@ def test_f321_tuple_swap_reassignment_not_sequentialized() -> None:
     engine = _engine_with(P=prim, PP=prim)
     result = engine.check_equivalent(pre, post)
     assert not result.valid
+
+
+def _detfn_namespace() -> dict:
+    prim = frog_parser.parse_primitive_file("""
+        Primitive DetFn(Int n) {
+            deterministic BitString<n> F(BitString<n> a);
+            deterministic BitString<n> G(BitString<n> a, BitString<n> b);
+        }
+        """)
+    return {"DetFn": prim, "D": prim}
+
+
+_F339_RIGHT = """
+    Game Right(DetFn D) {
+        BitString<n> x;
+        BitString<n> y;
+        BitString<n> c;
+        Void Initialize() {
+            x <- BitString<n>;
+            y <- BitString<n>;
+            c = D.G(D.F(x), y);
+        }
+        BitString<n> O(BitString<n> PARAM) {
+            return c;
+        }
+    }
+    """
+
+_F339_LEFT = """
+    Game Left(DetFn D) {
+        BitString<n> x;
+        BitString<n> y;
+        Void Initialize() {
+            x <- BitString<n>;
+            y <- BitString<n>;
+        }
+        BitString<n> O(BitString<n> PARAM) {
+            BitString<n> g = D.F(x);
+            return D.G(g, y);
+        }
+    }
+    """
+
+
+def test_f339_parameter_capture_multicall() -> None:
+    """F-339: with the oracle parameter named `x` like the field, Left reads
+    the parameter (answers depend on the query) while Right returns a
+    per-execution constant. For D.F = identity and D.G(a, b) = a, querying
+    O(0^n) and O(1^n) distinguishes them with advantage 1. InlineSingleUseField
+    used to inline Right's `c = D.G(D.F(x), y)` into O, where `x` is captured
+    by the parameter, making the two canonical forms equal."""
+    engine = _engine_with(**_detfn_namespace())
+    left = frog_parser.parse_game(_F339_LEFT.replace("PARAM", "x"))
+    right = frog_parser.parse_game(_F339_RIGHT.replace("PARAM", "x"))
+    result = engine.check_equivalent(left, right)
+    assert not result.valid
+
+
+def test_f339_renamed_parameter_control_still_equivalent() -> None:
+    """Sound control: with the parameter named `z`, both games read the field
+    `x` and are genuinely interchangeable."""
+    engine = _engine_with(**_detfn_namespace())
+    left = frog_parser.parse_game(_F339_LEFT.replace("PARAM", "z"))
+    right = frog_parser.parse_game(_F339_RIGHT.replace("PARAM", "z"))
+    result = engine.check_equivalent(left, right)
+    assert result.valid, result.failure_detail

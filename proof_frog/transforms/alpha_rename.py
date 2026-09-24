@@ -36,13 +36,30 @@ Scope discipline:
 * Names already beginning with ``__`` are skipped, so the pass is idempotent on
   its own output and does not disturb other passes' reserved-prefix temporaries
   (this is what lets it sit inside the fixed-point loop without diverging).
-* Loop binders (``for (Int i ...)``) are not renamed; they are masked in the
-  loop-body scope so a same-named outer local cannot leak in.
+* Loop binders (``for (Int i ...)``) are masked in the loop-body scope so a
+  same-named outer local cannot leak in.
+
+Outer-name collisions (F-339): method parameters and loop binders are not
+renamed in general, but one whose name collides with an *outer* name -- a game
+field, a game parameter, or a proof-level let / namespace name -- IS renamed to
+a fresh ``__aN__``. Many passes decide what a name means by membership in the
+field / parameter / let sets and then move an expression between methods
+(``InlineSingleUseField`` copies ``c = D.G(D.F(x), y)`` from Initialize into
+``O(x) { return c; }``, where ``x`` is the parameter). Removing the collision
+here closes that capture for every such pass at once. Parameters are
+re-washed to ``argN`` by ``StandardizeParameters``, so a sound proof's
+canonical form is unchanged; a renamed loop binder keeps its ``__aN__`` name,
+which only matters when the collision occurs. The method signature's types are
+left as they are: the typechecker forbids them from naming the method's own
+parameters (F-340), so any name they mention here is an outer one (for
+example a game parameter that instantiation substituted in).
 """
 
 from __future__ import annotations
 
+import copy
 import re
+from typing import Callable
 
 from .. import frog_ast
 from ..visitors import Transformer
@@ -75,12 +92,28 @@ class _RefRewriter(Transformer):
 
 
 class _AlphaRenamer:
-    """Renames local binders to fresh ``__aN__`` names within one game."""
+    """Renames local binders to fresh ``__aN__`` names within one game.
 
-    def __init__(self) -> None:
+    With *only_locals* set, a typed local is renamed only if its name is in
+    that set (others keep their name), and *fresh* supplies the new names;
+    :func:`rename_colliding_binders` uses this for capture-avoiding
+    instantiation.
+    """
+
+    def __init__(
+        self,
+        outer_names: frozenset[str] = frozenset(),
+        only_locals: frozenset[str] | None = None,
+        fresh: Callable[[], str] | None = None,
+    ) -> None:
         self._counter = 0
+        self._outer_names: frozenset[str] = outer_names
+        self._only_locals = only_locals
+        self._fresh_fn = fresh
 
     def _fresh(self) -> str:
+        if self._fresh_fn is not None:
+            return self._fresh_fn()
         name = _FRESH.format(self._counter)
         self._counter += 1
         return name
@@ -93,12 +126,40 @@ class _AlphaRenamer:
         # converges: each iteration re-mints ``__a0__`` for a different binder.
         existing = [int(m) for m in _FRESH_RE.findall(str(game))]
         self._counter = (max(existing) + 1) if existing else 0
-        new_methods = [
-            frog_ast.Method(method.signature, self._rename_block(method.block, []))
-            for method in game.methods
-        ]
+        self._outer_names = (
+            self._outer_names
+            | {f.name for f in game.fields}
+            | {p.name for p in game.parameters}
+        )
+        new_methods = [self._rename_method(method) for method in game.methods]
         new_game = frog_ast.Game((game.name, game.parameters, game.fields, new_methods))
         return new_game
+
+    def _rename_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        """Rename the method body, first giving any parameter that collides
+        with an outer name a fresh name (F-339)."""
+        signature = method.signature
+        param_map: dict[str, str] = {}
+        for param in signature.parameters:
+            if param.name in self._outer_names:
+                param_map[param.name] = self._fresh()
+        if not param_map:
+            return frog_ast.Method(signature, self._rename_block(method.block, []))
+        new_signature = copy.copy(signature)
+        new_signature.parameters = [
+            frog_ast.Parameter(param.type, param_map.get(param.name, param.name))
+            for param in signature.parameters
+        ]
+        return frog_ast.Method(
+            new_signature, self._rename_block(method.block, [], initial=param_map)
+        )
+
+    def _binder_name(self, name: str) -> str:
+        """The name a loop binder gets: fresh if it collides with an outer
+        name (F-339), else unchanged."""
+        if name in self._outer_names and not _FRESH_RE.fullmatch(name):
+            return self._fresh()
+        return name
 
     def _rename_block(
         self,
@@ -164,6 +225,11 @@ class _AlphaRenamer:
         and are safely renamed too: their producing passes re-mint by a
         within-block counter, so a renamed temp is never re-matched.
         """
+        if self._only_locals is not None and name not in self._only_locals:
+            # Not a name being renamed: bind it to itself so it still masks a
+            # same-named outer binding inside its scope.
+            local[name] = name
+            return None
         if _FRESH_RE.fullmatch(name):
             # Already an AlphaRename fresh name: keep it (identity binding so a
             # later same-name reference resolves to it) to guarantee
@@ -289,27 +355,42 @@ class _AlphaRenamer:
     ) -> frog_ast.NumericFor:
         new_start = self._rewrite(statement.start, scopes)
         new_end = self._rewrite(statement.end, scopes)
-        # The loop binder is not renamed, but it must mask a same-named outer
-        # local inside the body.
+        # The loop binder masks a same-named outer local inside the body; it is
+        # renamed only when it collides with an outer name (F-339).
+        name = self._binder_name(statement.name)
         body = self._rename_block(
-            statement.block, scopes, initial={statement.name: statement.name}
+            statement.block, scopes, initial={statement.name: name}
         )
-        return frog_ast.NumericFor(statement.name, new_start, new_end, body)
+        return frog_ast.NumericFor(name, new_start, new_end, body)
 
     def _rename_generic_for(
         self, statement: frog_ast.GenericFor, scopes: list[dict[str, str]]
     ) -> frog_ast.GenericFor:
         new_over = self._rewrite(statement.over, scopes)
+        name = self._binder_name(statement.var_name)
         body = self._rename_block(
-            statement.block, scopes, initial={statement.var_name: statement.var_name}
+            statement.block, scopes, initial={statement.var_name: name}
         )
-        return frog_ast.GenericFor(
-            statement.var_type, statement.var_name, new_over, body
-        )
+        return frog_ast.GenericFor(statement.var_type, name, new_over, body)
+
+
+def rename_colliding_binders(
+    method: frog_ast.Method, names: frozenset[str], fresh: Callable[[], str]
+) -> frog_ast.Method:
+    """Rename every binder of *method* whose name is in *names* -- parameters,
+    typed locals and ``for`` binders -- to names from *fresh*, rewriting the
+    references that resolve to each binder under position-sensitive scoping.
+    Other binders and all references to outer names are left alone. Used to
+    make instantiation capture-avoiding (F-341)."""
+    renamer = _AlphaRenamer(outer_names=names, only_locals=names, fresh=fresh)
+    return renamer._rename_method(method)  # pylint: disable=protected-access
 
 
 class AlphaRename(TransformPass):
     name = "Alpha Rename"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return _AlphaRenamer().rename_game(game)
+        outer = set(ctx.proof_namespace or {})
+        if ctx.proof_let_types is not None:
+            outer |= {pair.name for pair in ctx.proof_let_types.type_map}
+        return _AlphaRenamer(frozenset(outer)).rename_game(game)

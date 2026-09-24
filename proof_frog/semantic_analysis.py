@@ -70,6 +70,19 @@ def check_well_formed(
     file_name: str,
     allowed_root: Optional[str] = None,
 ) -> None:
+    try:
+        _check_well_formed(root, file_name, allowed_root)
+    except proof_engine.InstantiationCaptureError as e:
+        # A scheme/primitive field would capture a name in its instantiation
+        # arguments (F-341): report it as an ordinary type error.
+        print_error(root, str(e), file_name)
+
+
+def _check_well_formed(
+    root: frog_ast.Root,
+    file_name: str,
+    allowed_root: Optional[str] = None,
+) -> None:
     parse_cache = name_resolution(root, file_name, allowed_root=allowed_root)
 
     import_namespace: dict[str, frog_ast.Root | frog_ast.Game] = {}
@@ -435,6 +448,29 @@ class NameResolutionVisitor(VariableTypeVisitor):
         parameter_names = [param.name for param in method_signature.parameters]
         if len(parameter_names) != len(set(parameter_names)):
             print_error(method_signature, "Duplicated parameter name", self.file_name)
+        # F-340: a signature's types may not name one of the method's own
+        # parameters (`O(Int n, BitString<n> m)`). The typechecker would bind
+        # that `n` to the parameter (a type depending on the call's argument),
+        # while the engine binds it to the outer name when it instantiates the
+        # game, so the two layers would disagree about the method's type.
+        signature_type_names: set[str] = set()
+        for param in method_signature.parameters:
+            signature_type_names |= visitors.referenced_variable_names(param.type)
+        signature_type_names |= visitors.referenced_variable_names(
+            method_signature.return_type
+        )
+        for name in parameter_names:
+            if name in signature_type_names:
+                print_error(
+                    method_signature,
+                    f"Parameter '{name}' of method '{method_signature.name}' is "
+                    "used in the method signature's types",
+                    self.file_name,
+                    hint=(
+                        "A method's parameter and return types may not depend "
+                        "on its own parameters; rename the parameter"
+                    ),
+                )
 
     def visit_game_file(self, game_file: frog_ast.GameFile) -> None:
         for index, game in enumerate(game_file.games):

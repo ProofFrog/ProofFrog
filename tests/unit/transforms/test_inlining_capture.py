@@ -249,3 +249,213 @@ def test_f228_route2_field_not_inlined_into_shadowed_param() -> None:
     # parameter `e` -- the field `e`'s value (1) must NOT be substituted in.
     assert "^ e" in out
     assert "^ 1" not in out
+
+
+# ---------------------------------------------------------------------------
+# Cross-method call matching must be scope-aware at every site (F-338).
+# F-173 checked shadowing only in the method a hoist candidate was found in;
+# the replacement sites, Initialize, and the stable-alias map were name-blind.
+# ---------------------------------------------------------------------------
+
+
+def _det2_ns():
+    prim = frog_parser.parse_primitive_file(
+        """
+        Primitive P() {
+            deterministic Int f(Int x);
+            deterministic Int g(Int a, Int b);
+        }
+        """
+    )
+    return {"E": prim}
+
+
+def test_f338_hoist_not_replaced_in_shadowing_method() -> None:
+    """The hoisted `E.f(k)` (field `k`) must not replace `E.f(k)` in a method
+    whose parameter `k` shadows the field."""
+    out = _apply_pass(
+        HoistDeterministicCallToInitialize(),
+        """
+        Game G() {
+            Int k;
+            Void Initialize() { k = 1; }
+            Int A() { return E.f(k); }
+            Int B(Int k) { return E.f(k); }
+        }
+        """,
+        _det_ns(),
+    )
+    assert "_hoisted_0 = E.f(k);" in out  # A's call is still hoisted
+    assert "Int B(Int k) { \n    return E.f(k);" in out
+
+
+def test_f338_hoist_declined_when_initialize_rebinds_arg() -> None:
+    """A hoisted assignment is evaluated in Initialize, where a local `k`
+    would capture the field `k`."""
+    out = _apply_pass(
+        HoistDeterministicCallToInitialize(),
+        """
+        Game G() {
+            Int k;
+            Int Initialize() { k = 1; Int k = 7; return k; }
+            Int A() { return E.f(k); }
+        }
+        """,
+        _det_ns(),
+    )
+    assert "_hoisted" not in out
+
+
+def test_f338_hoist_initialize_return_stale_alias_not_rewritten() -> None:
+    """`x = k; k = 2; return E.f(x);` must not become a read of the hoisted
+    `E.f(k)`, which is evaluated after `k = 2`."""
+    out = _apply_pass(
+        HoistDeterministicCallToInitialize(),
+        """
+        Game G() {
+            Int k;
+            Int Initialize() { k = 1; Int x = k; k = 2; return E.f(x); }
+            Int A() { return E.f(k); }
+        }
+        """,
+        _det_ns(),
+    )
+    assert "return E.f(x);" in out
+    assert "return _hoisted_0;\n  }\n}" in out  # A still reads the field
+
+
+def test_f338_hoist_initialize_return_alias_still_rewritten() -> None:
+    """Positive control: an alias whose field is not rewritten afterwards is
+    still seen through in Initialize's return."""
+    out = _apply_pass(
+        HoistDeterministicCallToInitialize(),
+        """
+        Game G() {
+            Int k;
+            Int Initialize() { k = 1; Int x = k; return E.f(x); }
+            Int A() { return E.f(k); }
+        }
+        """,
+        _det_ns(),
+    )
+    assert "return _hoisted_0;" in out
+    assert "return E.f(x);" not in out
+
+
+def test_f338_cross_method_alias_not_applied_to_shadowed_call() -> None:
+    """CrossMethodFieldAlias must not replace `E.f(k)` in a method whose
+    parameter `k` shadows the field `k` cached in Initialize."""
+    out = _apply_pass(
+        CrossMethodFieldAlias(),
+        """
+        Game G() {
+            Int k;
+            Int c;
+            Void Initialize() { k = 1; c = E.f(k); }
+            Int B(Int k) { return E.f(k); }
+        }
+        """,
+        _det_ns(),
+    )
+    assert "return E.f(k);" in out
+    assert "return c;" not in out
+
+
+def test_f338_cross_method_alias_rhs_reads_shadowing_param() -> None:
+    """An oracle alias `h = E.f(k)` with `k` the method parameter is not a
+    stable alias, so `E.g(h, y)` does not match Initialize's
+    `E.g(E.f(k), y)` over the field `k`."""
+    out = _apply_pass(
+        CrossMethodFieldAlias(),
+        """
+        Game G() {
+            Int k;
+            Int y;
+            Int c;
+            Void Initialize() { k = 1; y = 2; c = E.g(E.f(k), y); }
+            Int B(Int k) { Int h = E.f(k); return E.g(h, y); }
+        }
+        """,
+        _det2_ns(),
+    )
+    assert "return E.g(h, y);" in out
+
+
+def test_f338_cross_method_alias_reassigned_param_is_not_alias() -> None:
+    """A parameter written once at top level is not an alias: before the write
+    it still holds the caller's argument."""
+    out = _apply_pass(
+        CrossMethodFieldAlias(),
+        """
+        Game G() {
+            Int k;
+            Int y;
+            Int c;
+            Void Initialize() { k = 1; y = 2; c = E.g(y, k); }
+            Int B(Int h) { Int a = E.g(h, k); h = y; return a + h; }
+        }
+        """,
+        _det2_ns(),
+    )
+    assert "Int a = E.g(h, k);" in out
+
+
+def test_f338_cross_method_alias_stale_initialize_alias() -> None:
+    """`x = k; k = 2; c = E.f(x);` caches E.f(1), not the oracle's E.f(k)
+    (which reads k = 2)."""
+    out = _apply_pass(
+        CrossMethodFieldAlias(),
+        """
+        Game G() {
+            Int k;
+            Int c;
+            Void Initialize() { k = 1; Int x = k; k = 2; c = E.f(x); }
+            Int A() { return E.f(k); }
+        }
+        """,
+        _det_ns(),
+    )
+    assert "return E.f(k);" in out
+
+
+def test_f338_alias_with_element_write_is_not_alias() -> None:
+    """A local written again through an element write is not single-assignment."""
+    from proof_frog.transforms.inlining import (  # pylint: disable=import-outside-toplevel
+        _build_local_stable_alias_map,
+    )
+
+    game = frog_parser.parse_game(
+        """
+        Game G() {
+            Array<Int, 2> k;
+            Void Initialize() { k[0] = 1; }
+            Int A() {
+                Array<Int, 2> x = k;
+                x[0] = 5;
+                return E.f(x[0]);
+            }
+        }
+        """
+    )
+    aliases = _build_local_stable_alias_map(
+        game.methods[1], {"k"}, set(), _det_ns(), None, set()
+    )
+    assert "x" not in aliases
+
+
+def test_f338_cross_method_alias_generator_alias_still_fires() -> None:
+    """Positive control: a legitimate stable oracle alias is still seen through."""
+    out = _apply_pass(
+        CrossMethodFieldAlias(),
+        """
+        Game G() {
+            Int k;
+            Int y;
+            Int c;
+            Void Initialize() { k = 1; y = 2; c = E.g(E.f(k), y); }
+            Int B(Int z) { Int h = E.f(k); return E.g(h, y) + z; }
+        }
+        """,
+        _det2_ns(),
+    )
+    assert "return c + z;" in out

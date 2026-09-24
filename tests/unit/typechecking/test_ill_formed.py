@@ -88,6 +88,16 @@ _PRIMITIVE_CASES = [
         id="repeated_method_param",
     ),
     pytest.param(
+        (
+            "Primitive DependentParam(Int n) {\n"
+            "    Int n = n;\n\n"
+            "    BitString<n> f(Int n, BitString<n> m);\n"
+            "}\n"
+        ),
+        "used in the method signature's types",
+        id="parameter_in_signature_type",
+    ),
+    pytest.param(
         "Primitive UndefinedType(Int x) {\n    Bla test = x;\n}\n",
         "not defined",
         id="undefined_type",
@@ -411,3 +421,70 @@ def test_scheme_rejects_ill_formed(
     with pytest.raises(semantic_analysis.FailedTypeCheck):
         semantic_analysis.check_well_formed(root, file_path)
     assert expected_error.lower() in capsys.readouterr().err.lower()
+
+
+# ---------------------------------------------------------------------------
+# F-340: a method signature's types may not name one of its own parameters.
+# The typechecker would bind the name to the parameter while the engine binds
+# it to the outer name at instantiation.
+# ---------------------------------------------------------------------------
+
+_DEPENDENT_SIGNATURE_GAME = """\
+Game Left(Int n) {
+    Void Initialize() { }
+    BitString<n> O(PARAMS) {
+        return m;
+    }
+}
+
+Game Right(Int n) {
+    Void Initialize() { }
+    BitString<n> O(PARAMS) {
+        return m;
+    }
+}
+
+export as Dependent;
+"""
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        pytest.param("Int n, BitString<n> m", id="param_type"),
+        pytest.param("Bool n, BitString<n> m", id="param_type_wrong_kind"),
+    ],
+)
+def test_f340_game_rejects_parameter_in_signature_type(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], params: str
+) -> None:
+    file_path = str(tmp_path / "test.game")
+    Path(file_path).write_text(_DEPENDENT_SIGNATURE_GAME.replace("PARAMS", params))
+    root = frog_parser.parse_file(file_path)
+    with pytest.raises(semantic_analysis.FailedTypeCheck):
+        semantic_analysis.check_well_formed(root, file_path)
+    assert "used in the method signature's types" in capsys.readouterr().err
+
+
+def test_f340_return_type_naming_parameter_rejected(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    file_path = str(tmp_path / "test.game")
+    Path(file_path).write_text(
+        _DEPENDENT_SIGNATURE_GAME.replace("BitString<n> O(PARAMS)", "BitString<k> O(Int k, BitString<k> m)")
+    )
+    root = frog_parser.parse_file(file_path)
+    with pytest.raises(semantic_analysis.FailedTypeCheck):
+        semantic_analysis.check_well_formed(root, file_path)
+    assert "Parameter 'k'" in capsys.readouterr().err
+
+
+def test_f340_outer_name_in_signature_type_still_accepted(tmp_path: Path) -> None:
+    """Positive control: a signature type naming the GAME parameter (not a
+    method parameter) is fine."""
+    file_path = str(tmp_path / "test.game")
+    Path(file_path).write_text(
+        _DEPENDENT_SIGNATURE_GAME.replace("PARAMS", "Int k, BitString<n> m")
+    )
+    root = frog_parser.parse_file(file_path)
+    semantic_analysis.check_well_formed(root, file_path)

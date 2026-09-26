@@ -69,3 +69,52 @@ def test_symbolic_renders_intermediate_game_body() -> None:
     )
     assert r"\Hyb" in out
     assert r"\begin{pcvstack}" in out
+
+
+# ---------------------------------------------------------------------------
+# Event theorems and identical-until-bad hops
+# ---------------------------------------------------------------------------
+
+UPTO = REPO / "tests/integration/upto_fixtures"
+
+
+@pytest.mark.parametrize("mode", ["symbolic", "inlined"])
+def test_upto_hop_exports(mode: str) -> None:
+    from proof_frog.export.latex.exporter import export_file
+
+    out = export_file(str(UPTO / "outer.proof"), composition=mode)
+    assert r"\begin{theorem}" in out
+    assert "identical until" in out
+    assert "fundamental lemma" in out
+    assert r"\Pr[" in out and r"\mathit{bad}" in out
+    assert "#event" not in out and "silenced" not in out
+
+
+@pytest.mark.parametrize("mode", ["symbolic", "inlined"])
+def test_event_theorem_exports(mode: str) -> None:
+    from proof_frog.export.latex.exporter import export_file
+
+    out = export_file(str(UPTO / "BadGuessEvent.proof"), composition=mode)
+    theorem = out[out.index(r"\begin{theorem}") : out.index(r"\end{theorem}")]
+    assert r"\Pr[" in theorem and r"\mathit{bad}" in theorem
+    # The exporter's AST-only synthesis keeps helper terms as \Adv terms.
+    assert r"\Adv{\RandomTargetGuessing" in theorem
+    assert "#event" not in out and "silenced" not in out
+
+
+def test_assumed_event_exports() -> None:
+    from proof_frog.export.latex.exporter import export_file
+
+    out = export_file(str(UPTO / "outer_opaque.proof"))
+    theorem = out[out.index(r"\begin{theorem}") : out.index(r"\end{theorem}")]
+    assert r"\mathit{bad}" in theorem
+    assert "#event" not in out and "silenced" not in out
+
+
+def test_event_claimed_bound_exports() -> None:
+    from proof_frog.export.latex.exporter import export_file
+
+    out = export_file(str(UPTO / "outer_claim.proof"))
+    theorem = out[out.index(r"\begin{theorem}") : out.index(r"\end{theorem}")]
+    assert r"\Pr[" in theorem and r"\mathit{bad}" in theorem
+    assert "#event" not in out and "silenced" not in out

@@ -52,15 +52,26 @@ def is_event_notion(notion: frog_ast.ParameterizedGame) -> bool:
     return "#event#" in notion.name
 
 
-def pretty_notion(notion: frog_ast.ParameterizedGame) -> str:
-    """``P#event#bad(S)`` -> ``bad of P(S)``; other notions unchanged."""
+def event_of_notion(
+    notion: frog_ast.ParameterizedGame,
+) -> Optional[frog_ast.EventTheorem]:
+    """The event a synthetic notion ``P#event#bad[#init](a)`` stands for."""
     if not is_event_notion(notion):
-        return str(notion)
+        return None
     game, rest = notion.name.split("#event#", 1)
     flag, _, init = rest.partition("#")
-    args = ", ".join(str(a) for a in notion.args)
-    suffix = " at Initialize" if init == "init" else ""
-    return f"{flag} of {game}({args}){suffix}"
+    return frog_ast.EventTheorem(
+        flag, frog_ast.ParameterizedGame(game, list(notion.args)), init == "init"
+    )
+
+
+def pretty_notion(notion: frog_ast.ParameterizedGame) -> str:
+    """``P#event#bad(S)`` -> ``bad of P(S)``; other notions unchanged."""
+    event = event_of_notion(notion)
+    if event is None:
+        return str(notion)
+    suffix = " at Initialize" if event.at_initialize else ""
+    return f"{event.flag} of {event.game}{suffix}"
 
 
 @dataclasses.dataclass(frozen=True)

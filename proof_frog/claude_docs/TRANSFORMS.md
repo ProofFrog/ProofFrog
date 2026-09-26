@@ -75,7 +75,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | ForwardExpressionAlias | Replaces repeated pure expressions with their named alias variable. |
 | HoistFieldPureAlias | Hoists field assignments of pure expressions before their first use. |
 | CrossMethodFieldAlias | Replaces deterministic calls in oracles with matching field references from Initialize. |
-| HoistDeterministicCallToInitialize | Hoists a deterministic call out of oracles into Initialize and caches it in a new field. |
+| HoistDeterministicCallToInitialize | Hoists a deterministic call out of oracles into Initialize and caches it in a new field. Sees through top-level single-assignment stable oracle locals (e.g. `g = NG.Generator(); NG.Exp(g, x)`), hoisting the alias-expanded call so both sides of a hop cache the same calls regardless of which already held one in a field. |
 | SplitOpaqueTupleField | Splits a `ProductType` field whose RHS is an opaque call and whose only reads are constant-indexed projections, into one fresh field per used component. |
 | HoistGroupExpToInitialize | Hoists `base ^ k` group exponentiations out of oracles into `Initialize` and caches the result in a pinned field; requires a prime-order / nonzero-exponent context. |
 | RefactorGroupElemFieldExp | Rewrites `base ^ (a * b)` as `Field2 ^ b` when a pre-existing pinned field `Field2 = base ^ a` exists. |

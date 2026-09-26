@@ -1,0 +1,31 @@
+// InitCollision's two sides are indistinguishable up to the collision
+// event, which InitCollisionEvent.proof bounds.
+import 'InitCollision.game';
+
+proof:
+
+let:
+    Set S;
+
+lemma:
+    event bad of InitCollision(S) at Initialize by 'InitCollisionEvent.proof';
+
+theorem:
+    InitCollision(S);
+
+games:
+    InitCollision(S).Real against InitCollision(S).Adversary;
+    InitCollision(S).Real  compose R_Fwd(S) against InitCollision(S).Adversary;
+    InitCollision(S).Ideal compose R_Fwd(S) against InitCollision(S).Adversary;
+    InitCollision(S).Ideal against InitCollision(S).Adversary;
+
+// R_Fwd: forwards Initialize and Collided to the pair.
+Reduction R_Fwd(Set S) compose InitCollision(S) against InitCollision(S).Adversary {
+    [S, S] Initialize() {
+        return challenger.Initialize();
+    }
+
+    Bool Collided() {
+        return challenger.Collided();
+    }
+}

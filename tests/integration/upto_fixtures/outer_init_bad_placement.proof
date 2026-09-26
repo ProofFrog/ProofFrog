@@ -1,0 +1,32 @@
+// Negative: R_Fwd calls challenger.Initialize from an oracle, so the
+// collision event would no longer be decided before the adversary acts.
+import 'InitCollision.game';
+
+proof:
+
+let:
+    Set S;
+
+lemma:
+    event bad of InitCollision(S) at Initialize by 'InitCollisionEvent.proof';
+
+theorem:
+    InitCollision(S);
+
+games:
+    InitCollision(S).Real against InitCollision(S).Adversary;
+    InitCollision(S).Real  compose R_Fwd(S) against InitCollision(S).Adversary;
+    InitCollision(S).Ideal compose R_Fwd(S) against InitCollision(S).Adversary;
+    InitCollision(S).Ideal against InitCollision(S).Adversary;
+
+// R_Fwd: forwards Initialize and Collided to the pair.
+Reduction R_Fwd(Set S) compose InitCollision(S) against InitCollision(S).Adversary {
+    [S, S] Initialize() {
+        return challenger.Initialize();
+    }
+
+    Bool Collided() {
+        [S, S] again = challenger.Initialize();
+        return challenger.Collided();
+    }
+}

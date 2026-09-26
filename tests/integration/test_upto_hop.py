@@ -122,3 +122,23 @@ def test_claimed_bound_below_event_term_fails() -> None:
     result = _run_prove("outer_claim_low.proof")
     assert result.returncode != 0, _out(result)
     assert "Claimed bound NOT verified" in result.stdout
+
+
+def test_initialize_event_standalone() -> None:
+    result = _run_prove("InitCollisionEvent.proof")
+    assert result.returncode == 0, _out(result)
+    assert (
+        "Pr[bad of InitCollision(S) at Initialize](A) <= 1/|S|" in result.stdout
+    ), _out(result)
+
+
+def test_initialize_event_licenses_upto_hop() -> None:
+    result = _run_prove("outer_init.proof")
+    assert result.returncode == 0, _out(result)
+    assert "up to bad" in result.stdout
+
+
+def test_initialize_event_rejects_oracle_initialize_call() -> None:
+    result = _run_prove("outer_init_bad_placement.proof")
+    assert result.returncode != 0, _out(result)
+    assert "challenger.Initialize" in result.stdout + result.stderr

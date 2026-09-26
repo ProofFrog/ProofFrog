@@ -795,11 +795,10 @@ class ProofEngine:
             except (FailedProof, Exception) as e:
                 print(f"{Fore.RED}Lemma FAILED: {e}{Fore.RESET}")
                 raise FailedProof(f"Lemma {lemma.game} failed verification") from e
-            if not _same_notion_shape(lemma_file.theorem, lemma.game):
-                message = (
-                    f"Lemma file '{lemma.proof_path}' proves"
-                    f" '{lemma_file.theorem}', not '{lemma.game}'"
-                )
+            message = _lemma_mismatch(
+                lemma_file, lemma_path, lemma, proof_file, proof_path
+            )
+            if message is not None:
                 print(f"{Fore.RED}{message}{Fore.RESET}")
                 raise FailedProof(message)
 
@@ -2357,17 +2356,106 @@ def _get_file_type_for_import(file_name: str) -> frog_ast.FileType:
     return frog_ast.FileType(extension)
 
 
-def _same_notion_shape(proven: frog_ast.Notion, claimed: frog_ast.Notion) -> bool:
-    """Whether a lemma file's theorem is the notion its lemma entry claims.
+def _lemma_mismatch(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    lemma_file: frog_ast.ProofFile,
+    lemma_path: str,
+    lemma: frog_ast.Lemma,
+    proof_file: frog_ast.ProofFile,
+    proof_path: str,
+) -> str | None:
+    """Why a verified lemma file does not establish its lemma entry, or None.
 
-    The kind (game or event), game name, flag, ``at Initialize`` and arity
-    must agree; arguments are the lemma file's own ``let:`` names, which the
-    entry instantiates.
+    The file's theorem must be the entry's notion: the same kind (game or
+    event), game, flag, ``at Initialize`` and arity; its game must resolve to
+    the same imported file; and its arguments must be pairwise-distinct
+    abstract ``let:`` parameters of the lemma file, so that the lemma holds
+    for every instantiation the entry may choose.
     """
-    if type(proven) is not type(claimed):
-        return False
+    proven, claimed = lemma_file.theorem, lemma.game
     key_p, key_c = frog_ast.notion_key(proven), frog_ast.notion_key(claimed)
-    return key_p.name == key_c.name and len(key_p.args) == len(key_c.args)
+    if (
+        type(proven) is not type(claimed)
+        or key_p.name != key_c.name
+        or len(key_p.args) != len(key_c.args)
+    ):
+        return f"Lemma file '{lemma.proof_path}' proves '{proven}', not '{claimed}'"
+    game_name = frog_ast.notion_game(proven).name
+    lemma_game_path = _imported_file_path(lemma_file, lemma_path, game_name)
+    entry_game_path = _imported_file_path(proof_file, proof_path, game_name)
+    if lemma_game_path is None or lemma_game_path != entry_game_path:
+        return (
+            f"Lemma file '{lemma.proof_path}' proves '{proven}' about a different"
+            f" file named {game_name} than this proof imports"
+        )
+    names = [arg.name for arg in key_p.args if isinstance(arg, frog_ast.Variable)]
+    if (
+        len(names) != len(key_p.args)
+        or len(set(names)) != len(names)
+        or not all(_is_abstract_let(lemma_file, lemma_path, n) for n in names)
+    ):
+        return (
+            f"Lemma file '{lemma.proof_path}' proves '{proven}', whose arguments"
+            f" are not distinct let: parameters without a value, so it does not"
+            f" establish '{claimed}' for every instantiation"
+        )
+    return None
+
+
+def _is_abstract_let(
+    proof_file: frog_ast.ProofFile, proof_path: str, name: str
+) -> bool:
+    """Whether the ``let:`` name is universally quantified in *proof_file*.
+
+    A let with no value is; so is one bound to an instantiation of an imported
+    *primitive* (any scheme of that primitive) whose arguments are themselves
+    abstract lets. A let bound to a scheme or a concrete value is not.
+    """
+    let = next((f for f in proof_file.lets if f.name == name), None)
+    if let is None or name in proof_file.sampled_let_names:
+        return False
+    if let.value is None:
+        return True
+    value = let.value
+    if not (
+        isinstance(value, frog_ast.FuncCall)
+        and isinstance(value.func, frog_ast.Variable)
+    ):
+        return False
+    imported = _imported_file(proof_file, proof_path, value.func.name)
+    if imported is None or not isinstance(imported[1], frog_ast.Primitive):
+        return False
+    return all(
+        isinstance(arg, frog_ast.Variable)
+        and arg.name != name
+        and _is_abstract_let(proof_file, proof_path, arg.name)
+        for arg in value.args
+    )
+
+
+def _imported_file(
+    proof_file: frog_ast.ProofFile, proof_path: str, export_name: str
+) -> tuple[str, frog_ast.Root] | None:
+    """The resolved path and root of the file imported as *export_name*."""
+    # pylint: disable=import-outside-toplevel,cyclic-import
+    from . import frog_parser
+
+    for imp in proof_file.imports:
+        resolved = frog_parser.resolve_import_path(imp.filename, proof_path)
+        try:
+            root = frog_parser.parse_file(resolved)
+        except Exception:  # pylint: disable=broad-exception-caught
+            continue
+        if (imp.rename or root.get_export_name()) == export_name:
+            return os.path.realpath(resolved), root
+    return None
+
+
+def _imported_file_path(
+    proof_file: frog_ast.ProofFile, proof_path: str, export_name: str
+) -> str | None:
+    """The resolved path of the file *proof_file* imports as *export_name*."""
+    imported = _imported_file(proof_file, proof_path, export_name)
+    return None if imported is None else imported[0]
 
 
 def verify_proof_file(

@@ -77,11 +77,12 @@ def test_no_licence_fails_with_hint() -> None:
 
 
 def test_not_iub_fails_at_the_hop() -> None:
+    # Reported by the checker at the hop's step, with lines into both sides.
     result = _run_prove("outer_not_iub.proof")
     assert result.returncode != 0, _out(result)
-    assert "Lemma verified" in result.stdout, _out(result)
-    assert "Step 2 failed" in result.stdout, _out(result)
-    assert "Eq" in result.stdout and "line" in result.stdout, _out(result)
+    out = result.stdout + result.stderr
+    assert "NotIUB is not identical until bad" in out, _out(result)
+    assert "Eq: return values differ (left line 16, right line 33)" in out
 
 
 def test_lemma_file_must_prove_the_entry() -> None:
@@ -142,3 +143,17 @@ def test_initialize_event_rejects_oracle_initialize_call() -> None:
     result = _run_prove("outer_init_bad_placement.proof")
     assert result.returncode != 0, _out(result)
     assert "challenger.Initialize" in result.stdout + result.stderr
+
+
+def test_lemma_file_must_quantify_over_its_parameters() -> None:
+    # The lemma proves the event only for U = BitString<8>.
+    result = _run_prove("outer_lemma_concrete.proof")
+    assert result.returncode != 0, _out(result)
+    assert "distinct let: parameters" in result.stdout + result.stderr, _out(result)
+
+
+def test_lemma_file_must_be_about_the_same_game_file() -> None:
+    # The lemma's BadGuess is a different file exported under the same name.
+    result = _run_prove("outer_lemma_other_file.proof")
+    assert result.returncode != 0, _out(result)
+    assert "different file" in result.stdout + result.stderr, _out(result)

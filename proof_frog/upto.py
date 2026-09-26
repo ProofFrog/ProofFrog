@@ -43,6 +43,25 @@ from . import frog_ast
 REVEAL = "__reveal"
 """Engine-internal oracle appended to flag games; not a FrogLang identifier."""
 
+SILENCED = "#silenced"
+"""Suffix of the engine-internal copy of a helper whose ``__reveal`` says false."""
+
+
+def is_event_notion(notion: frog_ast.ParameterizedGame) -> bool:
+    """Whether *notion* is the synthetic game of an event theorem."""
+    return "#event#" in notion.name
+
+
+def pretty_notion(notion: frog_ast.ParameterizedGame) -> str:
+    """``P#event#bad(S)`` -> ``bad of P(S)``; other notions unchanged."""
+    if not is_event_notion(notion):
+        return str(notion)
+    game, rest = notion.name.split("#event#", 1)
+    flag, _, init = rest.partition("#")
+    args = ", ".join(str(a) for a in notion.args)
+    suffix = " at Initialize" if init == "init" else ""
+    return f"{flag} of {game}({args}){suffix}"
+
 
 @dataclasses.dataclass(frozen=True)
 class UptoError:

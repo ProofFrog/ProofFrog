@@ -1,0 +1,37 @@
+// Pr[bad] in BadGuess is at most count_Eq / |S|: the flag is raised only
+// when the adversary hits the hidden uniform target.
+import 'BadGuess.game';
+import 'RandomTargetGuessing.game';
+
+proof:
+
+let:
+    Set S;
+
+assume:
+    RandomTargetGuessing(S);
+
+theorem:
+    event bad of BadGuess(S);
+
+games:
+    BadGuess(S).Right against BadGuess(S).Adversary;
+    RandomTargetGuessing(S).Real  compose R(S) against BadGuess(S).Adversary;
+    RandomTargetGuessing(S).Ideal compose R(S) against BadGuess(S).Adversary;
+
+// R: forwards each guess to the challenger and raises bad on a hit.
+Reduction R(Set S) compose RandomTargetGuessing(S) against BadGuess(S).Adversary {
+    Bool bad;
+
+    Void Initialize() {
+        challenger.Initialize();
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (challenger.Eq(c)) {
+            bad = true;
+        }
+        return false;
+    }
+}

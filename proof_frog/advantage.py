@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence
 import sympy
 
 from . import frog_ast
+from . import upto
 from . import visitors
 
 if TYPE_CHECKING:  # avoid an import cycle with proof_engine at runtime
@@ -181,6 +182,8 @@ class AdvantageBound:
 
 
 def _default_term_renderer(term: AdvTerm) -> str:
+    if upto.is_event_notion(term.notion):
+        return f"Pr[{upto.pretty_notion(term.notion)}]({term.adversary})"
     return f"Adv^{term.notion}({term.adversary})"
 
 
@@ -316,8 +319,9 @@ def _count_calls_in_statements(
     """Count ``challenger.<oracle>`` invocations across straight-line/loop code.
 
     A ``for`` loop multiplies its body's count by the loop's (upper-bounded)
-    trip count; an ``if``/``else`` sums its branches (a sound upper bound, since
-    at most one runs); ordinary statements contribute one per syntactic call
+    trip count (plus any calls in its header); an ``if``/``else`` counts every
+    condition once and sums its branches (a sound upper bound, since at most
+    one branch runs); ordinary statements contribute one per syntactic call
     site. Raises :class:`_UnconvertibleBound` if a construct's multiplicity
     cannot be bounded.
     """
@@ -329,11 +333,16 @@ def _count_calls_in_statements(
                 - _frog_arith_to_sympy(stmt.start)
                 + sympy.Integer(1)
             )
+            total += sympy.Integer(_count_calls_in_expression(stmt.start, oracle))
+            total += sympy.Integer(_count_calls_in_expression(stmt.end, oracle))
             total += trips * _count_calls_in_statements(stmt.block.statements, oracle)
         elif isinstance(stmt, frog_ast.GenericFor):
             size = sympy.Symbol(f"|{stmt.over}|", positive=True)
+            total += sympy.Integer(_count_calls_in_expression(stmt.over, oracle))
             total += size * _count_calls_in_statements(stmt.block.statements, oracle)
         elif isinstance(stmt, frog_ast.IfStatement):
+            for condition in stmt.conditions:
+                total += sympy.Integer(_count_calls_in_expression(condition, oracle))
             for block in stmt.blocks:
                 total += _count_calls_in_statements(block.statements, oracle)
         else:

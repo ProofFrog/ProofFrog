@@ -1,0 +1,34 @@
+// Negative: R_Mute never raises bad, so its chain does not track the event
+// of BadGuess.Right and the first hop must fail.
+import 'BadGuess.game';
+import 'RandomTargetGuessing.game';
+
+proof:
+
+let:
+    Set S;
+
+assume:
+    RandomTargetGuessing(S);
+
+theorem:
+    event bad of BadGuess(S);
+
+games:
+    BadGuess(S).Right against BadGuess(S).Adversary;
+    RandomTargetGuessing(S).Real  compose R_Mute(S) against BadGuess(S).Adversary;
+    RandomTargetGuessing(S).Ideal compose R_Mute(S) against BadGuess(S).Adversary;
+
+Reduction R_Mute(Set S) compose RandomTargetGuessing(S) against BadGuess(S).Adversary {
+    Bool bad;
+
+    Void Initialize() {
+        challenger.Initialize();
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        Bool hit = challenger.Eq(c);
+        return false;
+    }
+}

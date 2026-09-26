@@ -553,16 +553,94 @@ class ProofEngine:
         self.requirements: list[frog_ast.StructuralRequirement] = []
         self._total_steps = 0
         self._current_step = 0
+        # Event-theorem proofs: display labels for the engine-internal steps
+        # (keyed by their default rendering) and the top-level hop number of
+        # the terminal "flag unreachable" hop.
+        self._display_overrides: dict[str, str] = {}
+        self._event_terminal_hop: int | None = None
 
     def add_definition(self, name: str, root: frog_ast.Root) -> None:
         self.definition_namespace[name] = root
 
-    @staticmethod
-    def _step_display(step: frog_ast.Step) -> str:
+    def _step_display(self, step: frog_ast.Step) -> str:
         """Format a step for display, omitting the adversary and semicolon."""
         if step.reduction:
-            return f"{step.challenger} compose {step.reduction}"
-        return str(step.challenger)
+            default = f"{step.challenger} compose {step.reduction}"
+        else:
+            default = str(step.challenger)
+        return self._display_overrides.get(default, default)
+
+    def _event_chain(
+        self, proof_file: frog_ast.ProofFile, event: frog_ast.EventTheorem
+    ) -> list[frog_ast.ProofStep]:
+        """Rewrite an event theorem's games list into the flag-game chain.
+
+        Pr[flag] in the pair side of the first step equals the advantage of
+        the adversary that plays and then calls ``__reveal`` against that
+        side's flag game (``Real`` reveals the flag, ``Ideal`` says false).
+        The first step becomes the flag game's ``Real``; every helper
+        (reduction or intermediate game) gets a ``__reveal`` returning its
+        own ``Bool <flag>`` field, so equivalence hops preserve the joint
+        distribution of transcript and flag and assumption hops charge the
+        helper as usual. A terminal step repeats the last game with
+        ``__reveal`` returning false: the hop into it holds exactly when the
+        flag can no longer be raised there, and the sum of the hop losses
+        then bounds Pr[flag] (Shoup 2004; Bellare-Rogaway 2006).
+        """
+        first = proof_file.steps[0]
+        assert isinstance(first, frog_ast.Step)
+        assert isinstance(first.challenger, frog_ast.ConcreteGame)
+        pair = self.definition_namespace[event.game.name]
+        assert isinstance(pair, frog_ast.GameFile)
+        notion = event.notion()
+        build = upto.strip if event.at_initialize else upto.flag_game
+        self.definition_namespace[notion.name] = build(
+            pair, first.challenger.which, event.flag, notion.name
+        )
+        for helper in proof_file.helpers:
+            self.definition_namespace[helper.name] = upto.with_reveal(
+                helper, frog_ast.Variable(event.flag)
+            )
+            self.definition_namespace[helper.name + upto.SILENCED] = upto.with_reveal(
+                helper, frog_ast.Boolean(False)
+            )
+
+        steps: list[frog_ast.ProofStep] = list(proof_file.steps)
+        real = frog_ast.Step(
+            frog_ast.ConcreteGame(notion, "Real"), None, first.adversary
+        )
+        self._display_overrides[str(real.challenger)] = str(first.challenger)
+        steps[0] = real
+
+        last = next(s for s in reversed(steps) if isinstance(s, frog_ast.Step))
+        last_display = self._step_display(last)
+        terminal: frog_ast.Step
+        if last.reduction is not None:
+            silenced = frog_ast.ParameterizedGame(
+                last.reduction.name + upto.SILENCED, list(last.reduction.args)
+            )
+            terminal = frog_ast.Step(last.challenger, silenced, last.adversary)
+        elif isinstance(last.challenger, frog_ast.ParameterizedGame):
+            terminal = frog_ast.Step(
+                frog_ast.ParameterizedGame(
+                    last.challenger.name + upto.SILENCED, list(last.challenger.args)
+                ),
+                None,
+                last.adversary,
+            )
+        else:
+            terminal = frog_ast.Step(
+                frog_ast.ConcreteGame(notion, "Ideal"), None, last.adversary
+            )
+        default = (
+            f"{terminal.challenger} compose {terminal.reduction}"
+            if terminal.reduction
+            else str(terminal.challenger)
+        )
+        self._display_overrides[default] = f"{last_display} with {event.flag} silenced"
+        steps.append(terminal)
+        self._event_terminal_hop = self._count_hops(steps)
+        return steps
 
     @staticmethod
     def _count_hops(steps: list[frog_ast.ProofStep]) -> int:
@@ -656,12 +734,18 @@ class ProofEngine:
     def prove(self, proof_file: frog_ast.ProofFile, proof_path: str = "") -> None:
         self.set_up_proof_context(proof_file)
 
+        theorem: frog_ast.ParameterizedGame
+        steps: list[frog_ast.ProofStep]
+        is_event = isinstance(proof_file.theorem, frog_ast.EventTheorem)
         if isinstance(proof_file.theorem, frog_ast.EventTheorem):
-            raise FailedProof("event theorems are not supported yet")
-        theorem = proof_file.theorem
+            steps = self._event_chain(proof_file, proof_file.theorem)
+            theorem = proof_file.theorem.notion()
+        else:
+            steps = proof_file.steps
+            theorem = proof_file.theorem
 
-        first_step = proof_file.steps[0]
-        final_step = proof_file.steps[-1]
+        first_step = steps[0]
+        final_step = steps[-1]
 
         assert isinstance(first_step, frog_ast.Step)
         assert isinstance(final_step, frog_ast.Step)
@@ -716,10 +800,10 @@ class ProofEngine:
         print(f"Theorem: {proof_file.theorem}\n")
 
         self.hop_results = []
-        self._total_steps = self._count_hops(proof_file.steps)
+        self._total_steps = self._count_hops(steps)
         self._current_step = 0
         self.prove_steps(
-            proof_file.steps,
+            steps,
             effective_assumptions,
             lemma_games=lemma_games if lemma_games else None,
         )
@@ -742,7 +826,9 @@ class ProofEngine:
             )
             raise FailedProof()
 
-        if (
+        # An event theorem's chain is complete once every hop, including the
+        # terminal "flag unreachable" hop, has passed.
+        if is_event or (
             first_step.challenger.game == final_step.challenger.game
             and first_step.challenger.which != final_step.challenger.which
             and first_step.adversary == final_step.adversary
@@ -821,6 +907,8 @@ class ProofEngine:
                 type_labels.append("lemma")
             elif r.kind == "induction_rollover":
                 type_labels.append("rollover")
+            elif r.step_num == self._event_terminal_hop:
+                type_labels.append("flag unreachable")
             else:
                 type_labels.append("equivalence")
         type_width = max(len(t) for t in type_labels)
@@ -902,7 +990,11 @@ class ProofEngine:
         bound = self.advantage_bound
         if bound is None:
             return
-        lhs = f"Adv^{theorem}(A)"
+        lhs = (
+            f"Pr[{upto.pretty_notion(theorem)}](A)"
+            if upto.is_event_notion(theorem)
+            else f"Adv^{theorem}(A)"
+        )
         if not bound.supported:
             print(f"Advantage bound: {lhs} <= (not synthesized: {bound.note})")
             return

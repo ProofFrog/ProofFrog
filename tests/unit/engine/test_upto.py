@@ -293,3 +293,216 @@ def test_placement_rule_rejects_double_call(tmp_path: Path) -> None:
     )
     msg = upto.check_challenger_init_placement(red)
     assert msg is not None and "more than once" in msg
+
+
+# ---------------------------------------------------------------------------
+# The lockstep check (identical until bad)
+# ---------------------------------------------------------------------------
+
+
+def ok(p: frog_ast.GameFile) -> None:
+    err = upto.identical_until_bad(p, "bad")
+    assert err is None, str(err)
+
+
+def fails(p: frog_ast.GameFile, text: str) -> None:
+    err = upto.identical_until_bad(p, "bad")
+    assert err is not None and text in str(err), err
+
+
+def test_accept_bad_guess(tmp_path: Path) -> None:
+    ok(pair(tmp_path, BAD_GUESS_LEFT, BAD_GUESS_RIGHT))
+
+
+def test_accept_compare_then_return(tmp_path: Path) -> None:
+    # The RAISED arm learns !(e != m); the leaf m == e is then entailed.
+    left = """
+    S m; S e; Bool bad;
+    Void Initialize() { bad = false; m <- S; e <- S; }
+    S Get() { if (e != m) { bad = true; } return m; }
+    """
+    right = left.replace("return m;", "return e;")
+    ok(pair(tmp_path, left, right))
+
+
+def test_accept_if_bad_guard_pruned(tmp_path: Path) -> None:
+    left = """
+    S m; S e; Bool bad;
+    Void Initialize() { bad = false; m <- S; e <- S; }
+    Void Raise() { bad = true; }
+    S Get() { if (bad) { return m; } return e; }
+    """
+    right = left.replace("if (bad) { return m; } return e;", "return e;")
+    ok(pair(tmp_path, left, right))
+
+
+def test_accept_if_bad_else_pruned_to_else(tmp_path: Path) -> None:
+    left = """
+    S m; S e; Bool bad;
+    Void Initialize() { bad = false; m <- S; e <- S; }
+    Void Raise() { bad = true; }
+    S Get() { if (bad) { return m; } else { return e; } }
+    """
+    right = left.replace("if (bad) { return m; } else { return e; }", "return e;")
+    ok(pair(tmp_path, left, right))
+
+
+def test_accept_flag_leaf(tmp_path: Path) -> None:
+    # Collided returns the flag on one side and false on the other.
+    left = """
+    S x; S y; Bool bad;
+    Void Initialize() { bad = false; x <- S; y <- S; if (x == y) { bad = true; } }
+    Bool Collided() { return bad; }
+    """
+    ok(pair(tmp_path, left, left.replace("return bad;", "return false;")))
+
+
+def test_accept_assignment_learns_equality(tmp_path: Path) -> None:
+    left = """
+    S a; Bool bad;
+    Void Initialize() { bad = false; a <- S; }
+    S O() { S t = a; return t; }
+    """
+    ok(pair(tmp_path, left, left.replace("return t;", "return a;")))
+
+
+def test_reject_flag_at_different_positions(tmp_path: Path) -> None:
+    left = """
+    Int x; Bool bad;
+    Void Initialize() { bad = false; x = 0; }
+    Void O(Bool c) { if (c) { x = 1; bad = true; } }
+    """
+    right = left.replace("x = 1; bad = true;", "bad = true; x = 1;")
+    fails(pair(tmp_path, left, right), "flag raised at different points")
+
+
+def test_reject_fact_killed_by_reassignment(tmp_path: Path) -> None:
+    left = """
+    S a; S b; Bool bad;
+    Void Initialize() { bad = false; a <- S; b <- S; }
+    S Get() { if (a != b) { bad = true; } a <- S; return a; }
+    """
+    right = left.replace("a <- S; return a;", "a <- S; return b;")
+    fails(pair(tmp_path, left, right), "Get")
+
+
+def test_reject_learned_fact_killed_by_other_arm(tmp_path: Path) -> None:
+    # The fact a == b learned from the raising arm describes the state on
+    # entry; the else arm resamples a, so it must not survive the join.
+    left = """
+    S a; S b; Bool bad;
+    Void Initialize() { bad = false; a <- S; b <- S; }
+    S Get() { if (a != b) { bad = true; } else { a <- S; } return a; }
+    """
+    right = left.replace("return a;", "return b;")
+    fails(pair(tmp_path, left, right), "Get")
+
+
+def test_reject_different_assignment_targets(tmp_path: Path) -> None:
+    # a == b holds, but writing a and writing b are different effects.
+    left = """
+    S a; S b; Bool bad;
+    Void Initialize() { bad = false; a <- S; b <- S; }
+    S Get(S v) { if (a != b) { bad = true; } a = v; return a; }
+    """
+    right = left.replace("a = v; return a;", "b = v; return a;")
+    fails(pair(tmp_path, left, right), "Get")
+
+
+def test_accept_map_index_by_entailment(tmp_path: Path) -> None:
+    left = """
+    S a; S b; Map<S, S> M; Bool bad;
+    Void Initialize() { bad = false; a <- S; b <- S; }
+    Void Put(S v) { if (a != b) { bad = true; } M[a] = v; }
+    """
+    ok(pair(tmp_path, left, left.replace("M[a] = v;", "M[b] = v;")))
+
+
+def test_reject_call_in_leaf_not_sent_to_z3(tmp_path: Path) -> None:
+    # F(bad) vs F(false) is a syntactic mismatch, never decided by Z3.
+    left = """
+    Bool bad;
+    Void Initialize() { bad = false; }
+    Bool O(Function<Bool, Bool> F) { return F(bad); }
+    """
+    right = left.replace("F(bad)", "F(false)")
+    fails(pair(tmp_path, left, right), "O")
+
+
+def test_reject_differing_pre_bad_code(tmp_path: Path) -> None:
+    left = BAD_GUESS_LEFT.replace("target <- S; bad = false;", "bad = false; target <- S;")
+    right = BAD_GUESS_RIGHT.replace(
+        "target <- S; bad = false;", "bad = false; S u <- S; target <- S;"
+    )
+    fails(pair(tmp_path, left, right), "Initialize")
+
+
+def test_reject_read_before_reset_not_pruned(tmp_path: Path) -> None:
+    # Before the reset in Initialize the flag's value is not known to be false.
+    left = """
+    S m; Bool bad;
+    S Initialize() { S e <- S; if (bad) { return e; } bad = false; m <- S; return m; }
+    """
+    right = left.replace("if (bad) { return e; } ", "")
+    fails(pair(tmp_path, left, right), "Initialize")
+
+
+def test_loops_compared_bodywise(tmp_path: Path) -> None:
+    left = """
+    Set<S> seen; Bool bad;
+    Void Initialize() { bad = false; }
+    Void O(S c) { for (S s in seen) { if (s == c) { bad = true; } } seen = seen union c; }
+    """
+    ok(pair(tmp_path, left, left))
+    fails(
+        pair(tmp_path, left, left.replace("seen = seen union c;", "")),
+        "extra statement",
+    )
+
+
+def test_w1_w2_errors(tmp_path: Path) -> None:
+    fails(
+        pair(
+            tmp_path,
+            BAD_GUESS_LEFT,
+            BAD_GUESS_RIGHT.replace("S target;", "S target; Int n;"),
+        ),
+        "different fields",
+    )
+    fails(
+        pair(
+            tmp_path,
+            BAD_GUESS_LEFT,
+            BAD_GUESS_RIGHT.replace("Bool Eq(S c)", "Bool Eq2(S c)"),
+        ),
+        "oracle",
+    )
+
+
+def test_undecided_is_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(upto, "_entails", lambda *args: None)
+    left = """
+    S m; S e; Bool bad;
+    Void Initialize() { bad = false; m <- S; e <- S; }
+    S Get() { if (e != m) { bad = true; } return m; }
+    """
+    fails(pair(tmp_path, left, left.replace("return m;", "return e;")), "could not decide")
+
+
+def test_entails_does_not_collapse_concatenation_to_bool() -> None:
+    # `||` is also bitstring concatenation; encoding it as Boolean OR would
+    # make three pairwise-distinct concatenations unsatisfiable and so
+    # entail anything.
+    v = frog_ast.Variable
+    ops = frog_ast.BinaryOperators
+
+    def cat(a: str, b: str) -> frog_ast.Expression:
+        return frog_ast.BinaryOperation(ops.OR, v(a), v(b))
+
+    def ne(x: frog_ast.Expression, y: frog_ast.Expression) -> frog_ast.Expression:
+        return frog_ast.BinaryOperation(ops.NOTEQUALS, x, y)
+
+    phi = [ne(cat("a", "b"), cat("c", "d")), ne(cat("a", "b"), cat("e", "f")),
+           ne(cat("c", "d"), cat("e", "f"))]
+    goal = frog_ast.BinaryOperation(ops.EQUALS, v("x"), v("y"))
+    assert upto._entails(phi, goal) is False  # pylint: disable=protected-access

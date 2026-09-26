@@ -119,6 +119,19 @@ An assumption hop can go Real→Random or Random→Real; indistinguishability
 is symmetric. In the forward half of a symmetric proof the hop often
 goes Real→Random; in the reverse half it goes Random→Real.
 
+## Identical-until-bad hops
+
+When two adjacent games agree except after a rare event (a guess hits a
+secret, two samples collide), write the pair as a two-game file with a
+`Bool bad` flag raised at the event, identical on both sides until
+`bad = true;`, and hop over it with a side flip. Put the event in scope
+with `lemma: event bad of P(a) by '...';` (preferred: prove the bound in
+an event proof) or `assume: event bad of P(a);`. In the event proof,
+start from the side whose post-bad behaviour a reduction can simulate,
+give every reduction and intermediate game a `Bool bad` field that it
+raises exactly when the pair would, and end the chain in a game where
+`bad` can no longer be raised. See FROGLANG_REFERENCE.md section 8.8.
+
 ## Assumption hygiene
 
 - If the user specifies a particular set of security assumptions to use,

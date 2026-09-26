@@ -595,6 +595,102 @@ This expands to `q` iterations, each replacing one oracle call with a random one
 
 `assume expr;` statements within the `games:` section assert predicates that constrain the proof context (e.g., bounding the number of oracle calls: `assume R.count >= 1;`). These are used alongside induction to express hybrid argument invariants.
 
+### 8.8 Event Theorems and Identical-until-Bad Hops
+
+Some hops cannot be shown by code equivalence or by a single assumption: the two games behave identically *until* a rare event happens, after which they may differ arbitrarily (Bellare-Rogaway 2006, "the fundamental lemma of game playing"; Shoup 2004, section 5). ProofFrog supports this with **identical-until-bad pairs** and **event theorems**.
+
+**The pair.** An ordinary two-game file whose games both declare a `Bool` flag field (conventionally `bad`) and are *identical until the flag is set*:
+
+```
+Game Left(Set S) {
+    S target;
+    Bool bad;
+    Void Initialize() { target <- S; bad = false; }
+    Bool Eq(S c) {
+        if (c == target) { bad = true; return true; }
+        return false;
+    }
+}
+
+Game Right(Set S) {
+    S target;
+    Bool bad;
+    Void Initialize() { target <- S; bad = false; }
+    Bool Eq(S c) {
+        if (c == target) { bad = true; }
+        return false;
+    }
+}
+
+export as BadGuess;
+```
+
+The engine checks the side condition syntactically, oracle by oracle:
+
+- Both games take the same parameters, declare the same fields and the same oracles (names, order, signatures).
+- **Flag discipline** on each side: the flag is reset by `bad = false;` as a top-level statement of `Initialize` before anything raises it or returns (or the field is declared `Bool bad = false;`), and is otherwise only ever assigned `bad = true;`. It is never sampled, never assigned anything else, never shadowed by a parameter or local. Reading it is fine.
+- **Lockstep**: the two bodies are walked statement by statement. They must agree, except that return values, assigned values and map indices may differ when the facts known on the path (branch conditions taken, `bad == false`, `x = e` assignments) entail that they are equal, and `if` arms those facts rule out (such as `if (bad) {...}` before the flag is raised) are ignored. When both sides reach `bad = true;` at the same statement, everything after it in that block is free to differ. Code containing a method call is compared syntactically, never by value. The flag must be raised at the same point on both sides; align the two sides if they are equivalent but written differently.
+
+**The hop.** A side flip over the pair,
+
+```
+BadGuess(S).Left  compose R(S) against TargetGuess(S).Adversary;
+BadGuess(S).Right compose R(S) against TargetGuess(S).Adversary;
+```
+
+is an **`upto` hop** when an event of the pair is in scope. It costs `Pr[bad]` in the pair against the constructed adversary, printed as `Pr[bad of BadGuess(S)](B1)`. There are three ways to put the event in scope:
+
+| Route | Syntax | Loss term |
+|---|---|---|
+| Event lemma | `lemma: event bad of BadGuess(S) by 'BadGuessEvent.proof';` | the lemma's event term |
+| Assumed event | `assume: event bad of BadGuess(S);` | the pair's `advantage <= e;` clause if it has one (read as a bound on `Pr[bad]`), else the opaque event term |
+| Assumed pair | `assume: BadGuess(S);` | an ordinary assumption hop; no side-condition check |
+
+Assuming the pair directly while an event of it is in scope is an error. If a side flip over a pair with a shared `Bool` field fails as an equivalence, `prove` prints a hint naming the event routes.
+
+**Event theorems.** A proof whose theorem is `event bad of P(a)` bounds `Pr[bad]`:
+
+```
+import 'BadGuess.game';
+import 'RandomTargetGuessing.game';
+
+proof:
+
+let:
+    Set S;
+
+assume:
+    RandomTargetGuessing(S);
+
+theorem:
+    event bad of BadGuess(S);
+
+games:
+    BadGuess(S).Right against BadGuess(S).Adversary;
+    RandomTargetGuessing(S).Real  compose R(S) against BadGuess(S).Adversary;
+    RandomTargetGuessing(S).Ideal compose R(S) against BadGuess(S).Adversary;
+
+Reduction R(Set S) compose RandomTargetGuessing(S) against BadGuess(S).Adversary {
+    Bool bad;
+    Void Initialize() { challenger.Initialize(); bad = false; }
+    Bool Eq(S c) {
+        if (challenger.Eq(c)) { bad = true; }
+        return false;
+    }
+}
+```
+
+Rules for an event proof:
+
+- The first step is a side of the pair (either side: in an identical-until-bad pair `Pr[bad]` is the same in both); the pair appears nowhere else in the games list, every step is played against the pair's adversary, and induction is not supported.
+- Every reduction and intermediate game in the proof declares a `Bool bad` field. The engine observes it as the event: each game in the chain gets an internal oracle revealing its `bad`, so every hop must preserve the flag together with the transcript. A reduction therefore tracks the event (it raises `bad` exactly when the pair would); it does not have to reproduce what the pair does *after* the flag is raised.
+- There is no final game to reach. The engine appends a last check, **flag unreachable**, which passes when the last game can no longer raise `bad` (in the example, `challenger.Eq` is constantly `false` in `RandomTargetGuessing.Ideal`). The summary table shows it as its own hop.
+- The bound prints as `Advantage bound: Pr[bad of BadGuess(S)](A) <= count_Eq/|S|`.
+
+**Flags decided in `Initialize`.** When every `bad = true;` of the pair is in `Initialize`, write `event bad of P(a) at Initialize`. The event then depends only on the pair's own coins, so the event proof is against a stripped game with `Initialize` alone (its return value dropped); its reductions and intermediate games define only `Initialize`. Required: the flag is raised only in `Initialize`, `Initialize` takes no parameters and returns only as its last statement, and (for any proof) a reduction calls `challenger.Initialize` at most once and only from its own `Initialize`.
+
+**Claimed bounds.** A `bound:` clause names the event term as `advantage(event bad of BadGuess(S) compose R)`.
+
 ## 9. Semantic Equivalences
 
 The proof engine considers the following transformations to be semantics-preserving (i.e., they produce interchangeable games):

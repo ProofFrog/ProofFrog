@@ -499,11 +499,29 @@ def _path(conditions: list[frog_ast.Expression], i: int) -> list[frog_ast.Expres
     return parts
 
 
+def _declares_locals(block: frog_ast.Block) -> bool:
+    """Whether *block* binds a name at its own level (its scope ends with it)."""
+    for stmt in block.statements:
+        if isinstance(stmt, frog_ast.VariableDeclaration):
+            return True
+        if (
+            isinstance(
+                stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            )
+            and stmt.the_type is not None
+        ):
+            return True
+    return False
+
+
 def _prune(stmt: frog_ast.IfStatement, phi: Phi, flag: str) -> list[frog_ast.Statement]:
     """Drop arms Phi rules out; splice the arm Phi forces; [stmt] if unchanged.
 
     An undecided query counts as "not entailed": failing to prune only makes
-    the comparison stricter.
+    the comparison stricter. A forced arm that declares a local is not
+    spliced, since its locals would outlive their scope and could capture a
+    later reference to a same-named field: it is kept as `if (C) {...}` (or
+    `if (true) {...}` for an else) with its unreachable siblings dropped.
     """
     kept_conditions: list[frog_ast.Expression] = []
     kept_blocks: list[frog_ast.Block] = []
@@ -511,19 +529,25 @@ def _prune(stmt: frog_ast.IfStatement, phi: Phi, flag: str) -> list[frog_ast.Sta
         is_else = i >= len(stmt.conditions)
         if is_else:
             if not kept_blocks:
-                return list(block.statements)
+                if not _declares_locals(block):
+                    return list(block.statements)
+                kept_conditions.append(frog_ast.Boolean(True))
             kept_blocks.append(block)
             break
         condition = stmt.conditions[i]
         if _entails(phi, _not(condition), flag) is True:
             continue
         if not kept_blocks and _entails(phi, condition, flag) is True:
-            return list(block.statements)
+            if not _declares_locals(block):
+                return list(block.statements)
+            kept_conditions.append(condition)
+            kept_blocks.append(block)
+            break
         kept_conditions.append(condition)
         kept_blocks.append(block)
     if not kept_blocks:
         return []
-    if len(kept_blocks) == len(stmt.blocks):
+    if kept_conditions == stmt.conditions and len(kept_blocks) == len(stmt.blocks):
         return [stmt]
     pruned = frog_ast.IfStatement(kept_conditions, kept_blocks)
     pruned.line_num, pruned.column_num = stmt.line_num, stmt.column_num
@@ -822,7 +846,13 @@ def is_challenger_init_call(node: object) -> bool:
 
 
 def check_challenger_init_placement(reduction: frog_ast.Reduction) -> Optional[str]:
-    """``challenger.Initialize`` at most once, only inside the reduction's Initialize."""
+    """``challenger.Initialize`` runs at most once, before any other challenger call.
+
+    Only the reduction's own ``Initialize`` may call it, as (part of) a
+    top-level statement -- not inside a loop or branch, where it could run
+    several times or not at all -- and no challenger call may be evaluated
+    before it, in an earlier statement or in the same one.
+    """
     for method in reduction.methods:
         calls = [n for n in _walk(method.block) if is_challenger_init_call(n)]
         if method.signature.name != "Initialize" and calls:
@@ -835,4 +865,39 @@ def check_challenger_init_placement(reduction: frog_ast.Reduction) -> Optional[s
                 f"{reduction.name}.Initialize calls challenger.Initialize"
                 " more than once"
             )
+        if not calls:
+            continue
+        for stmt in method.block.statements:
+            nodes = _walk(stmt)
+            challenger_calls = [n for n in nodes if _is_challenger_call(n)]
+            if not any(is_challenger_init_call(n) for n in nodes):
+                if challenger_calls:
+                    return (
+                        f"{reduction.name}.Initialize calls the challenger before"
+                        " challenger.Initialize"
+                    )
+                continue
+            if isinstance(
+                stmt,
+                (frog_ast.IfStatement, frog_ast.NumericFor, frog_ast.GenericFor),
+            ):
+                return (
+                    f"{reduction.name}.Initialize must call challenger.Initialize"
+                    " in a top-level statement, not inside a loop or branch"
+                )
+            if len(challenger_calls) > 1:
+                return (
+                    f"{reduction.name}.Initialize calls the challenger before"
+                    " challenger.Initialize"
+                )
+            break
     return None
+
+
+def _is_challenger_call(node: object) -> bool:
+    return (
+        isinstance(node, frog_ast.FuncCall)
+        and isinstance(node.func, frog_ast.FieldAccess)
+        and isinstance(node.func.the_object, frog_ast.Variable)
+        and node.func.the_object.name == "challenger"
+    )

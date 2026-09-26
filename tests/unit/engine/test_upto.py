@@ -506,3 +506,76 @@ def test_entails_does_not_collapse_concatenation_to_bool() -> None:
            ne(cat("c", "d"), cat("e", "f"))]
     goal = frog_ast.BinaryOperation(ops.EQUALS, v("x"), v("y"))
     assert upto._entails(phi, goal) is False  # pylint: disable=protected-access
+
+
+def test_reject_forced_arm_declaring_shadowing_local(tmp_path: Path) -> None:
+    # Splicing the forced arm `if (!bad) { Int x = 1; }` would move the local
+    # x into the enclosing block, making Left's `return x` (the field, 7)
+    # look like Right's (the local, 1).
+    left = """
+    Int x; Bool bad;
+    Void Initialize() { bad = false; x = 7; }
+    Int Get() { if (!bad) { Int x = 1; } return x; }
+    """
+    right = left.replace("if (!bad) { Int x = 1; } return x;", "Int x = 1; return x;")
+    fails(pair(tmp_path, left, right), "Get")
+
+
+def test_forced_arm_without_declarations_still_spliced(tmp_path: Path) -> None:
+    left = """
+    Int x; Bool bad;
+    Void Initialize() { bad = false; x = 7; }
+    Int Get() { if (!bad) { x = 1; } return x; }
+    """
+    ok(pair(tmp_path, left, left.replace("if (!bad) { x = 1; } return x;", "x = 1; return x;")))
+
+
+def test_placement_rule_rejects_call_in_loop(tmp_path: Path) -> None:
+    # One call site, but it runs three times: a re-run Initialize re-resets
+    # the flag after the two sides' states have diverged.
+    src = _placement_proof(tmp_path, "challenger.Eq(c)")
+    src.write_text(
+        src.read_text().replace(
+            "Void Initialize() { challenger.Initialize();  }",
+            "Void Initialize() { for (Int i = 0 to 2) { challenger.Initialize(); } }",
+        )
+    )
+    msg = upto.check_challenger_init_placement(_reduction(src))
+    assert msg is not None and "top-level" in msg
+
+
+def test_placement_rule_rejects_challenger_call_before_initialize(
+    tmp_path: Path,
+) -> None:
+    src = _placement_proof(tmp_path, "challenger.Eq(c)")
+    src.write_text(
+        src.read_text().replace(
+            "Void Initialize() { challenger.Initialize();  }",
+            "Void Initialize() { Bool z = challenger.Eq(c0); challenger.Initialize(); }",
+        ).replace("Reduction R(Set S)", "Reduction R(Set S, S c0)")
+    )
+    msg = upto.check_challenger_init_placement(_reduction(src))
+    assert msg is not None and "before" in msg
+
+
+def test_placement_rule_rejects_conditional_initialize(tmp_path: Path) -> None:
+    src = _placement_proof(tmp_path, "challenger.Eq(c)")
+    src.write_text(
+        src.read_text().replace(
+            "Void Initialize() { challenger.Initialize();  }",
+            "Void Initialize() { if (true) { challenger.Initialize(); } }",
+        )
+    )
+    msg = upto.check_challenger_init_placement(_reduction(src))
+    assert msg is not None and "top-level" in msg
+
+
+def test_placement_rule_accepts_returned_initialize(tmp_path: Path) -> None:
+    src = _placement_proof(tmp_path, "challenger.Eq(c)")
+    src.write_text(
+        src.read_text().replace(
+            "Void Initialize() { challenger.Initialize();  }",
+            "Void Initialize() { S t <- S; challenger.Initialize(); }",
+        )
+    )
+    assert upto.check_challenger_init_placement(_reduction(src)) is None

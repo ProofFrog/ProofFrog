@@ -305,3 +305,15 @@ def test_bound_atom_event_not_in_scope(
         "games:", "bound:\n    advantage(event other of BadGuess(S) compose R);\n\ngames:"
     )
     _rejects(tmp_path, capsys, src, "not an assumed or lemma")
+
+
+def test_check_reports_pair_not_identical_until_bad(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `check` (and so the LSP) runs the side condition at every upto hop.
+    _rejects(
+        tmp_path,
+        capsys,
+        PARENT_PROOF.replace("BadGuess", "NotIUB"),
+        "NotIUB is not identical until bad",
+    )

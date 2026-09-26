@@ -1076,6 +1076,7 @@ def check_proof_well_formed(
     for helper in proof.helpers:
         import_namespace[helper.name] = helper
     _check_reduction_placement(proof, file_name)
+    _check_upto_hops(proof, import_namespace, file_name)
     if isinstance(proof.theorem, frog_ast.EventTheorem):
         _check_event_chain(proof, proof.theorem, file_name)
     for step in proof.steps:
@@ -1161,6 +1162,42 @@ def _check_initialize_event_game(
             f" `at Initialize` form needs it to return only as its last statement",
             file_name,
         )
+
+
+def _check_upto_hops(
+    proof: frog_ast.ProofFile,
+    import_namespace: dict[str, frog_ast.Root | frog_ast.Game],
+    file_name: str,
+) -> None:
+    """Run the identical-until-bad side condition at every upto hop.
+
+    A side flip over a pair with an event in scope is an upto hop; checking
+    the pair here, and not only in `prove`, lets `check` and the LSP report a
+    pair that is not identical until its flag while the proof is edited.
+    """
+    events = {
+        str(n.game): n
+        for n in [*proof.assumptions, *(lemma.game for lemma in proof.lemmas)]
+        if isinstance(n, frog_ast.EventTheorem)
+    }
+    if not events:
+        return
+    game_steps = [s for s in proof.steps if isinstance(s, frog_ast.Step)]
+    for current, following in zip(game_steps, game_steps[1:]):
+        flip = advantage.side_flip_game(current, following)
+        event = events.get(str(flip)) if flip is not None else None
+        if event is None:
+            continue
+        pair = import_namespace.get(event.game.name)
+        if not isinstance(pair, frog_ast.GameFile):
+            continue
+        err = upto.identical_until_bad(pair, event.flag)
+        if err is not None:
+            print_error(
+                following,
+                f"{event.game.name} is not identical until {event.flag}: {err}",
+                file_name,
+            )
 
 
 def _check_reduction_placement(proof: frog_ast.ProofFile, file_name: str) -> None:

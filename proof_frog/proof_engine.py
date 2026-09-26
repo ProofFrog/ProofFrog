@@ -20,6 +20,7 @@ from . import visitors
 from . import dependencies
 from . import diagnostics
 from . import advantage
+from . import upto
 from .transforms._base import (
     NearMiss,
     PipelineContext,
@@ -1612,17 +1613,8 @@ class ProofEngine:
             )
 
             # Check if the reduction already calls challenger.Initialize()
-            def _has_challenger_init_call(node: frog_ast.ASTNode) -> bool:
-                return (
-                    isinstance(node, frog_ast.FuncCall)
-                    and isinstance(node.func, frog_ast.FieldAccess)
-                    and isinstance(node.func.the_object, frog_ast.Variable)
-                    and node.func.the_object.name == "challenger"
-                    and node.func.name == "Initialize"
-                )
-
             already_calls = (
-                visitors.SearchVisitor(_has_challenger_init_call).visit(
+                visitors.SearchVisitor(upto.is_challenger_init_call).visit(
                     reduction_initialize
                 )
                 is not None

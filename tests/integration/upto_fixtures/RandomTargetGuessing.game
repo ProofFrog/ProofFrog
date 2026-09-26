@@ -1,0 +1,40 @@
+// Helper assumption: a multi-call oracle that compares its argument to a
+// hidden, uniformly sampled target is indistinguishable from one that
+// always returns false (up to a q/|S| distinguishing loss, where q is the
+// number of Eq queries and |S| is the size of the target set).
+//
+// Real:  Eq(c) returns c == target, where target was sampled uniformly at
+//        Initialize and is never revealed to the adversary.
+// Ideal: Eq(c) always returns false.
+//
+// This holds statistically: any adversary distinguishes Real from Ideal
+// with advantage at most q/|S|. It is used to discharge equivalences of
+// the form "comparing adversary inputs against an unrevealed uniform
+// random value collapses to false".
+
+Game Real(Set S) {
+    S target;
+
+    Void Initialize() {
+        target <- S;
+    }
+
+    Bool Eq(S c) {
+        return c == target;
+    }
+}
+
+Game Ideal(Set S) {
+    Void Initialize() {
+    }
+
+    Bool Eq(S c) {
+        return false;
+    }
+}
+
+// Guessing bound: over count_Eq queries against an unrevealed uniform target
+// in S, the distinguishing advantage is at most count_Eq/|S|.
+advantage <= count_Eq / |S|;
+
+export as RandomTargetGuessing;

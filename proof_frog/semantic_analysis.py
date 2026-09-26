@@ -8,6 +8,7 @@ from . import frog_ast
 from . import frog_parser
 from . import proof_engine
 from . import suggestions as _suggestions
+from . import upto
 from . import visitors
 
 
@@ -654,8 +655,10 @@ class NameResolutionVisitor(VariableTypeVisitor):
         assert claim is not None
         bound = claim.bound
 
-        assumption_names = {a.name for a in proof_file.assumptions}
-        assumption_names |= {lemma.game.name for lemma in proof_file.lemmas}
+        assumption_names = {frog_ast.notion_key(a).name for a in proof_file.assumptions}
+        assumption_names |= {
+            frog_ast.notion_key(lemma.game).name for lemma in proof_file.lemmas
+        }
         reductions = {
             helper.name: helper
             for helper in proof_file.helpers
@@ -663,7 +666,8 @@ class NameResolutionVisitor(VariableTypeVisitor):
         }
         let_names = {field.name for field in proof_file.lets}
         theorem_oracles: set[str] = set()
-        theorem_def = self.import_namespace.get(proof_file.theorem.name)
+        theorem_game = frog_ast.notion_game(proof_file.theorem)
+        theorem_def = self.import_namespace.get(theorem_game.name)
         if isinstance(theorem_def, frog_ast.GameFile):
             theorem_oracles = {
                 method.signature.name
@@ -673,7 +677,10 @@ class NameResolutionVisitor(VariableTypeVisitor):
             }
 
         for ref in _collect_advantage_references(bound):
-            notion = ref.notion
+            # An event reference `advantage(event f of P(a) compose R)` is keyed
+            # on the event's synthetic notion; its reduction composes `P`.
+            notion = frog_ast.notion_key(ref.notion)
+            composed = frog_ast.notion_game(ref.notion)
             if ref.reduction is not None:
                 reduction = reductions.get(ref.reduction.name)
                 if reduction is None:
@@ -684,12 +691,12 @@ class NameResolutionVisitor(VariableTypeVisitor):
                         self.file_name,
                     )
                     continue
-                if reduction.to_use.name != notion.name:
+                if reduction.to_use.name != composed.name:
                     print_error(
                         claim,
                         f"reduction '{ref.reduction.name}' composes"
                         f" '{reduction.to_use.name}', not the referenced notion"
-                        f" '{notion.name}'",
+                        f" '{composed.name}'",
                         self.file_name,
                     )
             if notion.name not in assumption_names:
@@ -700,7 +707,7 @@ class NameResolutionVisitor(VariableTypeVisitor):
                 )
                 print_error(
                     claim,
-                    f"claimed bound references '{notion.name}', which is not an"
+                    f"claimed bound references '{ref.notion}', which is not an"
                     f" assumed or lemma security notion{hint}",
                     self.file_name,
                 )
@@ -715,7 +722,7 @@ class NameResolutionVisitor(VariableTypeVisitor):
                         claim,
                         f"claimed bound references count of unknown oracle"
                         f" '{oracle}'; no such oracle in the theorem game"
-                        f" {proof_file.theorem.name}",
+                        f" {theorem_game.name}",
                         self.file_name,
                     )
                 continue
@@ -1030,9 +1037,9 @@ def check_proof_well_formed(
         # Always visit to register the type in the checker's scope
         type_check_visitor.visit(let)
     for assumption in proof.assumptions:
-        type_check_visitor.visit(assumption)
+        type_check_visitor.visit(frog_ast.notion_game(assumption))
     for lemma in proof.lemmas:
-        type_check_visitor.visit(lemma.game)
+        type_check_visitor.visit(frog_ast.notion_game(lemma.game))
         lemma_path = os.path.join(os.path.dirname(file_name), lemma.proof_path)
         if not os.path.isfile(lemma_path):
             print_error(
@@ -1042,7 +1049,11 @@ def check_proof_well_formed(
             )
             raise FailedTypeCheck()
 
-    type_check_visitor.visit(proof.theorem)
+    type_check_visitor.visit(frog_ast.notion_game(proof.theorem))
+    _check_event_notions(proof, import_namespace, file_name)
+    if isinstance(proof.theorem, frog_ast.EventTheorem):
+        if proof.theorem.at_initialize:
+            type_check_visitor.stripped_adversaries.add(proof.theorem.game.name)
 
     for req in proof.requirements:
         type_check_visitor.visit(req.target)
@@ -1064,8 +1075,165 @@ def check_proof_well_formed(
 
     for helper in proof.helpers:
         import_namespace[helper.name] = helper
+    _check_reduction_placement(proof, file_name)
+    if isinstance(proof.theorem, frog_ast.EventTheorem):
+        _check_event_chain(proof, proof.theorem, file_name)
     for step in proof.steps:
         type_check_visitor.visit(step)
+
+
+def _event_notions(proof: frog_ast.ProofFile) -> list[frog_ast.EventTheorem]:
+    notions: list[frog_ast.Notion] = [
+        *proof.assumptions,
+        *(lemma.game for lemma in proof.lemmas),
+        proof.theorem,
+    ]
+    return [n for n in notions if isinstance(n, frog_ast.EventTheorem)]
+
+
+def _check_event_notions(
+    proof: frog_ast.ProofFile,
+    import_namespace: dict[str, frog_ast.Root | frog_ast.Game],
+    file_name: str,
+) -> None:
+    """E1 (and the pair half of E4) on every event, plus the both-routes rule."""
+    for event in _event_notions(proof):
+        pair = import_namespace.get(event.game.name)
+        if not isinstance(pair, frog_ast.GameFile):
+            print_error(
+                event, f"{event.game.name} is not an imported game pair", file_name
+            )
+            return
+        for game in pair.games:
+            err = upto.check_flag_field(game, event.flag)
+            if err is not None:
+                print_error(event, f"{event}: {err}", file_name)
+            if event.at_initialize:
+                _check_initialize_event_game(event, game, file_name)
+    plain = {
+        str(notion): notion
+        for notion in proof.assumptions
+        if isinstance(notion, frog_ast.ParameterizedGame)
+    }
+    for event in _event_notions(proof):
+        if event is proof.theorem:
+            continue
+        clash = plain.get(str(event.game))
+        if clash is not None:
+            print_error(
+                clash,
+                f"{event.game} is assumed directly (line {clash.line_num}) and"
+                f" '{event}' is also in scope (line {event.line_num}); use one"
+                f" route, not both",
+                file_name,
+            )
+
+
+def _check_initialize_event_game(
+    event: frog_ast.EventTheorem, game: frog_ast.Game, file_name: str
+) -> None:
+    """E4, pair half: flag raised only in an argument-free Initialize."""
+    if not upto.raised_only_in_initialize(game, event.flag):
+        print_error(
+            event,
+            f"{event}: {game.name} raises `{event.flag}` outside Initialize; the"
+            f" `at Initialize` form requires it to be raised only in Initialize",
+            file_name,
+        )
+    if not game.has_method("Initialize"):
+        print_error(event, f"{event}: {game.name} has no Initialize", file_name)
+    init = game.get_method("Initialize")
+    if init.signature.parameters:
+        print_error(
+            event,
+            f"{event}: {game.name}.Initialize must take no parameters",
+            file_name,
+        )
+    body = list(init.block.statements)
+    if body and isinstance(body[-1], frog_ast.ReturnStatement):
+        body = body[:-1]
+    if visitors.SearchVisitor(
+        lambda node: isinstance(node, frog_ast.ReturnStatement)
+    ).visit(frog_ast.Block(body)):
+        print_error(
+            event,
+            f"{event}: {game.name}.Initialize has an early return; the"
+            f" `at Initialize` form needs it to return only as its last statement",
+            file_name,
+        )
+
+
+def _check_reduction_placement(proof: frog_ast.ProofFile, file_name: str) -> None:
+    for helper in proof.helpers:
+        if isinstance(helper, frog_ast.Reduction):
+            message = upto.check_challenger_init_placement(helper)
+            if message is not None:
+                print_error(helper, message, file_name)
+
+
+def _check_event_chain(
+    proof: frog_ast.ProofFile, event: frog_ast.EventTheorem, file_name: str
+) -> None:
+    """E2-E4 on the games list and helpers of an event theorem's proof."""
+    first = proof.steps[0]
+    if not (
+        isinstance(first, frog_ast.Step)
+        and first.reduction is None
+        and isinstance(first.challenger, frog_ast.ConcreteGame)
+        and first.challenger.game == event.game
+    ):
+        print_error(
+            first,
+            f"the first step must be a side of {event.game} (theorem '{event}')",
+            file_name,
+        )
+    for step in proof.steps:
+        if isinstance(step, frog_ast.Induction):
+            print_error(step, "induction is not supported in an event proof", file_name)
+        if not isinstance(step, frog_ast.Step):
+            continue
+        if step.adversary != event.game:
+            print_error(
+                step,
+                f"every step of this event proof must be played against"
+                f" {event.game}.Adversary",
+                file_name,
+            )
+        if step is first:
+            continue
+        uses_pair = (
+            isinstance(step.challenger, frog_ast.ConcreteGame)
+            and step.challenger.game.name == event.game.name
+        ) or (
+            isinstance(step.challenger, frog_ast.ParameterizedGame)
+            and step.challenger.name == event.game.name
+        )
+        if uses_pair:
+            print_error(
+                step,
+                f"{event.game.name} may appear only as the first step of the"
+                f" proof of '{event}'",
+                file_name,
+            )
+    for helper in proof.helpers:
+        kind = "reduction" if isinstance(helper, frog_ast.Reduction) else "game"
+        field = next((f for f in helper.fields if f.name == event.flag), None)
+        if field is None or not isinstance(field.type, frog_ast.BoolType):
+            print_error(
+                helper,
+                f"{kind} {helper.name} in the proof of '{event}' must declare"
+                f" `Bool {event.flag}`; the engine observes it as the event",
+                file_name,
+            )
+        if event.at_initialize and [m.signature.name for m in helper.methods] != [
+            "Initialize"
+        ]:
+            print_error(
+                helper,
+                f"{kind} {helper.name} in the proof of '{event}' must define"
+                f" only Initialize (the `at Initialize` game has no other oracle)",
+                file_name,
+            )
 
 
 def _format_type(t: PossibleType) -> str:
@@ -1223,6 +1391,9 @@ class CheckTypeVisitor(VariableTypeVisitor):
     ) -> None:
         super().__init__(import_namespace, variable_type_map_stack, field_value_map)
         self.import_namespace = import_namespace
+        # Games whose adversary interface is stripped to `Initialize` alone:
+        # the game of an `event f of P(a) at Initialize` theorem.
+        self.stripped_adversaries: set[str] = set()
         self.ast_type_map = frog_ast.ASTMap[PossibleType]()
         self.file_name = file_name
         self.file_name_mapping = file_name_mapping
@@ -1730,6 +1901,10 @@ class CheckTypeVisitor(VariableTypeVisitor):
             ),
             True,
         )
+        if reduction.play_against.name in self.stripped_adversaries:
+            # The chain of an `at Initialize` event theorem plays the stripped
+            # game, whose only oracle is Initialize (checked by E4).
+            return
         reduction_type = get_type_from_instantiable(reduction.name, reduction, True)
         non_matching_method = has_matching_methods(adversary_type, reduction_type)
         if non_matching_method is not True:
@@ -1790,7 +1965,12 @@ class CheckTypeVisitor(VariableTypeVisitor):
         non_matching_method = has_matching_methods(
             adversary_methods, instantiated_methods
         )
-        if non_matching_method is not True:
+        # The stripped adversary of an `at Initialize` event only calls
+        # Initialize, so the other oracles of its game need not be provided.
+        if (
+            non_matching_method is not True
+            and step.adversary.name not in self.stripped_adversaries
+        ):
             self.print_error(
                 step,
                 f"Method {non_matching_method} required by adversary not found in challenger",
@@ -2735,14 +2915,16 @@ class CheckTypeVisitor(VariableTypeVisitor):
             if variable_type_map_stack is not None
             else [dict(self.variable_type_map_stack[0])]
         )
-        CheckTypeVisitor(
+        nested = CheckTypeVisitor(
             self.import_namespace,
             file_name,
             self.file_name_mapping,
             stack,
             dict(combined_ns),
             self.subsets_pairs,
-        ).visit(instantiated_scheme)
+        )
+        nested.stripped_adversaries = self.stripped_adversaries
+        nested.visit(instantiated_scheme)
 
         self._instantiation_cache[cache_key] = instantiated_scheme
         return instantiated_scheme

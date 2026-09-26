@@ -91,3 +91,34 @@ def test_lemma_file_must_prove_the_entry() -> None:
         "proves 'event bad of NotIUB(S)', not 'event bad of BadGuess(S)'"
         in result.stdout + result.stderr
     ), _out(result)
+
+
+def test_assumed_event_uses_pair_clause() -> None:
+    result = _run_prove("outer_assumed.proof")
+    assert result.returncode == 0, _out(result)
+    assert "up to bad" in result.stdout
+    assert "Advantage bound: Adv^TargetGuess(S)(A) <= count_Eq/|S|" in result.stdout
+
+
+def test_assumed_event_opaque() -> None:
+    result = _run_prove("outer_opaque.proof")
+    assert result.returncode == 0, _out(result)
+    assert "Pr[bad of BadGuess(S)](B1)" in result.stdout
+
+
+def test_both_routes_is_checker_error() -> None:
+    result = _run_prove("outer_both.proof")
+    assert result.returncode != 0, _out(result)
+    assert "both" in (result.stdout + result.stderr).lower()
+
+
+def test_claimed_bound_with_event_atom_verifies() -> None:
+    result = _run_prove("outer_claim.proof")
+    assert result.returncode == 0, _out(result)
+    assert "Claimed bound verified" in result.stdout
+
+
+def test_claimed_bound_below_event_term_fails() -> None:
+    result = _run_prove("outer_claim_low.proof")
+    assert result.returncode != 0, _out(result)
+    assert "Claimed bound NOT verified" in result.stdout

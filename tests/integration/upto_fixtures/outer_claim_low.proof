@@ -1,0 +1,34 @@
+// Negative: the claim halves the event term, so it is not an upper bound.
+import 'TargetGuess.game';
+import 'BadGuess.game';
+
+proof:
+
+let:
+    Set S;
+
+lemma:
+    event bad of BadGuess(S) by 'BadGuessEvent.proof';
+
+theorem:
+    TargetGuess(S);
+
+bound:
+    advantage(event bad of BadGuess(S) compose R) / 2;
+
+games:
+    TargetGuess(S).Left against TargetGuess(S).Adversary;
+    BadGuess(S).Left compose R(S) against TargetGuess(S).Adversary;
+    BadGuess(S).Right compose R(S) against TargetGuess(S).Adversary;
+    TargetGuess(S).Right against TargetGuess(S).Adversary;
+
+// R: forwards every guess to the pair.
+Reduction R(Set S) compose BadGuess(S) against TargetGuess(S).Adversary {
+    Void Initialize() {
+        challenger.Initialize();
+    }
+
+    Bool Eq(S c) {
+        return challenger.Eq(c);
+    }
+}

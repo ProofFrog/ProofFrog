@@ -552,14 +552,19 @@ def side_flip_game(
 def synthesize_from_steps(
     steps: Sequence[frog_ast.ProofStep],
     assumed_game_names: set[str],
+    event_notions: Optional[Mapping[str, frog_ast.ParameterizedGame]] = None,
 ) -> AdvantageBound:
     """Synthesize the bound from a proof's game-step sequence.
 
     Used by consumers (e.g. the LaTeX exporter) that have the proof AST but
     not a verified engine run. A hop contributes a loss term only when it is a
-    side-flip over an assumed (or lemma) security game; every other hop is
-    treated as a perfect equivalence. Inductive proofs are unsupported.
+    side-flip over an assumed (or lemma) security game, or over a pair whose
+    event is in scope (``event_notions`` maps ``str(pair)`` to the event's
+    synthetic notion: an identical-until-bad hop charging Pr[flag]); every
+    other hop is treated as a perfect equivalence. Inductive proofs are
+    unsupported.
     """
+    events = event_notions or {}
     if any(isinstance(step, frog_ast.Induction) for step in steps):
         return AdvantageBound(
             expression=sympy.Integer(0),
@@ -571,7 +576,15 @@ def synthesize_from_steps(
     hops: list[HopInfo] = []
     for current, following in zip(game_steps, game_steps[1:]):
         flip = side_flip_game(current, following)
-        if flip is not None and flip.name in assumed_game_names:
+        if flip is not None and str(flip) in events:
+            hops.append(
+                HopInfo(
+                    kind="by_upto",
+                    notion=events[str(flip)],
+                    reduction=current.reduction,
+                )
+            )
+        elif flip is not None and flip.name in assumed_game_names:
             hops.append(
                 HopInfo(
                     kind="by_assumption",
@@ -816,7 +829,9 @@ def check_claimed_bound(
     extra_counter = [0]
 
     def on_advantage(ref: frog_ast.AdvantageReference) -> sympy.Expr:
-        notion = str(ref.notion)
+        # An event reference is keyed like its synthesized term: on the
+        # event's synthetic notion.
+        notion = str(frog_ast.notion_key(ref.notion))
         entry: Optional[tuple[sympy.Symbol, AdvTerm]]
         if ref.reduction is None:
             entry = by_name.get((notion, None))

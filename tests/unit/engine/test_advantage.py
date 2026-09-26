@@ -545,3 +545,20 @@ class TestCheckClaimedBound:
         )
         result = advantage.check_claimed_bound(_parse_claim(self._ADV), unsupported)
         assert result.status == "undecided"
+
+
+def test_synthesize_from_steps_charges_event_on_side_flip() -> None:
+    pair = frog_ast.ParameterizedGame("P", [frog_ast.Variable("S")])
+    red = frog_ast.ParameterizedGame("R", [frog_ast.Variable("S")])
+    adv = frog_ast.ParameterizedGame("T", [frog_ast.Variable("S")])
+    steps: list[frog_ast.ProofStep] = [
+        frog_ast.Step(frog_ast.ConcreteGame(pair, "Left"), red, adv),
+        frog_ast.Step(frog_ast.ConcreteGame(pair, "Right"), red, adv),
+    ]
+    event = frog_ast.EventTheorem("bad", pair)
+    bound = advantage.synthesize_from_steps(
+        steps, set(), event_notions={str(pair): event.notion()}
+    )
+    assert bound.render() == "Pr[bad of P(S)](B1)"
+    # Without the event in scope the side flip is an equivalence.
+    assert advantage.synthesize_from_steps(steps, set()).render() == "0"

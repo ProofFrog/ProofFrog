@@ -558,6 +558,8 @@ class ProofEngine:
         # the terminal "flag unreachable" hop.
         self._display_overrides: dict[str, str] = {}
         self._event_terminal_hop: int | None = None
+        # Events licensing `upto` hops, keyed by str(event.game).
+        self._events_in_scope: dict[str, frog_ast.EventTheorem] = {}
 
     def add_definition(self, name: str, root: frog_ast.Root) -> None:
         self.definition_namespace[name] = root
@@ -783,7 +785,7 @@ class ProofEngine:
             lemma_path = os.path.join(os.path.dirname(proof_path), lemma.proof_path)
             print(f"Lemma: {lemma.game} by '{lemma.proof_path}'")
             try:
-                verify_proof_file(
+                lemma_file = verify_proof_file(
                     lemma_path,
                     verbosity=self.verbosity,
                     no_diagnose=True,
@@ -793,10 +795,18 @@ class ProofEngine:
             except (FailedProof, Exception) as e:
                 print(f"{Fore.RED}Lemma FAILED: {e}{Fore.RESET}")
                 raise FailedProof(f"Lemma {lemma.game} failed verification") from e
+            if not _same_notion_shape(lemma_file.theorem, lemma.game):
+                message = (
+                    f"Lemma file '{lemma.proof_path}' proves"
+                    f" '{lemma_file.theorem}', not '{lemma.game}'"
+                )
+                print(f"{Fore.RED}{message}{Fore.RESET}")
+                raise FailedProof(message)
 
             effective_assumptions.append(frog_ast.notion_key(lemma.game))
             lemma_games.add(str(frog_ast.notion_key(lemma.game)))
 
+        self._register_events_in_scope(proof_file)
         print(f"Theorem: {proof_file.theorem}\n")
 
         self.hop_results = []
@@ -905,6 +915,8 @@ class ProofEngine:
                 type_labels.append("assumption")
             elif r.kind == "by_lemma":
                 type_labels.append("lemma")
+            elif r.kind == "by_upto":
+                type_labels.append("upto")
             elif r.kind == "induction_rollover":
                 type_labels.append("rollover")
             elif r.step_num == self._event_terminal_hop:
@@ -954,6 +966,8 @@ class ProofEngine:
                 result_str = Fore.CYAN + "assume" + Fore.RESET
             elif r.kind == "by_lemma":
                 result_str = Fore.CYAN + "lemma" + Fore.RESET
+            elif r.kind == "by_upto" and r.valid:
+                result_str = Fore.CYAN + "upto" + Fore.RESET
             elif r.valid:
                 result_str = Fore.GREEN + "ok" + Fore.RESET
             else:
@@ -1051,13 +1065,22 @@ class ProofEngine:
     def _print_diagnostics(self) -> None:
         """Print Level 2 diagnostic output for failed hops."""
         failed = [
-            r for r in self.hop_results if not r.valid and r.diagnosis is not None
+            r
+            for r in self.hop_results
+            if not r.valid and (r.diagnosis is not None or r.kind == "by_upto")
         ]
         if not failed:
             return
 
         for result in failed:
-            assert result.diagnosis is not None
+            if result.diagnosis is None:
+                print()
+                print(
+                    f"  {Fore.RED}Step {result.step_num} failed:{Fore.RESET} "
+                    f"{result.current_desc} -> {result.next_desc}"
+                )
+                print(f"    {result.failure_detail}")
+                continue
             diag = result.diagnosis
             print()
             print(
@@ -1100,6 +1123,11 @@ class ProofEngine:
         )
         # For induction entry hops, the original step index:
         induction_step_index: int | None = None
+        # For `upto` hops: why the side condition failed ("" when it holds).
+        failure: str = ""
+        # For equivalence hops over a side flip of a flagged pair: a hint
+        # naming the event routes that would license the hop.
+        hint: str = ""
 
     def _prepare_hops(
         self,
@@ -1169,6 +1197,26 @@ class ProofEngine:
                         )
                     )
                     continue
+                event, failure = self._is_by_upto(current_step, next_step)
+                if event is not None:
+                    assert isinstance(current_step.challenger, frog_ast.ConcreteGame)
+                    assert isinstance(next_step.challenger, frog_ast.ConcreteGame)
+                    prepared.append(
+                        ProofEngine._PreparedHop(
+                            step_num=step_num,
+                            current_desc=self._step_display(current_step),
+                            next_desc=self._step_display(next_step),
+                            kind="by_upto",
+                            justification=event.notion(),
+                            reduction=current_step.reduction,
+                            direction=(
+                                current_step.challenger.which,
+                                next_step.challenger.which,
+                            ),
+                            failure=failure,
+                        )
+                    )
+                    continue
                 current_game_ast = self._get_game_ast(
                     current_step.challenger, current_step.reduction
                 )
@@ -1230,9 +1278,101 @@ class ProofEngine:
                     induction_step_index=(
                         i if isinstance(steps[i], frog_ast.Induction) else None
                     ),
+                    hint=self._upto_hint(current_step, next_step),
                 )
             )
         return prepared
+
+    def _register_events_in_scope(self, proof_file: frog_ast.ProofFile) -> None:
+        """Record the assumed/lemma events and register their flag games.
+
+        The flag game is registered under the event's synthetic name so bound
+        synthesis can resolve a clause declared on the pair (Tier 2).
+        """
+        self._events_in_scope = {}
+        notions: list[frog_ast.Notion] = [
+            *proof_file.assumptions,
+            *(lemma.game for lemma in proof_file.lemmas),
+        ]
+        for notion in notions:
+            if not isinstance(notion, frog_ast.EventTheorem):
+                continue
+            self._events_in_scope[str(notion.game)] = notion
+            pair = self.definition_namespace.get(notion.game.name)
+            key = notion.notion().name
+            if isinstance(pair, frog_ast.GameFile) and key not in (
+                self.definition_namespace
+            ):
+                self.definition_namespace[key] = upto.flag_game(
+                    pair, pair.games[0].name, notion.flag, key
+                )
+
+    def _is_by_upto(
+        self, current_step: frog_ast.Step, next_step: frog_ast.Step
+    ) -> tuple[frog_ast.EventTheorem | None, str]:
+        """An `upto` hop: a side flip over a pair whose event is in scope.
+
+        Returns the licensing event (None if the hop is not of this kind) and
+        a failure message when the pair is not identical until the event's
+        flag (or, for `at Initialize`, the extra conditions fail); "" when
+        the hop is licensed.
+        """
+        flip = advantage.side_flip_game(current_step, next_step)
+        if flip is None or current_step.adversary != next_step.adversary:
+            return None, ""
+        event = self._events_in_scope.get(str(flip))
+        if event is None:
+            return None, ""
+        pair = self.definition_namespace.get(event.game.name)
+        if not isinstance(pair, frog_ast.GameFile):
+            return event, f"{event.game.name} is not a game pair"
+        err = upto.identical_until_bad(pair, event.flag)
+        if err is not None:
+            return event, (
+                f"{event.game.name} is not identical until {event.flag}: {err}"
+            )
+        if event.at_initialize:
+            for game in pair.games:
+                if not upto.raised_only_in_initialize(game, event.flag):
+                    return event, (
+                        f"{game.name} raises {event.flag} outside Initialize"
+                    )
+                if game.get_method("Initialize").signature.parameters:
+                    return event, f"{game.name}.Initialize takes parameters"
+            if current_step.reduction is not None:
+                red = self.definition_namespace.get(current_step.reduction.name)
+                if isinstance(red, frog_ast.Reduction):
+                    message = upto.check_challenger_init_placement(red)
+                    if message is not None:
+                        return event, message
+        return event, ""
+
+    def _upto_hint(self, current_step: frog_ast.Step, next_step: frog_ast.Step) -> str:
+        """A hint for a side flip over a non-assumed pair with a Bool field."""
+        flip = advantage.side_flip_game(current_step, next_step)
+        if flip is None:
+            return ""
+        pair = self.definition_namespace.get(flip.name)
+        if not isinstance(pair, frog_ast.GameFile):
+            return ""
+        left, right = pair.games
+        flags = [
+            f.name
+            for f in left.fields
+            if isinstance(f.type, frog_ast.BoolType)
+            and any(
+                g.name == f.name and isinstance(g.type, frog_ast.BoolType)
+                for g in right.fields
+            )
+        ]
+        if not flags:
+            return ""
+        flag = flags[0]
+        return (
+            f"{flip} looks like an identical-until-{flag} pair; to hop over it,"
+            f" put \"lemma: event {flag} of {flip} by '<proof>';\" or"
+            f' "assume: event {flag} of {flip};" in scope'
+        )
 
     def _make_task(self, hop: _PreparedHop) -> _EquivalenceTask:
         """Build an _EquivalenceTask from a prepared hop."""
@@ -1266,6 +1406,8 @@ class ProofEngine:
         else:
             self._print_step_status(hop_desc, "FAILED", Fore.RED)
             self._print_failure_inline(equiv_result)
+            if hop.hint:
+                print(f"    {Fore.CYAN}Hint:{Fore.RESET} {hop.hint}")
         self.hop_results.append(
             HopResult(
                 step_num=hop.step_num,
@@ -1286,18 +1428,26 @@ class ProofEngine:
     ) -> None:
         """Print status and append to hop_results for an assumption/lemma hop."""
         self._current_step += 1
-        hop_label = "by lemma" if hop.kind == "by_lemma" else "by assumption"
+        hop_label = {
+            "by_lemma": "by lemma",
+            "by_upto": "up to bad",
+        }.get(hop.kind, "by assumption")
         if self.verbosity >= Verbosity.NORMAL:
             print(f"===STEP {hop.step_num}===")
             print(f"Current: {hop.current_desc}")
             print(f"Hop To: {hop.next_desc}\n")
-            print(f"Valid {hop_label}")
+            print(f"Valid {hop_label}" if not hop.failure else hop.failure)
         hop_desc = f"{hop.current_desc} -> {hop.next_desc}"
-        self._print_step_status(hop_desc, hop_label, Fore.CYAN)
+        if hop.failure:
+            self._print_step_status(hop_desc, f"FAILED ({hop_label})", Fore.RED)
+            print(f"    {Fore.YELLOW}{hop.failure}{Fore.RESET}")
+        else:
+            self._print_step_status(hop_desc, hop_label, Fore.CYAN)
         self.hop_results.append(
             HopResult(
                 step_num=hop.step_num,
-                valid=True,
+                valid=not hop.failure,
+                failure_detail=hop.failure,
                 kind=hop.kind,
                 depth=depth,
                 current_desc=hop.current_desc,
@@ -2205,6 +2355,19 @@ def _get_file_type_for_import(file_name: str) -> frog_ast.FileType:
     """Determine the file type from a file's extension."""
     extension = os.path.splitext(file_name)[1].strip(".")
     return frog_ast.FileType(extension)
+
+
+def _same_notion_shape(proven: frog_ast.Notion, claimed: frog_ast.Notion) -> bool:
+    """Whether a lemma file's theorem is the notion its lemma entry claims.
+
+    The kind (game or event), game name, flag, ``at Initialize`` and arity
+    must agree; arguments are the lemma file's own ``let:`` names, which the
+    entry instantiates.
+    """
+    if type(proven) is not type(claimed):
+        return False
+    key_p, key_c = frog_ast.notion_key(proven), frog_ast.notion_key(claimed)
+    return key_p.name == key_c.name and len(key_p.args) == len(key_c.args)
 
 
 def verify_proof_file(

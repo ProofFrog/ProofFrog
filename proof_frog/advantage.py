@@ -487,7 +487,9 @@ def synthesize_from_hops(hops: Sequence[HopInfo]) -> AdvantageBound:
     notes: list[str] = []
 
     for hop in hops:
-        if hop.kind not in ("by_assumption", "by_lemma") or hop.notion is None:
+        if hop.kind not in ("by_assumption", "by_lemma", "by_upto") or (
+            hop.notion is None
+        ):
             hop_terms.append(None)
             continue
         if hop.reduction is not None:

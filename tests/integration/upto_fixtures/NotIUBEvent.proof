@@ -1,0 +1,37 @@
+// Pr[bad] in NotIUB.Right, as for BadGuess (the Right sides agree).
+// when the adversary hits the hidden uniform target.
+import 'NotIUB.game';
+import 'RandomTargetGuessing.game';
+
+proof:
+
+let:
+    Set S;
+
+assume:
+    RandomTargetGuessing(S);
+
+theorem:
+    event bad of NotIUB(S);
+
+games:
+    NotIUB(S).Right against NotIUB(S).Adversary;
+    RandomTargetGuessing(S).Real  compose R(S) against NotIUB(S).Adversary;
+    RandomTargetGuessing(S).Ideal compose R(S) against NotIUB(S).Adversary;
+
+// R: forwards each guess to the challenger and raises bad on a hit.
+Reduction R(Set S) compose RandomTargetGuessing(S) against NotIUB(S).Adversary {
+    Bool bad;
+
+    Void Initialize() {
+        challenger.Initialize();
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (challenger.Eq(c)) {
+            bad = true;
+        }
+        return false;
+    }
+}

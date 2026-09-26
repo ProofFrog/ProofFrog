@@ -55,3 +55,39 @@ def test_event_chain_must_make_flag_unreachable() -> None:
     result = _run_prove("BadGuessEventNoChain.proof")
     assert result.returncode != 0, _out(result)
     assert "flag unreachable  FAILED" in result.stdout
+
+
+def test_upto_hop_by_lemma() -> None:
+    result = _run_prove("outer.proof")
+    assert result.returncode == 0, _out(result)
+    assert "up to bad" in result.stdout and "Proof Succeeded" in result.stdout
+    assert "Pr[bad of BadGuess(S)](B1)" in result.stdout, _out(result)
+
+
+def test_upto_hop_skip_lemmas_stays_upto() -> None:
+    result = _run_prove("outer.proof", "--skip-lemmas")
+    assert result.returncode == 0, _out(result)
+    assert "up to bad" in result.stdout
+
+
+def test_no_licence_fails_with_hint() -> None:
+    result = _run_prove("outer_no_licence.proof")
+    assert result.returncode != 0, _out(result)
+    assert "event bad of BadGuess" in result.stdout, _out(result)
+
+
+def test_not_iub_fails_at_the_hop() -> None:
+    result = _run_prove("outer_not_iub.proof")
+    assert result.returncode != 0, _out(result)
+    assert "Lemma verified" in result.stdout, _out(result)
+    assert "Step 2 failed" in result.stdout, _out(result)
+    assert "Eq" in result.stdout and "line" in result.stdout, _out(result)
+
+
+def test_lemma_file_must_prove_the_entry() -> None:
+    result = _run_prove("outer_wrong_lemma.proof")
+    assert result.returncode != 0, _out(result)
+    assert (
+        "proves 'event bad of NotIUB(S)', not 'event bad of BadGuess(S)'"
+        in result.stdout + result.stderr
+    ), _out(result)

@@ -85,10 +85,10 @@ class ProofContext:
 
     # pylint: enable=duplicate-code
 
-    def assumptions(self) -> list[frog_ast.ParameterizedGame]:
+    def assumptions(self) -> list[frog_ast.Notion]:
         return list(self.proof_file.assumptions)
 
-    def theorem(self) -> frog_ast.ParameterizedGame:
+    def theorem(self) -> frog_ast.Notion:
         return self.proof_file.theorem
 
     def claimed_bound(self) -> frog_ast.Expression | None:
@@ -105,9 +105,8 @@ class ProofContext:
 
     def _referenced_game_names(self) -> list[str]:
         names: list[str] = []
-        for game in [*self.proof_file.assumptions, self.proof_file.theorem]:
-            if isinstance(game, frog_ast.ParameterizedGame):
-                names.append(game.name)
+        for notion in [*self.proof_file.assumptions, self.proof_file.theorem]:
+            names.append(frog_ast.notion_game(notion).name)
         for step in self.proof_file.steps:
             if isinstance(step, frog_ast.Step):
                 challenger = step.challenger
@@ -238,6 +237,8 @@ class ProofContext:
         hop is a perfect equivalence. Mirrors the engine's synthesis so the
         LaTeX theorem statement and the CLI report the same bound.
         """
-        assumed = {a.name for a in self.proof_file.assumptions}
-        assumed |= {lemma.game.name for lemma in self.proof_file.lemmas}
+        assumed = {frog_ast.notion_key(a).name for a in self.proof_file.assumptions}
+        assumed |= {
+            frog_ast.notion_key(lemma.game).name for lemma in self.proof_file.lemmas
+        }
         return advantage.synthesize_from_steps(self.proof_file.steps, assumed)

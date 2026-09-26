@@ -656,6 +656,10 @@ class ProofEngine:
     def prove(self, proof_file: frog_ast.ProofFile, proof_path: str = "") -> None:
         self.set_up_proof_context(proof_file)
 
+        if isinstance(proof_file.theorem, frog_ast.EventTheorem):
+            raise FailedProof("event theorems are not supported yet")
+        theorem = proof_file.theorem
+
         first_step = proof_file.steps[0]
         final_step = proof_file.steps[-1]
 
@@ -667,7 +671,7 @@ class ProofEngine:
         assert isinstance(first_step.challenger, frog_ast.ConcreteGame)
         assert isinstance(final_step.challenger, frog_ast.ConcreteGame)
 
-        if first_step.challenger.game != proof_file.theorem:
+        if first_step.challenger.game != theorem:
             print(
                 Fore.RED
                 + "Proof must start with a game matching the theorem's security game"
@@ -680,7 +684,7 @@ class ProofEngine:
             )
 
         # Process lemmas: verify each lemma proof and add its theorem as an assumption
-        effective_assumptions = list(proof_file.assumptions)
+        effective_assumptions = [frog_ast.notion_key(a) for a in proof_file.assumptions]
         lemma_games: set[str] = set()
         for lemma in proof_file.lemmas:
             if self.skip_lemmas:
@@ -688,8 +692,8 @@ class ProofEngine:
                     f"{Fore.CYAN}Lemma: {lemma.game} "
                     f"by '{lemma.proof_path}' ... skipped{Fore.RESET}\n"
                 )
-                effective_assumptions.append(lemma.game)
-                lemma_games.add(str(lemma.game))
+                effective_assumptions.append(frog_ast.notion_key(lemma.game))
+                lemma_games.add(str(frog_ast.notion_key(lemma.game)))
                 continue
 
             lemma_path = os.path.join(os.path.dirname(proof_path), lemma.proof_path)
@@ -706,8 +710,8 @@ class ProofEngine:
                 print(f"{Fore.RED}Lemma FAILED: {e}{Fore.RESET}")
                 raise FailedProof(f"Lemma {lemma.game} failed verification") from e
 
-            effective_assumptions.append(lemma.game)
-            lemma_games.add(str(lemma.game))
+            effective_assumptions.append(frog_ast.notion_key(lemma.game))
+            lemma_games.add(str(frog_ast.notion_key(lemma.game)))
 
         print(f"Theorem: {proof_file.theorem}\n")
 
@@ -748,7 +752,7 @@ class ProofEngine:
                 definition_lookup=self.definition_namespace,
                 max_calls=proof_file.max_calls,
             )
-            self._print_advantage_bound(proof_file.theorem)
+            self._print_advantage_bound(theorem)
             if not self._check_claimed_bound(proof_file):
                 raise FailedProof()
             print(Fore.GREEN + "Proof Succeeded!" + Fore.RESET)

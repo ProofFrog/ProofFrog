@@ -18,7 +18,7 @@ boundExpression
 	| boundExpression PLUS boundExpression                  #boundAdd
 	| boundExpression SUBTRACT boundExpression              #boundSubtract
 	| VBAR type VBAR                                        #boundCardinality
-	| ADVANTAGE L_PAREN parameterizedGame (COMPOSE reductionRef)? R_PAREN #boundAdvantage
+	| ADVANTAGE L_PAREN notion (COMPOSE reductionRef)? R_PAREN #boundAdvantage
 	| lvalue                                                #boundLvalue
 	| INT                                                   #boundInt
 	| L_PAREN boundExpression R_PAREN                       #boundParen
@@ -36,12 +36,20 @@ letEntry: field                                    # letField
 	| variable SAMPLES expression                  # letSample
 	;
 
-assumptions: (parameterizedGame SEMI)* (CALLS (LEQ|L_ANGLE) expression SEMI)?;
+assumptions: (notion SEMI)* (CALLS (LEQ|L_ANGLE) expression SEMI)?;
 
 lemmas: lemmaEntry*;
-lemmaEntry: parameterizedGame BY FILESTRING SEMI;
+lemmaEntry: notion BY FILESTRING SEMI;
 
-theorem: parameterizedGame SEMI;
+theorem: notion SEMI;
+
+// A security notion: a game pair, or the event that a Bool flag of a game
+// pair is set (`event bad of P(a)`, optionally `at Initialize`).
+notion: parameterizedGame  # gameNotion
+	| eventTheorem         # eventNotion
+	;
+
+eventTheorem: EVENT id OF parameterizedGame (AT id)?;
 
 gameList: gameStep SEMI (gameStep SEMI|induction|stepAssumption)*;
 
@@ -78,3 +86,6 @@ FROM: 'from';
 REQUIRES: 'requires';
 IS: 'is';
 PRIME: 'prime';
+EVENT: 'event';
+OF: 'of';
+AT: 'at';

@@ -904,6 +904,49 @@ class ParameterizedGame(Expression):
         return f"{self.name}({arg_str})"
 
 
+class EventTheorem(Expression):
+    """``event <flag> of <game>``: the event that ``<flag>`` is set in ``<game>``.
+
+    Appears as a proof's theorem (proven by a chain from one side of the
+    game pair), as a lemma or assumption entry, and inside ``advantage(...)``
+    in a claimed bound. ``at_initialize`` marks the output-stripped form for
+    a flag decided in ``Initialize``. The engine keys every event on
+    :meth:`notion`, a synthetic ``ParameterizedGame`` whose name cannot
+    collide with a user game (``#`` is not an identifier character).
+    """
+
+    def __init__(
+        self, flag: str, game: ParameterizedGame, at_initialize: bool = False
+    ) -> None:
+        super().__init__()
+        self.flag = flag
+        self.game = game
+        self.at_initialize = at_initialize
+
+    def notion(self) -> ParameterizedGame:
+        suffix = "#init" if self.at_initialize else ""
+        return ParameterizedGame(
+            f"{self.game.name}#event#{self.flag}{suffix}", list(self.game.args)
+        )
+
+    def __str__(self) -> str:
+        suffix = " at Initialize" if self.at_initialize else ""
+        return f"event {self.flag} of {self.game}{suffix}"
+
+
+Notion: TypeAlias = ParameterizedGame | EventTheorem
+
+
+def notion_key(notion: Notion) -> ParameterizedGame:
+    """The game the engine keys a notion on: the synthetic one for an event."""
+    return notion.notion() if isinstance(notion, EventTheorem) else notion
+
+
+def notion_game(notion: Notion) -> ParameterizedGame:
+    """The user-written game pair a notion is about."""
+    return notion.game if isinstance(notion, EventTheorem) else notion
+
+
 class ConcreteGame(Expression):
     def __init__(self, game: ParameterizedGame, which: str):
         super().__init__()
@@ -977,7 +1020,7 @@ class AdvantageReference(Expression):
 
     def __init__(
         self,
-        notion: "ParameterizedGame",
+        notion: "Notion",
         reduction: Optional["ParameterizedGame"] = None,
     ) -> None:
         super().__init__()
@@ -1102,7 +1145,7 @@ ProofStep: TypeAlias = Step | Induction | StepAssumption
 class Lemma(ASTNode):
     """A lemma entry: a security property proven by another proof file."""
 
-    def __init__(self, game: ParameterizedGame, proof_path: str) -> None:
+    def __init__(self, game: ParameterizedGame | EventTheorem, proof_path: str) -> None:
         super().__init__()
         self.game = game
         self.proof_path = proof_path
@@ -1134,10 +1177,10 @@ class ProofFile(Root):
         imports: list[Import],
         helpers: list[Game],
         lets: list[Field],
-        assumptions: list[ParameterizedGame],
+        assumptions: list[ParameterizedGame | EventTheorem],
         lemmas: list[Lemma],
         max_calls: Optional[Variable],
-        theorem: ParameterizedGame,
+        theorem: ParameterizedGame | EventTheorem,
         steps: list[ProofStep],
         requirements: Optional[list[StructuralRequirement]] = None,
         helpers_after_theorem_count: int = 0,

@@ -118,3 +118,19 @@ def test_event_claimed_bound_exports() -> None:
     theorem = out[out.index(r"\begin{theorem}") : out.index(r"\end{theorem}")]
     assert r"\Pr[" in theorem and r"\mathit{bad}" in theorem
     assert "#event" not in out and "silenced" not in out
+
+
+@pytest.mark.parametrize("mode", ["symbolic", "inlined"])
+def test_rfrp_switching_exports(mode: str) -> None:
+    from proof_frog.export.latex.exporter import export_file
+
+    out = export_file(
+        str(REPO / "examples/Proofs/PRP/RFRP_Switching.proof"), composition=mode
+    )
+    assert "identical until" in out and r"\mathit{bad}" in out
+    event = export_file(
+        str(REPO / "examples/Proofs/PRP/RFRP_Switching_Event.proof"),
+        composition=mode,
+    )
+    theorem = event[event.index(r"\begin{theorem}") : event.index(r"\end{theorem}")]
+    assert r"\Pr[\mathit{bad}" in theorem

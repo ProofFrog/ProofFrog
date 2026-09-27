@@ -308,3 +308,44 @@ def test_f346_rhs_local_captured_by_oracle_parameter_not_folded() -> None:
         """)
     assert result == game
     assert any("bound in this method" in nm.reason for nm in ctx.near_misses)
+
+
+def test_definition_skipped_by_earlier_initialize_return_not_expanded() -> None:
+    """An earlier top-level ``if (c) { return ...; }`` in Initialize can skip
+    the definition, leaving the field at its initial value."""
+    game, result, _ = _fold("""
+        Game G(D F, Int n) {
+            BitString<n> k; BitString<n> G;
+            Bool Initialize() {
+                k <- BitString<n>;
+                Bool c <- Bool;
+                if (c) { return true; }
+                G = F.eval(k);
+                return false;
+            }
+            BitString<n> O(Bool flag) { if (flag) { return G; } return F.eval(k); }
+        }
+        """)
+    assert result == game
+
+
+
+def test_definition_not_expanded_inside_initialize() -> None:
+    """A fold site in Initialize may run before the definition."""
+    game, result, _ = _fold("""
+        Game G(D F, Int n) {
+            BitString<n> k; BitString<n> G;
+            BitString<n> Initialize() {
+                k <- BitString<n>;
+                Bool c <- Bool;
+                Bool d <- Bool;
+                if (c) {
+                    if (d) { return G; }
+                    return F.eval(k);
+                }
+                G = F.eval(k);
+                return G;
+            }
+        }
+        """)
+    assert result == game

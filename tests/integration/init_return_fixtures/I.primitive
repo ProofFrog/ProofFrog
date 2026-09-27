@@ -1,0 +1,3 @@
+Primitive I(Int n) {
+    deterministic injective BitString<n> inj(BitString<n> x);
+}

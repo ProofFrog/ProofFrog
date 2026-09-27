@@ -1,0 +1,31 @@
+// y = H(cf) is evaluated BEFORE H is sampled, so y = F0(cf) for the known
+// function F0; the adversary sees cf and y and checks y == F0(cf).
+Game Left(Int n, Function<BitString<n>, BitString<n>> F0) {
+    Function<BitString<n>, BitString<n>> H = F0;
+    BitString<n> cf = 0^n;
+    BitString<n> y = 0^n;
+    Void Initialize() {
+        cf <- BitString<n>;
+        y = H(cf);
+        H <- Function<BitString<n>, BitString<n>>;
+    }
+    [BitString<n>, BitString<n>] Get() {
+        return [cf, y];
+    }
+}
+
+Game Right(Int n, Function<BitString<n>, BitString<n>> F0) {
+    Function<BitString<n>, BitString<n>> H = F0;
+    BitString<n> cf = 0^n;
+    BitString<n> y = 0^n;
+    Void Initialize() {
+        cf <- BitString<n>;
+        y <- BitString<n>;
+        H <- Function<BitString<n>, BitString<n>>;
+    }
+    [BitString<n>, BitString<n>] Get() {
+        return [cf, y];
+    }
+}
+
+export as Chal;

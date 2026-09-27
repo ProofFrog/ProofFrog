@@ -33,6 +33,7 @@ from ._base import (
     NearMiss,
     has_nondeterministic_call,
     _lookup_primitive_method,
+    may_return_before,
     method_bound_names,
 )
 from ._ordering import node_sort_key
@@ -1718,9 +1719,15 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         self.local_funccall_bindings: dict[str, frog_ast.FuncCall] = {}
         # Names the method being transformed binds (F-347).
         self._bound_names: set[str] = set()
+        self._in_initialize = False
+        self._type_map = NameTypeMap()
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
         self._bound_names = method_bound_names(method)
+        self._in_initialize = method.signature.name == "Initialize"
+        self._type_map = build_method_type_map(
+            self.game, method, self.ctx.proof_let_types
+        )
         bindings, reassigned = _scan_top_level_single_writes(
             method.block,
             value_predicate=lambda v: isinstance(v, frog_ast.FuncCall),
@@ -1828,6 +1835,28 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
                 )
             )
             return transformed
+        # F-348: each pair is compared at the arguments' own type, which must
+        # be the parameter's: an Int passed to a ModInt<q> parameter is
+        # reduced mod q, so `encm(1) == encm(q + 1)` is not `1 == q + 1`.
+        for param, a, b in zip(method.parameters, left.args, right.args):
+            if not self._compared_at_parameter_type(param.type, a, b):
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Injective Equality Simplify",
+                        reason=(
+                            f"comparison of calls to '{method.name}' did not "
+                            f"simplify: an argument for parameter '{param.name}' "
+                            f"may not have its type {param.type}"
+                        ),
+                        location=binary_operation.origin,
+                        suggestion=(
+                            "Store the argument in a variable of the parameter's type"
+                        ),
+                        variable=None,
+                        method=method.name,
+                    )
+                )
+                return transformed
         pair_op = op  # EQUALS or NOTEQUALS
         combiner = (
             frog_ast.BinaryOperators.AND
@@ -1842,6 +1871,24 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         for pair in pairs[1:]:
             result = frog_ast.BinaryOperation(combiner, result, pair)
         return result
+
+    def _compared_at_parameter_type(
+        self,
+        param_type: frog_ast.Type,
+        a: frog_ast.Expression,
+        b: frog_ast.Expression,
+    ) -> bool:
+        """True if ``a == b`` decides equality in *param_type* (F-348)."""
+        a_type = _get_expression_type(a, self._type_map)
+        b_type = _get_expression_type(b, self._type_map)
+        if isinstance(param_type, frog_ast.ModIntType):
+            return isinstance(a_type, frog_ast.ModIntType) and a_type == b_type
+        if isinstance(param_type, frog_ast.IntType):
+            return True
+        # A type name may stand for a ModInt; an Int argument would coerce.
+        return not isinstance(a_type, frog_ast.IntType) and not isinstance(
+            b_type, frog_ast.IntType
+        )
 
     def _try_wrapper_simplification(
         self,
@@ -1995,6 +2042,11 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
                 rhs = stmt.value
                 def_idx = idx
         if rhs is None:
+            return expr
+        # F-349: the definition must have run at the comparison site. In
+        # Initialize the site may precede it; elsewhere an earlier return in
+        # Initialize may have skipped it, leaving the initial value.
+        if self._in_initialize or may_return_before(init.block.statements, def_idx):
             return expr
         # The top-level definition must be the field's only write in
         # Initialize (a nested rewrite, e.g. under an `if`, may replace it).

@@ -9,7 +9,7 @@ import dataclasses
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 from sympy import Symbol
 
@@ -329,3 +329,20 @@ def method_bound_names(method: frog_ast.Method) -> set[str]:
 
     SearchVisitor(_collect).visit(method.block)
     return names
+
+
+def may_return_before(statements: Sequence[frog_ast.Statement], index: int) -> bool:
+    """True if a statement of *statements* before *index* contains a
+    ``return`` (at any depth), i.e. the statement at *index* may be skipped.
+
+    A pass that trusts a top-level Initialize definition ``f = e`` at
+    *index* (reading ``f`` elsewhere as ``e``) must check this: an earlier
+    ``if (c) { return ...; }`` ends Initialize with ``f`` still at its
+    initial value (audit F-349)."""
+
+    def _is_return(node: frog_ast.ASTNode) -> bool:
+        return isinstance(node, frog_ast.ReturnStatement)
+
+    return any(
+        SearchVisitor(_is_return).visit(stmt) is not None for stmt in statements[:index]
+    )

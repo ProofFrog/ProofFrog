@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .. import frog_ast
 from ..visitors import SearchVisitor, lvalue_base_name
+from ._base import may_return_before
 
 
 def _set_contains_literal_zero(expr: frog_ast.Expression) -> bool:
@@ -31,7 +32,10 @@ def is_known_nonzero(var_name: str, game: frog_ast.Game) -> bool:
       field would stay at its default (F-136 variant B); and
     * NO other write to the field exists anywhere -- a later ``k = 0``, a plain
       sample, a ``<-uniq`` without ``0``, or any write outside ``Initialize``
-      voids the guarantee (F-136 variant A).
+      voids the guarantee (F-136 variant A); and
+    * the sample must run before every read (F-349): it is a top-level
+      statement of ``Initialize`` (not under an ``if``), no earlier statement
+      may return, and no earlier statement reads the field.
     """
     if var_name not in {f.name for f in game.fields}:
         return False
@@ -64,10 +68,32 @@ def is_known_nonzero(var_name: str, game: frog_ast.Game) -> bool:
             is_uniq_zero = isinstance(
                 write, frog_ast.UniqueSample
             ) and _set_contains_literal_zero(write.unique_set)
-            if in_initialize and is_uniq_zero:
+            if (
+                in_initialize
+                and is_uniq_zero
+                and _runs_before_every_read(method, write, var_name)
+            ):
                 has_nonzero_sample = True
             else:
                 # Any non-uniq-zero write, or any write outside Initialize, may
                 # leave the field zero or unknown.
                 return False
     return has_nonzero_sample
+
+
+def _runs_before_every_read(
+    initialize: frog_ast.Method, sample: frog_ast.Statement, var_name: str
+) -> bool:
+    """True if *sample* is a top-level statement of *initialize* that no
+    earlier statement can skip (by returning) or precede with a read."""
+    stmts = initialize.block.statements
+    index = next((i for i, s in enumerate(stmts) if s is sample), None)
+    if index is None:
+        return False
+
+    def _reads(node: frog_ast.ASTNode) -> bool:
+        return isinstance(node, frog_ast.Variable) and node.name == var_name
+
+    return not may_return_before(stmts, index) and not any(
+        SearchVisitor(_reads).visit(s) is not None for s in stmts[:index]
+    )

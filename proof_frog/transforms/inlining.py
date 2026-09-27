@@ -28,6 +28,7 @@ from ..visitors import (
     lvalue_base_name,
 )
 from ._base import (
+    method_bound_names as _method_bound_names,
     TransformPass,
     PipelineContext,
     has_nondeterministic_call,
@@ -114,37 +115,6 @@ def _is_loop_binder(node: frog_ast.ASTNode, name: str) -> bool:
         )
 
     return SearchVisitor(_check).visit(node) is not None
-
-
-def _method_bound_names(method: frog_ast.Method) -> set[str]:
-    """The set of names *method* binds locally, i.e. introduces a NEW binding
-    for: signature parameters, typed local declarations / samples
-    (``T x = ...`` / ``T x <- ...``), and ``for`` binders.
-
-    A plain write to an existing name (``x = ...`` / ``M[k] <- ...`` with no
-    declared type) is NOT a binding -- it mutates the field/local already in
-    scope and does not create a capturing shadow. A name in this set, when it
-    occurs inside *method*, refers to the local binding rather than any
-    same-named game field/parameter, so a name-based mover that trusts
-    field/param membership must treat it as shadowed (audit RC4:
-    F-173/F-178/F-190/F-228)."""
-    names = {p.name for p in method.signature.parameters}
-
-    def _collect(n: frog_ast.ASTNode) -> bool:
-        if isinstance(n, frog_ast.NumericFor):
-            names.add(n.name)
-        elif isinstance(n, frog_ast.GenericFor):
-            names.add(n.var_name)
-        elif (
-            isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
-            and getattr(n, "the_type", None) is not None
-            and isinstance(n.var, frog_ast.Variable)
-        ):
-            names.add(n.var.name)
-        return False
-
-    SearchVisitor(_collect).visit(method.block)
-    return names
 
 
 def _name_shadowed_in_method(method: frog_ast.Method, name: str) -> bool:

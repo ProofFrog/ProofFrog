@@ -2508,3 +2508,29 @@ def test_fold_equivalent_return_branch_near_miss_on_rebound_init_local():
         and "Initialize local(s) x" in nm.reason
         for nm in ctx.near_misses
     )
+
+
+def test_fold_equivalent_return_branch_near_miss_on_rhs_field_written_later():
+    """F-345: a field the Init-only RHS reads is written after the definition."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive D(Int n) { deterministic BitString<n> eval(BitString<n> x); }"
+    )
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"D": prim, "F": prim},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(D F, Int n) {
+            BitString<n> k; BitString<n> G1;
+            Void Initialize() { G1 = F.eval(k); k <- BitString<n>; }
+            BitString<n> O(Bool flag) { if (flag) { return G1; } return F.eval(k); }
+        }
+        """)
+    FoldEquivalentReturnBranch().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Fold Equivalent Return Branch"
+        and "after the definition" in nm.reason
+        for nm in ctx.near_misses
+    )

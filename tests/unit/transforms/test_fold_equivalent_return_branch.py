@@ -243,3 +243,68 @@ def test_f342_single_assignment_init_local_still_folds() -> None:
     ctx = _ctx_with(D=prim, F=prim)
     result = FoldEquivalentReturnBranch().apply(game, ctx)
     assert result != game
+
+
+def _fold(source: str) -> tuple[object, object, PipelineContext]:
+    prim = frog_parser.parse_primitive_file(
+        "Primitive D(Int n) { deterministic BitString<n> eval(BitString<n> x); }"
+    )
+    game = frog_parser.parse_game(source)
+    ctx = _ctx_with(D=prim, F=prim)
+    return game, FoldEquivalentReturnBranch().apply(game, ctx), ctx
+
+
+def test_f345_rhs_field_written_only_in_oracle_not_folded() -> None:
+    """F-345: ``G = F.eval(k)`` in Initialize, but ``k`` is written (once) in
+    another oracle; at the fold site ``F.eval(k)`` need not equal ``G``."""
+    game, result, _ = _fold("""
+        Game G(D F, Int n) {
+            BitString<n> k; BitString<n> G;
+            Void Initialize() { G = F.eval(k); }
+            Void SetK() { k <- BitString<n>; }
+            BitString<n> O(Bool flag) { if (flag) { return G; } return F.eval(k); }
+        }
+        """)
+    assert result == game
+
+
+def test_f345_rhs_field_written_after_definition_not_folded() -> None:
+    """F-345: ``G = F.eval(k); k <- ...;`` -- G is the image of the old k."""
+    game, result, _ = _fold("""
+        Game G(D F, Int n) {
+            BitString<n> k; BitString<n> G;
+            Void Initialize() { G = F.eval(k); k <- BitString<n>; }
+            BitString<n> O(Bool flag) { if (flag) { return G; } return F.eval(k); }
+        }
+        """)
+    assert result == game
+
+
+def test_f345_rhs_field_written_before_definition_still_folds() -> None:
+    """F-345 control: ``k <- ...; G = F.eval(k);`` with no other write of k."""
+    game, result, _ = _fold("""
+        Game G(D F, Int n) {
+            BitString<n> k; BitString<n> G;
+            Void Initialize() { k <- BitString<n>; G = F.eval(k); }
+            BitString<n> O(Bool flag) { if (flag) { return G; } return F.eval(k); }
+        }
+        """)
+    assert result != game
+
+
+def test_f346_rhs_local_captured_by_oracle_parameter_not_folded() -> None:
+    """F-346: the Initialize local ``x`` in ``G = F.eval(x)`` has the same name
+    as the oracle's parameter ``x``; expanding G at the fold site would read
+    the parameter."""
+    game, result, ctx = _fold("""
+        Game G(D F, Int n) {
+            BitString<n> G;
+            Void Initialize() { BitString<n> x <- BitString<n>; G = F.eval(x); }
+            BitString<n> O(BitString<n> x, Bool c) {
+                if (c) { return G; }
+                return F.eval(x);
+            }
+        }
+        """)
+    assert result == game
+    assert any("bound in this method" in nm.reason for nm in ctx.near_misses)

@@ -15,7 +15,7 @@ from sympy import Symbol
 
 from .. import frog_ast
 from ..frog_ast import SourceOrigin
-from ..visitors import NameTypeMap
+from ..visitors import NameTypeMap, SearchVisitor
 
 _MAX_FIXED_POINT_ITERATIONS = 200
 
@@ -131,7 +131,6 @@ def has_nondeterministic_call(
     let-``Function`` classification is NOT applied (the call is treated as
     potentially non-deterministic).
     """
-    from ..visitors import SearchVisitor  # pylint: disable=import-outside-toplevel
 
     def _is_nondeterministic_call(node: frog_ast.ASTNode) -> bool:
         if not isinstance(node, frog_ast.FuncCall):
@@ -299,3 +298,34 @@ def run_pipeline_until(
             return game, game != before, available_names
 
     return game, False, available_names
+
+
+def method_bound_names(method: frog_ast.Method) -> set[str]:
+    """The set of names *method* binds locally, i.e. introduces a NEW binding
+    for: signature parameters, typed local declarations / samples
+    (``T x = ...`` / ``T x <- ...``), and ``for`` binders.
+
+    A plain write to an existing name (``x = ...`` / ``M[k] <- ...`` with no
+    declared type) is NOT a binding -- it mutates the field/local already in
+    scope and does not create a capturing shadow. A name in this set, when it
+    occurs inside *method*, refers to the local binding rather than any
+    same-named game field/parameter, so a name-based mover that trusts
+    field/param membership must treat it as shadowed (audit RC4:
+    F-173/F-178/F-190/F-228)."""
+    names = {p.name for p in method.signature.parameters}
+
+    def _collect(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.NumericFor):
+            names.add(n.name)
+        elif isinstance(n, frog_ast.GenericFor):
+            names.add(n.var_name)
+        elif (
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+            and getattr(n, "the_type", None) is not None
+            and isinstance(n.var, frog_ast.Variable)
+        ):
+            names.add(n.var.name)
+        return False
+
+    SearchVisitor(_collect).visit(method.block)
+    return names

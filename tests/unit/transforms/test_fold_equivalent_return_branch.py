@@ -409,3 +409,108 @@ def test_init_local_shadowing_field_not_expanded() -> None:
         }
     """)
     assert result == game
+
+
+def _fold_prim(prim_src: str, source: str) -> tuple[object, object]:
+    prim = frog_parser.parse_primitive_file(prim_src)
+    game = frog_parser.parse_game(source)
+    return game, FoldEquivalentReturnBranch().apply(game, _ctx_with(E=prim, F=prim))
+
+
+def test_injectivity_fact_not_emitted_for_tuple_arguments() -> None:
+    """Tuple arguments are encoded as Python tuples; comparing them must not
+    turn the fact into ``D(x) == D(y) => False``."""
+    game, result = _fold_prim(
+        "Primitive E(Int n) { deterministic injective BitString<n>"
+        " inj([BitString<n>, BitString<n>] x); }",
+        """
+        Game G(E F, Int n) {
+            Bool O(BitString<n> z, BitString<n> a, BitString<n> b,
+                   BitString<n> c, BitString<n> d) {
+                if (z == F.inj([a, b])) {
+                    return z == F.inj([c, d]);
+                }
+                return false;
+            }
+        }
+        """,
+    )
+    assert result == game
+
+
+def test_injectivity_fact_not_emitted_for_modint_integer_arguments() -> None:
+    """``encm(1)`` and ``encm(q + 1)`` are equal in ModInt<q>; Z3's integer
+    encoding of the arguments would conclude ``1 == q + 1``."""
+    game, result = _fold_prim(
+        "Primitive E(Int q, Int n) { deterministic injective BitString<n>"
+        " encm(ModInt<q> x); }",
+        """
+        Game G(E F, Int q, Int n) {
+            Bool O(BitString<n> z) {
+                if (z == F.encm(1) && q > 5) {
+                    return z == F.encm(q + 1);
+                }
+                return false;
+            }
+        }
+        """,
+    )
+    assert result == game
+
+
+def test_definition_skipped_by_earlier_initialize_return_not_expanded() -> None:
+    """An earlier top-level ``if (c) { return ...; }`` in Initialize can skip
+    the definition, leaving the field at its initial value."""
+    game, result, _ = _fold("""
+        Game G(D F, Int n) {
+            BitString<n> k; BitString<n> G;
+            Bool Initialize() {
+                k <- BitString<n>;
+                Bool c <- Bool;
+                if (c) { return true; }
+                G = F.eval(k);
+                return false;
+            }
+            BitString<n> O(Bool flag) { if (flag) { return G; } return F.eval(k); }
+        }
+        """)
+    assert result == game
+
+
+def test_comparison_definition_skipped_by_earlier_return_not_expanded() -> None:
+    game, result, _ = _fold("""
+        Game G(D F, Int n) {
+            BitString<n> a; BitString<n> b; Bool E;
+            Bool Initialize() {
+                a <- BitString<n>;
+                b <- BitString<n>;
+                Bool c <- Bool;
+                if (c) { return true; }
+                E = a == b;
+                return false;
+            }
+            Bool O(Bool flag) { if (flag) { return E; } return a == b; }
+        }
+        """)
+    assert result == game
+
+
+def test_definition_not_expanded_inside_initialize() -> None:
+    """A fold site in Initialize may run before the definition."""
+    game, result, _ = _fold("""
+        Game G(D F, Int n) {
+            BitString<n> k; BitString<n> G;
+            BitString<n> Initialize() {
+                k <- BitString<n>;
+                Bool c <- Bool;
+                Bool d <- Bool;
+                if (c) {
+                    if (d) { return G; }
+                    return F.eval(k);
+                }
+                G = F.eval(k);
+                return G;
+            }
+        }
+        """)
+    assert result == game

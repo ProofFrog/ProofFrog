@@ -24,6 +24,7 @@ from ..visitors import (
     SubstitutionTransformer,
     VariableCollectionVisitor,
     Z3FormulaVisitor,
+    _OPAQUE_Z3_SORT,
     GetTypeMapVisitor,
     NameTypeMap,
     lvalue_base_name,
@@ -2266,15 +2267,19 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
         # Names the method being transformed binds (F-346): an expansion
         # whose free names include one of them would be captured there.
         self._bound_names: set[str] = set()
+        self._in_initialize = False
         if isinstance(ast, frog_ast.Game):
             self._init_field_rhs = self._collect_init_field_rhs(ast)
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
         self._bound_names = method_bound_names(method)
+        # Inside Initialize a fold site may run before a definition.
+        self._in_initialize = method.signature.name == "Initialize"
         try:
             return self._transform_children(method)
         finally:
             self._bound_names = set()
+            self._in_initialize = False
 
     def _injectivity_facts(
         self, visitor: Z3FormulaVisitor, exprs: Sequence[frog_ast.Expression]
@@ -2285,29 +2290,37 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
         inputs give distinct outputs); the pass already refuses inputs with
         non-deterministic calls, so each call denotes one value.
         """
-        calls: list[frog_ast.FuncCall] = []
+        calls: list[tuple[frog_ast.FuncCall, frog_ast.MethodSignature]] = []
         for expr in exprs:
             for node in _walk_nodes(expr):
                 if isinstance(node, frog_ast.FuncCall) and node.args:
                     method = _lookup_primitive_method(
                         node.func, self.ctx.proof_namespace
                     )
-                    if method is not None and method.injective:
-                        calls.append(node)
+                    if (
+                        method is not None
+                        and method.injective
+                        and len(method.parameters) == len(node.args)
+                    ):
+                        calls.append((node, method))
         facts = []
-        for i, first in enumerate(calls):
-            for second in calls[i + 1 :]:
+        for i, (first, method) in enumerate(calls):
+            for second, _ in calls[i + 1 :]:
                 if first.func != second.func or first == second:
                     continue
-                if len(first.args) != len(second.args):
-                    continue
                 encoded = [visitor.visit(first), visitor.visit(second)]
-                arg_pairs = [
-                    (visitor.visit(a), visitor.visit(b))
-                    for a, b in zip(first.args, second.args)
-                ]
-                terms = encoded + [t for pair in arg_pairs for t in pair]
-                if any(t is None or isinstance(t, str) for t in terms):
+                arg_pairs = []
+                for param, a, b in zip(method.parameters, first.args, second.args):
+                    pair = (
+                        _faithful_z3_term(visitor.visit(a), param.type),
+                        _faithful_z3_term(visitor.visit(b), param.type),
+                    )
+                    if pair[0] is None or pair[1] is None:
+                        break
+                    arg_pairs.append(pair)
+                if len(arg_pairs) != len(method.parameters):
+                    continue
+                if not all(isinstance(t, z3.ExprRef) for t in encoded):
                     continue
                 try:
                     facts.append(
@@ -2324,6 +2337,8 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
         self,
     ) -> list[tuple[frog_ast.Variable, frog_ast.Expression]]:
         """The Initialize definitions whose names mean the same here (F-346)."""
+        if self._in_initialize:
+            return []
         usable = []
         for field_var, rhs in self._init_field_rhs:
             captured = sorted(
@@ -2385,6 +2400,15 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             # A definition is a call (`F = D(x)`) or a comparison
             # (`F = a == b`, e.g. an identical-until-bad flag folded by
             # FlagSetToAssignment).
+            # The definition must run whenever Initialize completes: an
+            # earlier statement that can return would skip it, leaving the
+            # field at its initial value.
+            if any(
+                isinstance(node, frog_ast.ReturnStatement)
+                for earlier in init.block.statements[:def_index]
+                for node in _walk_nodes(earlier)
+            ):
+                continue
             if not isinstance(stmt.value, frog_ast.FuncCall) and not (
                 isinstance(stmt.value, frog_ast.BinaryOperation)
                 and stmt.value.operator
@@ -2696,6 +2720,33 @@ def _local_value_count(node: frog_ast.ASTNode, name: str) -> int:
 
     SearchVisitor(_other_writes).visit(node)
     return count
+
+
+def _faithful_z3_term(term: object, param_type: frog_ast.Type) -> Any:
+    """*term* as a Z3 expression denoting the argument's actual value, or None.
+
+    An injectivity fact concludes that the Z3 encodings of two arguments are
+    equal, which is sound only if each encoding denotes the argument's real
+    value: an ``Int`` or ``Bool`` term for a parameter of that type, or an
+    opaque constant otherwise. Anything else (a Python tuple for a product,
+    integer arithmetic standing for a ``ModInt`` value, which Z3 would not
+    reduce mod q) is refused.
+    """
+    if isinstance(param_type, frog_ast.IntType):
+        if isinstance(term, bool):
+            return None
+        if isinstance(term, int):
+            return z3.IntVal(term)
+        if isinstance(term, z3.ArithRef) and term.is_int():
+            return term
+        return None
+    if isinstance(param_type, frog_ast.BoolType):
+        if isinstance(term, bool):
+            return z3.BoolVal(term)
+        return term if isinstance(term, z3.BoolRef) else None
+    if isinstance(term, z3.ExprRef) and term.sort() == _OPAQUE_Z3_SORT:
+        return term
+    return None
 
 
 def _flatten_top_level_and(expr: frog_ast.Expression) -> list[frog_ast.Expression]:

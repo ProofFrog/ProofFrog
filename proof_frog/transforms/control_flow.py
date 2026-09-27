@@ -37,6 +37,7 @@ from ._base import (
     PipelineContext,
     NearMiss,
     has_nondeterministic_call,
+    may_return_before,
     method_bound_names,
     _lookup_primitive_method,
 )
@@ -1448,9 +1449,12 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
         # Method that holds each field's (single, top-level) defining assignment.
         def_methods: dict[str, str] = {}
 
+        # Definitions an earlier return in their method may skip (F-349).
+        skippable: set[str] = set()
+
         for method in game.methods:
             # Collect top-level definitions (for the expression value)
-            for stmt in method.block.statements:
+            for idx, stmt in enumerate(method.block.statements):
                 if (
                     isinstance(stmt, frog_ast.Assignment)
                     and isinstance(stmt.var, frog_ast.Variable)
@@ -1458,6 +1462,8 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
                 ):
                     definitions[stmt.var.name] = stmt.value
                     def_methods[stmt.var.name] = method.signature.name
+                    if may_return_before(method.block.statements, idx):
+                        skippable.add(stmt.var.name)
 
             # Count ALL assignments recursively (including nested blocks)
             for field_name in self.field_names:
@@ -1482,6 +1488,10 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
             # def(A) is likewise written only in Initialize.
             if def_methods.get(name) != "Initialize":
                 continue
+            # F-349: an earlier return in Initialize may skip the definition,
+            # leaving the field at its initial value.
+            if name in skippable:
+                continue
             used_vars = VariableCollectionVisitor().visit(expr)
             if not all(v.name in self.field_names for v in used_vars):
                 continue
@@ -1502,7 +1512,15 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
 
     def _transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
         self.param_names = [p.name for p in method.signature.parameters]
-        return self.transform(method)
+        if method.signature.name != "Initialize":
+            return self.transform(method)
+        # F-349: a branch in Initialize may run before a definition.
+        definitions = self.field_definitions
+        self.field_definitions = {}
+        try:
+            return self.transform(method)
+        finally:
+            self.field_definitions = definitions
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -2403,11 +2421,7 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             # The definition must run whenever Initialize completes: an
             # earlier statement that can return would skip it, leaving the
             # field at its initial value.
-            if any(
-                isinstance(node, frog_ast.ReturnStatement)
-                for earlier in init.block.statements[:def_index]
-                for node in _walk_nodes(earlier)
-            ):
+            if may_return_before(init.block.statements, def_index):
                 continue
             if not isinstance(stmt.value, frog_ast.FuncCall) and not (
                 isinstance(stmt.value, frog_ast.BinaryOperation)

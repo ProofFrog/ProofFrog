@@ -1,0 +1,15 @@
+import 'D.primitive';
+import 'Early.game';
+
+proof:
+
+let:
+    Int n;
+    D F;
+
+theorem:
+    Early(F, n);
+
+games:
+    Early(F, n).Left against Early(F, n).Adversary;
+    Early(F, n).Right against Early(F, n).Adversary;

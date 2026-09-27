@@ -1,0 +1,52 @@
+// When Initialize returns early, k stays 0, x -> x^k is constant, and all
+// stored keys collapse to the identity in Right but not in Left:
+// Store(g); Store(g^2); Count(identity) gives 2 in Left, 1 in Right.
+Game Left(Group G) {
+    ModInt<G.order> k = 0;
+    Map<GroupElem<G>, Int> M;
+    Bool Initialize() {
+        Bool c <- Bool;
+        if (c) {
+            k <- ModInt<G.order> \ {0};
+        }
+        return c;
+    }
+    Void Store(GroupElem<G> a, Int s) {
+        M[a] = s;
+    }
+    Int Count(GroupElem<G> y) {
+        Int cnt = 0;
+        for ([GroupElem<G>, Int] e in M.entries) {
+            if (e[0] ^ k == y) {
+                cnt = cnt + 1;
+            }
+        }
+        return cnt;
+    }
+}
+
+Game Right(Group G) {
+    ModInt<G.order> k = 0;
+    Map<GroupElem<G>, Int> M;
+    Bool Initialize() {
+        Bool c <- Bool;
+        if (c) {
+            k <- ModInt<G.order> \ {0};
+        }
+        return c;
+    }
+    Void Store(GroupElem<G> a, Int s) {
+        M[a ^ k] = s;
+    }
+    Int Count(GroupElem<G> y) {
+        Int cnt = 0;
+        for ([GroupElem<G>, Int] e in M.entries) {
+            if (e[0] == y) {
+                cnt = cnt + 1;
+            }
+        }
+        return cnt;
+    }
+}
+
+export as Reidx2;

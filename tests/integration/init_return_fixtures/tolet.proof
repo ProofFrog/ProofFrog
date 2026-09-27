@@ -1,0 +1,15 @@
+import 'ToLet.game';
+
+proof:
+
+let:
+    Int n;
+    Function<BitString<n>, BitString<n>> F0;
+    Function<BitString<n>, BitString<n>> RO <- Function<BitString<n>, BitString<n>>;
+
+theorem:
+    ToLet(n, F0, RO);
+
+games:
+    ToLet(n, F0, RO).Left against ToLet(n, F0, RO).Adversary;
+    ToLet(n, F0, RO).Right against ToLet(n, F0, RO).Adversary;

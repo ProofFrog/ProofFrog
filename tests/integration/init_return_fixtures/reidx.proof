@@ -1,0 +1,16 @@
+import 'Reidx.game';
+
+proof:
+
+let:
+    Group G;
+
+requires:
+    G.order is prime;
+
+theorem:
+    Reidx(G);
+
+games:
+    Reidx(G).Left against Reidx(G).Adversary;
+    Reidx(G).Right against Reidx(G).Adversary;

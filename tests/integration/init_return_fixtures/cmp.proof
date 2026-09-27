@@ -1,0 +1,15 @@
+import 'D.primitive';
+import 'Cmp.game';
+
+proof:
+
+let:
+    Int n;
+    D F;
+
+theorem:
+    Cmp(F, n);
+
+games:
+    Cmp(F, n).Left against Cmp(F, n).Adversary;
+    Cmp(F, n).Right against Cmp(F, n).Adversary;

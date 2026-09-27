@@ -789,6 +789,8 @@ def lemma_instantiation(  # pylint: disable=too-many-arguments,too-many-position
     parents = {let.name: let for let in parent_lets}
     name_map: dict[str, frog_ast.ASTNode] = {}
     callees: set[str] = set()
+    # Parent sampled let -> the lemma sampled let it stands for.
+    sampled_images: dict[str, str] = {}
 
     def abstract(name: str) -> bool:
         let = lemmas.get(name)
@@ -810,9 +812,21 @@ def lemma_instantiation(  # pylint: disable=too-many-arguments,too-many-position
         if abstract(name):
             return bind(name, image)
         if name in lemma_sampled:
-            if isinstance(image, frog_ast.Variable) and image.name in parent_sampled:
-                return bind(name, image)
-            return f"its sampled {name} is not matched by a sampled parameter"
+            # Independently sampled lemma parameters must stay independent:
+            # each maps to its own sampled parent parameter of the same type.
+            if not (
+                isinstance(image, frog_ast.Variable)
+                and image.name in parent_sampled
+                and parents[image.name].type == lemmas[name].type
+            ):
+                return f"its sampled {name} is not matched by a sampled parameter"
+            other = sampled_images.setdefault(image.name, name)
+            if other != name:
+                return (
+                    f"its independently sampled {other} and {name} would both be"
+                    f" {image.name}"
+                )
+            return bind(name, image)
         value = let.value
         parent_let = (
             parents.get(image.name) if isinstance(image, frog_ast.Variable) else None
@@ -870,7 +884,34 @@ def lemma_instantiation(  # pylint: disable=too-many-arguments,too-many-position
         err = match_let(lemma_arg.name, parent_arg)
         if err is not None:
             return err
+    # The lemma quantifies over its abstract parameters independently of its
+    # random functions (and knows nothing of the parent's), so an abstract
+    # parameter may not stand for something built from a sampled parent let.
+    for name, image in name_map.items():
+        if not abstract(name):
+            continue
+        used = {
+            n.name for n in _walk_ast(image) if isinstance(n, frog_ast.Variable)
+        } & set(parent_sampled)
+        if used:
+            return (
+                f"its parameter {name} would stand for {image}, which depends on"
+                f" the sampled {', '.join(sorted(used))}"
+            )
     return LemmaInstantiation(name_map, callees)
+
+
+def _walk_ast(node: object) -> list[frog_ast.ASTNode]:
+    found: list[frog_ast.ASTNode] = []
+    stack: list[object] = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, frog_ast.ASTNode):
+            found.append(current)
+            stack.extend(v for k, v in vars(current).items() if k != "origin")
+        elif isinstance(current, (list, tuple)):
+            stack.extend(current)
+    return found
 
 
 def _rename_symbols(

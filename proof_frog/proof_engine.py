@@ -2403,13 +2403,23 @@ def _lemma_mismatch(  # pylint: disable=too-many-arguments,too-many-positional-a
 ) -> advantage.LemmaInstantiation | str:
     """How a verified lemma file establishes its entry, or why it does not.
 
-    The file's theorem must be the entry's notion: the same kind (game or
-    event), game, flag and ``at Initialize``; its game must resolve to the
+    The file must not rely on a query cap (``calls <= N``). Its theorem must
+    be the entry's notion: the same kind (game or event), game, flag and
+    ``at Initialize``; its game must resolve to the
     same imported file; and the entry's arguments must be an instance of the
     theorem's (``advantage.lemma_instantiation``), with every primitive or
     scheme matched on the way resolving to the same file on both sides.
     """
     proven, claimed = lemma_file.theorem, lemma.game
+    if lemma_file.max_calls is not None:
+        # The lemma holds only for adversaries within its query cap, which
+        # the parent's hops do not respect in general (the constructed
+        # adversary may query more).
+        return (
+            f"Lemma file '{lemma.proof_path}' proves '{proven}' only under"
+            f" `calls <= {lemma_file.max_calls}`, which a lemma entry cannot"
+            f" rely on"
+        )
     key_p, key_c = frog_ast.notion_key(proven), frog_ast.notion_key(claimed)
     if type(proven) is not type(claimed) or key_p.name != key_c.name:
         return f"Lemma file '{lemma.proof_path}' proves '{proven}', not '{claimed}'"

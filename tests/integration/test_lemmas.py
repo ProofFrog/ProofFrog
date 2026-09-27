@@ -73,3 +73,11 @@ def test_lemma_bound_inlined() -> None:
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "Adv^DerivedSecurity(G)(A) <= Adv^BaseAssumption(G)(B1)" in result.stdout
     assert "before inlining lemma bounds: Adv^DerivedSecurity(G)(A)" in result.stdout
+
+
+def test_lemma_with_query_cap_is_refused() -> None:
+    """A lemma proven under `calls <= N` does not hold for the parent's
+    adversaries in general, so it cannot discharge a lemma entry."""
+    result = _run_prove("outer_capped_lemma.proof")
+    assert result.returncode != 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "calls <= 1" in result.stdout + result.stderr

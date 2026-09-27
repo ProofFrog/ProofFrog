@@ -1,0 +1,22 @@
+// Left returns one hidden sample on every query, Right a fresh sample each
+// time: indistinguishable for a single query, distinguishable for two.
+Game Left(Int n) {
+    BitString<n> k;
+    Void Initialize() {
+        k <- BitString<n>;
+    }
+    BitString<n> O() {
+        return k;
+    }
+}
+
+Game Right(Int n) {
+    Void Initialize() {
+    }
+    BitString<n> O() {
+        BitString<n> r <- BitString<n>;
+        return r;
+    }
+}
+
+export as OneQuery;

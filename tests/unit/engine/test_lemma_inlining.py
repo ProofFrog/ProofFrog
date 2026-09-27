@@ -234,3 +234,66 @@ def test_instantiation_binds_set_parameter_to_type() -> None:
     )
     assert isinstance(result, advantage.LemmaInstantiation), result
     assert str(result.name_map["C"]) == "BitString<m>"
+
+
+def _instantiate_sampled(lemma_lets, lemma_sampled, lemma_args, parent_lets, parent_sampled, parent_args):
+    return advantage.lemma_instantiation(
+        [frog_ast.Variable(a) for a in lemma_args],
+        _lets(lemma_lets),
+        frozenset(lemma_sampled),
+        [frog_ast.Variable(a) for a in parent_args],
+        _lets(parent_lets),
+        frozenset(parent_sampled),
+    )
+
+
+def test_instantiation_rejects_merging_independent_sampled_parameters() -> None:
+    """Two independently sampled lemma functions cannot both be one parent
+    function: the lemma says nothing about the correlated case."""
+    result = _instantiate_sampled(
+        "    Function<Int, Int> F1;\n    Function<Int, Int> F2;",
+        {"F1", "F2"},
+        ["F1", "F2"],
+        "    Function<Int, Int> H;",
+        {"H"},
+        ["H", "H"],
+    )
+    assert isinstance(result, str)
+
+
+def test_instantiation_rejects_abstract_parameter_depending_on_sampled() -> None:
+    """An abstract lemma parameter ranges over values independent of the
+    lemma's random functions; the parent's image built from one is not."""
+    result = _instantiate_sampled(
+        "    Function<Int, Int> F1;\n    Int E;",
+        {"F1"},
+        ["F1", "E"],
+        "    Function<Int, Int> H;\n    Int k;",
+        {"H"},
+        ["H", "k"],
+    )
+    assert isinstance(result, advantage.LemmaInstantiation)
+    bad = advantage.lemma_instantiation(
+        [frog_ast.Variable("F1"), frog_ast.Variable("E")],
+        _lets("    Function<Int, Int> F1;\n    Int E;"),
+        frozenset({"F1"}),
+        [
+            frog_ast.Variable("H"),
+            frog_ast.FuncCall(frog_ast.Variable("H"), [frog_ast.Integer(0)]),
+        ],
+        _lets("    Function<Int, Int> H;"),
+        frozenset({"H"}),
+    )
+    assert isinstance(bad, str)
+
+
+def test_instantiation_maps_sampled_parameters_one_to_one() -> None:
+    result = _instantiate_sampled(
+        "    Function<Int, Int> F1;\n    Function<Int, Int> F2;",
+        {"F1", "F2"},
+        ["F1", "F2"],
+        "    Function<Int, Int> H1;\n    Function<Int, Int> H2;",
+        {"H1", "H2"},
+        ["H1", "H2"],
+    )
+    assert isinstance(result, advantage.LemmaInstantiation)

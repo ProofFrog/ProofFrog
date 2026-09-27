@@ -804,9 +804,9 @@ class ProofEngine:
                 lemma_file, lemma_path, lemma, proof_file, proof_path
             )
             if isinstance(match, str):
-                message = match
-                print(f"{Fore.RED}{message}{Fore.RESET}")
-                raise FailedProof(message)
+                print(f"{Fore.RED}{match}{Fore.RESET}")
+                print(f"{Fore.RED}Proof Failed! (lemma {lemma.game}){Fore.RESET}")
+                raise FailedProof(match)
             if lemma_engine.advantage_bound is not None:
                 self._lemma_bounds[str(frog_ast.notion_key(lemma.game))] = (
                     advantage.LemmaBound(

@@ -65,3 +65,11 @@ def test_failing_lemma_skipped_still_succeeds() -> None:
     assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     assert "skipped" in result.stdout
     assert "Proof Succeeded" in result.stdout
+
+
+def test_lemma_bound_inlined() -> None:
+    """The lemma's own bound replaces its opaque term in the parent's bound."""
+    result = _run_prove("outer.proof")
+    assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    assert "Adv^DerivedSecurity(G)(A) <= Adv^BaseAssumption(G)(B1)" in result.stdout
+    assert "before inlining lemma bounds: Adv^DerivedSecurity(G)(A)" in result.stdout

@@ -34,6 +34,7 @@ Genuine cryptographic assumptions carry no clause and stay symbolic by design.
 from __future__ import annotations
 
 import dataclasses
+import re
 from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence
 
 import sympy
@@ -93,6 +94,46 @@ class HopInfo:
     reduction: frog_ast.ParameterizedGame | None = None
     statistical: Optional[sympy.Expr] = None
     note: str = ""
+    # When the notion is a verified lemma whose bound is known, that bound
+    # rewritten into the parent's names (see ``expand_lemma``);
+    # ``synthesize_from_hops`` splices it in place of the opaque lemma term.
+    expansion: Optional["LemmaExpansion"] = None
+
+
+# Hop kinds that contribute an advantage term.
+_ADVANTAGE_HOP_KINDS = ("by_assumption", "by_lemma", "by_upto")
+
+
+@dataclasses.dataclass
+class LemmaLeaf:
+    """One term of an inlined lemma bound, in the parent's names."""
+
+    notion: frog_ast.ParameterizedGame
+    inner_key: str  # the lemma-side reduction (or "A"), for adversary naming
+    statistical: Optional[sympy.Expr] = None
+
+
+@dataclasses.dataclass
+class LemmaExpansion:
+    """A lemma's bound rewritten for one parent hop (see ``expand_lemma``)."""
+
+    expression: sympy.Expr
+    leaves: dict[sympy.Symbol, LemmaLeaf]
+
+
+@dataclasses.dataclass
+class LemmaBound:
+    """A verified lemma's synthesized bound, as a parent proof needs it.
+
+    ``theorem`` is the lemma file's theorem notion (an event's synthetic
+    notion for an event lemma), in the lemma's own ``let:`` names; ``lets``
+    are the lemma file's ``let:`` entries, used to map its local parameters
+    into the parent's names.
+    """
+
+    theorem: frog_ast.ParameterizedGame
+    bound: "AdvantageBound"
+    lets: list[frog_ast.Field] = dataclasses.field(default_factory=list)
 
 
 @dataclasses.dataclass
@@ -473,37 +514,58 @@ def resolve_statistical(
 def synthesize_from_hops(hops: Sequence[HopInfo]) -> AdvantageBound:
     """Fold a sequence of hop summaries into an advantage bound.
 
-    Equivalence hops contribute 0. Each assumption/lemma hop contributes one
-    advantage term; hops sharing the same notion *and* constructed adversary
-    collapse to a single term (so a symmetric two-sided use of one reduction
-    reads ``2 * Adv^X(B)``). Distinct reductions are numbered ``B1``, ``B2``,
-    ... in order of first appearance.
+    Equivalence hops contribute 0. Each assumption/lemma/upto hop contributes
+    one advantage term; hops sharing the same notion *and* constructed
+    adversary collapse to a single term (so a symmetric two-sided use of one
+    reduction reads ``2 * Adv^X(B)``). A hop carrying a lemma ``expansion``
+    contributes the lemma's inlined bound instead, each of its terms played by
+    the composition of the parent's and the lemma's reductions. The
+    constructed adversaries that stay visible (opaque terms) are numbered
+    ``B1``, ``B2``, ... in order of first appearance.
     """
+    # pylint: disable=too-many-locals
     expression: sympy.Expr = sympy.Integer(0)
     terms: dict[sympy.Symbol, AdvTerm] = {}
     symbol_by_key: dict[tuple[str, str], sympy.Symbol] = {}
     adversary_by_reduction: dict[str, str] = {}
     hop_terms: list[AdvTerm | None] = []
+    hop_symbols: dict[int, sympy.Symbol] = {}
     notes: list[str] = []
 
+    def adversary_for(key: str) -> str:
+        if key not in adversary_by_reduction:
+            adversary_by_reduction[key] = f"B{len(adversary_by_reduction) + 1}"
+        return adversary_by_reduction[key]
+
     for hop in hops:
-        if hop.kind not in ("by_assumption", "by_lemma", "by_upto") or (
-            hop.notion is None
-        ):
+        if hop.kind not in _ADVANTAGE_HOP_KINDS or hop.notion is None:
             hop_terms.append(None)
             continue
-        if hop.reduction is not None:
-            reduction_key = str(hop.reduction)
-            if reduction_key not in adversary_by_reduction:
-                adversary_by_reduction[reduction_key] = (
-                    f"B{len(adversary_by_reduction) + 1}"
-                )
-            adversary = adversary_by_reduction[reduction_key]
-        else:
-            adversary = "A"
-
         if hop.note and hop.note not in notes:
             notes.append(hop.note)
+        if hop.expansion is not None:
+            outer_key = str(hop.reduction) if hop.reduction is not None else "A"
+            leaf_subs: dict[sympy.Symbol, sympy.Symbol] = {}
+            for temp, leaf in hop.expansion.leaves.items():
+                if outer_key == "A" and leaf.inner_key == "A":
+                    leaf_adversary = "A"
+                else:
+                    leaf_adversary = adversary_for(f"{outer_key} o {leaf.inner_key}")
+                leaf_key = (str(leaf.notion), leaf_adversary)
+                if leaf_key not in symbol_by_key:
+                    symbol = sympy.Symbol(f"Adv_{len(symbol_by_key)}", nonnegative=True)
+                    symbol_by_key[leaf_key] = symbol
+                    terms[symbol] = AdvTerm(
+                        notion=leaf.notion,
+                        adversary=leaf_adversary,
+                        reduction=hop.reduction,
+                        statistical=leaf.statistical,
+                    )
+                leaf_subs[temp] = symbol_by_key[leaf_key]
+            expression += hop.expansion.expression.subs(leaf_subs, simultaneous=True)
+            hop_terms.append(None)
+            continue
+        adversary = adversary_for(str(hop.reduction)) if hop.reduction else "A"
         key = (str(hop.notion), adversary)
         if key not in symbol_by_key:
             symbol = sympy.Symbol(f"Adv_{len(symbol_by_key)}", nonnegative=True)
@@ -515,7 +577,20 @@ def synthesize_from_hops(hops: Sequence[HopInfo]) -> AdvantageBound:
                 statistical=hop.statistical,
             )
         expression += symbol_by_key[key]
+        hop_symbols[len(hop_terms)] = symbol_by_key[key]
         hop_terms.append(terms[symbol_by_key[key]])
+
+    # Number only the adversaries that stay visible: opaque terms, in order of
+    # first appearance (a statistical term renders as its expression).
+    relabel: dict[str, str] = {}
+    for symbol, term in list(terms.items()):
+        if term.statistical is None and term.adversary != "A":
+            if term.adversary not in relabel:
+                relabel[term.adversary] = f"B{len(relabel) + 1}"
+            terms[symbol] = dataclasses.replace(term, adversary=relabel[term.adversary])
+    hop_terms = [
+        None if t is None else terms[hop_symbols[i]] for i, t in enumerate(hop_terms)
+    ]
 
     return AdvantageBound(
         expression=expression, terms=terms, hop_terms=hop_terms, notes=notes
@@ -601,6 +676,8 @@ def synthesize_from_hop_results(
     hop_results: Sequence["HopResult"],
     definition_lookup: Optional[Mapping[str, object]] = None,
     max_calls: Optional[frog_ast.Expression] = None,
+    lemma_bounds: Optional[Mapping[str, LemmaBound]] = None,
+    parent_lets: Sequence[frog_ast.Field] = (),
 ) -> AdvantageBound:
     """Synthesize the bound from a proof engine's ``hop_results``.
 
@@ -614,6 +691,13 @@ def synthesize_from_hop_results(
     their concrete statistical bound, with per-oracle query counts derived from
     the composed reduction (and pinned by an integer ``max_calls`` cap).
     Assumptions without a clause stay opaque.
+
+    When ``lemma_bounds`` maps a lemma's notion (``str`` of its key, the
+    synthetic notion for an event) to the bound its proof established, hops
+    justified by that lemma (``by_lemma``, or ``by_upto`` via its event) are
+    inlined: see :func:`expand_lemma`. ``parent_lets`` are this proof's
+    ``let:`` entries, for mapping the lemma's local parameters. A lemma whose
+    expansion fails stays opaque, with a note.
     """
     for result in hop_results:
         if result.depth > 0 or result.kind == "induction_rollover":
@@ -635,6 +719,24 @@ def synthesize_from_hop_results(
                 definition_lookup,
                 max_calls,
             )
+        expansion: Optional[LemmaExpansion] = None
+        if (
+            lemma_bounds is not None
+            and result.justification is not None
+            and result.kind in ("by_lemma", "by_upto")
+            and str(result.justification) in lemma_bounds
+        ):
+            expansion, expansion_note = expand_lemma(
+                lemma_bounds[str(result.justification)],
+                result.justification,
+                result.reduction,
+                result.kind,
+                definition_lookup or {},
+                max_calls,
+                parent_lets,
+            )
+            if expansion_note:
+                note = expansion_note if not note else f"{note}; {expansion_note}"
         hops.append(
             HopInfo(
                 kind=result.kind,
@@ -642,9 +744,203 @@ def synthesize_from_hop_results(
                 reduction=result.reduction,
                 statistical=statistical,
                 note=note,
+                expansion=expansion,
             )
         )
     return synthesize_from_hops(hops)
+
+
+def _lemma_name_map(
+    lemma: LemmaBound,
+    instantiation: frog_ast.ParameterizedGame,
+    parent_lets: Sequence[frog_ast.Field],
+) -> dict[str, frog_ast.Expression]:
+    """Lemma ``let:`` name -> parent expression.
+
+    Positionally from the theorem's arguments (which the lemma check makes
+    distinct abstract ``let:`` parameters); then, where a theorem argument is
+    a primitive instantiation ``P(a1, ...)`` in the lemma and the matching
+    parent argument is a ``let:`` bound to the same primitive ``P(b1, ...)``,
+    each lemma parameter ``ai`` maps to ``bi``. A lemma parameter reached two
+    ways with different images is left unmapped (so it keeps the term opaque).
+    """
+    name_map: dict[str, frog_ast.Expression] = {}
+    conflicts: set[str] = set()
+    lemma_lets = {let.name: let for let in lemma.lets}
+    parents = {let.name: let for let in parent_lets}
+
+    def bind(name: str, image: frog_ast.Expression) -> None:
+        if name in name_map and str(name_map[name]) != str(image):
+            conflicts.add(name)
+        name_map.setdefault(name, image)
+
+    for lemma_arg, parent_arg in zip(lemma.theorem.args, instantiation.args):
+        if not isinstance(lemma_arg, frog_ast.Variable):
+            continue
+        bind(lemma_arg.name, parent_arg)
+        lemma_let = lemma_lets.get(lemma_arg.name)
+        parent_let = (
+            parents.get(parent_arg.name)
+            if isinstance(parent_arg, frog_ast.Variable)
+            else None
+        )
+        if lemma_let is None or parent_let is None:
+            continue
+        lv, pv = lemma_let.value, parent_let.value
+        if (
+            isinstance(lv, frog_ast.FuncCall)
+            and isinstance(pv, frog_ast.FuncCall)
+            and isinstance(lv.func, frog_ast.Variable)
+            and isinstance(pv.func, frog_ast.Variable)
+            and lv.func.name == pv.func.name
+            and len(lv.args) == len(pv.args)
+        ):
+            for inner, image in zip(lv.args, pv.args):
+                if isinstance(inner, frog_ast.Variable) and inner.name in lemma_lets:
+                    bind(inner.name, image)
+    for name in conflicts:
+        del name_map[name]
+    return name_map
+
+
+def _rename_symbols(
+    expr: sympy.Expr, name_map: Mapping[str, frog_ast.Expression]
+) -> sympy.Expr:
+    """Rewrite a lemma-side SymPy expression into the parent's names.
+
+    A plain symbol naming a mapped lemma parameter becomes the parent's
+    expression (as arithmetic when convertible, else an opaque symbol).
+    Opaque magnitude symbols whose *names* embed lemma parameters
+    (``|BitString<k>|``, ``G.order``) are renamed word by word, since they were
+    created from the rendered form. ``count_`` symbols are left to the caller.
+    """
+    if not name_map:
+        return expr
+    pattern = re.compile(r"\b(" + "|".join(map(re.escape, name_map)) + r")\b")
+    subs: dict[sympy.Symbol, sympy.Expr] = {}
+    for symbol in expr.free_symbols:
+        name = str(symbol)
+        if name.startswith("count_"):
+            continue
+        if name in name_map:
+            try:
+                subs[symbol] = _frog_arith_to_sympy(name_map[name])
+            except _UnconvertibleBound:
+                subs[symbol] = sympy.Symbol(str(name_map[name]), positive=True)
+            continue
+        renamed = pattern.sub(lambda m: str(name_map[m.group(1)]), name)
+        if renamed != name:
+            subs[symbol] = sympy.Symbol(renamed, positive=True)
+    return expr.subs(subs, simultaneous=True) if subs else expr
+
+
+def _unmapped_locals(
+    lemma: LemmaBound, name_map: Mapping[str, frog_ast.Expression]
+) -> set[str]:
+    """Lemma ``let:`` names its bound mentions that the parent cannot name."""
+    local = {let.name for let in lemma.lets} - set(name_map)
+    texts = [str(s) for s in lemma.bound.expression.free_symbols]
+    for term in lemma.bound.terms.values():
+        texts.append(str(term.notion))
+        if term.statistical is not None:
+            texts.extend(str(s) for s in term.statistical.free_symbols)
+    return {
+        word
+        for text in texts
+        if not text.startswith("count_")
+        for word in re.findall(r"[A-Za-z_][A-Za-z_0-9]*", text)
+        if word in local
+    }
+
+
+def expand_lemma(  # pylint: disable=too-many-locals,too-many-arguments,too-many-positional-arguments
+    lemma: LemmaBound,
+    instantiation: frog_ast.ParameterizedGame,
+    reduction: Optional[frog_ast.ParameterizedGame],
+    kind: str,
+    definition_lookup: Mapping[str, object],
+    max_calls: Optional[frog_ast.Expression],
+    parent_lets: Sequence[frog_ast.Field] = (),
+) -> tuple[Optional[LemmaExpansion], str]:
+    """Rewrite a lemma's bound for one parent hop that invokes it.
+
+    The lemma proves, for every adversary D of its theorem game,
+    ``Adv(D) <= sum_i Adv^{X_i}(S_i o D) + stat(counts of D)``. The parent
+    charges ``Adv(R o A)`` (``R`` the hop's reduction, or none), so with
+    ``D = R o A``: (1) the lemma theorem's parameters become the parent's
+    instantiation arguments; (2) each ``count_<Oracle>`` of the lemma's
+    theorem game becomes how often ``R`` invokes that oracle (the engine's
+    ``__reveal`` oracle of an event is invoked once), then an integer
+    ``calls <= N`` pins what is left; (3) each lemma term is played by the
+    composition of ``R`` and the lemma's reduction. Returns ``(None, note)``
+    when the bound is unsupported, a count is unbounded, or the bound
+    mentions a lemma-local parameter the parent cannot name.
+    """
+    bound = lemma.bound
+    label = str(instantiation)
+    if not bound.supported:
+        return None, f"lemma {label} left opaque: bound not synthesized ({bound.note})"
+    name_map = _lemma_name_map(lemma, instantiation, parent_lets)
+    unmapped = _unmapped_locals(lemma, name_map)
+    if unmapped:
+        names = ", ".join(sorted(unmapped))
+        return None, (
+            f"lemma {label} left opaque: its bound mentions {names}, which this"
+            " proof's arguments do not determine"
+        )
+    replace: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(identity=False)
+    for name, arg in name_map.items():
+        replace.set(frog_ast.Variable(name), arg)
+    substitute = visitors.SubstitutionTransformer(replace)
+
+    def to_parent(expr: sympy.Expr) -> sympy.Expr:
+        expr = _rename_symbols(expr, name_map)
+        counts = [s for s in expr.free_symbols if str(s).startswith("count_")]
+        if counts:
+            derived: dict[sympy.Symbol, sympy.Expr] = {}
+            reduction_def = (
+                definition_lookup.get(reduction.name) if reduction is not None else None
+            )
+            for sym in counts:
+                oracle = str(sym)[len("count_") :]
+                if kind == "by_upto" and oracle == upto.REVEAL:
+                    derived[sym] = sympy.Integer(1)
+                elif reduction is None:
+                    continue
+                elif not isinstance(reduction_def, frog_ast.Reduction):
+                    raise _UnconvertibleBound(
+                        f"reduction '{reduction.name}' definition unavailable"
+                    )
+                else:
+                    derived[sym] = _derive_oracle_count(reduction_def, oracle)
+            expr = expr.subs(derived)
+        if isinstance(max_calls, frog_ast.Integer):
+            expr = expr.subs(
+                {
+                    s: sympy.Integer(max_calls.num)
+                    for s in expr.free_symbols
+                    if str(s).startswith("count_")
+                }
+            )
+        return expr
+
+    try:
+        leaves: dict[sympy.Symbol, LemmaLeaf] = {}
+        leaf_subs: dict[sympy.Symbol, sympy.Symbol] = {}
+        for symbol, term in bound.terms.items():
+            temp = sympy.Symbol(f"_lemma_{len(leaves)}_{symbol}", nonnegative=True)
+            notion = substitute.transform(term.notion)
+            assert isinstance(notion, frog_ast.ParameterizedGame)
+            statistical = (
+                to_parent(term.statistical) if term.statistical is not None else None
+            )
+            inner_key = str(term.reduction) if term.reduction is not None else "A"
+            leaves[temp] = LemmaLeaf(notion, inner_key, statistical)
+            leaf_subs[symbol] = temp
+        expression = to_parent(bound.expression.subs(leaf_subs, simultaneous=True))
+    except _UnconvertibleBound as exc:
+        return None, f"lemma {label} left opaque: {exc}"
+    return LemmaExpansion(expression, leaves), ""
 
 
 # ---------------------------------------------------------------------------

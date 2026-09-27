@@ -546,6 +546,11 @@ class ProofEngine:
         self.step_assumptions: list[ProcessedAssumption] = []
         self.hop_results: list[HopResult] = []
         self.advantage_bound: advantage.AdvantageBound | None = None
+        # The bound before lemma bounds were inlined (None when identical).
+        self.advantage_bound_raw: advantage.AdvantageBound | None = None
+        # Bounds established by verified lemma proofs, keyed by the lemma's
+        # notion key (str), for inlining into this proof's bound.
+        self._lemma_bounds: dict[str, advantage.LemmaBound] = {}
         self.variables: dict[str, Symbol | frog_ast.Expression] = {}
         self.method_lookup: MethodLookup = {}
         self.max_calls: Optional[int] = None
@@ -785,7 +790,7 @@ class ProofEngine:
             lemma_path = os.path.join(os.path.dirname(proof_path), lemma.proof_path)
             print(f"Lemma: {lemma.game} by '{lemma.proof_path}'")
             try:
-                lemma_file = verify_proof_file(
+                lemma_file, lemma_engine = _verify_proof_file_with_engine(
                     lemma_path,
                     verbosity=self.verbosity,
                     no_diagnose=True,
@@ -801,6 +806,14 @@ class ProofEngine:
             if message is not None:
                 print(f"{Fore.RED}{message}{Fore.RESET}")
                 raise FailedProof(message)
+            if lemma_engine.advantage_bound is not None:
+                self._lemma_bounds[str(frog_ast.notion_key(lemma.game))] = (
+                    advantage.LemmaBound(
+                        theorem=frog_ast.notion_key(lemma_file.theorem),
+                        bound=lemma_engine.advantage_bound,
+                        lets=list(lemma_file.lets),
+                    )
+                )
 
             effective_assumptions.append(frog_ast.notion_key(lemma.game))
             lemma_games.add(str(frog_ast.notion_key(lemma.game)))
@@ -846,7 +859,17 @@ class ProofEngine:
                 self.hop_results,
                 definition_lookup=self.definition_namespace,
                 max_calls=proof_file.max_calls,
+                lemma_bounds=self._lemma_bounds or None,
+                parent_lets=proof_file.lets,
             )
+            if self._lemma_bounds:
+                raw = advantage.synthesize_from_hop_results(
+                    self.hop_results,
+                    definition_lookup=self.definition_namespace,
+                    max_calls=proof_file.max_calls,
+                )
+                if raw.render() != self.advantage_bound.render():
+                    self.advantage_bound_raw = raw
             self._print_advantage_bound(theorem)
             if not self._check_claimed_bound(proof_file):
                 raise FailedProof()
@@ -1012,6 +1035,10 @@ class ProofEngine:
             print(f"Advantage bound: {lhs} <= (not synthesized: {bound.note})")
             return
         print(f"Advantage bound: {lhs} <= {bound.render()}")
+        if self.advantage_bound_raw is not None:
+            print(
+                f"  (before inlining lemma bounds: {self.advantage_bound_raw.render()})"
+            )
         for note in bound.notes:
             print(f"  note: {note}")
 
@@ -1027,6 +1054,16 @@ class ProofEngine:
         if claim is None or self.advantage_bound is None:
             return True
         result = advantage.check_claimed_bound(claim.bound, self.advantage_bound)
+        if result.status != "verified" and self.advantage_bound_raw is not None:
+            # A claim may name a lemma's own term (the form before inlining);
+            # it is a valid bound if it bounds either form.
+            raw_result = advantage.check_claimed_bound(
+                claim.bound, self.advantage_bound_raw
+            )
+            if raw_result.status == "verified" or (
+                raw_result.status == "undecided" and result.status == "not_verified"
+            ):
+                result = raw_result
         if result.status == "verified":
             print(Fore.GREEN + f"Claimed bound verified: {result.detail}." + Fore.RESET)
             return True
@@ -2466,6 +2503,20 @@ def verify_proof_file(
     skip_bound: bool = False,
 ) -> frog_ast.ProofFile:
     """Parse, load imports, and verify a proof file. Returns the ProofFile on success."""
+    proof_file, _ = _verify_proof_file_with_engine(
+        proof_path, verbosity, no_diagnose, skip_lemmas, skip_bound
+    )
+    return proof_file
+
+
+def _verify_proof_file_with_engine(
+    proof_path: str,
+    verbosity: Verbosity = Verbosity.QUIET,
+    no_diagnose: bool = True,
+    skip_lemmas: bool = False,
+    skip_bound: bool = False,
+) -> tuple[frog_ast.ProofFile, "ProofEngine"]:
+    """As :func:`verify_proof_file`, also returning the engine (for its bound)."""
     # pylint: disable=import-outside-toplevel,cyclic-import
     from . import frog_parser, semantic_analysis
 
@@ -2496,4 +2547,4 @@ def verify_proof_file(
         engine.add_definition(name, root)
 
     engine.prove(proof_file, proof_path)
-    return proof_file
+    return proof_file, engine

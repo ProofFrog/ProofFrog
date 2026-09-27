@@ -149,7 +149,7 @@ def test_lemma_file_must_quantify_over_its_parameters() -> None:
     # The lemma proves the event only for U = BitString<8>.
     result = _run_prove("outer_lemma_concrete.proof")
     assert result.returncode != 0, _out(result)
-    assert "distinct let: parameters" in result.stdout + result.stderr, _out(result)
+    assert "does not cover" in result.stdout + result.stderr, _out(result)
 
 
 def test_lemma_file_must_be_about_the_same_game_file() -> None:

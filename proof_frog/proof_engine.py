@@ -800,10 +800,11 @@ class ProofEngine:
             except (FailedProof, Exception) as e:
                 print(f"{Fore.RED}Lemma FAILED: {e}{Fore.RESET}")
                 raise FailedProof(f"Lemma {lemma.game} failed verification") from e
-            message = _lemma_mismatch(
+            match = _lemma_mismatch(
                 lemma_file, lemma_path, lemma, proof_file, proof_path
             )
-            if message is not None:
+            if isinstance(match, str):
+                message = match
                 print(f"{Fore.RED}{message}{Fore.RESET}")
                 raise FailedProof(message)
             if lemma_engine.advantage_bound is not None:
@@ -812,6 +813,7 @@ class ProofEngine:
                         theorem=frog_ast.notion_key(lemma_file.theorem),
                         bound=lemma_engine.advantage_bound,
                         lets=list(lemma_file.lets),
+                        name_map=match.name_map,
                     )
                 )
 
@@ -860,7 +862,6 @@ class ProofEngine:
                 definition_lookup=self.definition_namespace,
                 max_calls=proof_file.max_calls,
                 lemma_bounds=self._lemma_bounds or None,
-                parent_lets=proof_file.lets,
             )
             if self._lemma_bounds:
                 raw = advantage.synthesize_from_hop_results(
@@ -2399,74 +2400,51 @@ def _lemma_mismatch(  # pylint: disable=too-many-arguments,too-many-positional-a
     lemma: frog_ast.Lemma,
     proof_file: frog_ast.ProofFile,
     proof_path: str,
-) -> str | None:
-    """Why a verified lemma file does not establish its lemma entry, or None.
+) -> advantage.LemmaInstantiation | str:
+    """How a verified lemma file establishes its entry, or why it does not.
 
     The file's theorem must be the entry's notion: the same kind (game or
-    event), game, flag, ``at Initialize`` and arity; its game must resolve to
-    the same imported file; and its arguments must be pairwise-distinct
-    abstract ``let:`` parameters of the lemma file, so that the lemma holds
-    for every instantiation the entry may choose.
+    event), game, flag and ``at Initialize``; its game must resolve to the
+    same imported file; and the entry's arguments must be an instance of the
+    theorem's (``advantage.lemma_instantiation``), with every primitive or
+    scheme matched on the way resolving to the same file on both sides.
     """
     proven, claimed = lemma_file.theorem, lemma.game
     key_p, key_c = frog_ast.notion_key(proven), frog_ast.notion_key(claimed)
-    if (
-        type(proven) is not type(claimed)
-        or key_p.name != key_c.name
-        or len(key_p.args) != len(key_c.args)
-    ):
+    if type(proven) is not type(claimed) or key_p.name != key_c.name:
         return f"Lemma file '{lemma.proof_path}' proves '{proven}', not '{claimed}'"
     game_name = frog_ast.notion_game(proven).name
     lemma_game_path = _imported_file_path(lemma_file, lemma_path, game_name)
-    entry_game_path = _imported_file_path(proof_file, proof_path, game_name)
-    if lemma_game_path is None or lemma_game_path != entry_game_path:
+    if lemma_game_path is None or lemma_game_path != _imported_file_path(
+        proof_file, proof_path, game_name
+    ):
         return (
             f"Lemma file '{lemma.proof_path}' proves '{proven}' about a different"
             f" file named {game_name} than this proof imports"
         )
-    names = [arg.name for arg in key_p.args if isinstance(arg, frog_ast.Variable)]
-    if (
-        len(names) != len(key_p.args)
-        or len(set(names)) != len(names)
-        or not all(_is_abstract_let(lemma_file, lemma_path, n) for n in names)
-    ):
-        return (
-            f"Lemma file '{lemma.proof_path}' proves '{proven}', whose arguments"
-            f" are not distinct let: parameters without a value, so it does not"
-            f" establish '{claimed}' for every instantiation"
-        )
-    return None
-
-
-def _is_abstract_let(
-    proof_file: frog_ast.ProofFile, proof_path: str, name: str
-) -> bool:
-    """Whether the ``let:`` name is universally quantified in *proof_file*.
-
-    A let with no value is; so is one bound to an instantiation of an imported
-    *primitive* (any scheme of that primitive) whose arguments are themselves
-    abstract lets. A let bound to a scheme or a concrete value is not.
-    """
-    let = next((f for f in proof_file.lets if f.name == name), None)
-    if let is None or name in proof_file.sampled_let_names:
-        return False
-    if let.value is None:
-        return True
-    value = let.value
-    if not (
-        isinstance(value, frog_ast.FuncCall)
-        and isinstance(value.func, frog_ast.Variable)
-    ):
-        return False
-    imported = _imported_file(proof_file, proof_path, value.func.name)
-    if imported is None or not isinstance(imported[1], frog_ast.Primitive):
-        return False
-    return all(
-        isinstance(arg, frog_ast.Variable)
-        and arg.name != name
-        and _is_abstract_let(proof_file, proof_path, arg.name)
-        for arg in value.args
+    match = advantage.lemma_instantiation(
+        key_p.args,
+        lemma_file.lets,
+        lemma_file.sampled_let_names,
+        key_c.args,
+        proof_file.lets,
+        proof_file.sampled_let_names,
     )
+    if isinstance(match, str):
+        return (
+            f"Lemma file '{lemma.proof_path}' proves '{proven}', which does not"
+            f" cover '{claimed}': {match}"
+        )
+    for callee in sorted(match.callees):
+        callee_path = _imported_file_path(lemma_file, lemma_path, callee)
+        if callee_path is None or callee_path != _imported_file_path(
+            proof_file, proof_path, callee
+        ):
+            return (
+                f"Lemma file '{lemma.proof_path}' instantiates a different file"
+                f" named {callee} than this proof imports"
+            )
+    return match
 
 
 def _imported_file(

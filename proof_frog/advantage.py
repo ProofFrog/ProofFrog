@@ -127,13 +127,15 @@ class LemmaBound:
 
     ``theorem`` is the lemma file's theorem notion (an event's synthetic
     notion for an event lemma), in the lemma's own ``let:`` names; ``lets``
-    are the lemma file's ``let:`` entries, used to map its local parameters
-    into the parent's names.
+    are the lemma file's ``let:`` entries; ``name_map`` sends the lemma
+    parameters the entry determines to the parent's expressions (see
+    :func:`lemma_instantiation`).
     """
 
     theorem: frog_ast.ParameterizedGame
     bound: "AdvantageBound"
     lets: list[frog_ast.Field] = dataclasses.field(default_factory=list)
+    name_map: dict[str, frog_ast.ASTNode] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
@@ -677,7 +679,6 @@ def synthesize_from_hop_results(
     definition_lookup: Optional[Mapping[str, object]] = None,
     max_calls: Optional[frog_ast.Expression] = None,
     lemma_bounds: Optional[Mapping[str, LemmaBound]] = None,
-    parent_lets: Sequence[frog_ast.Field] = (),
 ) -> AdvantageBound:
     """Synthesize the bound from a proof engine's ``hop_results``.
 
@@ -695,9 +696,8 @@ def synthesize_from_hop_results(
     When ``lemma_bounds`` maps a lemma's notion (``str`` of its key, the
     synthetic notion for an event) to the bound its proof established, hops
     justified by that lemma (``by_lemma``, or ``by_upto`` via its event) are
-    inlined: see :func:`expand_lemma`. ``parent_lets`` are this proof's
-    ``let:`` entries, for mapping the lemma's local parameters. A lemma whose
-    expansion fails stays opaque, with a note.
+    inlined: see :func:`expand_lemma`. A lemma whose expansion fails stays
+    opaque, with a note.
     """
     for result in hop_results:
         if result.depth > 0 or result.kind == "induction_rollover":
@@ -733,7 +733,6 @@ def synthesize_from_hop_results(
                 result.kind,
                 definition_lookup or {},
                 max_calls,
-                parent_lets,
             )
             if expansion_note:
                 note = expansion_note if not note else f"{note}; {expansion_note}"
@@ -750,61 +749,132 @@ def synthesize_from_hop_results(
     return synthesize_from_hops(hops)
 
 
-def _lemma_name_map(
-    lemma: LemmaBound,
-    instantiation: frog_ast.ParameterizedGame,
-    parent_lets: Sequence[frog_ast.Field],
-) -> dict[str, frog_ast.Expression]:
-    """Lemma ``let:`` name -> parent expression.
+@dataclasses.dataclass
+class LemmaInstantiation:
+    """How a lemma entry instantiates the lemma file's theorem.
 
-    Positionally from the theorem's arguments (which the lemma check makes
-    distinct abstract ``let:`` parameters); then, where a theorem argument is
-    a primitive instantiation ``P(a1, ...)`` in the lemma and the matching
-    parent argument is a ``let:`` bound to the same primitive ``P(b1, ...)``,
-    each lemma parameter ``ai`` maps to ``bi``. A lemma parameter reached two
-    ways with different images is left unmapped (so it keeps the term opaque).
+    ``name_map`` sends each lemma ``let:`` parameter the match determines to
+    the parent's expression; ``callees`` are the primitive/scheme names whose
+    instantiations were matched (their files must be the same on both sides).
     """
-    name_map: dict[str, frog_ast.Expression] = {}
-    conflicts: set[str] = set()
-    lemma_lets = {let.name: let for let in lemma.lets}
+
+    name_map: dict[str, frog_ast.ASTNode]
+    callees: set[str]
+
+
+def lemma_instantiation(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    lemma_args: Sequence[frog_ast.Expression],
+    lemma_lets: Sequence[frog_ast.Field],
+    lemma_sampled: frozenset[str] | set[str],
+    parent_args: Sequence[frog_ast.Expression],
+    parent_lets: Sequence[frog_ast.Field],
+    parent_sampled: frozenset[str] | set[str],
+) -> LemmaInstantiation | str:
+    """Match a lemma's theorem arguments against a parent entry's arguments.
+
+    The lemma holds for every value of its abstract ``let:`` parameters (no
+    value, not sampled), so the entry is covered exactly when its arguments
+    are an instance of the lemma's: each lemma argument must be a ``let:``
+    name that is either abstract (bound, consistently, to the parent's
+    expression -- a diagonal instance of distinct parameters is fine, but one
+    parameter bound to two different expressions is not), sampled (matched to
+    a parent argument naming a sampled ``let:``), or an instantiation
+    ``P(a1, ...)`` (the parent argument must name a ``let:`` instantiating the
+    same ``P``, and the ``ai`` are matched structurally against its
+    arguments, abstract lemma parameters binding as above). Returns the
+    match, or a reason why the entry is not an instance.
+    """
+    # pylint: disable=too-many-return-statements
+    lemmas = {let.name: let for let in lemma_lets}
     parents = {let.name: let for let in parent_lets}
+    name_map: dict[str, frog_ast.ASTNode] = {}
+    callees: set[str] = set()
 
-    def bind(name: str, image: frog_ast.Expression) -> None:
-        if name in name_map and str(name_map[name]) != str(image):
-            conflicts.add(name)
-        name_map.setdefault(name, image)
+    def abstract(name: str) -> bool:
+        let = lemmas.get(name)
+        return let is not None and let.value is None and name not in lemma_sampled
 
-    for lemma_arg, parent_arg in zip(lemma.theorem.args, instantiation.args):
-        if not isinstance(lemma_arg, frog_ast.Variable):
-            continue
-        bind(lemma_arg.name, parent_arg)
-        lemma_let = lemma_lets.get(lemma_arg.name)
+    def bind(name: str, image: frog_ast.ASTNode) -> Optional[str]:
+        if name in name_map and name_map[name] != image:
+            return (
+                f"its parameter {name} would stand for both {name_map[name]}"
+                f" and {image}"
+            )
+        name_map[name] = image
+        return None
+
+    def match_let(name: str, image: frog_ast.ASTNode) -> Optional[str]:
+        let = lemmas.get(name)
+        if let is None:
+            return f"{name} is not a let: parameter of the lemma"
+        if abstract(name):
+            return bind(name, image)
+        if name in lemma_sampled:
+            if isinstance(image, frog_ast.Variable) and image.name in parent_sampled:
+                return bind(name, image)
+            return f"its sampled {name} is not matched by a sampled parameter"
+        value = let.value
         parent_let = (
-            parents.get(parent_arg.name)
-            if isinstance(parent_arg, frog_ast.Variable)
-            else None
+            parents.get(image.name) if isinstance(image, frog_ast.Variable) else None
         )
-        if lemma_let is None or parent_let is None:
-            continue
-        lv, pv = lemma_let.value, parent_let.value
-        if (
-            isinstance(lv, frog_ast.FuncCall)
-            and isinstance(pv, frog_ast.FuncCall)
-            and isinstance(lv.func, frog_ast.Variable)
-            and isinstance(pv.func, frog_ast.Variable)
-            and lv.func.name == pv.func.name
-            and len(lv.args) == len(pv.args)
+        if not (
+            isinstance(value, frog_ast.FuncCall)
+            and isinstance(value.func, frog_ast.Variable)
+            and parent_let is not None
+            and isinstance(parent_let.value, frog_ast.FuncCall)
+            and parent_let.value.func == value.func
+            and len(parent_let.value.args) == len(value.args)
         ):
-            for inner, image in zip(lv.args, pv.args):
-                if isinstance(inner, frog_ast.Variable) and inner.name in lemma_lets:
-                    bind(inner.name, image)
-    for name in conflicts:
-        del name_map[name]
-    return name_map
+            return f"{image} is not an instance of its {name} = {value}"
+        callees.add(value.func.name)
+        err = bind(name, image)
+        if err is not None:
+            return err
+        for inner, parent_inner in zip(value.args, parent_let.value.args):
+            err = match(inner, parent_inner)
+            if err is not None:
+                return err
+        return None
+
+    def match(pattern: object, image: object) -> Optional[str]:
+        if isinstance(pattern, frog_ast.Variable) and pattern.name in lemmas:
+            if not isinstance(image, frog_ast.ASTNode):
+                return f"{image} does not match {pattern}"
+            return match_let(pattern.name, image)
+        if isinstance(pattern, frog_ast.ASTNode):
+            if type(pattern) is not type(image):
+                return f"{image} does not match {pattern}"
+            skip = {"line_num", "column_num", "origin"}
+            for attr, value in vars(pattern).items():
+                if attr in skip:
+                    continue
+                err = match(value, getattr(image, attr, None))
+                if err is not None:
+                    return err
+            return None
+        if isinstance(pattern, (list, tuple)):
+            if not isinstance(image, (list, tuple)) or len(pattern) != len(image):
+                return f"{image} does not match {pattern}"
+            for p, q in zip(pattern, image):
+                err = match(p, q)
+                if err is not None:
+                    return err
+            return None
+        return None if pattern == image else f"{image} does not match {pattern}"
+
+    if len(lemma_args) != len(parent_args):
+        return "its theorem has a different number of arguments"
+    for lemma_arg, parent_arg in zip(lemma_args, parent_args):
+        if not isinstance(lemma_arg, frog_ast.Variable):
+            return f"its theorem argument {lemma_arg} is not a let: parameter"
+        err = match_let(lemma_arg.name, parent_arg)
+        if err is not None:
+            return err
+    return LemmaInstantiation(name_map, callees)
 
 
 def _rename_symbols(
-    expr: sympy.Expr, name_map: Mapping[str, frog_ast.Expression]
+    expr: sympy.Expr, name_map: Mapping[str, frog_ast.ASTNode]
 ) -> sympy.Expr:
     """Rewrite a lemma-side SymPy expression into the parent's names.
 
@@ -835,7 +905,7 @@ def _rename_symbols(
 
 
 def _unmapped_locals(
-    lemma: LemmaBound, name_map: Mapping[str, frog_ast.Expression]
+    lemma: LemmaBound, name_map: Mapping[str, frog_ast.ASTNode]
 ) -> set[str]:
     """Lemma ``let:`` names its bound mentions that the parent cannot name."""
     local = {let.name for let in lemma.lets} - set(name_map)
@@ -860,15 +930,14 @@ def expand_lemma(  # pylint: disable=too-many-locals,too-many-arguments,too-many
     kind: str,
     definition_lookup: Mapping[str, object],
     max_calls: Optional[frog_ast.Expression],
-    parent_lets: Sequence[frog_ast.Field] = (),
 ) -> tuple[Optional[LemmaExpansion], str]:
     """Rewrite a lemma's bound for one parent hop that invokes it.
 
     The lemma proves, for every adversary D of its theorem game,
     ``Adv(D) <= sum_i Adv^{X_i}(S_i o D) + stat(counts of D)``. The parent
     charges ``Adv(R o A)`` (``R`` the hop's reduction, or none), so with
-    ``D = R o A``: (1) the lemma theorem's parameters become the parent's
-    instantiation arguments; (2) each ``count_<Oracle>`` of the lemma's
+    ``D = R o A``: (1) the lemma's parameters become the parent's expressions
+    (``lemma.name_map``, from matching the entry against the theorem); (2) each ``count_<Oracle>`` of the lemma's
     theorem game becomes how often ``R`` invokes that oracle (the engine's
     ``__reveal`` oracle of an event is invoked once), then an integer
     ``calls <= N`` pins what is left; (3) each lemma term is played by the
@@ -880,7 +949,7 @@ def expand_lemma(  # pylint: disable=too-many-locals,too-many-arguments,too-many
     label = str(instantiation)
     if not bound.supported:
         return None, f"lemma {label} left opaque: bound not synthesized ({bound.note})"
-    name_map = _lemma_name_map(lemma, instantiation, parent_lets)
+    name_map = lemma.name_map
     unmapped = _unmapped_locals(lemma, name_map)
     if unmapped:
         names = ", ".join(sorted(unmapped))

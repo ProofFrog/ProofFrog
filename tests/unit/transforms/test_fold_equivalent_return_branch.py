@@ -178,3 +178,68 @@ def test_init_rhs_field_reassigned_in_oracle_not_folded() -> None:
         and "reassigned outside Initialize" in nm.reason
         for nm in ctx.near_misses
     )
+
+
+def test_f342_init_local_resampled_between_definitions_not_folded() -> None:
+    """F-342: ``G = F.eval(x); x <- ...; H = F.eval(x);`` in Initialize.  The
+    recorded definitions of G and H have the same text but name different
+    values of the local ``x``, so expanding them equated G with H and folded
+    ``if (flag) return G; return H;`` into ``return H;`` -- the pass must
+    DECLINE."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive D(Int n) { deterministic BitString<n> eval(BitString<n> x); }"
+    )
+    game = frog_parser.parse_game("""
+        Game Collapse(D F, Int n) {
+            BitString<n> G;
+            BitString<n> H;
+            Void Initialize() {
+                BitString<n> x <- BitString<n>;
+                G = F.eval(x);
+                x <- BitString<n>;
+                H = F.eval(x);
+            }
+            BitString<n> O(Bool flag) {
+                if (flag) {
+                    return G;
+                }
+                return H;
+            }
+        }
+        """)
+    ctx = _ctx_with(D=prim, F=prim)
+    result = FoldEquivalentReturnBranch().apply(game, ctx)
+    assert result == game, "fold wrongly fired across a re-sampled Initialize local"
+    assert any(
+        nm.transform_name == "Fold Equivalent Return Branch"
+        and "Initialize local" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_f342_single_assignment_init_local_still_folds() -> None:
+    """F-342 control: with a single-assignment local, both fields are the same
+    deterministic image of it, and the fold still fires."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive D(Int n) { deterministic BitString<n> eval(BitString<n> x); }"
+    )
+    game = frog_parser.parse_game("""
+        Game Collapse(D F, Int n) {
+            BitString<n> G;
+            BitString<n> H;
+            Void Initialize() {
+                BitString<n> x <- BitString<n>;
+                G = F.eval(x);
+                H = F.eval(x);
+            }
+            BitString<n> O(Bool flag) {
+                if (flag) {
+                    return G;
+                }
+                return H;
+            }
+        }
+        """)
+    ctx = _ctx_with(D=prim, F=prim)
+    result = FoldEquivalentReturnBranch().apply(game, ctx)
+    assert result != game

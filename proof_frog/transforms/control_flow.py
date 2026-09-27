@@ -2183,6 +2183,34 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
                     )
                 )
                 continue
+            # Soundness (F-342): the same applies to Initialize LOCALS the RHS
+            # reads. The recorded text `F.eval(x)` names whatever `x` holds
+            # when the field is assigned; if `x` is re-sampled or reassigned
+            # in Initialize (before or after), another field's RHS can have
+            # the same text for a different value, and the comparison below
+            # would equate the two fields. Require each such local to take a
+            # single value in Initialize.
+            rhs_locals = referenced_variable_names(stmt.value) - field_names
+            rebound = sorted(
+                name for name in rhs_locals if _local_value_count(init, name) > 1
+            )
+            if rebound:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Fold Equivalent Return Branch",
+                        reason=(
+                            "Init-only field RHS not expanded: the Initialize"
+                            f" local(s) {', '.join(rebound)} it reads take more"
+                            " than one value in Initialize, so the RHS text does"
+                            " not identify the stored value"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=stmt.var.name,
+                        method=None,
+                    )
+                )
+                continue
             result.append((stmt.var, stmt.value))
         return result
 
@@ -2335,6 +2363,33 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             )
             return self.transform_block(frog_ast.Block(new_stmts))
         return block
+
+
+def _local_value_count(method: frog_ast.Method, name: str) -> int:
+    """How many values the local *name* can take in *method*: its writes.
+
+    Counts assignments and samples to it (including element writes), a
+    ``<-uniq[name]`` draw (which inserts into it), and being a loop variable
+    (which takes one value per iteration, counted as two). A bare
+    declaration is not a value. A method parameter never written counts 0.
+    """
+    count = _count_field_assigns_recursive(method.block, name)
+
+    def _other_writes(node: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if (
+            isinstance(node, frog_ast.UniqueSample)
+            and lvalue_base_name(node.unique_set) == name
+        ):
+            count += 1
+        elif (isinstance(node, frog_ast.NumericFor) and node.name == name) or (
+            isinstance(node, frog_ast.GenericFor) and node.var_name == name
+        ):
+            count += 2
+        return False
+
+    SearchVisitor(_other_writes).visit(method.block)
+    return count
 
 
 def _flatten_top_level_and(expr: frog_ast.Expression) -> list[frog_ast.Expression]:

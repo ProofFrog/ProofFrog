@@ -50,6 +50,14 @@ emitted with a `Frog` prefix (e.g. `\FrogPr`) to avoid clobbering them.
   can be filled in. Adjacent games highlight their changed lines with a
   soft tint by default (`--no-diff` to disable, `--diff-style color` for
   colored text instead).
+- Identical-until-bad hops and event theorems: a side flip over a pair
+  whose event is in scope (`lemma:`/`assume: event bad of P(a)`) renders
+  as a hop "identical until `bad` is set", citing the fundamental lemma
+  of game playing, with loss `\Pr[\mathit{bad} \text{ in } P(a) \text{
+  against } \mathcal{B}]`. A proof whose theorem is an event states that
+  probability as the left-hand side of its concrete-security inequality.
+  As for other helper games, a clause on the pair is not substituted:
+  the exporter's bound keeps it symbolic.
 - XOR rendering: `+` between two `BitString` operands renders as
   `\oplus` only when the orchestrator passes a `type_of` map to the
   expression renderer. The proof orchestrator does not yet populate

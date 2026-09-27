@@ -124,6 +124,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | SimplifyReturn | Inlines `Type v = expr; return v;` into `return expr;`. |
 | SimplifyIf | Merges adjacent if/else-if branches with identical (alpha-equivalent) bodies. |
 | RemoveUnreachable | Removes statements after all execution paths have returned (Z3-assisted). |
+| RemoveEmptyIf | Drops an `if` whose branches are all empty when its conditions make no call and index no map/array (else records a near-miss). |
 | FoldEquivalentReturnBranch | Folds `if (P) { return X; } return Y;` to `return Y;` when Z3 proves `P ⇒ (X ↔ Y)`. Refuses on any non-deterministic call. |
 
 ### Types (`types.py`)

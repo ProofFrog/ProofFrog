@@ -15,6 +15,7 @@ from typing import Callable, Optional
 
 from .. import frog_ast
 from ..visitors import (
+    lvalue_base_name,
     Transformer,
     BlockTransformer,
     SearchVisitor,
@@ -32,21 +33,31 @@ from ._base import (
     NearMiss,
     has_nondeterministic_call,
     _lookup_primitive_method,
+    method_bound_names,
 )
 from ._ordering import node_sort_key
 from ._wrappers import GroupExponentWrapper, WrapperShape, _GroupExpShape
 
 
 def _count_field_assigns(node: frog_ast.ASTNode, name: str) -> int:
-    """Count assignments/samples to *name* recursively in *node*."""
+    """Count writes to *name* recursively in *node*.
+
+    Element and slice writes (``M[k] = v``) mutate *name* and count, as does
+    a ``<-uniq[name]`` draw, which inserts into *name* (F-343/F-344: counting
+    only bare-Variable targets let a map or set field look unchanged).
+    """
     count = 0
 
     def _visit(n: frog_ast.ASTNode) -> bool:
         nonlocal count
         if (
             isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
-            and isinstance(n.var, frog_ast.Variable)
-            and n.var.name == name
+            and lvalue_base_name(n.var) == name
+        ):
+            count += 1
+        if (
+            isinstance(n, frog_ast.UniqueSample)
+            and lvalue_base_name(n.unique_set) == name
         ):
             count += 1
         return False
@@ -1705,8 +1716,11 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         # resolve Variable references when CSE / ForwardExpressionAlias
         # has hoisted the call into a named local.
         self.local_funccall_bindings: dict[str, frog_ast.FuncCall] = {}
+        # Names the method being transformed binds (F-347).
+        self._bound_names: set[str] = set()
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        self._bound_names = method_bound_names(method)
         bindings, reassigned = _scan_top_level_single_writes(
             method.block,
             value_predicate=lambda v: isinstance(v, frog_ast.FuncCall),
@@ -1982,6 +1996,10 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
                 def_idx = idx
         if rhs is None:
             return expr
+        # The top-level definition must be the field's only write in
+        # Initialize (a nested rewrite, e.g. under an `if`, may replace it).
+        if _count_field_assigns(init.block, name) != 1:
+            return expr
         # No assignment may exist anywhere else in the game.
         for method in self.game.methods:
             if method is init:
@@ -1999,6 +2017,27 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         visible = field_names | {p.name for p in self.game.parameters}
         free = {v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(rhs))}
         if not free.issubset(visible):
+            return expr
+        # F-347: at the comparison site the resolved RHS is read in the
+        # current method, where a parameter or local named like one of its
+        # free variables (or the field itself) would capture it.
+        captured = sorted((free | {name}) & self._bound_names)
+        if captured:
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Injective Equality Simplify",
+                    reason=(
+                        f"Field '{name}' was not resolved to its Initialize"
+                        f" definition: {', '.join(captured)} is bound in this"
+                        " method, so the definition would refer to a different"
+                        " variable"
+                    ),
+                    location=None,
+                    suggestion="rename the method's parameter or local",
+                    variable=name,
+                    method=None,
+                )
+            )
             return expr
         # F-248: the resolved RHS is substituted at an arbitrary comparison
         # site (any oracle, any time), so each free variable must hold the

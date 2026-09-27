@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 import functools
-from typing import Sequence
+from typing import Any, Sequence
 
 import z3
 
@@ -37,6 +37,7 @@ from ._base import (
     NearMiss,
     has_nondeterministic_call,
     method_bound_names,
+    _lookup_primitive_method,
 )
 
 # ---------------------------------------------------------------------------
@@ -2275,6 +2276,50 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
         finally:
             self._bound_names = set()
 
+    def _injectivity_facts(
+        self, visitor: Z3FormulaVisitor, exprs: Sequence[frog_ast.Expression]
+    ) -> list[Any]:
+        """``c1 == c2 => args(c1) == args(c2)`` for calls to the same method.
+
+        Sound for a method the primitive declares ``injective`` (distinct
+        inputs give distinct outputs); the pass already refuses inputs with
+        non-deterministic calls, so each call denotes one value.
+        """
+        calls: list[frog_ast.FuncCall] = []
+        for expr in exprs:
+            for node in _walk_nodes(expr):
+                if isinstance(node, frog_ast.FuncCall) and node.args:
+                    method = _lookup_primitive_method(
+                        node.func, self.ctx.proof_namespace
+                    )
+                    if method is not None and method.injective:
+                        calls.append(node)
+        facts = []
+        for i, first in enumerate(calls):
+            for second in calls[i + 1 :]:
+                if first.func != second.func or first == second:
+                    continue
+                if len(first.args) != len(second.args):
+                    continue
+                encoded = [visitor.visit(first), visitor.visit(second)]
+                arg_pairs = [
+                    (visitor.visit(a), visitor.visit(b))
+                    for a, b in zip(first.args, second.args)
+                ]
+                terms = encoded + [t for pair in arg_pairs for t in pair]
+                if any(t is None or isinstance(t, str) for t in terms):
+                    continue
+                try:
+                    facts.append(
+                        z3.Implies(
+                            encoded[0] == encoded[1],
+                            z3.And(*[a == b for a, b in arg_pairs]),
+                        )
+                    )
+                except (z3.Z3Exception, TypeError):
+                    continue
+        return facts
+
     def _usable_init_field_rhs(
         self,
     ) -> list[tuple[frog_ast.Variable, frog_ast.Expression]]:
@@ -2337,7 +2382,14 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
                 continue
             if counts.get(stmt.var.name, 0) != 1:
                 continue
-            if not isinstance(stmt.value, frog_ast.FuncCall):
+            # A definition is a call (`F = D(x)`) or a comparison
+            # (`F = a == b`, e.g. an identical-until-bad flag folded by
+            # FlagSetToAssignment).
+            if not isinstance(stmt.value, frog_ast.FuncCall) and not (
+                isinstance(stmt.value, frog_ast.BinaryOperation)
+                and stmt.value.operator
+                in (frog_ast.BinaryOperators.EQUALS, frog_ast.BinaryOperators.NOTEQUALS)
+            ):
                 continue
             # Reject a non-deterministic FuncCall RHS: expanding the field
             # to a textual copy of the call would let the comparison fold
@@ -2409,6 +2461,28 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             # the same text for a different value, and the comparison below
             # would equate the two fields. Require each such local to take a
             # single value in Initialize.
+            # An Initialize local shadowing a field would be read as the
+            # field once the RHS is expanded in another method.
+            shadowing = sorted(
+                (referenced_variable_names(stmt.value) & field_names)
+                & method_bound_names(init)
+            )
+            if shadowing:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Fold Equivalent Return Branch",
+                        reason=(
+                            "Init-only field RHS not expanded: the Initialize"
+                            f" local(s) {', '.join(shadowing)} it reads shadow a"
+                            " field of the same name"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=stmt.var.name,
+                        method=None,
+                    )
+                )
+                continue
             rhs_locals = referenced_variable_names(stmt.value) - field_names
             rebound = sorted(
                 name for name in rhs_locals if _local_value_count(init, name) > 1
@@ -2514,8 +2588,19 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             # field atoms intact in Z3 — overriding with the hoisted-call
             # RHS would replace one side of the equality with a structure
             # Z3 cannot relate to the other side's atom.
+            usable_init = self._usable_init_field_rhs()
+            if usable_init:
+                # Expand the Initialize definitions in P as well, so a guard
+                # on hoisted fields (`f1 == f2`) is stated over the values
+                # they were computed from.
+                p_map: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(
+                    identity=False
+                )
+                for field_var, rhs in usable_init:
+                    p_map.set(field_var, copy.deepcopy(rhs))
+                p_expr = SubstitutionTransformer(p_map).transform(copy.deepcopy(p_expr))
             all_sub_pairs: list[tuple[frog_ast.Expression, frog_ast.Expression]] = list(
-                self._usable_init_field_rhs()
+                usable_init
             ) + list(sub_pairs)
             if all_sub_pairs:
                 # Iterate substitution to a fixed point so chains like
@@ -2572,6 +2657,8 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
                 solver.set("timeout", 30000)
                 # Check Not(P => (X == Y)) is UNSAT, i.e., P AND X != Y is UNSAT.
                 solver.add(z3.And(p_formula, x_formula != y_formula))
+                for fact in self._injectivity_facts(visitor, (p_expr, x_sub, y_sub)):
+                    solver.add(fact)
                 if solver.check() != z3.unsat:
                     continue
             except (z3.Z3Exception, TypeError):

@@ -305,6 +305,7 @@ The essentials for writing correct FrogLang:
 - Dead code elimination, constant folding, single-use variable inlining, branch elimination, tuple index folding
 - An `if` whose branches are all empty, when its conditions make no call and index no map/array (`RemoveEmptyIf`)
 - A flag raise after a known-false flag: `x = false; S; if (C) { x = true; }` → `x = false; S; x = C;` when S does not mention `x` (`FlagSetToAssignment`)
+- Branch folding with Initialize facts: `if (P) { return X; } return Y;` → `return Y;` when Z3 proves `P ⇒ (X ↔ Y)`, using the definitions of fields assigned once in Initialize (calls or comparisons over values fixed from then on) and the injectivity of `injective` methods (`FoldEquivalentReturnBranch`)
 
 ### Guidelines for creating FrogLang files
 

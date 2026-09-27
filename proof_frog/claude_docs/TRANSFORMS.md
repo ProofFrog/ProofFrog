@@ -126,7 +126,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | RemoveUnreachable | Removes statements after all execution paths have returned (Z3-assisted). |
 | FlagSetToAssignment | Folds `x = false; S; if (C) { x = true; }` into `x = false; S; x = C;` when S does not mention `x` (the flag-raise shape of identical-until-bad pairs). |
 | RemoveEmptyIf | Drops an `if` whose branches are all empty when its conditions make no call and index no map/array (else records a near-miss). |
-| FoldEquivalentReturnBranch | Folds `if (P) { return X; } return Y;` to `return Y;` when Z3 proves `P ⇒ (X ↔ Y)`. Refuses on any non-deterministic call. |
+| FoldEquivalentReturnBranch | Folds `if (P) { return X; } return Y;` to `return Y;` when Z3 proves `P ⇒ (X ↔ Y)`. Refuses on any non-deterministic call. Fields assigned once in Initialize (to a deterministic call or a comparison) are expanded to their definitions in P, X and Y when every value the definition reads is fixed from the definition on and none of its names is rebound at the fold site; Z3 is also told that `injective` primitive methods are injective (`D(a) == D(b)` implies `a == b`). |
 
 ### Types (`types.py`)
 

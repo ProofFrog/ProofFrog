@@ -1261,3 +1261,61 @@ def test_f342_reject_fold_across_resampled_init_local() -> None:
     engine = _engine_with(D=prim, F=prim)
     result = engine.check_equivalent(with_flag, without_flag)
     assert not result.valid
+
+
+def _encoded_flag_game(name: str, encode: str, body: str) -> object:
+    return frog_parser.parse_game(
+        f"""
+        Game {name}(E F) {{
+            BitString<n> f1;
+            BitString<n> f2;
+            Bool flag;
+            Void Initialize() {{
+                BitString<n> a <- BitString<n>;
+                BitString<n> b <- BitString<n>;
+                f1 = F.{encode}(a);
+                f2 = F.{encode}(b);
+                flag = a == b;
+            }}
+            BitString<n> Peek1() {{
+                return f1;
+            }}
+            Bool O() {{
+                {body}
+            }}
+        }}
+        """
+    )
+
+
+def test_injective_encoding_decides_flag_multicall() -> None:
+    """A flag computed in Initialize as ``a == b`` equals ``enc(a) == enc(b)``
+    when ``enc`` is injective, so the guarded return of the flag is the same
+    as the unguarded comparison of the stored encodings."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive E(Int n) {
+            deterministic injective BitString<n> enc(BitString<n> x);
+        }
+        """)
+    engine = _engine_with(E=prim, F=prim)
+    guarded = _encoded_flag_game(
+        "A", "enc", "if (f1 == f2) { return flag; } return f1 == f2;"
+    )
+    plain = _encoded_flag_game("B", "enc", "return f1 == f2;")
+    assert engine.check_equivalent(guarded, plain).valid
+
+
+def test_non_injective_encoding_does_not_decide_flag() -> None:
+    """With a merely deterministic encoding the stored images can collide while
+    ``a != b``, where the guarded game returns false and the plain one true."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive E(Int n) {
+            deterministic BitString<n> enc(BitString<n> x);
+        }
+        """)
+    engine = _engine_with(E=prim, F=prim)
+    guarded = _encoded_flag_game(
+        "A", "enc", "if (f1 == f2) { return flag; } return f1 == f2;"
+    )
+    plain = _encoded_flag_game("B", "enc", "return f1 == f2;")
+    assert not engine.check_equivalent(guarded, plain).valid

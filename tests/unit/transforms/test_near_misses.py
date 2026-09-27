@@ -6,6 +6,7 @@ from proof_frog.transforms._base import (
 )
 from proof_frog import frog_parser, frog_ast
 from proof_frog.transforms.algebraic import (
+    InjectiveEqualitySimplify,
     UniformXorSimplification,
     UniformModIntSimplification,
     XorCancellation,
@@ -2532,5 +2533,31 @@ def test_fold_equivalent_return_branch_near_miss_on_rhs_field_written_later():
     assert any(
         nm.transform_name == "Fold Equivalent Return Branch"
         and "after the definition" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_injective_equality_near_miss_on_captured_definition():
+    """F-347: the comparison's method binds a name the definition reads."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive T(Int n) { deterministic injective BitString<n> eval(BitString<n> x); }"
+    )
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"T": prim, "F": prim},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(T F, Int n) {
+            BitString<n> K;
+            BitString<n> A;
+            Void Initialize() { K <- BitString<n>; A = F.eval(K); }
+            Bool Test(BitString<n> K) { return A == F.eval(K); }
+        }
+        """)
+    InjectiveEqualitySimplify().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Injective Equality Simplify" and "bound in this method" in nm.reason
         for nm in ctx.near_misses
     )

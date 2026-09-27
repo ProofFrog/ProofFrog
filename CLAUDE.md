@@ -175,6 +175,7 @@ The essentials for writing correct FrogLang:
 - Random function on fresh `<-uniq` input used only in that call → independent uniform sample (`FreshInputRFToUniform`)
 - Dead code elimination, constant folding, single-use variable inlining, branch elimination, tuple index folding
 - An `if` whose branches are all empty, when its conditions make no call and index no map/array (`RemoveEmptyIf`)
+- A flag raise after a known-false flag: `x = false; S; if (C) { x = true; }` → `x = false; S; x = C;` when S does not mention `x` (`FlagSetToAssignment`)
 
 ### Guidelines for creating FrogLang files
 

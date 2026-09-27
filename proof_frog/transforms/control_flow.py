@@ -866,6 +866,93 @@ class RemoveStatementTransformer(BlockTransformer):
         return frog_ast.Block(new_statements)
 
 
+class FlagSetToAssignmentTransformer(BlockTransformer):
+    """Folds a conditional flag raise after a known-false flag into an assignment.
+
+    ::
+
+        x = false; S; if (C) { x = true; }   ->   x = false; S; x = C;
+
+    when no statement of S mentions ``x`` (so ``x`` is false right before
+    the if). Afterwards ``x`` equals ``C`` on both sides, and ``C`` is
+    evaluated exactly once at the same point, so the rewrite is exact even
+    when ``C`` makes calls. The earlier ``x = false`` is then a dead store.
+    This is the shape an identical-until-bad pair uses to raise a flag in
+    Initialize.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+
+    @staticmethod
+    def _flag_assignment(stmt: frog_ast.Statement, value: bool) -> str | None:
+        if (
+            isinstance(stmt, frog_ast.Assignment)
+            and stmt.the_type is None
+            and isinstance(stmt.var, frog_ast.Variable)
+            and stmt.value == frog_ast.Boolean(value)
+        ):
+            return stmt.var.name
+        return None
+
+    def _raised_flag(self, stmt: frog_ast.Statement) -> str | None:
+        if (
+            isinstance(stmt, frog_ast.IfStatement)
+            and len(stmt.conditions) == 1
+            and len(stmt.blocks) == 1
+            and len(stmt.blocks[0].statements) == 1
+        ):
+            return self._flag_assignment(stmt.blocks[0].statements[0], True)
+        return None
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        known_false: set[str] = set()
+        reset_earlier: set[str] = set()
+        new_statements: list[frog_ast.Statement] = []
+        for stmt in block.statements:
+            flag = self._raised_flag(stmt)
+            if flag is not None and flag in known_false:
+                assert isinstance(stmt, frog_ast.IfStatement)
+                replacement = frog_ast.Assignment(
+                    None, frog_ast.Variable(flag), copy.deepcopy(stmt.conditions[0])
+                )
+                replacement.line_num, replacement.column_num = (
+                    stmt.line_num,
+                    stmt.column_num,
+                )
+                new_statements.append(replacement)
+                known_false.discard(flag)
+                continue
+            if flag is not None and flag in reset_earlier:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Flag Set To Assignment",
+                        reason=(
+                            f"'if (...) {{ {flag} = true; }}' was not folded into"
+                            f" '{flag} = ...;': {flag} is mentioned between its"
+                            f" reset to false and the if-statement"
+                        ),
+                        location=stmt.origin,
+                        suggestion=(
+                            f"move the statements that mention {flag} after the"
+                            " if-statement, or before the reset"
+                        ),
+                        variable=flag,
+                        method=None,
+                    )
+                )
+            mentioned = {
+                n.name for n in _walk_nodes(stmt) if isinstance(n, frog_ast.Variable)
+            }
+            known_false -= mentioned
+            reset = self._flag_assignment(stmt, False)
+            if reset is not None:
+                known_false.add(reset)
+                reset_earlier.add(reset)
+            new_statements.append(stmt)
+        return frog_ast.Block(new_statements)
+
+
 class RemoveEmptyIfTransformer(BlockTransformer):
     """Drops an ``if`` statement whose every arm is empty.
 
@@ -3045,6 +3132,13 @@ class SimplifyIf(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return SimplifyIfTransformer().transform(game)
+
+
+class FlagSetToAssignment(TransformPass):
+    name = "Flag Set To Assignment"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return FlagSetToAssignmentTransformer(ctx).transform(game)
 
 
 class RemoveEmptyIf(TransformPass):

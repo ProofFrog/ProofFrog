@@ -11,6 +11,7 @@ from proof_frog.transforms.algebraic import (
     XorCancellation,
 )
 from proof_frog.transforms.control_flow import (
+    FlagSetToAssignment,
     RemoveEmptyIf,
     BranchElimination,
     GuardConditionSimplification,
@@ -2493,3 +2494,29 @@ def test_remove_empty_if_near_miss_on_indexed_condition():
     RemoveEmptyIf().apply(game, ctx)
     misses = [nm for nm in ctx.near_misses if nm.transform_name == "Remove Empty If"]
     assert misses and "M[x]" in misses[0].reason
+
+
+def test_flag_set_to_assignment_near_miss_on_intervening_mention():
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(Set S) {
+            S a; S b; Bool bad; Bool seen;
+            Void Initialize() {
+                bad = false;
+                seen = bad;
+                if (a == b) {
+                    bad = true;
+                }
+            }
+        }
+        """)
+    FlagSetToAssignment().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Flag Set To Assignment" and nm.variable == "bad"
+        for nm in ctx.near_misses
+    )

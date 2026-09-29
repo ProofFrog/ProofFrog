@@ -139,3 +139,62 @@ class TestPreservesRealNullGuards:
         assert (
             result == game
         ), "Guard on variable reassigned to None should not be eliminated"
+
+
+class TestNullableLocalWrites:
+    """A nullable local stays nullable if any later statement may write it."""
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            "if (c) { v = None; }",
+            "if (c) { } else { v = None; }",
+            "for (Int i = 0 to 2) { v = None; }",
+            "if (c) { if (c) { v = None; } }",
+        ],
+    )
+    def test_nested_write_keeps_guard(self, write: str) -> None:
+        game = frog_parser.parse_game(f"""
+            Game G() {{
+                Int Test(Int x, Bool c) {{
+                    Int? v = x;
+                    {write}
+                    if (v == None) {{
+                        return 0;
+                    }}
+                    return 1;
+                }}
+            }}
+            """)
+        assert "if (v == None)" in _transform(str(game))
+
+    def test_no_write_removes_guard(self) -> None:
+        result = _transform("""
+            Game G() {
+                Int Test(Int x, Bool c) {
+                    Int? v = x;
+                    if (c) { x = 0; }
+                    if (v == None) {
+                        return 0;
+                    }
+                    return 1;
+                }
+            }
+            """)
+        assert "v == None" not in result
+
+    def test_guard_before_declaration_kept(self) -> None:
+        """The guard reads the field v, not the later local."""
+        result = _transform("""
+            Game G() {
+                Int? v;
+                Int Test(Int x) {
+                    if (v == None) {
+                        return 0;
+                    }
+                    Int? v = x;
+                    return 1;
+                }
+            }
+            """)
+        assert "if (v == None)" in result

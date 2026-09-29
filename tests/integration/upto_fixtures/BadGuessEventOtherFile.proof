@@ -1,0 +1,37 @@
+// Proves an event of other/BadGuess.game, a different file that is also
+// exported as BadGuess.
+import 'other/BadGuess.game';
+import 'RandomTargetGuessing.game';
+
+proof:
+
+let:
+    Set S;
+
+assume:
+    RandomTargetGuessing(S);
+
+theorem:
+    event bad of BadGuess(S);
+
+games:
+    BadGuess(S).Right against BadGuess(S).Adversary;
+    RandomTargetGuessing(S).Real  compose R(S) against BadGuess(S).Adversary;
+    RandomTargetGuessing(S).Ideal compose R(S) against BadGuess(S).Adversary;
+
+// R: forwards each guess to the challenger and raises bad on a hit.
+Reduction R(Set S) compose RandomTargetGuessing(S) against BadGuess(S).Adversary {
+    Bool bad;
+
+    Void Initialize() {
+        challenger.Initialize();
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (challenger.Eq(c)) {
+            bad = true;
+        }
+        return false;
+    }
+}

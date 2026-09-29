@@ -117,7 +117,7 @@
          (declaration-keywords '("Primitive" "Scheme" "Game" "Reduction" "Phase"))
          ;; Proof structure keywords
          (proof-keywords '("proof" "let" "assume" "lemma" "theorem" "games"
-                           "induction" "from" "by"))
+                           "induction" "from" "by" "event" "of" "at"))
          ;; Control flow keywords
          (control-keywords '("if" "else" "for" "return" "to" "in"))
          ;; Other keywords

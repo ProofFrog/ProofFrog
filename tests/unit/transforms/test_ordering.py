@@ -52,6 +52,8 @@ _EXCLUDED = {
     # Proof-file-level declared bound (its own vocabulary; never inside a game)
     frog_ast.ClaimedBound,
     frog_ast.AdvantageReference,
+    # Proof-file-level notion (theorem/assume/lemma entries; never inside a game)
+    frog_ast.EventTheorem,
     # Parse-time-only sugar: the parser desugars these away immediately, so
     # they never reach canonicalization/ordering.
     frog_ast.DestructuringBinding,

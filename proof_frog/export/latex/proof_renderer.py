@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ... import frog_ast
+from ... import upto
 from . import ir
 from .backends.base import Backend
 from .document import assemble
@@ -193,7 +194,22 @@ def _adversary_tex(name: str) -> str:
     return base + (rf"_{{{rest}}}" if rest else "")
 
 
+def _render_event(
+    event: frog_ast.EventTheorem, renderer: ModuleRenderer, adversary: str
+) -> str:
+    """``Pr[bad in P(a) against B]``: the probability that ``bad`` is set."""
+    pair = _render_game_ref(event.game, renderer, as_notion=True)
+    flag = event.flag.replace("_", r"\_")
+    return (
+        rf"\Pr[\mathit{{{flag}}} \text{{ in }} {pair}"
+        rf" \text{{ against }} {adversary}]"
+    )
+
+
 def _render_adv_term(term: "AdvTerm", renderer: ModuleRenderer) -> str:
+    event = upto.event_of_notion(term.notion)
+    if event is not None:
+        return _render_event(event, renderer, _adversary_tex(term.adversary))
     notion = _render_game_ref(term.notion, renderer, as_notion=True)
     return rf"\Adv{{{notion}}}{{{_adversary_tex(term.adversary)}}}"
 
@@ -222,11 +238,13 @@ def _render_advantage_reference(
     in a claimed bound) as an algorithm macro. A reference with no reduction is
     played directly by the adversary ``A``.
     """
-    notion = _render_game_ref(ref.notion, renderer, as_notion=True)
     if ref.reduction is None:
         adversary = r"\mathcal{A}"
     else:
         adversary = _render_game_ref(ref.reduction, renderer, as_notion=False)
+    if isinstance(ref.notion, frog_ast.EventTheorem):
+        return _render_event(ref.notion, renderer, adversary)
+    notion = _render_game_ref(ref.notion, renderer, as_notion=True)
     return rf"\Adv{{{notion}}}{{{adversary}}}"
 
 
@@ -367,17 +385,35 @@ def _bound_sentence(lhs: str, terms: list[str], adversaries: list[str]) -> str:
 
 
 def _theorem_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
-    hyps = [_render_game_ref(a, renderer, as_notion=True) for a in ctx.assumptions()]
-    concl = _render_game_ref(ctx.theorem(), renderer, as_notion=True)
-    if hyps:
-        joined = " and ".join(f"${h}$" for h in hyps)
-        body = (
-            f"If indistinguishability holds for {joined}, then "
-            f"indistinguishability holds for ${concl}$."
-        )
+    # pylint: disable=too-many-locals
+    a_tex = r"\mathcal{A}"
+    game_hyps = [
+        f"${_render_game_ref(a, renderer, as_notion=True)}$"
+        for a in ctx.assumptions()
+        if not isinstance(a, frog_ast.EventTheorem)
+    ]
+    event_hyps = [
+        f"${_render_event(a, renderer, a_tex)}$"
+        for a in ctx.assumptions()
+        if isinstance(a, frog_ast.EventTheorem)
+    ]
+    premises = []
+    if game_hyps:
+        premises.append(f"indistinguishability holds for {' and '.join(game_hyps)}")
+    if event_hyps:
+        premises.append(f"{' and '.join(event_hyps)} is small")
+    theorem = ctx.theorem()
+    if isinstance(theorem, frog_ast.EventTheorem):
+        lhs = _render_event(theorem, renderer, a_tex)
+        conclusion = f"${lhs}$ is small"
     else:
-        body = f"Indistinguishability holds for ${concl}$."
-    lhs = rf"\Adv{{{concl}}}{{\mathcal{{A}}}}"
+        concl = _render_game_ref(theorem, renderer, as_notion=True)
+        lhs = rf"\Adv{{{concl}}}{{{a_tex}}}"
+        conclusion = f"indistinguishability holds for ${concl}$"
+    if premises:
+        body = f"If {', and '.join(premises)}, then {conclusion}."
+    else:
+        body = conclusion[0].upper() + conclusion[1:] + "."
     claimed = ctx.claimed_bound()
     if claimed is not None:
         # The author stated the bound explicitly: display it (the intended,
@@ -531,7 +567,29 @@ def _hop_annotation(
     """
     prev = rf"G_{{{i-1}}}"
     cur = rf"G_{{{i}}}"
-    if hop.kind == "assumption" and hop.assumption is not None:
+    if hop.kind == "upto" and isinstance(hop.assumption, frog_ast.EventTheorem):
+        event = hop.assumption
+        pair = _render_game_ref(event.game, renderer, as_notion=True)
+        flag = event.flag.replace("_", r"\_")
+        source = "the event lemma" if hop.by_lemma else "assumption"
+        sentence = (
+            rf"Games $G_{{{i-1}}}$ and $G_{{{i}}}$ differ only in the side of "
+            rf"the ${pair}$ challenger, whose two sides are identical until "
+            rf"$\mathit{{{flag}}}$ is set; by the fundamental lemma of game "
+            rf"playing"
+        )
+        if loss is not None:
+            adv = _render_adv_term(loss, renderer)
+            sentence += (
+                rf", $\lvert \Pr[{prev} = 1] - \Pr[{cur} = 1] \rvert \le {adv}$,"
+                rf" which is bounded by {source}."
+            )
+        else:
+            sentence += (
+                rf" the loss is at most the probability that "
+                rf"$\mathit{{{flag}}}$ is set, bounded by {source}."
+            )
+    elif hop.kind == "assumption" and hop.assumption is not None:
         ref = _render_game_ref(hop.assumption, renderer, as_notion=True)
         if loss is not None:
             adversary = _adversary_tex(loss.adversary)

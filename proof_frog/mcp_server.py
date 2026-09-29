@@ -498,6 +498,7 @@ assume:
 
 lemma:
     LemmaGame(E) by 'path/to/lemma.proof';   // verify and use another proof
+    event bad of PairGame(E) by 'p.proof';    // Pr[bad] bound for an upto hop
 
 theorem:
     TargetGame(S);
@@ -521,6 +522,15 @@ games:
 - Reductions use `compose` to plug a game in as challenger for another.
 - A reduction's parameter list must include every parameter needed to instantiate \
 the composed security game.
+- Identical-until-bad: a side flip over a pair whose games declare `Bool bad` \
+and agree until `bad = true;` is an `upto` hop when `event bad of Pair(args)` is \
+assumed or proven by a lemma; it costs Pr[bad].
+- Event theorem (`theorem: event bad of Pair(args);`): the first step is a side \
+of the pair, every reduction/intermediate game declares `Bool bad` and raises it \
+when the pair would, and the chain ends where `bad` can no longer be raised. \
+`event bad of Pair(args) at Initialize` is for a flag raised only in Initialize \
+(helpers then define only Initialize).
+- A reduction calls `challenger.Initialize` at most once, only from Initialize.
 
 ## Import Paths
 Paths in import statements are relative to where `proof_frog` is invoked,

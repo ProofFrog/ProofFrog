@@ -1,0 +1,43 @@
+// Two uniform samples are handed to the adversary; the flag records whether
+// they collided. Real reveals the flag through Collided, Ideal never does.
+Game Real(Set S) {
+    S x;
+    S y;
+    Bool bad;
+
+    [S, S] Initialize() {
+        x <- S;
+        y <- S;
+        bad = false;
+        if (x == y) {
+            bad = true;
+        }
+        return [x, y];
+    }
+
+    Bool Collided() {
+        return bad;
+    }
+}
+
+Game Ideal(Set S) {
+    S x;
+    S y;
+    Bool bad;
+
+    [S, S] Initialize() {
+        x <- S;
+        y <- S;
+        bad = false;
+        if (x == y) {
+            bad = true;
+        }
+        return [x, y];
+    }
+
+    Bool Collided() {
+        return false;
+    }
+}
+
+export as InitCollision;

@@ -98,6 +98,7 @@ from .control_flow import (
     SimplifyReturn,
     SimplifyIf,
     RemoveUnreachable,
+    RemoveEmptyIf,
 )
 from .types import DeadNullGuardElimination, SubsetTypeNormalization
 from .tuples import (
@@ -202,6 +203,7 @@ CORE_PIPELINE: list[TransformPass] = [
     RedundantFieldCopy(),
     SimplifyTuple(),
     RemoveUnreachable(),
+    RemoveEmptyIf(),
     AbsorbRedundantEarlyReturn(),
     FactorCommonGuard(),
     MergeNestedGuard(),

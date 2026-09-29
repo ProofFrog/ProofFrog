@@ -1,0 +1,55 @@
+// The chain passes through an intermediate game, which declares the flag
+// the engine observes.
+import 'BadGuess.game';
+import 'RandomTargetGuessing.game';
+
+proof:
+
+let:
+    Set S;
+
+assume:
+    RandomTargetGuessing(S);
+
+theorem:
+    event bad of BadGuess(S);
+
+games:
+    BadGuess(S).Right against BadGuess(S).Adversary;
+    G_Hit(S) against BadGuess(S).Adversary;
+    RandomTargetGuessing(S).Real  compose R(S) against BadGuess(S).Adversary;
+    RandomTargetGuessing(S).Ideal compose R(S) against BadGuess(S).Adversary;
+
+// G_Hit: BadGuess.Right with the comparison written the other way round.
+Game G_Hit(Set S) {
+    S target;
+    Bool bad;
+
+    Void Initialize() {
+        target <- S;
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (target == c) {
+            bad = true;
+        }
+        return false;
+    }
+}
+
+Reduction R(Set S) compose RandomTargetGuessing(S) against BadGuess(S).Adversary {
+    Bool bad;
+
+    Void Initialize() {
+        challenger.Initialize();
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (challenger.Eq(c)) {
+            bad = true;
+        }
+        return false;
+    }
+}

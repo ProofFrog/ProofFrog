@@ -13,6 +13,7 @@ from proof_frog.transforms.algebraic import (
 )
 from proof_frog.transforms.control_flow import (
     FoldEquivalentReturnBranch,
+    RemoveEmptyIf,
     BranchElimination,
     GuardConditionSimplification,
     IfToBooleanAssignment,
@@ -2472,6 +2473,28 @@ def test_hoist_near_miss_initialize_rebinds_arg():
     ]
     assert len(misses) == 1
     assert misses[0].method == "Initialize"
+
+
+def test_remove_empty_if_near_miss_on_indexed_condition():
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G() {
+            Map<Int, Bool> M;
+            Int O(Int x) {
+                if (M[x]) {
+                }
+                return x;
+            }
+        }
+        """)
+    RemoveEmptyIf().apply(game, ctx)
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == "Remove Empty If"]
+    assert misses and "M[x]" in misses[0].reason
 
 
 def test_fold_equivalent_return_branch_near_miss_on_rebound_init_local():

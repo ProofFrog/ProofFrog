@@ -1419,7 +1419,7 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
         assumptions = []
         max_calls = None
         if proof.assumptions():
-            for assumption in proof.assumptions().parameterizedGame():
+            for assumption in proof.assumptions().notion():
                 assumptions.append(self.visit(assumption))
             if proof.assumptions().CALLS():
                 max_calls = self.visit(proof.assumptions().expression())
@@ -1427,7 +1427,7 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
         lemmas: list[frog_ast.Lemma] = []
         if proof.lemmas():
             for lemma_entry in proof.lemmas().lemmaEntry():
-                game = self.visit(lemma_entry.parameterizedGame())
+                game = self.visit(lemma_entry.notion())
                 path = lemma_entry.FILESTRING().getText().strip("'")
                 lemmas.append(frog_ast.Lemma(game, path))
 
@@ -1449,7 +1449,7 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
             assumptions,
             lemmas,
             max_calls,
-            self.visit(proof.theorem().parameterizedGame()),
+            self.visit(proof.theorem().notion()),
             self.visit(proof.gameList()),
             requirements,
             helpers_after_theorem_count=helpers_after_count,
@@ -1463,6 +1463,35 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
     ) -> frog_ast.ParameterizedGame:
         return frog_ast.ParameterizedGame(
             ctx.id_().getText(), self.visit(ctx.argList()) if ctx.argList() else []
+        )
+
+    def visitGameNotion(
+        self, ctx: ProofParser.GameNotionContext
+    ) -> frog_ast.ParameterizedGame:
+        game: frog_ast.ParameterizedGame = self.visit(ctx.parameterizedGame())
+        return game
+
+    def visitEventNotion(
+        self, ctx: ProofParser.EventNotionContext
+    ) -> frog_ast.EventTheorem:
+        event: frog_ast.EventTheorem = self.visit(ctx.eventTheorem())
+        return event
+
+    def visitEventTheorem(
+        self, ctx: ProofParser.EventTheoremContext
+    ) -> frog_ast.EventTheorem:
+        ids = ctx.id_()
+        at_initialize = ctx.AT() is not None
+        if at_initialize and ids[1].getText() != "Initialize":
+            raise ParseError(
+                f"'at' must be followed by 'Initialize' (got '{ids[1].getText()}')",
+                file_name=self.source_file,
+                line=ctx.start.line,
+                column=ctx.start.column,
+                token=ids[1].getText(),
+            )
+        return frog_ast.EventTheorem(
+            ids[0].getText(), self.visit(ctx.parameterizedGame()), at_initialize
         )
 
     def visitBoundExponentiate(
@@ -1513,7 +1542,7 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
     def visitBoundAdvantage(
         self, ctx: ProofParser.BoundAdvantageContext
     ) -> frog_ast.AdvantageReference:
-        notion = self.visit(ctx.parameterizedGame())
+        notion = self.visit(ctx.notion())
         reduction = (
             self.visit(ctx.reductionRef()) if ctx.reductionRef() is not None else None
         )

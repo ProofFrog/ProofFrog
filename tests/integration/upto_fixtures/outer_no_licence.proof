@@ -1,0 +1,29 @@
+// Negative: no event of BadGuess is in scope, so the side flip is an
+// ordinary equivalence hop, which fails.
+import 'TargetGuess.game';
+import 'BadGuess.game';
+
+proof:
+
+let:
+    Set S;
+
+theorem:
+    TargetGuess(S);
+
+games:
+    TargetGuess(S).Left against TargetGuess(S).Adversary;
+    BadGuess(S).Left compose R(S) against TargetGuess(S).Adversary;
+    BadGuess(S).Right compose R(S) against TargetGuess(S).Adversary;
+    TargetGuess(S).Right against TargetGuess(S).Adversary;
+
+// R: forwards every guess to the pair.
+Reduction R(Set S) compose BadGuess(S) against TargetGuess(S).Adversary {
+    Void Initialize() {
+        challenger.Initialize();
+    }
+
+    Bool Eq(S c) {
+        return challenger.Eq(c);
+    }
+}

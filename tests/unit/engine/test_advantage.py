@@ -238,6 +238,58 @@ class TestOracleCountDerivation:
         )
         assert bound.render() == "count_CTXT*(2*count_CTXT - 1)/|Message|"
 
+    def test_calls_in_if_condition_are_counted(self) -> None:
+        # `if (challenger.Samp()) { ... }` queries Samp once per CTXT call.
+        cond_call = frog_ast.IfStatement(
+            [_challenger_call("Samp")], [frog_ast.Block([])]
+        )
+        reduction = frog_ast.Reduction(
+            (
+                "R",
+                [],
+                [],
+                [
+                    frog_ast.Method(
+                        frog_ast.MethodSignature("CTXT", frog_ast.Void(), []),
+                        frog_ast.Block([cond_call]),
+                    )
+                ],
+            ),
+            frog_ast.ParameterizedGame("H", []),
+            frog_ast.ParameterizedGame("Th", []),
+        )
+        lookup = _lookup()
+        lookup["R"] = reduction
+        bound = advantage.synthesize_from_hop_results(
+            [_birthday_hop()], definition_lookup=lookup
+        )
+        assert bound.render() == "count_CTXT*(count_CTXT - 1)/(2*|Message|)"
+
+    def test_calls_in_loop_header_are_counted(self) -> None:
+        # `for (T x in challenger.Samp())` evaluates its header once.
+        loop = frog_ast.GenericFor(
+            frog_ast.Variable("T"), "x", _challenger_call("Samp"), frog_ast.Block([])
+        )
+        count = advantage._derive_oracle_count(  # pylint: disable=protected-access
+            frog_ast.Reduction(
+                (
+                    "R",
+                    [],
+                    [],
+                    [
+                        frog_ast.Method(
+                            frog_ast.MethodSignature("CTXT", frog_ast.Void(), []),
+                            frog_ast.Block([loop]),
+                        )
+                    ],
+                ),
+                frog_ast.ParameterizedGame("H", []),
+                frog_ast.ParameterizedGame("Th", []),
+            ),
+            "Samp",
+        )
+        assert count == sympy.Symbol("count_CTXT", nonnegative=True)
+
     def test_integer_calls_cap_pins_count(self) -> None:
         # A concrete `calls <= 1` pins count_CTXT -> 1, so the birthday term is 0.
         bound = advantage.synthesize_from_hop_results(
@@ -493,3 +545,20 @@ class TestCheckClaimedBound:
         )
         result = advantage.check_claimed_bound(_parse_claim(self._ADV), unsupported)
         assert result.status == "undecided"
+
+
+def test_synthesize_from_steps_charges_event_on_side_flip() -> None:
+    pair = frog_ast.ParameterizedGame("P", [frog_ast.Variable("S")])
+    red = frog_ast.ParameterizedGame("R", [frog_ast.Variable("S")])
+    adv = frog_ast.ParameterizedGame("T", [frog_ast.Variable("S")])
+    steps: list[frog_ast.ProofStep] = [
+        frog_ast.Step(frog_ast.ConcreteGame(pair, "Left"), red, adv),
+        frog_ast.Step(frog_ast.ConcreteGame(pair, "Right"), red, adv),
+    ]
+    event = frog_ast.EventTheorem("bad", pair)
+    bound = advantage.synthesize_from_steps(
+        steps, set(), event_notions={str(pair): event.notion()}
+    )
+    assert bound.render() == "Pr[bad of P(S)](B1)"
+    # Without the event in scope the side flip is an equivalence.
+    assert advantage.synthesize_from_steps(steps, set()).render() == "0"

@@ -873,6 +873,80 @@ class RemoveStatementTransformer(BlockTransformer):
         return frog_ast.Block(new_statements)
 
 
+class RemoveEmptyIfTransformer(BlockTransformer):
+    """Drops an ``if`` statement whose every arm is empty.
+
+    Such a statement writes nothing and continues at the same point on every
+    path, so only the evaluation of its conditions could be observable. It is
+    removed when that evaluation has no effect: no call (a method may be
+    non-deterministic, a random function lazily sampled) and no map/array
+    indexing (an absent-key read). Otherwise the statement is kept and a
+    near-miss recorded.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        kept: list[frog_ast.Statement] = []
+        for statement in block.statements:
+            if not (
+                isinstance(statement, frog_ast.IfStatement)
+                and all(not b.statements for b in statement.blocks)
+            ):
+                kept.append(statement)
+                continue
+            blocker = next(
+                (
+                    node
+                    for condition in statement.conditions
+                    for node in _walk_nodes(condition)
+                    if isinstance(
+                        node,
+                        (frog_ast.FuncCall, frog_ast.ArrayAccess, frog_ast.Slice),
+                    )
+                ),
+                None,
+            )
+            if blocker is None:
+                continue
+            kept.append(statement)
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Remove Empty If",
+                    reason=(
+                        f"an if-statement with only empty branches was kept"
+                        f" because its condition evaluates '{blocker}', which"
+                        f" may have an effect"
+                    ),
+                    location=statement.origin,
+                    suggestion=(
+                        "compute the condition into a local only if its value"
+                        " is needed, or drop the empty if-statement"
+                    ),
+                    variable=None,
+                    method=None,
+                )
+            )
+        return frog_ast.Block(kept)
+
+
+def _walk_nodes(node: object) -> list[frog_ast.ASTNode]:
+    """Every AST node reachable from *node* (including itself)."""
+    found: list[frog_ast.ASTNode] = []
+    stack: list[object] = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, frog_ast.ASTNode):
+            found.append(current)
+            stack.extend(
+                getattr(current, attr) for attr in vars(current) if attr != "origin"
+            )
+        elif isinstance(current, (list, tuple)):
+            stack.extend(current)
+    return found
+
+
 # Consider case where else if condition might have a return but then the if condition doesn't
 # Then in order to check whether it's definitely true we need (not A and B) where A is first condition and B is second.
 
@@ -3112,6 +3186,13 @@ class SimplifyIf(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return SimplifyIfTransformer().transform(game)
+
+
+class RemoveEmptyIf(TransformPass):
+    name = "Remove Empty If"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return RemoveEmptyIfTransformer(ctx).transform(game)
 
 
 class RemoveUnreachable(TransformPass):

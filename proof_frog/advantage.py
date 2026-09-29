@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence
 import sympy
 
 from . import frog_ast
+from . import upto
 from . import visitors
 
 if TYPE_CHECKING:  # avoid an import cycle with proof_engine at runtime
@@ -181,6 +182,8 @@ class AdvantageBound:
 
 
 def _default_term_renderer(term: AdvTerm) -> str:
+    if upto.is_event_notion(term.notion):
+        return f"Pr[{upto.pretty_notion(term.notion)}]({term.adversary})"
     return f"Adv^{term.notion}({term.adversary})"
 
 
@@ -316,8 +319,9 @@ def _count_calls_in_statements(
     """Count ``challenger.<oracle>`` invocations across straight-line/loop code.
 
     A ``for`` loop multiplies its body's count by the loop's (upper-bounded)
-    trip count; an ``if``/``else`` sums its branches (a sound upper bound, since
-    at most one runs); ordinary statements contribute one per syntactic call
+    trip count (plus any calls in its header); an ``if``/``else`` counts every
+    condition once and sums its branches (a sound upper bound, since at most
+    one branch runs); ordinary statements contribute one per syntactic call
     site. Raises :class:`_UnconvertibleBound` if a construct's multiplicity
     cannot be bounded.
     """
@@ -329,11 +333,16 @@ def _count_calls_in_statements(
                 - _frog_arith_to_sympy(stmt.start)
                 + sympy.Integer(1)
             )
+            total += sympy.Integer(_count_calls_in_expression(stmt.start, oracle))
+            total += sympy.Integer(_count_calls_in_expression(stmt.end, oracle))
             total += trips * _count_calls_in_statements(stmt.block.statements, oracle)
         elif isinstance(stmt, frog_ast.GenericFor):
             size = sympy.Symbol(f"|{stmt.over}|", positive=True)
+            total += sympy.Integer(_count_calls_in_expression(stmt.over, oracle))
             total += size * _count_calls_in_statements(stmt.block.statements, oracle)
         elif isinstance(stmt, frog_ast.IfStatement):
+            for condition in stmt.conditions:
+                total += sympy.Integer(_count_calls_in_expression(condition, oracle))
             for block in stmt.blocks:
                 total += _count_calls_in_statements(block.statements, oracle)
         else:
@@ -478,7 +487,9 @@ def synthesize_from_hops(hops: Sequence[HopInfo]) -> AdvantageBound:
     notes: list[str] = []
 
     for hop in hops:
-        if hop.kind not in ("by_assumption", "by_lemma") or hop.notion is None:
+        if hop.kind not in ("by_assumption", "by_lemma", "by_upto") or (
+            hop.notion is None
+        ):
             hop_terms.append(None)
             continue
         if hop.reduction is not None:
@@ -541,14 +552,19 @@ def side_flip_game(
 def synthesize_from_steps(
     steps: Sequence[frog_ast.ProofStep],
     assumed_game_names: set[str],
+    event_notions: Optional[Mapping[str, frog_ast.ParameterizedGame]] = None,
 ) -> AdvantageBound:
     """Synthesize the bound from a proof's game-step sequence.
 
     Used by consumers (e.g. the LaTeX exporter) that have the proof AST but
     not a verified engine run. A hop contributes a loss term only when it is a
-    side-flip over an assumed (or lemma) security game; every other hop is
-    treated as a perfect equivalence. Inductive proofs are unsupported.
+    side-flip over an assumed (or lemma) security game, or over a pair whose
+    event is in scope (``event_notions`` maps ``str(pair)`` to the event's
+    synthetic notion: an identical-until-bad hop charging Pr[flag]); every
+    other hop is treated as a perfect equivalence. Inductive proofs are
+    unsupported.
     """
+    events = event_notions or {}
     if any(isinstance(step, frog_ast.Induction) for step in steps):
         return AdvantageBound(
             expression=sympy.Integer(0),
@@ -560,7 +576,15 @@ def synthesize_from_steps(
     hops: list[HopInfo] = []
     for current, following in zip(game_steps, game_steps[1:]):
         flip = side_flip_game(current, following)
-        if flip is not None and flip.name in assumed_game_names:
+        if flip is not None and str(flip) in events:
+            hops.append(
+                HopInfo(
+                    kind="by_upto",
+                    notion=events[str(flip)],
+                    reduction=current.reduction,
+                )
+            )
+        elif flip is not None and flip.name in assumed_game_names:
             hops.append(
                 HopInfo(
                     kind="by_assumption",
@@ -805,7 +829,9 @@ def check_claimed_bound(
     extra_counter = [0]
 
     def on_advantage(ref: frog_ast.AdvantageReference) -> sympy.Expr:
-        notion = str(ref.notion)
+        # An event reference is keyed like its synthesized term: on the
+        # event's synthetic notion.
+        notion = str(frog_ast.notion_key(ref.notion))
         entry: Optional[tuple[sympy.Symbol, AdvTerm]]
         if ref.reduction is None:
             entry = by_name.get((notion, None))

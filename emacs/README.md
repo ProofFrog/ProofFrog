@@ -7,7 +7,7 @@ An Emacs major mode for editing [ProofFrog](https://github.com/ProofFrog/ProofFr
 ### Syntax Highlighting
 
 - **Declaration keywords:** `Primitive`, `Scheme`, `Game`, `Reduction`, `Phase`
-- **Proof structure:** `proof:`, `let:`, `assume:`, `lemma:`, `theorem:`, `games:`, `by`
+- **Proof structure:** `proof:`, `let:`, `assume:`, `lemma:`, `theorem:`, `games:`, `by`, `event`, `of`, `at`
 - **Control flow:** `if`, `else`, `for`, `return`, `to`, `in`
 - **Language keywords:** `import`, `as`, `export`, `extends`, `requires`, `compose`, `against`, `Adversary`, `oracles`, `calls`, `union`, `subsets`, `deterministic`, `injective`
 - **Built-in types:** `Bool`, `Void`, `Int`, `BitString`, `ModInt`, `Set`, `Map`, `Array`, `Function`

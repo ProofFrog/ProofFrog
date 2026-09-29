@@ -100,6 +100,10 @@ def _describe_proof_file(proof: frog_ast.ProofFile) -> str:
             lines.append(f"  {assumption};")
     if proof.max_calls:
         lines.append(f"  calls <= {proof.max_calls};")
+    if proof.lemmas:
+        lines.append("Lemma:")
+        for lemma in proof.lemmas:
+            lines.append(f"  {lemma}")
     lines.append(f"Theorem: {proof.theorem};")
     lines.append("Games:")
     for step in proof.steps:

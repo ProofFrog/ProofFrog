@@ -1,0 +1,37 @@
+// Negative: not identical until bad (Left answers true outside the branch).
+Game Left(Set S) {
+    S target;
+    Bool bad;
+
+    Void Initialize() {
+        target <- S;
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (c == target) {
+            bad = true;
+            return true;
+        }
+        return true;
+    }
+}
+
+Game Right(Set S) {
+    S target;
+    Bool bad;
+
+    Void Initialize() {
+        target <- S;
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (c == target) {
+            bad = true;
+        }
+        return false;
+    }
+}
+
+export as NotIUB;

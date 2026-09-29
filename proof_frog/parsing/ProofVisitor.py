@@ -134,6 +134,21 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#gameNotion.
+    def visitGameNotion(self, ctx:ProofParser.GameNotionContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#eventNotion.
+    def visitEventNotion(self, ctx:ProofParser.EventNotionContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#eventTheorem.
+    def visitEventTheorem(self, ctx:ProofParser.EventTheoremContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#gameList.
     def visitGameList(self, ctx:ProofParser.GameListContext):
         return self.visitChildren(ctx)

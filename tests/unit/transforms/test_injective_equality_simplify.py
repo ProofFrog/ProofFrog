@@ -382,3 +382,112 @@ def test_f248_immutable_field_rhs_still_resolves() -> None:
     """
     result, _ = _apply(source, _ns(NS_INJ_ENC))
     assert "t == t" in str(result)
+
+
+# ---------------------------------------------------------------------------
+# F-343 / F-344 / F-347: stability of the values a resolved image names
+# ---------------------------------------------------------------------------
+
+NS_MAP_IMAGE = """
+Primitive T(Int n) {
+    deterministic injective BitString<n> inj(Map<BitString<n>, BitString<n>> m);
+    deterministic injective BitString<n> eval(BitString<n> x);
+}
+"""
+
+
+def _simplify(source: str, method: str) -> str:
+    game = frog_parser.parse_game(source)
+    prim = frog_parser.parse_primitive_file(NS_MAP_IMAGE)
+    result = InjectiveEqualitySimplify().apply(game, _ctx({"T": prim, "F": prim}))
+    return str(result.get_method(method))
+
+
+def test_f343_field_image_not_resolved_across_element_write() -> None:
+    """F-343: ``Fd = F.inj(T)`` in Initialize; an oracle writes ``T[x]``, so
+    ``Fd == F.inj(T)`` compares the old image with the new one."""
+    out = _simplify(
+        """
+        Game G(T F, Int n) {
+            Map<BitString<n>, BitString<n>> M;
+            BitString<n> Fd;
+            Void Initialize() { Fd = F.inj(M); }
+            Void Put(BitString<n> x, BitString<n> y) { M[x] = y; }
+            Bool Test() { return Fd == F.inj(M); }
+        }
+        """,
+        "Test",
+    )
+    assert "M == M" not in out, out
+
+
+def test_f343_field_image_still_resolved_when_map_unwritten() -> None:
+    """F-343 control: with no write to the map, the images are equal."""
+    out = _simplify(
+        """
+        Game G(T F, Int n) {
+            Map<BitString<n>, BitString<n>> M;
+            BitString<n> Fd;
+            Void Initialize() { Fd = F.inj(M); }
+            Bool Test() { return Fd == F.inj(M); }
+        }
+        """,
+        "Test",
+    )
+    assert "M == M" in out, out
+
+
+def test_f343_nested_rewrite_of_defined_field_blocks_resolution() -> None:
+    """A nested second write of the defined field inside Initialize means its
+    value need not be the top-level right-hand side."""
+    out = _simplify(
+        """
+        Game G(T F, Int n) {
+            BitString<n> K;
+            BitString<n> A;
+            Void Initialize(Bool c) {
+                K <- BitString<n>;
+                A = F.eval(K);
+                if (c) { A <- BitString<n>; }
+            }
+            Bool Test() { return A == F.eval(K); }
+        }
+        """,
+        "Test",
+    )
+    assert "K == K" not in out, out
+
+
+def test_f344_local_image_not_stable_across_element_write() -> None:
+    """F-344: ``v = F.inj(M); M[a] = b;`` -- v is the image of the old map."""
+    out = _simplify(
+        """
+        Game G(T F, Int n) {
+            Map<BitString<n>, BitString<n>> M;
+            Bool Test(BitString<n> a, BitString<n> b) {
+                BitString<n> v = F.inj(M);
+                M[a] = b;
+                return v == F.inj(M);
+            }
+        }
+        """,
+        "Test",
+    )
+    assert "M == M" not in out, out
+
+
+def test_f347_field_image_not_resolved_into_shadowing_parameter() -> None:
+    """F-347: the comparison's method has a parameter named like the field the
+    image reads, so the resolved ``F.eval(K)`` would name the parameter."""
+    out = _simplify(
+        """
+        Game G(T F, Int n) {
+            BitString<n> K;
+            BitString<n> A;
+            Void Initialize() { K <- BitString<n>; A = F.eval(K); }
+            Bool Test(BitString<n> K) { return A == F.eval(K); }
+        }
+        """,
+        "Test",
+    )
+    assert "K == K" not in out, out

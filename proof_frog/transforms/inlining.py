@@ -1230,6 +1230,33 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
         return block
 
 
+class _TupleLiteralUseClassifier(Visitor[None]):
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.total_var_refs = 0
+        self.array_access_refs = 0
+        self.has_non_constant = False
+        self.counts: dict[int, int] = {}
+
+    def result(self) -> None:
+        pass
+
+    def visit_variable(self, var: frog_ast.Variable) -> None:
+        if var.name == self.name:
+            self.total_var_refs += 1
+
+    def visit_array_access(self, aa: frog_ast.ArrayAccess) -> None:
+        if (
+            isinstance(aa.the_array, frog_ast.Variable)
+            and aa.the_array.name == self.name
+        ):
+            self.array_access_refs += 1
+            if isinstance(aa.index, frog_ast.Integer):
+                self.counts[aa.index.num] = self.counts.get(aa.index.num, 0) + 1
+            else:
+                self.has_non_constant = True
+
+
 class InlineLocalTupleLiteralTransformer(BlockTransformer):
     """Inline a local typed tuple-literal binding when the variable is used
     only at constant indices and not reassigned, substituting each ``v[k]``
@@ -1277,33 +1304,7 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
         for constant integer ``k``.
         """
 
-        class _Classifier(Visitor[None]):
-            def __init__(self, name: str) -> None:
-                self.name = name
-                self.total_var_refs = 0
-                self.array_access_refs = 0
-                self.has_non_constant = False
-                self.counts: dict[int, int] = {}
-
-            def result(self) -> None:
-                pass
-
-            def visit_variable(self, var: frog_ast.Variable) -> None:
-                if var.name == self.name:
-                    self.total_var_refs += 1
-
-            def visit_array_access(self, aa: frog_ast.ArrayAccess) -> None:
-                if (
-                    isinstance(aa.the_array, frog_ast.Variable)
-                    and aa.the_array.name == self.name
-                ):
-                    self.array_access_refs += 1
-                    if isinstance(aa.index, frog_ast.Integer):
-                        self.counts[aa.index.num] = self.counts.get(aa.index.num, 0) + 1
-                    else:
-                        self.has_non_constant = True
-
-        visitor = _Classifier(var_name)
+        visitor = _TupleLiteralUseClassifier(var_name)
         visitor.visit(block)
         has_bare = visitor.total_var_refs > visitor.array_access_refs
         return has_bare, visitor.has_non_constant, visitor.counts
@@ -4401,22 +4402,24 @@ class HoistDuplicateBranchCallTransformer(BlockTransformer):
         return None
 
 
+class _MatchingNodeCollector(Visitor[list[frog_ast.ASTNode]]):
+    def __init__(self, predicate: Callable[[frog_ast.ASTNode], bool]) -> None:
+        self.predicate = predicate
+        self.found: list[frog_ast.ASTNode] = []
+
+    def result(self) -> list[frog_ast.ASTNode]:
+        return self.found
+
+    def leave_ast_node(self, node: frog_ast.ASTNode) -> None:
+        if self.predicate(node):
+            self.found.append(node)
+
+
 def _iter_matches(
     node: frog_ast.ASTNode, predicate: Callable[[frog_ast.ASTNode], bool]
 ) -> list[frog_ast.ASTNode]:
     """Return every descendant (and *node* itself) satisfying *predicate*."""
-    found: list[frog_ast.ASTNode] = []
-
-    class _Collector(Visitor[None]):
-        def result(self) -> None:
-            return None
-
-        def leave_ast_node(self, n: frog_ast.ASTNode) -> None:
-            if predicate(n):
-                found.append(n)
-
-    _Collector().visit(node)
-    return found
+    return _MatchingNodeCollector(predicate).visit(node)
 
 
 def _max_hoist_index(node: frog_ast.ASTNode) -> int:

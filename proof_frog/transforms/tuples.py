@@ -586,6 +586,35 @@ class SimplifyTuple(TransformPass):
         return SimplifyTupleTransformer(game).transform(game)
 
 
+class _SingleIndexTupleUsageVisitor(Visitor[None]):
+    """Count total Variable refs and ArrayAccess refs."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.total_var_refs = 0
+        self.array_access_refs = 0
+        self.non_constant_access = False
+        self.indices: set[int] = set()
+
+    def result(self) -> None:
+        pass
+
+    def visit_variable(self, var: frog_ast.Variable) -> None:
+        if var.name == self.name:
+            self.total_var_refs += 1
+
+    def visit_array_access(self, aa: frog_ast.ArrayAccess) -> None:
+        if (
+            isinstance(aa.the_array, frog_ast.Variable)
+            and aa.the_array.name == self.name
+        ):
+            self.array_access_refs += 1
+            if isinstance(aa.index, frog_ast.Integer):
+                self.indices.add(aa.index.num)
+            else:
+                self.non_constant_access = True
+
+
 class CollapseSingleIndexTupleTransformer(BlockTransformer):
     """Collapses a product-typed variable accessed at a single constant index.
 
@@ -643,35 +672,7 @@ class CollapseSingleIndexTupleTransformer(BlockTransformer):
         ``the_array`` child of an ``ArrayAccess`` node.
         """
 
-        class _UsageVisitor(Visitor[None]):
-            """Count total Variable refs and ArrayAccess refs."""
-
-            def __init__(self, name: str) -> None:
-                self.name = name
-                self.total_var_refs = 0
-                self.array_access_refs = 0
-                self.non_constant_access = False
-                self.indices: set[int] = set()
-
-            def result(self) -> None:
-                pass
-
-            def visit_variable(self, var: frog_ast.Variable) -> None:
-                if var.name == self.name:
-                    self.total_var_refs += 1
-
-            def visit_array_access(self, aa: frog_ast.ArrayAccess) -> None:
-                if (
-                    isinstance(aa.the_array, frog_ast.Variable)
-                    and aa.the_array.name == self.name
-                ):
-                    self.array_access_refs += 1
-                    if isinstance(aa.index, frog_ast.Integer):
-                        self.indices.add(aa.index.num)
-                    else:
-                        self.non_constant_access = True
-
-        visitor = _UsageVisitor(var_name)
+        visitor = _SingleIndexTupleUsageVisitor(var_name)
         visitor.visit(block)
         # Bare uses = total Variable refs minus those inside ArrayAccess
         has_bare = visitor.total_var_refs > visitor.array_access_refs

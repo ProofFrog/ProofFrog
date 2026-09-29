@@ -36,6 +36,9 @@ def generate_dependency_graph(
             and name in shadowed
         )
 
+    def binds_local(stmt: frog_ast.Statement, name: str) -> bool:
+        return isinstance(stmt, frog_ast.VariableDeclaration) and stmt.name == name
+
     def contains_return(node: frog_ast.ASTNode) -> bool:
         return isinstance(node, frog_ast.ReturnStatement)
 
@@ -112,6 +115,16 @@ def generate_dependency_graph(
                     is not None
                 ):
                     add_dependency(node_in_graph, preceding_statement)
+
+        # A bare declaration rebinds its name from here on, so it stays below
+        # every earlier statement that mentions the name. Nearest alone is not
+        # enough: two earlier reads carry no edge between them.
+        if isinstance(statement, frog_ast.VariableDeclaration):
+            for depends_on in earlier_statements:
+                if statement.name in visitors.referenced_variable_names(
+                    depends_on
+                ) or binds_local(depends_on, statement.name):
+                    add_dependency(node_in_graph, depends_on)
 
         # Complete read-set, in first-appearance order so dependency-edge order
         # is deterministic: includes variables referenced through a FieldAccess

@@ -90,6 +90,20 @@ from proof_frog import dependencies
             """,
             [[], [0]],
         ),
+        # A shadowing bare declaration depends on every earlier reader of
+        # the outer binding, not only the nearest one.
+        (
+            """
+            Int f() {
+                Int a = x;
+                Int b = x;
+                Int x;
+                x = 5;
+                return a + b + x;
+            }
+            """,
+            [[], [], [1, 0], [1], [0, 1, 3]],
+        ),
     ],
 )
 def test_dependencies(method_code: str, expected_dependencies: list[list[int]]) -> None:

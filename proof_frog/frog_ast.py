@@ -32,16 +32,59 @@ class FileType(Enum):
 
 
 class ASTNode:
+    _HASH_METADATA = frozenset({"line_num", "column_num", "origin", "_structural_hash"})
+
     def __init__(self) -> None:
         self.line_num: int = -1
         self.column_num: int = -1
         self.origin: SourceOrigin | None = None
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name not in self._HASH_METADATA:
+            self.__dict__.pop("_structural_hash", None)
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if name not in self._HASH_METADATA:
+            self.__dict__.pop("_structural_hash", None)
+        object.__delattr__(self, name)
+
+    def __getstate__(self) -> dict[str, object]:
+        # Python salts string hashes per process, so workers must recompute.
+        return {
+            key: value
+            for key, value in self.__dict__.items()
+            if key != "_structural_hash"
+        }
+
+    def structural_hash(self) -> int:
+        """Return a cached structural hash for a scalar leaf node."""
+        if type(self) not in _HASHABLE_LEAF_TYPES:
+            raise TypeError("structural hash requires a scalar leaf")
+        cached = self.__dict__.get("_structural_hash")
+        if cached is None:
+            fields = tuple(
+                sorted(
+                    (key, value)
+                    for key, value in self.__dict__.items()
+                    if key not in self._HASH_METADATA
+                )
+            )
+            cached = hash((type(self), fields))
+            self.__dict__["_structural_hash"] = cached
+        return cached
 
     def __eq__(self, other: object) -> bool:
         if self is other:
             return True
 
         if type(self) is not type(other):
+            return False
+
+        if (
+            type(self) in _HASHABLE_LEAF_TYPES
+            and self.structural_hash() != other.structural_hash()
+        ):
             return False
 
         # Compare all attributes. Only true source-position / provenance
@@ -59,7 +102,7 @@ class ASTNode:
         # well-formed instances of the same class have identical key sets, so
         # this changes nothing for them; a malformed node now compares
         # unequal (fail-closed) instead of accepting or raising.
-        excluded = {"line_num", "column_num", "origin"}
+        excluded = self._HASH_METADATA
         self_keys = self.__dict__.keys() - excluded
         other_keys = other.__dict__.keys() - excluded
         if self_keys != other_keys:
@@ -174,6 +217,8 @@ class ProductType(Type):
         self.types = types
 
     def __eq__(self, other: object) -> bool:
+        if self is other:
+            return True
         if isinstance(other, ProductType):
             return self.types == other.types
         # ProductType([A, B]) == Tuple([A, B]) when elements match,
@@ -438,6 +483,8 @@ class Tuple(Expression):
         self.values = values
 
     def __eq__(self, other: object) -> bool:
+        if self is other:
+            return True
         if isinstance(other, Tuple):
             return self.values == other.values
         if isinstance(other, ProductType):
@@ -737,6 +784,21 @@ class BinaryNum(Expression):
         return "0b" + format(self.num, f"0{self.length}b")
 
 
+_HASHABLE_LEAF_TYPES = frozenset(
+    {
+        Variable,
+        Integer,
+        Boolean,
+        NoneExpression,
+        BinaryNum,
+        IntType,
+        BoolType,
+        Void,
+        GroupType,
+    }
+)
+
+
 class BitStringLiteral(Expression):
     """A bitstring literal: 0^n (all zeros) or 1^n (all ones)."""
 
@@ -853,6 +915,8 @@ class Game(ASTNode):
         self.methods = body[3]
 
     def __eq__(self, __value: object) -> bool:
+        if self is __value:
+            return True
         # F-335: exact-type match, not `isinstance`. `Reduction` subclasses
         # `Game`, so a loose `isinstance` check let a `Reduction` compare
         # equal to a plain `Game` with the same body (and, via the inherited
@@ -966,6 +1030,8 @@ class Reduction(Game):
         self.play_against = play_against
 
     def __eq__(self, __value: object) -> bool:
+        if self is __value:
+            return True
         # F-335: a Reduction is defined by its composition (which game it
         # plays and against what), not only by its body. Two Reductions with
         # identical bodies but different `to_use`/`play_against` are distinct;

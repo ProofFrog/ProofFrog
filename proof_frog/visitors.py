@@ -708,11 +708,20 @@ class InlineTransformer(Transformer):
         if self.finished:
             return block
 
-        self.blocks.append(block)
+        block_copy = copy.copy(block)
+        block_copy.statements = list(block.statements)
+        self.blocks.append(block_copy)
         for index, statement in enumerate(block.statements):
             self.statement_index = index
-            block.statements[index] = self.transform(statement)  # type: ignore
-        return self.blocks.pop()
+            transformed = self.transform(statement)
+            if self.blocks[-1] is block_copy:
+                block_copy.statements[index] = transformed  # type: ignore
+        result = self.blocks.pop()
+        if result is block_copy and all(
+            old is new for old, new in zip(block.statements, block_copy.statements)
+        ):
+            return block
+        return result
 
     def transform_func_call(self, exp: frog_ast.FuncCall) -> frog_ast.FuncCall:
         is_inlinable_call = (

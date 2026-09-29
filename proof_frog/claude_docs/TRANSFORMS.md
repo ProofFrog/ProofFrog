@@ -33,7 +33,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 
 | Pass | Description |
 |---|---|
-| TopologicalSort | Reorders statements by dependency graph. |
+| TopologicalSort | Reorders statements by dependency graph. A bare declaration stays below earlier reads of its name and above its later uses, and is kept while a later read needs it. |
 | RemoveDuplicateFields | Removes fields with same type that always hold the same value. |
 | RemoveUnnecessaryFields | Removes unused fields and dead statements via liveness analysis. |
 | UniformBijectionElimination | Replaces `f(x)` with `x` when x is uniform and f is a deterministic injective bijection. |
@@ -152,7 +152,7 @@ The standardization pipeline runs once after the core pipeline converges.
 
 | Pass | Description |
 |---|---|
-| VariableStandardize | Renames local variables to canonical names (v1, v2, ...). |
+| VariableStandardize | Renames explicit local binders (typed assignments and samples, bare declarations, loop binders) to v1, v2, ... per method, by a scope walk. Untyped writes follow their binder. Field, parameter, type and free names are reserved. |
 | StandardizeFieldNames | Normalizes field names to canonical ordering. Two-phase: rename by oracle first-read order, then regroup by type. |
 | NormalizeCommutativeChains | Re-sorts commutative chains after field/variable renaming. |
 | BubbleSortFieldAssignments | Sorts field assignments into canonical dependency order. |

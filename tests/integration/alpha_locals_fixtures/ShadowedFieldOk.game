@@ -1,0 +1,26 @@
+import 'Source.primitive';
+
+// Same as ShadowedField.Left on both sides, up to the shadowing local's name.
+Game Left(Source S) {
+    Int __a5__;
+    Void Initialize() { __a5__ = 7; }
+    Int O() {
+        Int out = __a5__;
+        Int __a5__;
+        __a5__ = S.Draw();
+        return __a5__ + out;
+    }
+}
+
+Game Right(Source S) {
+    Int __a5__;
+    Void Initialize() { __a5__ = 7; }
+    Int O() {
+        Int out = __a5__;
+        Int draw;
+        draw = S.Draw();
+        return draw + out;
+    }
+}
+
+export as ShadowedFieldOk;

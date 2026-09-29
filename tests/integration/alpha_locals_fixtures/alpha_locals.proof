@@ -1,0 +1,19 @@
+import 'Brancher.primitive';
+import 'Source.primitive';
+import 'BrancherImpl.scheme';
+import 'AlphaLocals.game';
+
+proof:
+
+let:
+    Source S;
+    BrancherImpl B = BrancherImpl(S);
+
+assume:
+
+theorem:
+    AlphaLocals(B);
+
+games:
+    AlphaLocals(B).Real against AlphaLocals(B).Adversary;
+    AlphaLocals(B).Random against AlphaLocals(B).Adversary;

@@ -9,7 +9,6 @@ def generate_dependency_graph(
     block: frog_ast.Block,
     fields: list[frog_ast.Field],
     proof_namespace: frog_ast.Namespace,
-    shadowed_names: set[str] | None = None,
 ) -> DependencyGraph:
     dependency_graph = DependencyGraph()
     for statement in block.statements:
@@ -19,23 +18,9 @@ def generate_dependency_graph(
         node_in_graph.add_neighbour(dependency_graph.get_node(statement))
 
     field_names = [field.name for field in fields]
-    # Names bound by an enclosing scope (method parameters, fields).  A bare
-    # ``VariableDeclaration`` of such a name is a *shadowing binder*: every
-    # later reference to the name resolves to the inner local, so the
-    # declaration must not be pruned as disconnected dead code (doing so
-    # rebinds those references to the outer binding -- RC1 scope-awareness,
-    # SliceOfInlineConcat attack-1).  We therefore make later uses of the name
-    # depend on the declaration so it is reachable from the return and ordered
-    # ahead of its uses.
-    shadowed = set(shadowed_names or set())
 
-    def binds_shadowed(stmt: frog_ast.Statement, name: str) -> bool:
-        return (
-            isinstance(stmt, frog_ast.VariableDeclaration)
-            and stmt.name == name
-            and name in shadowed
-        )
-
+    # A bare declaration anchors later uses even when it does not shadow an
+    # outer name. Keep that edge so sorting cannot erase a live local binder.
     def binds_local(stmt: frog_ast.Statement, name: str) -> bool:
         return isinstance(stmt, frog_ast.VariableDeclaration) and stmt.name == name
 
@@ -134,7 +119,14 @@ def generate_dependency_graph(
         statement_write_cache: dict[str, bool] = {}
         for variable in visitors.referenced_variables_in_order(statement):
             name = variable.name
-            if name in proof_namespace:
+            # A local declaration can shadow a proof-level name. Its binding
+            # edge must be recorded before considering namespace references.
+            local_declaration = next(
+                (s for s in earlier_statements if binds_local(s, name)), None
+            )
+            if local_declaration is not None:
+                add_dependency(node_in_graph, local_declaration)
+            if name in proof_namespace and local_declaration is None:
                 continue
             # Does *this* statement write `name`?  If so it must come after any
             # earlier statement that references `name` (WAR / WAW); otherwise it
@@ -147,9 +139,8 @@ def generate_dependency_graph(
                     related = name in visitors.referenced_variable_names(depends_on)
                 else:
                     related = writes_name(depends_on, name)
-                # A shadowing declaration of `name` is a binder the later use
-                # depends on, whether the use reads or writes.
-                if not related and binds_shadowed(depends_on, name):
+                # A declaration is a binder the later use depends on.
+                if not related and binds_local(depends_on, name):
                     related = True
                 if related:
                     add_dependency(node_in_graph, depends_on)
@@ -317,6 +308,10 @@ def unnecessary_statement_info(
             if (
                 isinstance(statement, frog_ast.ReturnStatement)
                 or visitors.assigns_variable(necessary_vars, statement)
+                or (
+                    isinstance(statement, frog_ast.VariableDeclaration)
+                    and statement.name in {var.name for var in necessary_vars}
+                )
                 # The stateful `x <-uniq[S] T` form implicitly does
                 # `S = S union {x}`, an adversary-observable mutation of S, so
                 # it is NEVER dead even when its target `x` is unused; dropping

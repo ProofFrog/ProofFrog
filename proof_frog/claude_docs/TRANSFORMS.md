@@ -118,6 +118,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | RedundantConditionalReturn | Removes `if (c) { return X; } return X;` patterns. |
 | AbsorbRedundantEarlyReturn | Absorbs `if (P) { return X; } ... if (Q) { ... } return X;` into `if (!P && Q) { ... } return X;` (outermost-block-only). |
 | IfFalseReturnToConjunction | Absorbs `if (P) { return false; } ...; return Q;` into `...; return Q && !P;`. |
+| FoldLiteralConditions | Folds `!true`/`!false`, `<`/`>`/`<=`/`>=` on integer literals, `==`/`!=` on boolean literals or equal integer literals, and `None == L` / `None != L` when `L` is a call-free, index-free tuple, set, integer, boolean, or bitstring literal. Runs just before BranchElimination. |
 | BranchElimination | Eliminates branches with statically known `true`/`false` conditions. |
 | UniqExclusionBranchElimination | Statically eliminates `x in S` branches when `x` was sampled via `<-uniq[S] T` and `S` has not been mutated since. |
 | ElseUnwrap | Unwraps else blocks when the if-branch unconditionally returns. |

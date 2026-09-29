@@ -130,3 +130,59 @@ def test_none_against_variable_not_folded_rejected() -> None:
         }
         """)
     assert not _engine().check_equivalent(guarded, plain).valid
+
+
+_CONSTANT_ONE = """
+    Game Plain(Int q) {
+        Int Query(Int n) {
+            return 1;
+        }
+    }
+    """
+
+
+def test_optional_bool_not_true_folded_accepted() -> None:
+    """``v`` is ``None`` or ``false`` on every path, so ``v != true`` holds.
+
+    After branch duplication each path compares a literal with ``true``.
+    """
+    guarded = frog_parser.parse_game("""
+        Game Guarded(Int q) {
+            Int Query(Int n) {
+                Bool? v;
+                if (n >= q) {
+                    v = None;
+                } else {
+                    v = false;
+                }
+                if (v != true) {
+                    return 1;
+                }
+                return 2;
+            }
+        }
+        """)
+    plain = frog_parser.parse_game(_CONSTANT_ONE)
+    assert _engine().check_equivalent(guarded, plain).valid
+
+
+def test_optional_bool_from_argument_not_folded_rejected() -> None:
+    """``v`` comes from the caller and may be ``true``."""
+    guarded = frog_parser.parse_game("""
+        Game Guarded(Int q) {
+            Int Query(Int n, Bool? v) {
+                if (v != true) {
+                    return 1;
+                }
+                return 2;
+            }
+        }
+        """)
+    plain = frog_parser.parse_game("""
+        Game Plain(Int q) {
+            Int Query(Int n, Bool? v) {
+                return 1;
+            }
+        }
+        """)
+    assert not _engine().check_equivalent(guarded, plain).valid

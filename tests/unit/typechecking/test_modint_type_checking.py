@@ -385,3 +385,25 @@ class TestModIntComparison:
                 }
             }
             """)
+
+    # FoldLiteralConditions folds <, >, <=, >= on Int literals as integers.
+    # That is sound only while ordering on ModInt stays a type error.
+    @pytest.mark.parametrize("op", ["<", ">", "<=", ">="])
+    def test_ordering_same_modulus_fails(self, op: str) -> None:
+        _check_game_fails(f"""
+            Game G(Int q) {{
+                Bool Test(ModInt<q> a, ModInt<q> b) {{
+                    return a {op} b;
+                }}
+            }}
+            """)
+
+    @pytest.mark.parametrize("op", ["<", ">", "<=", ">="])
+    def test_ordering_against_int_literal_fails(self, op: str) -> None:
+        _check_game_fails(f"""
+            Game G(Int q) {{
+                Bool Test(ModInt<q> a) {{
+                    return a {op} 3;
+                }}
+            }}
+            """)

@@ -1312,15 +1312,19 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
         for index, statement in enumerate(block.statements):
             if not (
                 isinstance(statement, frog_ast.Assignment)
-                and statement.the_type is not None
-                and isinstance(statement.the_type, frog_ast.ProductType)
                 and isinstance(statement.var, frog_ast.Variable)
                 and isinstance(statement.value, frog_ast.Tuple)
             ):
                 continue
+            declared = statement.the_type
+            # A tuple literal is never None, so [T0, T1]? binds like [T0, T1].
+            if isinstance(declared, frog_ast.OptionalType):
+                declared = declared.the_type
+            if not isinstance(declared, frog_ast.ProductType):
+                continue
 
             tuple_values = statement.value.values
-            unfolded_types = statement.the_type.types
+            unfolded_types = declared.types
             if len(tuple_values) != len(unfolded_types):
                 continue
 

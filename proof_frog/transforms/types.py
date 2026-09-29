@@ -100,12 +100,16 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
         """Return True if expr is provably non-nullable.
 
         Handles:
+        - Tuple literals.
         - Variables with non-nullable type in type_map.
         - Method calls obj.method(args) where obj is a known instantiable
           and method's declared return type is not Optional.
         """
         if isinstance(expr, frog_ast.NoneExpression):
             return False
+        # A tuple literal is never None.
+        if isinstance(expr, frog_ast.Tuple):
+            return True
         if isinstance(expr, frog_ast.Variable):
             t = self.type_map.get(expr.name)
             return t is not None and not isinstance(t, frog_ast.OptionalType)

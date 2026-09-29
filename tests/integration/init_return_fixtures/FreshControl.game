@@ -1,0 +1,36 @@
+// Control for Fresh.game: H is sampled before the early return, so it is a
+// random function on every trace and O's fresh query is uniform.
+Game Left(Int n, Function<BitString<n>, BitString<n>> F0) {
+    Function<BitString<n>, BitString<n>> H = F0;
+    Bool Initialize() {
+        H <- Function<BitString<n>, BitString<n>>;
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        return false;
+    }
+    BitString<n> O() {
+        BitString<n> v <-uniq[H.domain] BitString<n>;
+        return H(v);
+    }
+}
+
+Game Right(Int n, Function<BitString<n>, BitString<n>> F0) {
+    Function<BitString<n>, BitString<n>> H = F0;
+    Bool Initialize() {
+        H <- Function<BitString<n>, BitString<n>>;
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        return false;
+    }
+    BitString<n> O() {
+        BitString<n> v <-uniq[H.domain] BitString<n>;
+        BitString<n> z <- BitString<n>;
+        return z;
+    }
+}
+
+export as FreshControl;

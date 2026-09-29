@@ -1211,3 +1211,53 @@ def test_f339_renamed_parameter_control_still_equivalent() -> None:
     right = frog_parser.parse_game(_F339_RIGHT.replace("PARAM", "z"))
     result = engine.check_equivalent(left, right)
     assert result.valid, result.failure_detail
+
+
+def test_f342_reject_fold_across_resampled_init_local() -> None:
+    """F-342: ``Initialize`` derives ``G`` and ``H`` from two samples held in
+    the same local ``x``.  ``O(true)`` returns ``G`` and ``Peek()`` returns
+    ``G`` too in the first game, but ``O`` always returns ``H`` in the second:
+    the two answers agree only on a collision, so the games are
+    distinguishable and must not be judged equivalent."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive D(Int n) {
+            deterministic BitString<n> eval(BitString<n> x);
+        }
+        """)
+    body = """
+            BitString<n> G;
+            BitString<n> H;
+            Void Initialize() {
+                BitString<n> x <- BitString<n>;
+                G = F.eval(x);
+                x <- BitString<n>;
+                H = F.eval(x);
+            }
+            BitString<n> Peek() {
+                return G;
+            }
+    """
+    with_flag = frog_parser.parse_game(
+        "Game A(D F) {"
+        + body
+        + """
+            BitString<n> O(Bool flag) {
+                if (flag) {
+                    return G;
+                }
+                return H;
+            }
+        }"""
+    )
+    without_flag = frog_parser.parse_game(
+        "Game B(D F) {"
+        + body
+        + """
+            BitString<n> O(Bool flag) {
+                return H;
+            }
+        }"""
+    )
+    engine = _engine_with(D=prim, F=prim)
+    result = engine.check_equivalent(with_flag, without_flag)
+    assert not result.valid

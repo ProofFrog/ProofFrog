@@ -6,11 +6,13 @@ from proof_frog.transforms._base import (
 )
 from proof_frog import frog_parser, frog_ast
 from proof_frog.transforms.algebraic import (
+    InjectiveEqualitySimplify,
     UniformXorSimplification,
     UniformModIntSimplification,
     XorCancellation,
 )
 from proof_frog.transforms.control_flow import (
+    FoldEquivalentReturnBranch,
     RemoveEmptyIf,
     BranchElimination,
     GuardConditionSimplification,
@@ -2493,3 +2495,160 @@ def test_remove_empty_if_near_miss_on_indexed_condition():
     RemoveEmptyIf().apply(game, ctx)
     misses = [nm for nm in ctx.near_misses if nm.transform_name == "Remove Empty If"]
     assert misses and "M[x]" in misses[0].reason
+
+
+def test_fold_equivalent_return_branch_near_miss_on_rebound_init_local():
+    """F-342: an Initialize local read by a field's RHS takes two values."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive D(Int n) { deterministic BitString<n> eval(BitString<n> x); }"
+    )
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"D": prim, "F": prim},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(D F, Int n) {
+            BitString<n> G1;
+            BitString<n> H1;
+            Void Initialize() {
+                BitString<n> x <- BitString<n>;
+                G1 = F.eval(x);
+                x <- BitString<n>;
+                H1 = F.eval(x);
+            }
+            BitString<n> O(Bool flag) {
+                if (flag) {
+                    return G1;
+                }
+                return H1;
+            }
+        }
+        """)
+    FoldEquivalentReturnBranch().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Fold Equivalent Return Branch"
+        and "Initialize local(s) x" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_fold_equivalent_return_branch_near_miss_on_rhs_field_written_later():
+    """F-345: a field the Init-only RHS reads is written after the definition."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive D(Int n) { deterministic BitString<n> eval(BitString<n> x); }"
+    )
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"D": prim, "F": prim},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(D F, Int n) {
+            BitString<n> k; BitString<n> G1;
+            Void Initialize() { G1 = F.eval(k); k <- BitString<n>; }
+            BitString<n> O(Bool flag) { if (flag) { return G1; } return F.eval(k); }
+        }
+        """)
+    FoldEquivalentReturnBranch().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Fold Equivalent Return Branch"
+        and "after the definition" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_injective_equality_near_miss_on_captured_definition():
+    """F-347: the comparison's method binds a name the definition reads."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive T(Int n) { deterministic injective BitString<n> eval(BitString<n> x); }"
+    )
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"T": prim, "F": prim},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(T F, Int n) {
+            BitString<n> K;
+            BitString<n> A;
+            Void Initialize() { K <- BitString<n>; A = F.eval(K); }
+            Bool Test(BitString<n> K) { return A == F.eval(K); }
+        }
+        """)
+    InjectiveEqualitySimplify().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Injective Equality Simplify" and "bound in this method" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_injective_equality_near_miss_on_coerced_modint_argument():
+    """F-348: an Int argument for a ModInt<q> parameter is reduced mod q."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive M(Int q, Int n) { deterministic injective BitString<n> encm(ModInt<q> x); }"
+    )
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"M": prim, "E": prim},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(M E, Int q, Int n) {
+            Void Initialize() { }
+            Bool O() { return E.encm(1) == E.encm(q + 1); }
+        }
+        """)
+    InjectiveEqualitySimplify().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Injective Equality Simplify" and "may not have its type" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_inline_single_use_field_near_miss_on_skippable_definition():
+    """F-349: Initialize may return before the field's definition."""
+    ctx = _make_ctx()
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int G = 0;
+            Bool Initialize() {
+                Bool c <- Bool;
+                if (c) { return true; }
+                G = 5;
+                return false;
+            }
+            Int O() { return G; }
+        }
+        """)
+    InlineSingleUseField().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Inline Single-Use Field" and "may return before" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_local_fn_near_miss_sample_skippable_by_initialize_return() -> None:
+    """F-349: Initialize may return before sampling F."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Function<BitString<8>, BitString<16>> F;
+            Bool Initialize() {
+                Bool c <- Bool;
+                if (c) { return true; }
+                F <- Function<BitString<8>, BitString<16>>;
+                return false;
+            }
+            BitString<16> Hash(BitString<8> x) {
+                return F(x);
+            }
+        }
+        """)
+    ctx = _local_fn_ctx(sampled={"H"})
+    result = LocalFunctionFieldToLet().apply(game, ctx)
+    assert result == game
+    assert any("read before its sample" in nm.reason for nm in _local_fn_misses(ctx))

@@ -36,6 +36,7 @@ from ._base import (
     NearMiss,
     _lookup_primitive_method,
     has_nondeterministic_call,
+    may_return_before,
 )
 
 
@@ -1607,18 +1608,7 @@ class FreshInputRFToUniform(TransformPass):
     @staticmethod
     def _sampled_function_fields(game: frog_ast.Game) -> set[str]:
         """Return names of Function fields that are sampled in Initialize."""
-        sampled: set[str] = set()
-        for method in game.methods:
-            if method.signature.name != "Initialize":
-                continue
-            for stmt in method.block.statements:
-                if (
-                    isinstance(stmt, frog_ast.Sample)
-                    and isinstance(stmt.var, frog_ast.Variable)
-                    and isinstance(stmt.sampled_from, frog_ast.FunctionType)
-                ):
-                    sampled.add(stmt.var.name)
-        return sampled
+        return _sampled_function_fields_in_init(game)
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         # Collect RF types from sampled game fields and sampled proof-level
@@ -2079,19 +2069,35 @@ def _sampled_function_fields_in_init(
     bound by an ordinary assignment ``H = F;`` (a known/standard-model
     function) is NOT a random function, so the RF-to-uniform rewrite is invalid
     for it (verdict vector (a)).
+
+    The sample must also hold wherever the field is read (F-349): no earlier
+    Initialize statement may return (the field would keep its initial value)
+    or read the field (it would see the initial value).
     """
     sampled: set[str] = set()
     for method in game.methods:
         if method.signature.name != "Initialize":
             continue
-        for stmt in method.block.statements:
+        stmts = method.block.statements
+        for idx, stmt in enumerate(stmts):
             if (
                 isinstance(stmt, frog_ast.Sample)
                 and isinstance(stmt.var, frog_ast.Variable)
                 and isinstance(stmt.sampled_from, frog_ast.FunctionType)
+                and not may_return_before(stmts, idx)
+                and not any(_references_name(s, stmt.var.name) for s in stmts[:idx])
             ):
                 sampled.add(stmt.var.name)
     return sampled
+
+
+def _references_name(node: frog_ast.ASTNode, name: str) -> bool:
+    return (
+        SearchVisitor(
+            lambda n: isinstance(n, frog_ast.Variable) and n.name == name
+        ).visit(node)
+        is not None
+    )
 
 
 def _count_rf_calls_in_block(block: frog_ast.Block, rf_name: str) -> int:
@@ -3749,6 +3755,25 @@ class LocalFunctionFieldToLet(TransformPass):
                     )
                     return None
                 found_idx = idx
+        # F-349: the field is the random function only after its sample, and
+        # only if no earlier return skips it.
+        if found_idx is not None and (
+            may_return_before(init.block.statements, found_idx)
+            or any(
+                _references_name(s, f_name) for s in init.block.statements[:found_idx]
+            )
+        ):
+            self._emit_near_miss(
+                ctx,
+                (
+                    f"Field '{f_name}' may be read before its sample: "
+                    "Initialize reads it or may return before sampling it"
+                ),
+                init.block.statements[found_idx].origin,
+                f_name,
+                "Initialize",
+            )
+            return None
         return found_idx
 
     def _has_other_assignments(

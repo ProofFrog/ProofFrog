@@ -15,6 +15,7 @@ from typing import Callable, Optional
 
 from .. import frog_ast
 from ..visitors import (
+    lvalue_base_name,
     Transformer,
     BlockTransformer,
     SearchVisitor,
@@ -32,21 +33,32 @@ from ._base import (
     NearMiss,
     has_nondeterministic_call,
     _lookup_primitive_method,
+    may_return_before,
+    method_bound_names,
 )
 from ._ordering import node_sort_key
 from ._wrappers import GroupExponentWrapper, WrapperShape, _GroupExpShape
 
 
 def _count_field_assigns(node: frog_ast.ASTNode, name: str) -> int:
-    """Count assignments/samples to *name* recursively in *node*."""
+    """Count writes to *name* recursively in *node*.
+
+    Element and slice writes (``M[k] = v``) mutate *name* and count, as does
+    a ``<-uniq[name]`` draw, which inserts into *name* (F-343/F-344: counting
+    only bare-Variable targets let a map or set field look unchanged).
+    """
     count = 0
 
     def _visit(n: frog_ast.ASTNode) -> bool:
         nonlocal count
         if (
             isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
-            and isinstance(n.var, frog_ast.Variable)
-            and n.var.name == name
+            and lvalue_base_name(n.var) == name
+        ):
+            count += 1
+        if (
+            isinstance(n, frog_ast.UniqueSample)
+            and lvalue_base_name(n.unique_set) == name
         ):
             count += 1
         return False
@@ -1705,8 +1717,17 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         # resolve Variable references when CSE / ForwardExpressionAlias
         # has hoisted the call into a named local.
         self.local_funccall_bindings: dict[str, frog_ast.FuncCall] = {}
+        # Names the method being transformed binds (F-347).
+        self._bound_names: set[str] = set()
+        self._in_initialize = False
+        self._type_map = NameTypeMap()
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        self._bound_names = method_bound_names(method)
+        self._in_initialize = method.signature.name == "Initialize"
+        self._type_map = build_method_type_map(
+            self.game, method, self.ctx.proof_let_types
+        )
         bindings, reassigned = _scan_top_level_single_writes(
             method.block,
             value_predicate=lambda v: isinstance(v, frog_ast.FuncCall),
@@ -1814,6 +1835,28 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
                 )
             )
             return transformed
+        # F-348: each pair is compared at the arguments' own type, which must
+        # be the parameter's: an Int passed to a ModInt<q> parameter is
+        # reduced mod q, so `encm(1) == encm(q + 1)` is not `1 == q + 1`.
+        for param, a, b in zip(method.parameters, left.args, right.args):
+            if not self._compared_at_parameter_type(param.type, a, b):
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Injective Equality Simplify",
+                        reason=(
+                            f"comparison of calls to '{method.name}' did not "
+                            f"simplify: an argument for parameter '{param.name}' "
+                            f"may not have its type {param.type}"
+                        ),
+                        location=binary_operation.origin,
+                        suggestion=(
+                            "Store the argument in a variable of the parameter's type"
+                        ),
+                        variable=None,
+                        method=method.name,
+                    )
+                )
+                return transformed
         pair_op = op  # EQUALS or NOTEQUALS
         combiner = (
             frog_ast.BinaryOperators.AND
@@ -1828,6 +1871,24 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         for pair in pairs[1:]:
             result = frog_ast.BinaryOperation(combiner, result, pair)
         return result
+
+    def _compared_at_parameter_type(
+        self,
+        param_type: frog_ast.Type,
+        a: frog_ast.Expression,
+        b: frog_ast.Expression,
+    ) -> bool:
+        """True if ``a == b`` decides equality in *param_type* (F-348)."""
+        a_type = _get_expression_type(a, self._type_map)
+        b_type = _get_expression_type(b, self._type_map)
+        if isinstance(param_type, frog_ast.ModIntType):
+            return isinstance(a_type, frog_ast.ModIntType) and a_type == b_type
+        if isinstance(param_type, frog_ast.IntType):
+            return True
+        # A type name may stand for a ModInt; an Int argument would coerce.
+        return not isinstance(a_type, frog_ast.IntType) and not isinstance(
+            b_type, frog_ast.IntType
+        )
 
     def _try_wrapper_simplification(
         self,
@@ -1982,6 +2043,15 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
                 def_idx = idx
         if rhs is None:
             return expr
+        # F-349: the definition must have run at the comparison site. In
+        # Initialize the site may precede it; elsewhere an earlier return in
+        # Initialize may have skipped it, leaving the initial value.
+        if self._in_initialize or may_return_before(init.block.statements, def_idx):
+            return expr
+        # The top-level definition must be the field's only write in
+        # Initialize (a nested rewrite, e.g. under an `if`, may replace it).
+        if _count_field_assigns(init.block, name) != 1:
+            return expr
         # No assignment may exist anywhere else in the game.
         for method in self.game.methods:
             if method is init:
@@ -1999,6 +2069,27 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         visible = field_names | {p.name for p in self.game.parameters}
         free = {v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(rhs))}
         if not free.issubset(visible):
+            return expr
+        # F-347: at the comparison site the resolved RHS is read in the
+        # current method, where a parameter or local named like one of its
+        # free variables (or the field itself) would capture it.
+        captured = sorted((free | {name}) & self._bound_names)
+        if captured:
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Injective Equality Simplify",
+                    reason=(
+                        f"Field '{name}' was not resolved to its Initialize"
+                        f" definition: {', '.join(captured)} is bound in this"
+                        " method, so the definition would refer to a different"
+                        " variable"
+                    ),
+                    location=None,
+                    suggestion="rename the method's parameter or local",
+                    variable=name,
+                    method=None,
+                )
+            )
             return expr
         # F-248: the resolved RHS is substituted at an arbitrary comparison
         # site (any oracle, any time), so each free variable must hold the

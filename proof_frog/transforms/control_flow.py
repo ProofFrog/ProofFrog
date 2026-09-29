@@ -31,7 +31,14 @@ from ..visitors import (
     reassigns_or_rebinds,
     block_unconditionally_returns,
 )
-from ._base import TransformPass, PipelineContext, NearMiss, has_nondeterministic_call
+from ._base import (
+    TransformPass,
+    PipelineContext,
+    NearMiss,
+    has_nondeterministic_call,
+    may_return_before,
+    method_bound_names,
+)
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -1353,9 +1360,12 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
         # Method that holds each field's (single, top-level) defining assignment.
         def_methods: dict[str, str] = {}
 
+        # Definitions an earlier return in their method may skip (F-349).
+        skippable: set[str] = set()
+
         for method in game.methods:
             # Collect top-level definitions (for the expression value)
-            for stmt in method.block.statements:
+            for idx, stmt in enumerate(method.block.statements):
                 if (
                     isinstance(stmt, frog_ast.Assignment)
                     and isinstance(stmt.var, frog_ast.Variable)
@@ -1363,6 +1373,8 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
                 ):
                     definitions[stmt.var.name] = stmt.value
                     def_methods[stmt.var.name] = method.signature.name
+                    if may_return_before(method.block.statements, idx):
+                        skippable.add(stmt.var.name)
 
             # Count ALL assignments recursively (including nested blocks)
             for field_name in self.field_names:
@@ -1387,6 +1399,10 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
             # def(A) is likewise written only in Initialize.
             if def_methods.get(name) != "Initialize":
                 continue
+            # F-349: an earlier return in Initialize may skip the definition,
+            # leaving the field at its initial value.
+            if name in skippable:
+                continue
             used_vars = VariableCollectionVisitor().visit(expr)
             if not all(v.name in self.field_names for v in used_vars):
                 continue
@@ -1407,7 +1423,15 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
 
     def _transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
         self.param_names = [p.name for p in method.signature.parameters]
-        return self.transform(method)
+        if method.signature.name != "Initialize":
+            return self.transform(method)
+        # F-349: a branch in Initialize may run before a definition.
+        definitions = self.field_definitions
+        self.field_definitions = {}
+        try:
+            return self.transform(method)
+        finally:
+            self.field_definitions = definitions
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -2169,8 +2193,52 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
         self.ctx = ctx
         self.ast = ast
         self._init_field_rhs: list[tuple[frog_ast.Variable, frog_ast.Expression]] = []
+        # Names the method being transformed binds (F-346): an expansion
+        # whose free names include one of them would be captured there.
+        self._bound_names: set[str] = set()
+        self._in_initialize = False
         if isinstance(ast, frog_ast.Game):
             self._init_field_rhs = self._collect_init_field_rhs(ast)
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        self._bound_names = method_bound_names(method)
+        self._in_initialize = method.signature.name == "Initialize"
+        try:
+            return self._transform_children(method)
+        finally:
+            self._bound_names = set()
+            self._in_initialize = False
+
+    def _usable_init_field_rhs(
+        self,
+    ) -> list[tuple[frog_ast.Variable, frog_ast.Expression]]:
+        """The Initialize definitions whose names mean the same here (F-346)."""
+        # A fold site in Initialize may run before the definition (F-349).
+        if self._in_initialize:
+            return []
+        usable = []
+        for field_var, rhs in self._init_field_rhs:
+            captured = sorted(
+                ({field_var.name} | referenced_variable_names(rhs)) & self._bound_names
+            )
+            if captured:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Fold Equivalent Return Branch",
+                        reason=(
+                            f"Init-only field RHS not expanded: {', '.join(captured)}"
+                            " is bound in this method, so the expansion would"
+                            " refer to a different variable"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=field_var.name,
+                        method=None,
+                    )
+                )
+                continue
+            usable.append((field_var, rhs))
+        return usable
 
     def _collect_init_field_rhs(
         self,
@@ -2186,18 +2254,17 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
         though each invocation draws independently.
         """
         field_names = {f.name for f in game.fields}
-        # Count assignments per field across all methods.
+        # Count the values each field can take across all methods: writes,
+        # element writes and `<-uniq` insertions.
         counts: dict[str, int] = {}
         for method in game.methods:
             for name in field_names:
-                counts[name] = counts.get(name, 0) + _count_field_assigns_recursive(
-                    method.block, name
-                )
+                counts[name] = counts.get(name, 0) + _local_value_count(method, name)
         init = next((m for m in game.methods if m.signature.name == "Initialize"), None)
         if init is None:
             return []
         result: list[tuple[frog_ast.Variable, frog_ast.Expression]] = []
-        for stmt in init.block.statements:
+        for def_index, stmt in enumerate(init.block.statements):
             if not (
                 isinstance(stmt, frog_ast.Assignment)
                 and stmt.the_type is None
@@ -2206,6 +2273,10 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             ):
                 continue
             if counts.get(stmt.var.name, 0) != 1:
+                continue
+            # F-349: an earlier statement that can return would skip the
+            # definition, leaving the field at its initial value.
+            if may_return_before(init.block.statements, def_index):
                 continue
             if not isinstance(stmt.value, frog_ast.FuncCall):
                 continue
@@ -2241,14 +2312,57 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             # FIELD referenced by the RHS to be single-write (only its Initialize
             # assignment).
             rhs_field_refs = referenced_variable_names(stmt.value) & field_names
-            if any(counts.get(name, 0) > 1 for name in rhs_field_refs):
+            # F-345: a field the RHS reads must hold one value from the
+            # definition on: never written, or written exactly once, by a
+            # top-level Initialize statement BEFORE the definition (a write
+            # in an oracle, or after the definition, changes it).
+            if any(
+                counts.get(name, 0) > 1
+                or (
+                    counts.get(name, 0) == 1
+                    and not any(
+                        _local_value_count(earlier, name)
+                        for earlier in init.block.statements[:def_index]
+                    )
+                )
+                for name in rhs_field_refs
+            ):
                 self.ctx.near_misses.append(
                     NearMiss(
                         transform_name="Fold Equivalent Return Branch",
                         reason=(
                             "Init-only field RHS not expanded: a field referenced "
-                            "by the RHS is reassigned outside Initialize, so the "
-                            "stored value no longer matches the RHS at the fold site"
+                            "by the RHS is reassigned outside Initialize or after "
+                            "the definition, so the stored value no longer matches "
+                            "the RHS at the fold site"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=stmt.var.name,
+                        method=None,
+                    )
+                )
+                continue
+            # Soundness (F-342): the same applies to Initialize LOCALS the RHS
+            # reads. The recorded text `F.eval(x)` names whatever `x` holds
+            # when the field is assigned; if `x` is re-sampled or reassigned
+            # in Initialize (before or after), another field's RHS can have
+            # the same text for a different value, and the comparison below
+            # would equate the two fields. Require each such local to take a
+            # single value in Initialize.
+            rhs_locals = referenced_variable_names(stmt.value) - field_names
+            rebound = sorted(
+                name for name in rhs_locals if _local_value_count(init, name) > 1
+            )
+            if rebound:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Fold Equivalent Return Branch",
+                        reason=(
+                            "Init-only field RHS not expanded: the Initialize"
+                            f" local(s) {', '.join(rebound)} it reads take more"
+                            " than one value in Initialize, so the RHS text does"
+                            " not identify the stored value"
                         ),
                         location=None,
                         suggestion=None,
@@ -2342,7 +2456,7 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             # RHS would replace one side of the equality with a structure
             # Z3 cannot relate to the other side's atom.
             all_sub_pairs: list[tuple[frog_ast.Expression, frog_ast.Expression]] = list(
-                self._init_field_rhs
+                self._usable_init_field_rhs()
             ) + list(sub_pairs)
             if all_sub_pairs:
                 # Iterate substitution to a fixed point so chains like
@@ -2409,6 +2523,33 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             )
             return self.transform_block(frog_ast.Block(new_stmts))
         return block
+
+
+def _local_value_count(node: frog_ast.ASTNode, name: str) -> int:
+    """How many values *name* can take in *node* (a method, block or statement).
+
+    Counts assignments and samples to it (including element writes), a
+    ``<-uniq[name]`` draw (which inserts into it), and being a loop variable
+    (which takes one value per iteration, counted as two). A bare
+    declaration is not a value. A method parameter never written counts 0.
+    """
+    count = _count_field_assigns_recursive(node, name)
+
+    def _other_writes(node: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if (
+            isinstance(node, frog_ast.UniqueSample)
+            and lvalue_base_name(node.unique_set) == name
+        ):
+            count += 1
+        elif (isinstance(node, frog_ast.NumericFor) and node.name == name) or (
+            isinstance(node, frog_ast.GenericFor) and node.var_name == name
+        ):
+            count += 2
+        return False
+
+    SearchVisitor(_other_writes).visit(node)
+    return count
 
 
 def _flatten_top_level_and(expr: frog_ast.Expression) -> list[frog_ast.Expression]:

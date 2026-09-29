@@ -249,7 +249,7 @@ A **game hopping proof** (grammar file: `proof_frog/antlr/Proof.g4`; extension: 
 - Subsequent games may be stated explicitly by providing an **intermediate game**, or implicitly by composing a game (for an underlying primitive) with a **reduction**.
 - Each hop in the game sequence must be justified as either an **interchangeability-based hop**, in which the two adjacent games are **interchangeable** (demonstrated by code equivalence using the ProofFrog engine), or a **reduction-based hop**. A reduction-based hop is justified by exhibiting a reduction to an assumed security property and verifying that the reduction composed with each side of that property is interchangeable with the respective adjacent game.
 - Reductions and intermediate games are separately written out at the top of the proof file.
-- A proof may reference other proof files as **lemmas** via a `lemma:` section between `assume:` and `theorem:`. Each lemma entry has the form `SecurityProperty(params) by 'path/to/proof.proof';` (or `event bad of Pair(params) by '...';` for an event lemma). The engine verifies each lemma proof, checks that the lemma file proves the entry for every instantiation (same kind, game file, flag and arity; the lemma theorem's arguments must be distinct `let:` parameters without a value, or instantiations of an imported primitive over such parameters), and adds the lemma's theorem to the available assumptions. Use `--skip-lemmas` on the CLI to bypass lemma verification (and these checks).
+- A proof may reference other proof files as **lemmas** via a `lemma:` section between `assume:` and `theorem:`. Each lemma entry has the form `SecurityProperty(params) by 'path/to/proof.proof';` (or `event bad of Pair(params) by '...';` for an event lemma). The engine verifies each lemma proof, checks that the lemma file proves the entry (same kind, game file, flag and arity, and the entry's arguments an instance of the lemma theorem's: matched through the lemma's `let:` instantiations, its abstract parameters binding consistently, with matched primitives/schemes resolving to the same files; `advantage.lemma_instantiation`), and adds the lemma's theorem to the available assumptions. A lemma file may not rely on a query cap (`calls <= N`). The lemma's own assumptions are not required in the parent's `assume:` block; with lemma-bound inlining their terms appear in the parent's bound. Use `--skip-lemmas` on the CLI to bypass lemma verification (and these checks).
 - An **induction** argument in a game hopping proof involves a loop of games which gradually transition from one game to another.
 
 ### The ProofFrog engine
@@ -304,6 +304,8 @@ The essentials for writing correct FrogLang:
 - Random function on fresh `<-uniq` input used only in that call → independent uniform sample (`FreshInputRFToUniform`)
 - Dead code elimination, constant folding, single-use variable inlining, branch elimination, tuple index folding
 - An `if` whose branches are all empty, when its conditions make no call and index no map/array (`RemoveEmptyIf`)
+- A flag raise after a known-false flag: `x = false; S; if (C) { x = true; }` → `x = false; S; x = C;` when S does not mention `x` (`FlagSetToAssignment`)
+- Branch folding with Initialize facts: `if (P) { return X; } return Y;` → `return Y;` when Z3 proves `P ⇒ (X ↔ Y)`, using the definitions of fields assigned once in Initialize (calls or comparisons over values fixed from then on) and the injectivity of `injective` methods (`FoldEquivalentReturnBranch`)
 
 ### Guidelines for creating FrogLang files
 

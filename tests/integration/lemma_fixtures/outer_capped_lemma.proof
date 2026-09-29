@@ -1,0 +1,18 @@
+// Negative: uses a lemma proven only for one query against adversaries
+// making any number of queries.
+import 'OneQuery.game';
+
+proof:
+
+let:
+    Int m;
+
+lemma:
+    OneQuery(m) by 'capped_lemma.proof';
+
+theorem:
+    OneQuery(m);
+
+games:
+    OneQuery(m).Left against OneQuery(m).Adversary;
+    OneQuery(m).Right against OneQuery(m).Adversary;

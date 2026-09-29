@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import copy
 import functools
-from typing import Sequence
+from typing import Any, Sequence
 
 import z3
 
@@ -24,6 +24,7 @@ from ..visitors import (
     SubstitutionTransformer,
     VariableCollectionVisitor,
     Z3FormulaVisitor,
+    _OPAQUE_Z3_SORT,
     GetTypeMapVisitor,
     NameTypeMap,
     lvalue_base_name,
@@ -38,6 +39,7 @@ from ._base import (
     has_nondeterministic_call,
     may_return_before,
     method_bound_names,
+    _lookup_primitive_method,
 )
 
 # ---------------------------------------------------------------------------
@@ -870,6 +872,93 @@ class RemoveStatementTransformer(BlockTransformer):
         for statement in block.statements:
             if statement not in self.to_remove:
                 new_statements.append(statement)
+        return frog_ast.Block(new_statements)
+
+
+class FlagSetToAssignmentTransformer(BlockTransformer):
+    """Folds a conditional flag raise after a known-false flag into an assignment.
+
+    ::
+
+        x = false; S; if (C) { x = true; }   ->   x = false; S; x = C;
+
+    when no statement of S mentions ``x`` (so ``x`` is false right before
+    the if). Afterwards ``x`` equals ``C`` on both sides, and ``C`` is
+    evaluated exactly once at the same point, so the rewrite is exact even
+    when ``C`` makes calls. The earlier ``x = false`` is then a dead store.
+    This is the shape an identical-until-bad pair uses to raise a flag in
+    Initialize.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+
+    @staticmethod
+    def _flag_assignment(stmt: frog_ast.Statement, value: bool) -> str | None:
+        if (
+            isinstance(stmt, frog_ast.Assignment)
+            and stmt.the_type is None
+            and isinstance(stmt.var, frog_ast.Variable)
+            and stmt.value == frog_ast.Boolean(value)
+        ):
+            return stmt.var.name
+        return None
+
+    def _raised_flag(self, stmt: frog_ast.Statement) -> str | None:
+        if (
+            isinstance(stmt, frog_ast.IfStatement)
+            and len(stmt.conditions) == 1
+            and len(stmt.blocks) == 1
+            and len(stmt.blocks[0].statements) == 1
+        ):
+            return self._flag_assignment(stmt.blocks[0].statements[0], True)
+        return None
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        known_false: set[str] = set()
+        reset_earlier: set[str] = set()
+        new_statements: list[frog_ast.Statement] = []
+        for stmt in block.statements:
+            flag = self._raised_flag(stmt)
+            if flag is not None and flag in known_false:
+                assert isinstance(stmt, frog_ast.IfStatement)
+                replacement = frog_ast.Assignment(
+                    None, frog_ast.Variable(flag), copy.deepcopy(stmt.conditions[0])
+                )
+                replacement.line_num, replacement.column_num = (
+                    stmt.line_num,
+                    stmt.column_num,
+                )
+                new_statements.append(replacement)
+                known_false.discard(flag)
+                continue
+            if flag is not None and flag in reset_earlier:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Flag Set To Assignment",
+                        reason=(
+                            f"'if (...) {{ {flag} = true; }}' was not folded into"
+                            f" '{flag} = ...;': {flag} is mentioned between its"
+                            f" reset to false and the if-statement"
+                        ),
+                        location=stmt.origin,
+                        suggestion=(
+                            f"move the statements that mention {flag} after the"
+                            " if-statement, or before the reset"
+                        ),
+                        variable=flag,
+                        method=None,
+                    )
+                )
+            mentioned = {
+                n.name for n in _walk_nodes(stmt) if isinstance(n, frog_ast.Variable)
+            }
+            known_false -= mentioned
+            reset = self._flag_assignment(stmt, False)
+            if reset is not None:
+                known_false.add(reset)
+                reset_earlier.add(reset)
+            new_statements.append(stmt)
         return frog_ast.Block(new_statements)
 
 
@@ -2202,6 +2291,7 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
         self._bound_names = method_bound_names(method)
+        # Inside Initialize a fold site may run before a definition.
         self._in_initialize = method.signature.name == "Initialize"
         try:
             return self._transform_children(method)
@@ -2209,11 +2299,62 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             self._bound_names = set()
             self._in_initialize = False
 
+    def _injectivity_facts(
+        self, visitor: Z3FormulaVisitor, exprs: Sequence[frog_ast.Expression]
+    ) -> list[Any]:
+        """``c1 == c2 => args(c1) == args(c2)`` for calls to the same method.
+
+        Sound for a method the primitive declares ``injective`` (distinct
+        inputs give distinct outputs); the pass already refuses inputs with
+        non-deterministic calls, so each call denotes one value.
+        """
+        calls: list[tuple[frog_ast.FuncCall, frog_ast.MethodSignature]] = []
+        for expr in exprs:
+            for node in _walk_nodes(expr):
+                if isinstance(node, frog_ast.FuncCall) and node.args:
+                    method = _lookup_primitive_method(
+                        node.func, self.ctx.proof_namespace
+                    )
+                    if (
+                        method is not None
+                        and method.injective
+                        and len(method.parameters) == len(node.args)
+                    ):
+                        calls.append((node, method))
+        facts = []
+        for i, (first, method) in enumerate(calls):
+            for second, _ in calls[i + 1 :]:
+                if first.func != second.func or first == second:
+                    continue
+                encoded = [visitor.visit(first), visitor.visit(second)]
+                arg_pairs = []
+                for param, a, b in zip(method.parameters, first.args, second.args):
+                    pair = (
+                        _faithful_z3_term(visitor.visit(a), param.type),
+                        _faithful_z3_term(visitor.visit(b), param.type),
+                    )
+                    if pair[0] is None or pair[1] is None:
+                        break
+                    arg_pairs.append(pair)
+                if len(arg_pairs) != len(method.parameters):
+                    continue
+                if not all(isinstance(t, z3.ExprRef) for t in encoded):
+                    continue
+                try:
+                    facts.append(
+                        z3.Implies(
+                            encoded[0] == encoded[1],
+                            z3.And(*[a == b for a, b in arg_pairs]),
+                        )
+                    )
+                except (z3.Z3Exception, TypeError):
+                    continue
+        return facts
+
     def _usable_init_field_rhs(
         self,
     ) -> list[tuple[frog_ast.Variable, frog_ast.Expression]]:
         """The Initialize definitions whose names mean the same here (F-346)."""
-        # A fold site in Initialize may run before the definition (F-349).
         if self._in_initialize:
             return []
         usable = []
@@ -2274,11 +2415,19 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
                 continue
             if counts.get(stmt.var.name, 0) != 1:
                 continue
-            # F-349: an earlier statement that can return would skip the
-            # definition, leaving the field at its initial value.
+            # A definition is a call (`F = D(x)`) or a comparison
+            # (`F = a == b`, e.g. an identical-until-bad flag folded by
+            # FlagSetToAssignment).
+            # The definition must run whenever Initialize completes: an
+            # earlier statement that can return would skip it, leaving the
+            # field at its initial value.
             if may_return_before(init.block.statements, def_index):
                 continue
-            if not isinstance(stmt.value, frog_ast.FuncCall):
+            if not isinstance(stmt.value, frog_ast.FuncCall) and not (
+                isinstance(stmt.value, frog_ast.BinaryOperation)
+                and stmt.value.operator
+                in (frog_ast.BinaryOperators.EQUALS, frog_ast.BinaryOperators.NOTEQUALS)
+            ):
                 continue
             # Reject a non-deterministic FuncCall RHS: expanding the field
             # to a textual copy of the call would let the comparison fold
@@ -2350,6 +2499,28 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             # the same text for a different value, and the comparison below
             # would equate the two fields. Require each such local to take a
             # single value in Initialize.
+            # An Initialize local shadowing a field would be read as the
+            # field once the RHS is expanded in another method.
+            shadowing = sorted(
+                (referenced_variable_names(stmt.value) & field_names)
+                & method_bound_names(init)
+            )
+            if shadowing:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Fold Equivalent Return Branch",
+                        reason=(
+                            "Init-only field RHS not expanded: the Initialize"
+                            f" local(s) {', '.join(shadowing)} it reads shadow a"
+                            " field of the same name"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=stmt.var.name,
+                        method=None,
+                    )
+                )
+                continue
             rhs_locals = referenced_variable_names(stmt.value) - field_names
             rebound = sorted(
                 name for name in rhs_locals if _local_value_count(init, name) > 1
@@ -2455,8 +2626,19 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             # field atoms intact in Z3 — overriding with the hoisted-call
             # RHS would replace one side of the equality with a structure
             # Z3 cannot relate to the other side's atom.
+            usable_init = self._usable_init_field_rhs()
+            if usable_init:
+                # Expand the Initialize definitions in P as well, so a guard
+                # on hoisted fields (`f1 == f2`) is stated over the values
+                # they were computed from.
+                p_map: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(
+                    identity=False
+                )
+                for field_var, rhs in usable_init:
+                    p_map.set(field_var, copy.deepcopy(rhs))
+                p_expr = SubstitutionTransformer(p_map).transform(copy.deepcopy(p_expr))
             all_sub_pairs: list[tuple[frog_ast.Expression, frog_ast.Expression]] = list(
-                self._usable_init_field_rhs()
+                usable_init
             ) + list(sub_pairs)
             if all_sub_pairs:
                 # Iterate substitution to a fixed point so chains like
@@ -2513,6 +2695,8 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
                 solver.set("timeout", 30000)
                 # Check Not(P => (X == Y)) is UNSAT, i.e., P AND X != Y is UNSAT.
                 solver.add(z3.And(p_formula, x_formula != y_formula))
+                for fact in self._injectivity_facts(visitor, (p_expr, x_sub, y_sub)):
+                    solver.add(fact)
                 if solver.check() != z3.unsat:
                     continue
             except (z3.Z3Exception, TypeError):
@@ -2550,6 +2734,33 @@ def _local_value_count(node: frog_ast.ASTNode, name: str) -> int:
 
     SearchVisitor(_other_writes).visit(node)
     return count
+
+
+def _faithful_z3_term(term: object, param_type: frog_ast.Type) -> Any:
+    """*term* as a Z3 expression denoting the argument's actual value, or None.
+
+    An injectivity fact concludes that the Z3 encodings of two arguments are
+    equal, which is sound only if each encoding denotes the argument's real
+    value: an ``Int`` or ``Bool`` term for a parameter of that type, or an
+    opaque constant otherwise. Anything else (a Python tuple for a product,
+    integer arithmetic standing for a ``ModInt`` value, which Z3 would not
+    reduce mod q) is refused.
+    """
+    if isinstance(param_type, frog_ast.IntType):
+        if isinstance(term, bool):
+            return None
+        if isinstance(term, int):
+            return z3.IntVal(term)
+        if isinstance(term, z3.ArithRef) and term.is_int():
+            return term
+        return None
+    if isinstance(param_type, frog_ast.BoolType):
+        if isinstance(term, bool):
+            return z3.BoolVal(term)
+        return term if isinstance(term, z3.BoolRef) else None
+    if isinstance(term, z3.ExprRef) and term.sort() == _OPAQUE_Z3_SORT:
+        return term
+    return None
 
 
 def _flatten_top_level_and(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
@@ -3186,6 +3397,13 @@ class SimplifyIf(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return SimplifyIfTransformer().transform(game)
+
+
+class FlagSetToAssignment(TransformPass):
+    name = "Flag Set To Assignment"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return FlagSetToAssignmentTransformer(ctx).transform(game)
 
 
 class RemoveEmptyIf(TransformPass):

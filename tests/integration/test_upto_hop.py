@@ -149,7 +149,7 @@ def test_lemma_file_must_quantify_over_its_parameters() -> None:
     # The lemma proves the event only for U = BitString<8>.
     result = _run_prove("outer_lemma_concrete.proof")
     assert result.returncode != 0, _out(result)
-    assert "distinct let: parameters" in result.stdout + result.stderr, _out(result)
+    assert "does not cover" in result.stdout + result.stderr, _out(result)
 
 
 def test_lemma_file_must_be_about_the_same_game_file() -> None:
@@ -157,3 +157,22 @@ def test_lemma_file_must_be_about_the_same_game_file() -> None:
     result = _run_prove("outer_lemma_other_file.proof")
     assert result.returncode != 0, _out(result)
     assert "different file" in result.stdout + result.stderr, _out(result)
+
+
+def test_event_lemma_bound_inlined_into_parent() -> None:
+    result = _run_prove("outer.proof")
+    assert result.returncode == 0, _out(result)
+    assert "Adv^TargetGuess(S)(A) <= count_Eq/|S|" in result.stdout, _out(result)
+    assert "(before inlining lemma bounds: Pr[bad of BadGuess(S)](B1))" in result.stdout
+
+
+def test_initialize_event_bound_inlined_into_parent() -> None:
+    result = _run_prove("outer_init.proof")
+    assert result.returncode == 0, _out(result)
+    assert "Adv^InitCollision(S)(A) <= 1/|S|" in result.stdout, _out(result)
+
+
+def test_skip_lemmas_leaves_event_term_opaque() -> None:
+    result = _run_prove("outer.proof", "--skip-lemmas")
+    assert result.returncode == 0, _out(result)
+    assert "Adv^TargetGuess(S)(A) <= Pr[bad of BadGuess(S)](B1)" in result.stdout

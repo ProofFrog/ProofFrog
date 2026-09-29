@@ -310,6 +310,154 @@ def test_f346_rhs_local_captured_by_oracle_parameter_not_folded() -> None:
     assert any("bound in this method" in nm.reason for nm in ctx.near_misses)
 
 
+# ---------------------------------------------------------------------------
+# Comparison definitions and injectivity facts
+# ---------------------------------------------------------------------------
+
+_INJ_PRIM = """
+Primitive E(Int n) {
+    deterministic injective BitString<n> enc(BitString<n> x);
+    deterministic injective BitString<n> enc2(BitString<n> x);
+    deterministic BitString<n> hash(BitString<n> x);
+    deterministic injective BitString<n> pair(BitString<n> x, BitString<n> y);
+}
+"""
+
+
+def _fold_e(source: str) -> tuple[object, object]:
+    prim = frog_parser.parse_primitive_file(_INJ_PRIM)
+    game = frog_parser.parse_game(source)
+    return game, FoldEquivalentReturnBranch().apply(game, _ctx_with(E=prim, F=prim))
+
+
+_FLAG_GAME = """
+    Game G(E F, Int n) {
+        BitString<n> f1;
+        BitString<n> f2;
+        Bool flag;
+        Void Initialize() {
+            BitString<n> a <- BitString<n>;
+            BitString<n> b <- BitString<n>;
+            f1 = F.ENC(a);
+            f2 = F.ENC(b);
+            flag = a == b;
+        }
+        Bool O() {
+            if (f1 == f2) {
+                return flag;
+            }
+            return f1 == f2;
+        }
+    }
+"""
+
+
+def test_injective_encodings_decide_comparison_flag() -> None:
+    """``flag = (a == b)`` is true under ``enc(a) == enc(b)`` by injectivity."""
+    game, result = _fold_e(_FLAG_GAME.replace("ENC", "enc"))
+    assert result != game
+    assert "if" not in str(result.get_method("O"))
+
+
+def test_non_injective_encodings_do_not_decide_flag() -> None:
+    """A merely deterministic ``hash`` may collide, so ``flag`` may be false."""
+    game, result = _fold_e(_FLAG_GAME.replace("ENC", "hash"))
+    assert result == game
+
+
+def test_different_injective_methods_are_not_related() -> None:
+    game, result = _fold_e(
+        _FLAG_GAME.replace("f1 = F.ENC(a)", "f1 = F.enc(a)").replace(
+            "f2 = F.ENC(b)", "f2 = F.enc2(b)"
+        )
+    )
+    assert result == game
+
+
+def test_multi_argument_injectivity() -> None:
+    """``pair(a, c) == pair(b, c)`` gives ``a == b``."""
+    game, result = _fold_e(
+        _FLAG_GAME.replace("F.ENC(a)", "F.pair(a, a)").replace(
+            "F.ENC(b)", "F.pair(b, b)"
+        )
+    )
+    assert result != game
+
+
+def test_init_local_shadowing_field_not_expanded() -> None:
+    """An Initialize local named like a field: its definition's ``a`` means the
+    local there but the field at the fold site, so it must not be expanded."""
+    game, result = _fold_e("""
+        Game G(E F, Int n) {
+            BitString<n> a;
+            BitString<n> f1;
+            BitString<n> f2;
+            Bool flag;
+            Void Initialize() {
+                BitString<n> a <- BitString<n>;
+                BitString<n> b <- BitString<n>;
+                f1 = F.enc(a);
+                f2 = F.enc(b);
+                flag = a == b;
+            }
+            Bool O() {
+                if (f1 == f2) {
+                    return flag;
+                }
+                return f1 == f2;
+            }
+        }
+    """)
+    assert result == game
+
+
+def _fold_prim(prim_src: str, source: str) -> tuple[object, object]:
+    prim = frog_parser.parse_primitive_file(prim_src)
+    game = frog_parser.parse_game(source)
+    return game, FoldEquivalentReturnBranch().apply(game, _ctx_with(E=prim, F=prim))
+
+
+def test_injectivity_fact_not_emitted_for_tuple_arguments() -> None:
+    """Tuple arguments are encoded as Python tuples; comparing them must not
+    turn the fact into ``D(x) == D(y) => False``."""
+    game, result = _fold_prim(
+        "Primitive E(Int n) { deterministic injective BitString<n>"
+        " inj([BitString<n>, BitString<n>] x); }",
+        """
+        Game G(E F, Int n) {
+            Bool O(BitString<n> z, BitString<n> a, BitString<n> b,
+                   BitString<n> c, BitString<n> d) {
+                if (z == F.inj([a, b])) {
+                    return z == F.inj([c, d]);
+                }
+                return false;
+            }
+        }
+        """,
+    )
+    assert result == game
+
+
+def test_injectivity_fact_not_emitted_for_modint_integer_arguments() -> None:
+    """``encm(1)`` and ``encm(q + 1)`` are equal in ModInt<q>; Z3's integer
+    encoding of the arguments would conclude ``1 == q + 1``."""
+    game, result = _fold_prim(
+        "Primitive E(Int q, Int n) { deterministic injective BitString<n>"
+        " encm(ModInt<q> x); }",
+        """
+        Game G(E F, Int q, Int n) {
+            Bool O(BitString<n> z) {
+                if (z == F.encm(1) && q > 5) {
+                    return z == F.encm(q + 1);
+                }
+                return false;
+            }
+        }
+        """,
+    )
+    assert result == game
+
+
 def test_definition_skipped_by_earlier_initialize_return_not_expanded() -> None:
     """An earlier top-level ``if (c) { return ...; }`` in Initialize can skip
     the definition, leaving the field at its initial value."""
@@ -328,6 +476,23 @@ def test_definition_skipped_by_earlier_initialize_return_not_expanded() -> None:
         """)
     assert result == game
 
+
+def test_comparison_definition_skipped_by_earlier_return_not_expanded() -> None:
+    game, result, _ = _fold("""
+        Game G(D F, Int n) {
+            BitString<n> a; BitString<n> b; Bool E;
+            Bool Initialize() {
+                a <- BitString<n>;
+                b <- BitString<n>;
+                Bool c <- Bool;
+                if (c) { return true; }
+                E = a == b;
+                return false;
+            }
+            Bool O(Bool flag) { if (flag) { return E; } return a == b; }
+        }
+        """)
+    assert result == game
 
 
 def test_definition_not_expanded_inside_initialize() -> None:

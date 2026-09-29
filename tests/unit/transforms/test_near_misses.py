@@ -13,6 +13,7 @@ from proof_frog.transforms.algebraic import (
 )
 from proof_frog.transforms.control_flow import (
     FoldEquivalentReturnBranch,
+    FlagSetToAssignment,
     RemoveEmptyIf,
     BranchElimination,
     GuardConditionSimplification,
@@ -2497,6 +2498,32 @@ def test_remove_empty_if_near_miss_on_indexed_condition():
     assert misses and "M[x]" in misses[0].reason
 
 
+def test_flag_set_to_assignment_near_miss_on_intervening_mention():
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(Set S) {
+            S a; S b; Bool bad; Bool seen;
+            Void Initialize() {
+                bad = false;
+                seen = bad;
+                if (a == b) {
+                    bad = true;
+                }
+            }
+        }
+        """)
+    FlagSetToAssignment().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Flag Set To Assignment" and nm.variable == "bad"
+        for nm in ctx.near_misses
+    )
+
+
 def test_fold_equivalent_return_branch_near_miss_on_rebound_init_local():
     """F-342: an Initialize local read by a field's RHS takes two values."""
     prim = frog_parser.parse_primitive_file(
@@ -2582,6 +2609,41 @@ def test_injective_equality_near_miss_on_captured_definition():
     InjectiveEqualitySimplify().apply(game, ctx)
     assert any(
         nm.transform_name == "Injective Equality Simplify" and "bound in this method" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_fold_equivalent_return_branch_near_miss_on_init_local_shadowing_field():
+    """An Initialize local shadows the field its definition's name refers to."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive E(Int n) { deterministic injective BitString<n> enc(BitString<n> x); }"
+    )
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"E": prim, "F": prim},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(E F, Int n) {
+            BitString<n> a;
+            BitString<n> f1;
+            Void Initialize() {
+                BitString<n> a <- BitString<n>;
+                f1 = F.enc(a);
+            }
+            BitString<n> O(Bool c) {
+                if (c) {
+                    return f1;
+                }
+                return F.enc(a);
+            }
+        }
+        """)
+    FoldEquivalentReturnBranch().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Fold Equivalent Return Branch"
+        and "shadow a field" in nm.reason
         for nm in ctx.near_misses
     )
 

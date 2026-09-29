@@ -1,0 +1,48 @@
+import 'D.primitive';
+
+Game Left(D F, Int n) {
+    BitString<n> G = 0^n;
+    BitString<n> H;
+    Bool Initialize() {
+        BitString<n> x <- BitString<n>;
+        H = F.eval(x);
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        G = F.eval(x);
+        return false;
+    }
+    BitString<n> O(Bool flag) {
+        if (flag) {
+            return G;
+        }
+        return H;
+    }
+    BitString<n> Peek() {
+        return H;
+    }
+}
+
+Game Right(D F, Int n) {
+    BitString<n> G = 0^n;
+    BitString<n> H;
+    Bool Initialize() {
+        BitString<n> x <- BitString<n>;
+        H = F.eval(x);
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        G = F.eval(x);
+        return false;
+    }
+    BitString<n> O(Bool flag) {
+        return H;
+    }
+    BitString<n> Peek() {
+        return H;
+    }
+}
+
+export as Loc;

@@ -491,3 +491,123 @@ def test_f347_field_image_not_resolved_into_shadowing_parameter() -> None:
         "Test",
     )
     assert "K == K" not in out, out
+
+
+def test_f349_field_image_not_resolved_past_earlier_initialize_return() -> None:
+    """F-349: Initialize may return before ``A = F.eval(K)``, leaving ``A`` at
+    its initial value, so ``A == F.eval(L)`` is not ``K == L``."""
+    out = _simplify(
+        """
+        Game G(T F, Int n) {
+            BitString<n> K;
+            BitString<n> L;
+            BitString<n> A = 0^n;
+            Bool Initialize() {
+                K <- BitString<n>;
+                L <- BitString<n>;
+                Bool c <- Bool;
+                if (c) { return true; }
+                A = F.eval(K);
+                return false;
+            }
+            Bool Test() { return A == F.eval(L); }
+        }
+        """,
+        "Test",
+    )
+    assert "K == L" not in out, out
+
+
+def test_f349_field_image_not_resolved_inside_initialize() -> None:
+    """F-349: a comparison in Initialize may run before the definition."""
+    out = _simplify(
+        """
+        Game G(T F, Int n) {
+            BitString<n> K;
+            BitString<n> L;
+            BitString<n> A = 0^n;
+            Bool Initialize() {
+                K <- BitString<n>;
+                L <- BitString<n>;
+                Bool c <- Bool;
+                if (c) { return A == F.eval(L); }
+                A = F.eval(K);
+                return false;
+            }
+        }
+        """,
+        "Initialize",
+    )
+    assert "K == L" not in out, out
+
+
+def test_f349_field_image_resolved_when_definition_always_runs() -> None:
+    """Control: no return before the definition."""
+    out = _simplify(
+        """
+        Game G(T F, Int n) {
+            BitString<n> K;
+            BitString<n> L;
+            BitString<n> A = 0^n;
+            Bool Initialize() {
+                K <- BitString<n>;
+                L <- BitString<n>;
+                A = F.eval(K);
+                Bool c <- Bool;
+                if (c) { return true; }
+                return false;
+            }
+            Bool Test() { return A == F.eval(L); }
+        }
+        """,
+        "Test",
+    )
+    assert "K == L" in out, out
+
+
+NS_MODINT = """
+Primitive T(Int q, Int n) {
+    deterministic injective BitString<n> encm(ModInt<q> x);
+}
+"""
+
+
+def _simplify_modint(source: str) -> str:
+    game = frog_parser.parse_game(source)
+    result, _ = _apply_ns(game, NS_MODINT)
+    return str(result.get_method("O"))
+
+
+def _apply_ns(game: frog_ast.Game, primitive_src: str) -> tuple[frog_ast.Game, PipelineContext]:
+    prim = frog_parser.parse_primitive_file(primitive_src)
+    ctx = _ctx({"T": prim, "E": prim})
+    return InjectiveEqualitySimplify().apply(game, ctx), ctx
+
+
+def test_f348_int_arguments_to_modint_parameter_not_compared_as_ints() -> None:
+    """F-348: ``encm(1) == encm(q + 1)`` holds (q + 1 = 1 mod q), but the
+    integer comparison ``1 == q + 1`` is false."""
+    out = _simplify_modint(
+        """
+        Game G(T E, Int q, Int n) {
+            Void Initialize() { }
+            Bool O() { return E.encm(1) == E.encm(q + 1); }
+        }
+        """
+    )
+    assert "1 == q + 1" not in out, out
+
+
+def test_f348_modint_arguments_still_simplify() -> None:
+    """Control: both arguments already have the parameter's type."""
+    out = _simplify_modint(
+        """
+        Game G(T E, Int q, Int n) {
+            ModInt<q> a;
+            ModInt<q> b;
+            Void Initialize() { a <- ModInt<q>; b <- ModInt<q>; }
+            Bool O() { return E.encm(a) == E.encm(b); }
+        }
+        """
+    )
+    assert "a == b" in out, out

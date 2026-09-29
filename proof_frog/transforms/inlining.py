@@ -34,6 +34,7 @@ from ._base import (
     has_nondeterministic_call,
     NearMiss,
     _lookup_primitive_method,
+    may_return_before,
 )
 
 
@@ -2640,6 +2641,29 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                             suggestion=None,
                             variable=field_name,
                             method=None,
+                        )
+                    )
+                return None
+            # F-349: Initialize may return before the definition, leaving the
+            # field at its initial value for every later oracle.
+            if may_return_before(
+                game.methods[assign_method_idx].block.statements, assign_stmt_idx
+            ):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Field",
+                            reason=(
+                                f"Cannot inline field '{field_name}' across "
+                                f"methods: Initialize may return before its "
+                                f"definition"
+                            ),
+                            location=None,
+                            suggestion=(
+                                "Move the definition above any return in " "Initialize"
+                            ),
+                            variable=field_name,
+                            method="Initialize",
                         )
                     )
                 return None

@@ -1,0 +1,14 @@
+import 'FreshControl.game';
+
+proof:
+
+let:
+    Int n;
+    Function<BitString<n>, BitString<n>> F0;
+
+theorem:
+    FreshControl(n, F0);
+
+games:
+    FreshControl(n, F0).Left against FreshControl(n, F0).Adversary;
+    FreshControl(n, F0).Right against FreshControl(n, F0).Adversary;

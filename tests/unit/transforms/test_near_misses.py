@@ -2561,3 +2561,71 @@ def test_injective_equality_near_miss_on_captured_definition():
         nm.transform_name == "Injective Equality Simplify" and "bound in this method" in nm.reason
         for nm in ctx.near_misses
     )
+
+
+def test_injective_equality_near_miss_on_coerced_modint_argument():
+    """F-348: an Int argument for a ModInt<q> parameter is reduced mod q."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive M(Int q, Int n) { deterministic injective BitString<n> encm(ModInt<q> x); }"
+    )
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"M": prim, "E": prim},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(M E, Int q, Int n) {
+            Void Initialize() { }
+            Bool O() { return E.encm(1) == E.encm(q + 1); }
+        }
+        """)
+    InjectiveEqualitySimplify().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Injective Equality Simplify" and "may not have its type" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_inline_single_use_field_near_miss_on_skippable_definition():
+    """F-349: Initialize may return before the field's definition."""
+    ctx = _make_ctx()
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int G = 0;
+            Bool Initialize() {
+                Bool c <- Bool;
+                if (c) { return true; }
+                G = 5;
+                return false;
+            }
+            Int O() { return G; }
+        }
+        """)
+    InlineSingleUseField().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Inline Single-Use Field" and "may return before" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_local_fn_near_miss_sample_skippable_by_initialize_return() -> None:
+    """F-349: Initialize may return before sampling F."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Function<BitString<8>, BitString<16>> F;
+            Bool Initialize() {
+                Bool c <- Bool;
+                if (c) { return true; }
+                F <- Function<BitString<8>, BitString<16>>;
+                return false;
+            }
+            BitString<16> Hash(BitString<8> x) {
+                return F(x);
+            }
+        }
+        """)
+    ctx = _local_fn_ctx(sampled={"H"})
+    result = LocalFunctionFieldToLet().apply(game, ctx)
+    assert result == game
+    assert any("read before its sample" in nm.reason for nm in _local_fn_misses(ctx))

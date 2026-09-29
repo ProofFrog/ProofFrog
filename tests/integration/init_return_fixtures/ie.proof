@@ -1,0 +1,15 @@
+import 'I.primitive';
+import 'Ie.game';
+
+proof:
+
+let:
+    Int n;
+    I F;
+
+theorem:
+    Ie(F, n);
+
+games:
+    Ie(F, n).Left against Ie(F, n).Adversary;
+    Ie(F, n).Right against Ie(F, n).Adversary;

@@ -32,6 +32,7 @@ from ._base import (
     PipelineContext,
     NearMiss,
     has_nondeterministic_call,
+    may_return_before,
 )
 
 # ---------------------------------------------------------------------------
@@ -1538,6 +1539,12 @@ def _single_call_field_to_local(
         if init_sample is None or init_sample_count > 1 or field_used_elsewhere_in_init:
             continue
 
+        # F-349: Initialize may return before the sample, leaving the field
+        # at its initial value; the relocated sample would draw it anyway.
+        assert init_sample_idx is not None
+        if may_return_before(init_method.block.statements, init_sample_idx):
+            continue
+
         # Reject if any oracle shadows the field name with a parameter/local:
         # name-only reference detection cannot tell field from binding, and the
         # prepended local sample would clobber the binding (F-055).
@@ -2256,6 +2263,12 @@ def _counter_guarded_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
 
         # Reject if no sample, multiple samples, or field used elsewhere
         if init_sample is None or init_sample_count > 1 or field_used_elsewhere_in_init:
+            continue
+
+        # F-349: Initialize may return before the sample, leaving the field
+        # at its initial value; the relocated sample would draw it anyway.
+        assert init_sample_idx is not None
+        if may_return_before(init_method.block.statements, init_sample_idx):
             continue
 
         # Reject if any oracle shadows the field name with a parameter/local

@@ -33,7 +33,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 
 | Pass | Description |
 |---|---|
-| TopologicalSort | Reorders statements by dependency graph. A bare declaration stays below earlier reads of its name and above its later uses, and is kept while a later read needs it. |
+| TopologicalSort | Reorders statements by dependency graph and drops the ones that neither a return nor a statement mentioning a field depends on. Ordering rule (F-354): a statement that writes a name stays below every earlier statement that mentions that name, not only the nearest one, and a statement that reads a name stays below the nearest earlier writer of it. A bare declaration counts as a write of its name, so it stays below earlier mentions of the name (which refer to an outer binding) and above its later uses, and it is kept while a later use is. Names are compared textually; a name shared with a proof-level `let` is ordered like any other. |
 | RemoveDuplicateFields | Removes fields with same type that always hold the same value. |
 | RemoveUnnecessaryFields | Removes unused fields and dead statements via liveness analysis. |
 | UniformBijectionElimination | Replaces `f(x)` with `x` when x is uniform and f is a deterministic injective bijection. |

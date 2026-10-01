@@ -377,11 +377,16 @@ class _AlphaRenamer:
         self, statement: frog_ast.GenericFor, scopes: list[dict[str, str]]
     ) -> frog_ast.GenericFor:
         new_over = self._rewrite(statement.over, scopes)
+        # The binder's type is evaluated in the enclosing scope, like a
+        # declaration's (F-239): a length naming a renamed local must follow
+        # it, or it re-binds to a same-named outer name.
+        new_type = self._rewrite_type(statement.var_type, scopes)
+        assert new_type is not None
         name = self._binder_name(statement.var_name)
         body = self._rename_block(
             statement.block, scopes, initial={statement.var_name: name}
         )
-        return frog_ast.GenericFor(statement.var_type, name, new_over, body)
+        return frog_ast.GenericFor(new_type, name, new_over, body)
 
 
 def rename_colliding_binders(

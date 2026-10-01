@@ -30,14 +30,26 @@ from ._base import TransformPass, PipelineContext
 def _may_write(node: frog_ast.ASTNode, name: str) -> bool:
     """True if *node* or any statement nested in it may write *name*.
 
-    Counts assignments, samples, element writes, and ``for`` binders.
+    Counts assignments, samples, element writes, ``for`` binders, bare
+    redeclarations (``T? v;`` rebinds *name* to an unset, possibly-None
+    variable) and tuple-destructuring bindings.  A write whose l-value has no
+    variable base is counted too, since what it targets cannot be told.
+
+    The last three are defense in depth: AlphaRename renames a redeclaration
+    before this pass runs, the parser desugars destructuring into plain
+    declarations, and the grammar's l-values always have a variable base.
     """
 
     def writes(inner: frog_ast.ASTNode) -> bool:
         if isinstance(
             inner, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
         ):
-            return lvalue_base_name(inner.var) == name
+            base = lvalue_base_name(inner.var)
+            return base is None or base == name
+        if isinstance(inner, frog_ast.VariableDeclaration):
+            return inner.name == name
+        if isinstance(inner, frog_ast.DestructuringBinding):
+            return name in inner.names
         if isinstance(inner, frog_ast.NumericFor):
             return inner.name == name
         if isinstance(inner, frog_ast.GenericFor):

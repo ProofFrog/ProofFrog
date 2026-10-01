@@ -77,6 +77,53 @@ def _describe_write(write: frog_ast.ASTNode) -> str:
     return "a sample"
 
 
+def _conflicting_names(
+    method: frog_ast.Method, outer: list[tuple[str, frog_ast.Type]]
+) -> set[str]:
+    """Names bound in *method*'s scope under more than one type.
+
+    *outer* lists the bindings visible from outside the method (fields,
+    proof lets).  To these are added the method's parameters and every binder
+    in its body, at any depth: typed declarations and ``for`` binders.  A
+    name-to-type map of the method holds one type per name, so for a name
+    returned here it is wrong at some use.
+    """
+    bindings: dict[str, list[frog_ast.Type]] = {}
+    conflicting: set[str] = set()
+
+    def bind(name: str, the_type: frog_ast.Type) -> None:
+        bindings.setdefault(name, []).append(the_type)
+
+    for name, the_type in outer:
+        bind(name, the_type)
+    for param in method.signature.parameters:
+        bind(param.name, param.type)
+
+    def collect(inner: frog_ast.ASTNode) -> bool:
+        if isinstance(
+            inner, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            if inner.the_type is not None and isinstance(inner.var, frog_ast.Variable):
+                bind(inner.var.name, inner.the_type)
+        elif isinstance(inner, frog_ast.VariableDeclaration):
+            bind(inner.name, inner.type)
+        elif isinstance(inner, frog_ast.NumericFor):
+            bind(inner.name, frog_ast.IntType())
+        elif isinstance(inner, frog_ast.GenericFor):
+            bind(inner.var_name, inner.var_type)
+        elif isinstance(inner, frog_ast.DestructuringBinding):
+            conflicting.update(inner.names)
+        return False
+
+    SearchVisitor[frog_ast.ASTNode](collect).visit(method.block)
+    conflicting.update(
+        name
+        for name, types in bindings.items()
+        if any(other != types[0] for other in types[1:])
+    )
+    return conflicting
+
+
 class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
     """Removes if (x == None) { ... } guards that can never execute.
 
@@ -90,6 +137,13 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
     patterns like `T? v = E.Enc(...); if (v == None) { return ...; } return v;`
     which can be simplified by this rule once E.Enc's non-nullable return
     type is known.
+
+    The type map holds one type per name for a whole method.  A name bound
+    twice under different types (a nullable field or parameter shadowed by a
+    non-nullable local of an inner block, or two sibling-block locals) would
+    get the wrong type at some guard, so the declared type of such a name is
+    not trusted.  AlphaRename gives every local a distinct name before this
+    pass runs; the check is there so the pass does not depend on it.
     """
 
     def __init__(
@@ -102,14 +156,36 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
         self.proof_instantiables = proof_instantiables or {}
         self.ctx = ctx
         self._method_name: Optional[str] = None
+        self._outer_bindings: list[tuple[str, frog_ast.Type]] = []
+        self._conflicting: set[str] = set()
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.ASTNode:
+        saved = self._outer_bindings
+        self._outer_bindings = [(field.name, field.type) for field in game.fields]
+        if self._scope_let_types is not None:
+            self._outer_bindings += [
+                (pair.name, pair.type) for pair in self._scope_let_types.type_map
+            ]
+        try:
+            return self._transform_children(game)
+        finally:
+            self._outer_bindings = saved
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.ASTNode:
-        saved = self._method_name
+        saved = (self._method_name, self._conflicting)
         self._method_name = method.signature.name
+        self._conflicting = _conflicting_names(method, self._outer_bindings)
         try:
             return super().transform_method(method)
         finally:
-            self._method_name = saved
+            self._method_name, self._conflicting = saved
+
+    def _declared_type(self, name: str) -> Optional[frog_ast.Type]:
+        """The type *name* is declared with, or None if it is unknown or the
+        method binds *name* under more than one type."""
+        if name in self._conflicting:
+            return None
+        return self.type_map.get(name)
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         # A nullable declaration `T? v = expr` with a provably non-nullable
@@ -206,7 +282,7 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
         if isinstance(expr, frog_ast.NoneExpression):
             return False
         if isinstance(expr, frog_ast.Variable):
-            t = self.type_map.get(expr.name)
+            t = self._declared_type(expr.name)
             return t is not None and not isinstance(t, frog_ast.OptionalType)
         if isinstance(expr, frog_ast.FuncCall) and isinstance(
             expr.func, frog_ast.FieldAccess
@@ -258,7 +334,7 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
 
         # Case 1: tested expression is a variable with non-nullable type.
         if isinstance(tested_expr, frog_ast.Variable):
-            var_type = self.type_map.get(tested_expr.name)
+            var_type = self._declared_type(tested_expr.name)
             if var_type is not None and not isinstance(var_type, frog_ast.OptionalType):
                 return True
             # Case 2: nullable var was assigned from a provably non-nullable expr.

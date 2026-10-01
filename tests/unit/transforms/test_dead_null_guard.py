@@ -2,7 +2,11 @@
 
 import pytest
 from proof_frog import frog_ast, visitors, frog_parser
-from proof_frog.transforms.types import DeadNullGuardEliminator
+from proof_frog.transforms._base import PipelineContext
+from proof_frog.transforms.types import (
+    DeadNullGuardElimination,
+    DeadNullGuardEliminator,
+)
 
 
 def _transform(game_str: str) -> str:
@@ -403,3 +407,115 @@ class TestNullableLocalWrites:
             }
             """)
         assert "if (v == None)" in result
+
+
+class TestConflictingBindings:
+    """The type map holds one type per name for a whole method.  When the
+    method binds a name under two types, the map is wrong at some guard, so
+    the pass must not trust it.  AlphaRename gives locals distinct names
+    before the pass runs in the pipeline; these run the pass on its own."""
+
+    @pytest.mark.parametrize(
+        "fields, params, body",
+        [
+            # The guard reads the nullable field; the map says Int, from the
+            # inner local.
+            ("Int? v;", "Bool c", "if (c) { Int v = 1; } if (v == None) { return 0; }"),
+            # Likewise for a nullable parameter.
+            ("", "Int? v, Bool c", "if (c) { Int v = 1; } if (v == None) { return 0; }"),
+            # Sibling blocks: the later declaration wins in the map.
+            (
+                "",
+                "Bool c",
+                "if (c) { Int? v = None; if (v == None) { return 0; } }"
+                " else { Int v = 1; }",
+            ),
+            # A loop binder is not in the map at all, so the field's type
+            # would be used for the guard on the binder.
+            (
+                "Int v;",
+                "Set<Int?> S",
+                "for (Int? v in S) { if (v == None) { return 0; } }",
+            ),
+            (
+                "",
+                "Int v, Set<Int?> S",
+                "for (Int? v in S) { if (v == None) { return 0; } }",
+            ),
+            # A bare declaration and a sample as the second binding.
+            ("Int? v;", "Bool c", "if (c) { Int v; } if (v == None) { return 0; }"),
+            (
+                "BitString<8>? v;",
+                "Bool c",
+                "if (c) { BitString<8> v <- BitString<8>; }"
+                " if (v == None) { return 0; }",
+            ),
+        ],
+    )
+    def test_guard_kept_when_name_bound_under_two_types(
+        self, fields: str, params: str, body: str
+    ) -> None:
+        result = _transform(f"""
+            Game G() {{
+                {fields}
+                Int Test({params}) {{
+                    {body}
+                    return 1;
+                }}
+            }}
+            """)
+        assert "if (v == None)" in result
+
+    def test_initialiser_of_conflicting_name_not_trusted(self) -> None:
+        """`Int? w = v` is non-null only if the v it reads is."""
+        result = _transform("""
+            Game G() {
+                Int? v;
+                Int Test(Bool c) {
+                    if (c) { Int v = 1; }
+                    Int? w = v;
+                    if (w == None) { return 0; }
+                    return 1;
+                }
+            }
+            """)
+        assert "if (w == None)" in result
+
+    def test_guard_removed_when_bindings_agree(self) -> None:
+        """Two bindings of the same type leave the map right either way."""
+        result = _transform("""
+            Game G() {
+                Int Test(Bool c) {
+                    if (c) { Int v = 1; } else {
+                        Int v = 2;
+                        if (v == None) { return 0; }
+                    }
+                    return 1;
+                }
+            }
+            """)
+        assert "v == None" not in result
+
+    def test_conflict_in_another_method_does_not_block(self) -> None:
+        result = DeadNullGuardElimination().apply(
+            frog_parser.parse_game("""
+                Game G() {
+                    Int A(Int v) {
+                        if (v == None) { return 0; }
+                        return 1;
+                    }
+                    Int B(Int? v) {
+                        if (v == None) { return 0; }
+                        return 1;
+                    }
+                }
+                """),
+            PipelineContext(
+                variables={},
+                proof_let_types=visitors.NameTypeMap(),
+                proof_namespace={},
+                subsets_pairs=[],
+            ),
+        )
+        assert str(result).count("v == None") == 1
+        assert "v == None" not in str(result.methods[0])

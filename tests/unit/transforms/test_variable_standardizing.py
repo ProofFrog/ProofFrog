@@ -327,17 +327,36 @@ def test_free_name_read_before_its_binder_is_reserved() -> None:
     assert VariableStandardizingTransformer().transform(game) == expected
 
 
-def test_sample_domain_follows_renamed_local() -> None:
-    """AlphaRename rewrites ``Sample.sampled_from`` as an expression, so the
-    standardizer must too, or the ``__aN__`` name survives there."""
-    game = frog_parser.parse_game("""
-    Game G() {
-        BitString<8> O() {
+@pytest.mark.parametrize(
+    "draw,expected",
+    [
+        ("BitString<8> x <- s;", "BitString<8> v2 <- v1;"),
+        ("BitString<8> x <-uniq[T] s;", "BitString<8> v2 <-uniq[T] v1;"),
+        ("BitString<8> x <- s \\ {s};", "BitString<8> v2 <- v1 \\ {v1};"),
+    ],
+)
+def test_bare_local_name_as_sampling_domain_follows_its_binder(
+    draw: str, expected: str
+) -> None:
+    """Defensive: a draw whose domain is a local VALUE has no meaning, but it
+    is not rejected today. The typechecker only requires the right-hand side
+    of ``<-`` to be a ``Type``, which a bare ``Variable`` is, so this shape
+    reaches the engine. Under position-sensitive scoping the name is the
+    local, AlphaRename renames it with its binder, and the standardizer must
+    do the same or the ``__aN__`` name survives there with no binder.
+
+    The well-formed case, a local in a length argument of the domain
+    (``BitString<n>``), is ``test_length_type_tracks_renamed_local_on_repeated_passes``.
+    """
+    game = frog_parser.parse_game(f"""
+    Game G() {{
+        Set<BitString<8>> T;
+        BitString<8> O() {{
             BitString<8> s = foo();
-            BitString<8> x <- s;
+            {draw}
             return x;
-        }
-    }
+        }}
+    }}
     """)
     ctx = PipelineContext(
         variables={},
@@ -346,11 +365,29 @@ def test_sample_domain_follows_renamed_local() -> None:
         subsets_pairs=[],
     )
     alpha = AlphaRename().apply(game, ctx)
-    assert "<- __a" in str(alpha)
+    assert "__a0__;" in str(alpha) or "__a0__ \\" in str(alpha)
     result = VariableStandardizingTransformer().transform(alpha)
     assert "__a" not in str(result)
-    assert "BitString<8> v2 <- v1" in str(result)
+    assert expected in str(result)
     assert VariableStandardizingTransformer().transform(game) == result
+
+
+def test_type_name_as_sampling_domain_is_left_alone() -> None:
+    """A domain name with no local binder (a ``Set`` let, a type alias) is
+    not a local and keeps its name."""
+    game = frog_parser.parse_game("""
+    Game G(Set K) {
+        Set<K> T;
+        K O() {
+            K a <- K;
+            K b <-uniq[T] K;
+            return a;
+        }
+    }
+    """)
+    result = str(VariableStandardizingTransformer().transform(game))
+    assert "K v1 <- K;" in result
+    assert "K v2 <-uniq[T] K;" in result
 
 
 def test_name_used_only_as_signature_length_is_reserved() -> None:

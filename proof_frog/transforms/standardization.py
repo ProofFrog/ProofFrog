@@ -217,6 +217,29 @@ class VariableStandardizingTransformer(Transformer):
             return self._rename_block(stmt, scopes)
         return cast(frog_ast.Statement, self._rewrite(stmt, scopes))
 
+    def _sampling_domain(
+        self,
+        stmt: frog_ast.Sample | frog_ast.UniqueSample,
+        scopes: list[dict[str, str]],
+    ) -> frog_ast.ASTNode:
+        """The ``sampled_from`` of a draw, with every name an active local
+        binder resolves renamed, bare names included.
+
+        ``visitors.TYPE_SLOTS`` lists ``sampled_from`` as a type, and in a
+        meaningful draw it is one: it names no local except in a length
+        argument (``BitString<n>``), which is renamed in type context too. It
+        is rewritten in expression context here because a bare name there can
+        still resolve to a local. The typechecker only asks that the
+        right-hand side of ``<-`` be a ``Type``, and ``Variable`` is one, so
+        ``T x <- s;`` with ``s`` a local value reaches the engine. Under
+        position-sensitive scoping that ``s`` is the local, and AlphaRename's
+        name-keyed rewrite renames it with its binder. Left alone here, the
+        binder would become ``vN`` while this reference kept its ``__aN__``
+        name and referred to nothing. A name with no active local binder (a
+        ``Set`` let, a type alias) is not in the scope map and is left as is.
+        """
+        return self._rewrite(stmt.sampled_from, scopes)
+
     def _rename_assignment(
         self,
         stmt: frog_ast.Assignment | frog_ast.Sample | frog_ast.UniqueSample,
@@ -236,20 +259,17 @@ class VariableStandardizingTransformer(Transformer):
                 cast(frog_ast.Expression, self._rewrite(stmt.value, scopes)),
             )
         elif isinstance(stmt, frog_ast.Sample):
-            # `Sample.sampled_from` is an expression here, as in AlphaRename
-            # and the inliner, so a renamed local in it follows its binder.
-            # `UniqueSample.sampled_from` below stays a type.
             new_stmt = frog_ast.Sample(
                 new_type,
                 stmt.var,
-                cast(frog_ast.Expression, self._rewrite(stmt.sampled_from, scopes)),
+                cast(frog_ast.Expression, self._sampling_domain(stmt, scopes)),
             )
         else:
             new_stmt = frog_ast.UniqueSample(
                 new_type,
                 stmt.var,
                 cast(frog_ast.Expression, self._rewrite(stmt.unique_set, scopes)),
-                cast(frog_ast.Type, self._rewrite(stmt.sampled_from, scopes, True)),
+                cast(frog_ast.Type, self._sampling_domain(stmt, scopes)),
                 stmt.surface_form,
             )
         if stmt.the_type is not None and isinstance(stmt.var, frog_ast.Variable):

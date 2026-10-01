@@ -35,13 +35,66 @@ class _VariableNames(visitors.Visitor[list[str]]):
         self.names.append(node.name)
 
 
-def test_dispatch_falls_back_to_node_base_class() -> None:
-    reduction = frog_ast.Reduction(
+def _reduction() -> frog_ast.Reduction:
+    return frog_ast.Reduction(
         ("R", [], [], []),
         frog_ast.ParameterizedGame("G", []),
         frog_ast.ParameterizedGame("A", []),
     )
-    assert _GameNames().visit(reduction) == ["R"]
+
+
+def test_dispatch_falls_back_to_node_base_class() -> None:
+    assert _GameNames().visit(_reduction()) == ["R"]
+
+
+class _MostSpecificHook(visitors.Visitor[list[str]]):
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def result(self) -> list[str]:
+        return self.calls
+
+    def visit_game(self, node: frog_ast.Game) -> None:
+        self.calls.append("game:" + node.name)
+
+    def visit_reduction(self, node: frog_ast.Reduction) -> None:
+        self.calls.append("reduction:" + node.name)
+
+
+def test_visitor_dispatch_prefers_the_most_specific_hook() -> None:
+    assert _MostSpecificHook().visit(_reduction()) == ["reduction:R"]
+    game = frog_ast.Game(("G", [], [], []))
+    assert _MostSpecificHook().visit(game) == ["game:G"]
+
+
+class _RenameGames(visitors.Transformer):
+    def transform_game(self, node: frog_ast.Game) -> frog_ast.Game:
+        return frog_ast.Game((node.name + "'", [], [], []))
+
+
+class _RenameViaGenericHook(visitors.Transformer):
+    def __init__(self) -> None:
+        self.seen: list[str] = []
+
+    def transform_game(self, node: frog_ast.Game) -> frog_ast.Game:
+        raise AssertionError(f"transform_game called on {type(node).__name__}")
+
+    def transform_ast_node(self, node: frog_ast.ASTNode) -> None:
+        self.seen.append(type(node).__name__)
+
+
+def test_transformer_dispatch_is_exact_name_with_no_base_class_fallback() -> None:
+    """Unlike Visitor dispatch, ``transform_game`` does not fire on a Reduction."""
+    game = frog_ast.Game(("G", [], [], []))
+    assert _RenameGames().transform(game).name == "G'"
+
+    reduction = _reduction()
+    assert _RenameGames().transform(reduction) is reduction
+
+    # The Reduction goes straight to the generic hook, then to its children.
+    transformer = _RenameViaGenericHook()
+    assert transformer.transform(reduction) is reduction
+    assert transformer.seen == ["Reduction", "ParameterizedGame", "ParameterizedGame"]
 
 
 def test_visitor_descends_through_optional_and_tuple_children() -> None:

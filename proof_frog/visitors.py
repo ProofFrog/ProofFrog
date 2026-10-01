@@ -62,6 +62,12 @@ _VISITOR_METHODS_CACHE: dict[type, dict[type, tuple[Any, Any]]] = {}
 
 # Only fields that can contain AST nodes belong here. Unknown node classes
 # retain the dynamic walk, including any attributes added by their callers.
+#
+# Every Visitor and Transformer descends through these fields and no others. A
+# node-holding field left out of its class's entry is skipped without any
+# error, and the order within an entry is the traversal order (it must stay the
+# constructor's assignment order, which is what the vars() walk followed).
+# tests/unit/visitors/test_dispatch_fields.py checks both against frog_ast.
 _CHILD_FIELDS: dict[type, tuple[str, ...]] = {
     frog_ast.ASTNode: (),
     frog_ast.Root: (),
@@ -150,7 +156,15 @@ _TRANSFORM_FALLBACK_CACHE: dict[type, Any] = {}
 
 
 def _lookup_visitor_methods(cls: type, node_cls: type) -> tuple[Any, Any]:
-    """Resolve visit/leave hooks along the node MRO, then use generic hooks."""
+    """Resolve the visit/leave hooks of visitor class *cls* for *node_cls*.
+
+    The hook is looked up by the node class's own name first, then by the name
+    of each of its AST base classes in MRO order, ending at the generic
+    ``visit_ast_node`` / ``leave_ast_node``.  So ``visit_game`` also fires on a
+    ``Reduction`` unless the visitor defines ``visit_reduction``.
+
+    ``Transformer`` dispatch does NOT do this (see ``_lookup_transform``).
+    """
     methods: list[Any] = []
     for prefix in ("visit_", "leave_"):
         method = None
@@ -187,7 +201,12 @@ def _child_fields(node: frog_ast.ASTNode) -> tuple[str, ...]:
 
 
 def _lookup_transform(cls: type, node_cls: type) -> Any:
-    """Look up transform method for a (transformer_class, node_class) pair."""
+    """Look up transform method for a (transformer_class, node_class) pair.
+
+    Exact-name only: the hook for a node is ``transform_<its own class name>``.
+    Unlike ``_lookup_visitor_methods`` there is no fallback through the node
+    class's bases, so ``transform_game`` does not fire on a ``Reduction``.
+    """
     key = (cls, node_cls)
     method = _TRANSFORM_CACHE.get(key, _NOT_CACHED)
     if method is _NOT_CACHED:
@@ -232,6 +251,23 @@ U = TypeVar("U")
 
 
 class Visitor(ABC, Generic[U]):
+    """Read-only traversal with ``visit_<node>`` / ``leave_<node>`` hooks.
+
+    Hooks are named after the snake-cased node class.  Dispatch picks the most
+    specific hook the visitor defines along the node class's MRO: the node's
+    own class, then each AST base class in turn, then the generic
+    ``visit_ast_node`` / ``leave_ast_node``.  A ``visit_game`` hook therefore
+    also runs on a ``Reduction`` (a ``Game`` subclass) unless the visitor has
+    a ``visit_reduction``; at most one visit hook and one leave hook run per
+    node.
+
+    This differs from ``Transformer``, whose ``transform_<node>`` hooks match
+    the node's own class name only.
+
+    Children are reached through ``_CHILD_FIELDS``.  A field missing from that
+    map is never visited.
+    """
+
     @abstractmethod
     def result(self) -> U:
         pass
@@ -286,6 +322,20 @@ T = TypeVar("T", bound=frog_ast.ASTNode)
 
 
 class Transformer(ABC):
+    """Copy-on-write rewriting with ``transform_<node>`` hooks.
+
+    Dispatch is exact-name: a node is handed to ``transform_<snake-cased name
+    of its own class>`` if the transformer defines it.  There is NO fallback
+    through the node class's bases, unlike ``Visitor``: ``transform_game`` is
+    not called for a ``Reduction``, and a transformer that must handle both
+    defines ``transform_reduction`` as well.  Failing an exact match, the
+    generic ``transform_ast_node`` is tried and its result used if truthy;
+    otherwise the node's children are transformed (``_transform_children``).
+
+    Children are reached through ``_CHILD_FIELDS``.  A field missing from that
+    map is never transformed.
+    """
+
     def transform(self, node: T) -> T:
         cls = type(self)
         node_cls = type(node)

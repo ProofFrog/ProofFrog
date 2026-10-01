@@ -252,3 +252,74 @@ def test_if_with_return_in_body_is_a_barrier() -> None:
     # The if-with-return still sits between v1 and v2 (positions 0/1/2).
     assert isinstance(stmts[1], frog_ast.IfStatement)
     assert isinstance(stmts[2], frog_ast.Sample)
+
+
+def _stabilized_statements(source: str) -> list[str]:
+    game = frog_parser.parse_game(source)
+    result = _StabilizeIndependentStatementsTransformer().transform_game(game)
+    return [str(stmt) for stmt in result.methods[0].block.statements]
+
+
+def test_f354_reader_not_moved_below_conditional_write() -> None:
+    """Two readers of field ``f`` above an ``if`` that writes ``f``. The
+    dependency graph used to tie the ``if`` to the nearest reader (``a``)
+    only, so ``b`` -- last in return order -- traded places with ``c`` and
+    landed below the write."""
+    statements = _stabilized_statements("""
+        Game Test() {
+            Int f;
+            [Int, Int, Int] O(Int p) {
+                Int b = f + 2;
+                Int a = f + 1;
+                if (p == 0) {
+                    f = 5;
+                }
+                Int c = p + 0;
+                return [c, a, b];
+            }
+        }
+        """)
+    barrier = next(i for i, text in enumerate(statements) if text.startswith("if"))
+    assert statements.index("Int a = f + 1;") < barrier
+    assert statements.index("Int b = f + 2;") < barrier
+    assert statements.index("Int c = p + 0;") > barrier
+
+
+def test_f354_independent_readers_above_write_still_reorder() -> None:
+    """Sound twin: the two readers are independent of each other, so they are
+    still put in return order above the write."""
+    statements = _stabilized_statements("""
+        Game Test() {
+            Int f;
+            [Int, Int] O(Int p) {
+                Int b = f + 2;
+                Int a = f + 1;
+                if (p == 0) {
+                    f = 5;
+                }
+                return [a, b];
+            }
+        }
+        """)
+    assert statements[:2] == ["Int a = f + 1;", "Int b = f + 2;"]
+
+
+def test_write_not_moved_above_shadowing_declaration() -> None:
+    """``f = p;`` below ``Int f;`` writes the local. The pass sorts field
+    assignments first, and used to lift it above the declaration, where it
+    writes the field."""
+    statements = _stabilized_statements("""
+        Game Test() {
+            Int f;
+            Int O(Int p) {
+                Int z = p + 9;
+                Int f;
+                f = p;
+                Int a = f + 1;
+                return a + z;
+            }
+        }
+        """)
+    declaration = statements.index("Int f;")
+    assert statements.index("f = p;") > declaration
+    assert statements.index("Int a = f + 1;") > declaration

@@ -380,6 +380,7 @@ class FoldLiteralConditionsTransformer(Transformer):
         )
         if isinstance(left, frog_ast.Integer) and isinstance(right, frog_ast.Integer):
             if is_eq and left.num != right.num:
+                self._note_distinct_integers(new_op)
                 return new_op
             return frog_ast.Boolean(relation(left.num, right.num))
         if not is_eq:
@@ -395,6 +396,28 @@ class FoldLiteralConditionsTransformer(Transformer):
         if isinstance(other, _NON_NONE_LITERALS) and self._literal_is_total(other):
             return frog_ast.Boolean(op == frog_ast.BinaryOperators.NOTEQUALS)
         return new_op
+
+    def _note_distinct_integers(self, comparison: frog_ast.BinaryOperation) -> None:
+        """Records why ``0 == 1`` stays: the fold does not know its type."""
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Fold Literal Conditions",
+                reason=(
+                    f"'{comparison}' not folded: distinct integer literals "
+                    "may be equal mod q when compared at type ModInt<q>, "
+                    "and the fold does not know the type"
+                ),
+                location=comparison.origin,
+                suggestion=(
+                    "Keep the comparison in the adjacent game so both games "
+                    "canonicalize to the same condition"
+                ),
+                variable=None,
+                method=self._method.signature.name if self._method else None,
+            )
+        )
 
 
 class BranchEliminiationTransformer(BlockTransformer):

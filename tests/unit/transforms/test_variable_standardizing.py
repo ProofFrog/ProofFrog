@@ -6,7 +6,7 @@ shadowing, loop binders, and type lengths.
 """
 
 import pytest
-from proof_frog import frog_parser, proof_engine
+from proof_frog import frog_ast, frog_parser, proof_engine, visitors
 from proof_frog.transforms._base import PipelineContext
 from proof_frog.transforms.alpha_rename import AlphaRename
 from proof_frog.transforms.standardization import VariableStandardizingTransformer
@@ -351,3 +351,139 @@ def test_sample_domain_follows_renamed_local() -> None:
     assert "__a" not in str(result)
     assert "BitString<8> v2 <- v1" in str(result)
     assert VariableStandardizingTransformer().transform(game) == result
+
+
+def test_name_used_only_as_signature_length_is_reserved() -> None:
+    """``v1`` occurs only as a length argument in the signature, where it
+    names an outer value (a game parameter that instantiation substituted
+    in). No local may be given that name."""
+    game = frog_parser.parse_game("""
+    Game G() {
+        BitString<v1> O(BitString<v1> m) {
+            Int a = 5;
+            return m;
+        }
+    }
+    """)
+    expected = frog_parser.parse_game("""
+    Game G() {
+        BitString<v1> O(BitString<v1> m) {
+            Int v2 = 5;
+            return m;
+        }
+    }
+    """)
+    assert VariableStandardizingTransformer().transform(game) == expected
+
+
+def test_name_used_only_in_signature_return_type_is_reserved() -> None:
+    game = frog_parser.parse_game("""
+    Game G() {
+        Array<Int, v1> O() {
+            Array<Int, v2> a = foo();
+            return a;
+        }
+    }
+    """)
+    result = str(VariableStandardizingTransformer().transform(game))
+    assert "Array<Int, v1> O()" in result
+    assert "Array<Int, v2> v3 = foo();" in result
+
+
+# One method per binder form. In each, ``v1`` is used OUTSIDE the scope of
+# the local binder that carries the same name, so it is free there and must
+# stay reserved, and ``w`` is bound wherever it is used.
+_SCOPE_CASES = [
+    # typed assignment: the right-hand side is evaluated before the binder
+    "Int O() { Int v1 = v1 + 1; Int w = 2; return w; }",
+    # typed sample: the domain's length is evaluated before the binder
+    "Int O() { BitString<v1> v1 <- BitString<v1>; Int w = 2; return w; }",
+    # typed unique sample: exclusion set evaluated before the binder
+    "Int O() { Int w = 2; BitString<8> v1 <-uniq[v1] BitString<8>; return w; }",
+    # bare declaration: read above it
+    "Int O() { Int w = v1; Int v1; v1 = 2; return w + v1; }",
+    # branch-local binder, read after the branch
+    "Int O(Bool c) { Int w = 0; if (c) { Int v1 = 1; w = v1; } return w + v1; }",
+    # else-branch binder, read in the then-branch
+    "Int O(Bool c) { Int w = 0; if (c) { w = v1; } else { Int v1 = 1; w = v1; } return w; }",
+    # numeric loop binder: bounds are outside its scope, and so is the tail
+    "Int O() { Int w = 0; for (Int v1 = v1 to 3) { w = w + v1; } return w; }",
+    "Int O() { Int w = 0; for (Int v1 = 0 to 3) { w = w + v1; } return w + v1; }",
+    # generic loop binder: the iterated set and its type are outside its scope
+    "Int O() { Int w = 0; for (Int v1 in v1) { w = w + v1; } return w; }",
+    "Int O() { Int w = 0; for (BitString<v1> v1 in S) { w = w + 1; } return w; }",
+    # binder inside a loop body, read after the loop
+    "Int O() { Int w = 0; for (Int i = 0 to 3) { Int v1 = i; w = w + v1; } return w + v1; }",
+    # untyped write and element write to a name with no binder
+    "Int O() { Int w = 0; v1 = w; return w; }",
+    "Int O() { Int w = 0; v1[w] = w; return w; }",
+    # bare call statement
+    "Void O() { Int w = 0; foo(v1, w); }",
+]
+
+
+@pytest.mark.parametrize("method_code", _SCOPE_CASES)
+def test_free_names_agree_with_the_rename_walk(method_code: str) -> None:
+    """The free names and the renaming come from one scope walk. For every
+    binder form: a name used outside its binder's scope is reported free, is
+    left untouched by the renaming, and is never minted; a name used only
+    under its binder is not reported free and does not survive."""
+    method = frog_parser.parse_method(method_code)
+    transformer = VariableStandardizingTransformer()
+    parameters = {param.name for param in method.signature.parameters}
+
+    # pylint: disable=protected-access
+    free = transformer._free_names(method, parameters)
+    # pylint: enable=protected-access
+    assert "v1" in free
+    assert "w" not in free
+    assert not free & parameters
+
+    renamed = transformer.transform_method(method)
+    names = visitors.referenced_variable_names(renamed)
+    # Every free name is still there, and no binder was given one.
+    assert free <= names
+    binders = _binder_names(renamed)
+    assert not binders & free
+    # ``w`` was only ever a local, so it is gone; the local ``v1`` became
+    # another name, so every remaining ``v1`` is the free one.
+    assert "w" not in names
+    assert "v1" not in binders
+
+
+def _binder_names(method: frog_ast.Method) -> set[str]:
+    names: set[str] = set()
+
+    def collect(node: frog_ast.ASTNode) -> bool:
+        if isinstance(node, frog_ast.NumericFor):
+            names.add(node.name)
+        elif isinstance(node, frog_ast.GenericFor):
+            names.add(node.var_name)
+        elif isinstance(node, frog_ast.VariableDeclaration):
+            names.add(node.name)
+        elif (
+            isinstance(
+                node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            )
+            and node.the_type is not None
+            and isinstance(node.var, frog_ast.Variable)
+        ):
+            names.add(node.var.name)
+        return False
+
+    visitors.SearchVisitor(collect).visit(method)
+    return names
+
+
+def test_collecting_free_names_leaves_the_method_and_counter_alone() -> None:
+    method = frog_parser.parse_method(
+        "Int O(Bool c) { Int a = 1; if (c) { Int b = a; } return a + q; }"
+    )
+    before = str(method)
+    transformer = VariableStandardizingTransformer()
+    # pylint: disable=protected-access
+    assert transformer._free_names(method, {"c"}) == {"q"}
+    assert transformer._counter == 0
+    assert transformer._free is None
+    # pylint: enable=protected-access
+    assert str(method) == before

@@ -42,6 +42,7 @@ from ._base import (
     method_bound_names,
     _lookup_primitive_method,
 )
+from ._definedness import GameDefinedness
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -76,72 +77,6 @@ _LITERAL_INTERIOR_NODES = _NON_NONE_LITERALS + (
     frog_ast.BinaryOperation,
     frog_ast.UnaryOperation,
 )
-
-
-def _initialized_binder(node: frog_ast.ASTNode) -> str | None:
-    """The name a typed ``T x = e;`` / ``T x <- D;`` statement binds."""
-    if (
-        isinstance(node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
-        and node.the_type is not None
-        and isinstance(node.var, frog_ast.Variable)
-    ):
-        return node.var.name
-    return None
-
-
-def _bare_declared_names(method: frog_ast.Method) -> list[str]:
-    return [
-        node.name
-        for node in _walk_nodes(method.block)
-        if isinstance(node, frog_ast.VariableDeclaration)
-    ]
-
-
-def _method_binders(method: frog_ast.Method) -> dict[str, int]:
-    """How many times *method* binds each name: parameters, typed
-    declarations (with or without a value) and loop binders."""
-    names = _bare_declared_names(method)
-    names.extend(parameter.name for parameter in method.signature.parameters)
-    for node in _walk_nodes(method.block):
-        name = _initialized_binder(node)
-        if isinstance(node, frog_ast.NumericFor):
-            name = node.name
-        elif isinstance(node, frog_ast.GenericFor):
-            name = node.var_name
-        if name is not None:
-            names.append(name)
-    return {name: names.count(name) for name in names}
-
-
-def _initialize_assigned_fields(game: frog_ast.Game) -> set[str]:
-    """Fields every oracle call may read: those ``Initialize`` assigns in a
-    top-level statement no earlier ``return`` can skip (F-349), plus fields
-    with a declared initializer.
-
-    A name that ``Initialize`` also binds as a local is left out: an
-    assignment to that name may target the local.
-    """
-    assigned = {field.name for field in game.fields if field.value is not None}
-    initialize = next(
-        (m for m in game.methods if m.signature.name == "Initialize"), None
-    )
-    if initialize is None:
-        return assigned
-    shadowed = _method_binders(initialize)
-    statements = initialize.block.statements
-    for index, statement in enumerate(statements):
-        if (
-            isinstance(
-                statement,
-                (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
-            )
-            and statement.the_type is None
-            and isinstance(statement.var, frog_ast.Variable)
-            and statement.var.name not in shadowed
-            and not may_return_before(statements, index)
-        ):
-            assigned.add(statement.var.name)
-    return assigned
 
 
 class FoldLiteralConditionsTransformer(Transformer):
@@ -189,39 +124,30 @@ class FoldLiteralConditionsTransformer(Transformer):
 
     def __init__(self, ctx: PipelineContext | None = None) -> None:
         self.ctx = ctx
-        self._game: frog_ast.Game | None = None
-        self._init_fields: set[str] = set()
-        self._method: frog_ast.Method | None = None
-        self._binders: dict[str, int] = {}
-        self._bare: set[str] = set()
-        # Lexical scopes, innermost last; each holds the names bound by a
-        # parameter, an initialized declaration or a loop binder.
-        self._scopes: list[set[str]] = []
+        self._game = GameDefinedness(None, ctx)
+        self._scope = self._game.for_method(None)
 
     # -- context ---------------------------------------------------------
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
-        saved = (self._game, self._init_fields)
-        self._game = game
-        self._init_fields = _initialize_assigned_fields(game)
+        saved = (self._game, self._scope)
+        self._game = GameDefinedness(game, self.ctx)
+        self._scope = self._game.for_method(None)
         try:
             return self._transform_children(game)
         finally:
-            self._game, self._init_fields = saved
+            self._game, self._scope = saved
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
-        saved = (self._method, self._binders, self._bare, self._scopes)
-        self._method = method
-        self._binders = _method_binders(method)
-        self._bare = set(_bare_declared_names(method))
-        self._scopes = [{p.name for p in method.signature.parameters}]
+        saved = self._scope
+        self._scope = self._game.for_method(method)
         try:
             return self._transform_children(method)
         finally:
-            self._method, self._binders, self._bare, self._scopes = saved
+            self._scope = saved
 
     def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
-        self._scopes.append(set())
+        self._scope.enter_block()
         try:
             statements: list[frog_ast.Statement] = []
             changed = False
@@ -229,13 +155,9 @@ class FoldLiteralConditionsTransformer(Transformer):
                 new_statement = self.transform(statement)
                 changed = changed or new_statement is not statement
                 statements.append(new_statement)
-                # Bound only after the statement itself: ``T x = e;`` does
-                # not have ``x`` in scope while ``e`` is evaluated.
-                name = _initialized_binder(statement)
-                if name is not None:
-                    self._scopes[-1].add(name)
+                self._scope.declare(statement)
         finally:
-            self._scopes.pop()
+            self._scope.exit_block()
         if not changed:
             return block
         new_block = copy.copy(block)
@@ -243,25 +165,21 @@ class FoldLiteralConditionsTransformer(Transformer):
         return new_block
 
     def transform_numeric_for(self, loop: frog_ast.NumericFor) -> frog_ast.NumericFor:
-        new_loop: frog_ast.NumericFor = self._transform_loop(
-            loop, loop.name, ("start", "end")
-        )
+        new_loop: frog_ast.NumericFor = self._transform_loop(loop, ("start", "end"))
         return new_loop
 
     def transform_generic_for(self, loop: frog_ast.GenericFor) -> frog_ast.GenericFor:
-        new_loop: frog_ast.GenericFor = self._transform_loop(
-            loop, loop.var_name, ("over",)
-        )
+        new_loop: frog_ast.GenericFor = self._transform_loop(loop, ("over",))
         return new_loop
 
-    def _transform_loop(self, loop: Any, binder: str, headers: tuple[str, ...]) -> Any:
+    def _transform_loop(self, loop: Any, headers: tuple[str, ...]) -> Any:
         """Transforms a loop with its binder in scope for the body only."""
         new_attrs = {attr: self.transform(getattr(loop, attr)) for attr in headers}
-        self._scopes.append({binder})
+        self._scope.enter_loop(loop)
         try:
             new_attrs["block"] = self.transform(loop.block)
         finally:
-            self._scopes.pop()
+            self._scope.exit_loop()
         if all(new_val is getattr(loop, attr) for attr, new_val in new_attrs.items()):
             return loop
         new_loop = copy.copy(loop)
@@ -271,49 +189,10 @@ class FoldLiteralConditionsTransformer(Transformer):
 
     # -- definedness -----------------------------------------------------
 
-    def _unassigned_reason(self, name: str) -> str | None:
-        """Why *name* may be unassigned where it is read, or ``None`` when
-        it is definitely assigned."""
-        # pylint: disable=too-many-return-statements
-        if self._method is None:
-            return "it is read outside a method"
-        fields = {f.name for f in self._game.fields} if self._game else set()
-        params = {p.name for p in self._game.parameters} if self._game else set()
-        if name in self._binders:
-            if name in self._bare:
-                return "it is declared without a value"
-            if self._binders[name] != 1:
-                return "the method binds that name more than once"
-            if name in fields or name in params:
-                return "it names both a local and a game field or parameter"
-            if not any(name in scope for scope in self._scopes):
-                return "its declaration is not in scope"
-            return None
-        if name in fields:
-            if name in params:
-                return "it names both a game field and a game parameter"
-            if self._method.signature.name == "Initialize":
-                return "it is a field read inside Initialize"
-            if name not in self._init_fields:
-                return (
-                    "it is a field that Initialize does not assign in a "
-                    "top-level statement before any return"
-                )
-            return None
-        if name in params:
-            return None
-        if self.ctx is not None and (
-            name in self.ctx.proof_namespace
-            or self.ctx.proof_let_types.get(name) is not None
-        ):
-            return None
-        return "it is not a parameter, local, field or let name"
-
     def _literal_is_total(self, literal: frog_ast.Expression) -> bool:
         """True if evaluating *literal* cannot fail, so dropping it is
         unobservable. Records a near-miss for a possibly unassigned read."""
-        nodes = _walk_nodes(literal)
-        for node in nodes:
+        for node in _walk_nodes(literal):
             if not isinstance(node, _LITERAL_INTERIOR_NODES):
                 return False
             if (
@@ -321,36 +200,29 @@ class FoldLiteralConditionsTransformer(Transformer):
                 and node.operator == frog_ast.BinaryOperators.DIVIDE
             ):
                 return False
-        method_name = self._method.signature.name if self._method else None
-        total = True
-        for node in nodes:
-            if not isinstance(node, frog_ast.Variable):
-                continue
-            reason = self._unassigned_reason(node.name)
-            if reason is None:
-                continue
-            total = False
-            if self.ctx is not None:
+        unassigned = self._scope.unassigned_reads(literal)
+        if self.ctx is not None:
+            for name, reason in unassigned:
                 self.ctx.near_misses.append(
                     NearMiss(
                         transform_name="Fold Literal Conditions",
                         reason=(
                             f"None-vs-literal comparison against '{literal}' "
-                            f"not folded: '{node.name}' may be unassigned when "
+                            f"not folded: '{name}' may be unassigned when "
                             f"the literal is evaluated ({reason})"
                         ),
                         location=literal.origin,
                         suggestion=(
-                            f"Make '{node.name}' definitely assigned: declare "
+                            f"Make '{name}' definitely assigned: declare "
                             "a local with a value, or assign a field in a "
                             "top-level statement of Initialize before any "
                             "return"
                         ),
-                        variable=node.name,
-                        method=method_name,
+                        variable=name,
+                        method=self._scope.method_name,
                     )
                 )
-        return total
+        return not unassigned
 
     # -- folds -----------------------------------------------------------
 
@@ -415,7 +287,7 @@ class FoldLiteralConditionsTransformer(Transformer):
                     "canonicalize to the same condition"
                 ),
                 variable=None,
-                method=self._method.signature.name if self._method else None,
+                method=self._scope.method_name,
             )
         )
 

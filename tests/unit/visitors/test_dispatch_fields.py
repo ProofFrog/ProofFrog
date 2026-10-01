@@ -220,15 +220,31 @@ def test_every_frog_ast_node_class_has_child_fields() -> None:
 # below as a scalar that never holds an AST node.
 # ---------------------------------------------------------------------------
 
-_AST_CLASSES = [
-    cls
-    for cls in vars(frog_ast).values()
-    if isinstance(cls, type)
-    and issubclass(cls, frog_ast.ASTNode)
-    and cls.__module__ == frog_ast.__name__
-]
 
-# Set by ASTNode.__init__ on every node: source position and provenance.
+def _node_classes(namespace: dict[str, Any]) -> list[type]:
+    """The public AST node classes a module defines.
+
+    An underscore-prefixed class is a private helper or mixin, not a node type
+    of its own: it needs no ``_CHILD_FIELDS`` entry, and whatever its
+    constructor sets is charged to the public classes that inherit from it.
+    Classes are taken from the module's own namespace, never from
+    ``__subclasses__()``, so node classes defined by tests are not included.
+    """
+    base = namespace["ASTNode"]
+    return [
+        cls
+        for name, cls in namespace.items()
+        if isinstance(cls, type)
+        and issubclass(cls, base)
+        and cls.__module__ == base.__module__
+        and not name.startswith("_")
+    ]
+
+
+_AST_CLASSES = _node_classes(vars(frog_ast))
+
+# Source position and provenance: set on every node, by whichever constructor
+# along the MRO takes care of it, and never an AST node.
 _POSITION_ATTRIBUTES = ("line_num", "column_num", "origin")
 
 # Per class, the constructor-set attributes that never hold an AST node.
@@ -266,12 +282,30 @@ _SCALAR_ATTRIBUTES: dict[type, tuple[str, ...]] = {
     frog_ast.ProofFile: ("sampled_let_names", "helpers_after_theorem_count"),
 }
 
+# Slot names that are part of the instance layout, not attributes of a node.
+_LAYOUT_SLOTS = ("__dict__", "__weakref__")
+
+# Type names a slot's annotation may use for the slot to count as a scalar.
+_SCALAR_TYPE_NAMES = ("int", "str", "bool", "float", "bytes", "None")
+
+# Methods that implement attribute writing itself; forwarding a name they were
+# handed is not a new attribute.
+_ATTRIBUTE_PROTOCOL_METHODS = ("__setattr__", "__delattr__")
+
+
+def _is_self(node: ast.AST) -> bool:
+    return isinstance(node, ast.Name) and node.id == "self"
+
 
 def _is_self_attribute(node: ast.AST) -> bool:
+    return isinstance(node, ast.Attribute) and _is_self(node.value)
+
+
+def _is_super_call(node: ast.AST) -> bool:
     return (
-        isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id == "self"
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "super"
     )
 
 
@@ -280,103 +314,251 @@ def _is_super_init_call(node: ast.AST) -> bool:
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == "__init__"
-        and isinstance(node.func.value, ast.Call)
-        and isinstance(node.func.value.func, ast.Name)
-        and node.func.value.func.id == "super"
+        and _is_super_call(node.func.value)
     )
 
 
-def _class_definitions() -> dict[str, ast.ClassDef]:
-    module = ast.parse(inspect.getsource(frog_ast))
-    return {
-        node.name: node for node in ast.walk(module) if isinstance(node, ast.ClassDef)
-    }
+def _is_object_setattr(node: ast.AST) -> bool:
+    return (
+        isinstance(node, ast.Attribute)
+        and node.attr == "__setattr__"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "object"
+    )
 
 
-def _own_init(class_def: ast.ClassDef) -> Optional[ast.FunctionDef]:
-    for item in class_def.body:
-        if isinstance(item, ast.FunctionDef) and item.name == "__init__":
-            return item
-    return None
+def _is_scalar_annotation(node: ast.AST) -> bool:
+    """``int | None``, ``Optional[str]`` and the like: no room for a node."""
+    if isinstance(node, ast.Constant):
+        return node.value is None
+    if isinstance(node, ast.Name):
+        return node.id in _SCALAR_TYPE_NAMES
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        return _is_scalar_annotation(node.left) and _is_scalar_annotation(node.right)
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+        return node.value.id == "Optional" and _is_scalar_annotation(node.slice)
+    return False
 
 
-def _constructor_attributes(
-    cls: type, definitions: dict[str, ast.ClassDef]
-) -> tuple[str, ...]:
-    """Attributes ``cls()`` sets on ``self``, in the order it first sets them.
+class _NodeSource:
+    """What the node classes of a module's source set on their instances.
 
-    Read from the ``__init__`` source of each class along the MRO, following
-    ``super().__init__(...)`` calls where they occur.  Anything the reading
-    cannot account for (dynamic attribute writes, attributes first set outside
-    a constructor) is an assertion failure rather than a silent gap.
+    Reads the source instead of running it, so that it sees every attribute a
+    constructor may set (not only those one particular call happens to set)
+    and the order it sets them in.  Anything it cannot account for (a write
+    under a computed name, an attribute first set outside a constructor, a
+    slot not declared scalar) is an assertion failure, never a silent gap.
     """
-    mro = [klass for klass in cls.__mro__ if klass.__name__ in definitions]
-    assert all(
-        "__init__" not in vars(klass)
-        for klass in cls.__mro__
-        if klass not in mro and klass is not object
-    ), f"{cls.__name__} inherits a constructor defined outside frog_ast"
-    attributes: list[str] = []
 
-    def record(name: str) -> None:
-        if name not in attributes:
-            attributes.append(name)
+    def __init__(self, source: str, namespace: dict[str, Any]) -> None:
+        module = ast.parse(source)
+        self.namespace = namespace
+        self.classes = {
+            node.name: node for node in ast.walk(module) if isinstance(node, ast.ClassDef)
+        }
+        # Module-level names for the attribute-writing primitive, e.g.
+        # ``_SET = object.__setattr__``: calling one is an attribute write.
+        self.setattr_names = {"setattr"} | {
+            target.id
+            for statement in module.body
+            if isinstance(statement, ast.Assign) and _is_object_setattr(statement.value)
+            for target in statement.targets
+            if isinstance(target, ast.Name)
+        }
 
-    def walk(node: ast.AST, start: int) -> None:
-        if _is_super_init_call(node):
-            run_constructor(start + 1)
-            return
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-            assert node.func.id not in (
-                "setattr",
-                "vars",
-            ), f"{cls.__name__}: dynamic attribute write in a constructor"
-        if isinstance(node, ast.Attribute) and _is_self_attribute(node):
-            assert node.attr != "__dict__", f"{cls.__name__}: constructor uses __dict__"
-            if isinstance(node.ctx, ast.Store):
-                record(node.attr)
-        for child in ast.iter_child_nodes(node):
-            walk(child, start)
+    def node_classes(self) -> list[type]:
+        return _node_classes(self.namespace)
 
-    def run_constructor(start: int) -> None:
-        for index in range(start, len(mro)):
-            init = _own_init(definitions[mro[index].__name__])
-            if init is not None:
-                for statement in init.body:
-                    walk(statement, index)
+    def _mro(self, cls: type) -> list[type]:
+        mro = [klass for klass in cls.__mro__ if klass.__name__ in self.classes]
+        assert all(
+            "__init__" not in vars(klass)
+            for klass in cls.__mro__
+            if klass not in mro and klass is not object
+        ), f"{cls.__name__} inherits a constructor defined outside its module"
+        return mro
+
+    def _written_name(self, call: ast.Call) -> Optional[ast.expr]:
+        """The name argument, if *call* writes an attribute of ``self``.
+
+        Covers ``setattr(self, n, v)``, ``object.__setattr__(self, n, v)`` and
+        module-level aliases of it, ``super().__setattr__(n, v)`` and
+        ``self.__setattr__(n, v)``.
+        """
+        func, args = call.func, call.args
+        explicit_self = (
+            isinstance(func, ast.Name) and func.id in self.setattr_names
+        ) or _is_object_setattr(func)
+        if explicit_self:
+            return args[1] if len(args) >= 2 and _is_self(args[0]) else None
+        if (
+            isinstance(func, ast.Attribute)
+            and func.attr == "__setattr__"
+            and (_is_super_call(func.value) or _is_self(func.value))
+        ):
+            return args[0] if args else None
+        return None
+
+    def _literal_write(self, node: ast.AST, where: str) -> Optional[str]:
+        """The attribute a setattr-style call writes; a computed name fails."""
+        if not isinstance(node, ast.Call):
+            return None
+        name = self._written_name(node)
+        if name is None:
+            return None
+        assert isinstance(name, ast.Constant) and isinstance(
+            name.value, str
+        ), f"{where} writes an attribute of self under a non-literal name"
+        return name.value
+
+    def constructor_attributes(self, cls: type) -> tuple[str, ...]:
+        """Attributes ``cls()`` sets on ``self``, in the order it first sets them.
+
+        Follows the ``__init__`` chain along the MRO through each
+        ``super().__init__(...)`` call, at the point where it occurs.
+        """
+        mro = self._mro(cls)
+        attributes: list[str] = []
+
+        def record(name: str) -> None:
+            if name not in attributes:
+                attributes.append(name)
+
+        def walk(node: ast.AST, start: int) -> None:
+            where = f"{mro[start].__name__}.__init__"
+            if _is_super_init_call(node):
+                run_constructor(start + 1)
                 return
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                assert node.func.id != "vars", f"{where} uses vars()"
+            written = self._literal_write(node, where)
+            if written is not None:
+                record(written)
+            if isinstance(node, ast.Attribute) and _is_self_attribute(node):
+                assert node.attr != "__dict__", f"{where} uses __dict__"
+                if isinstance(node.ctx, ast.Store):
+                    record(node.attr)
+            for child in ast.iter_child_nodes(node):
+                walk(child, start)
 
-    run_constructor(0)
+        def run_constructor(start: int) -> None:
+            for index in range(start, len(mro)):
+                init = self._method(mro[index], "__init__")
+                if init is not None:
+                    for statement in init.body:
+                        walk(statement, index)
+                    return
 
-    # An attribute first set by some other method would not be seen above.
-    for klass in mro:
-        for node in ast.walk(definitions[klass.__name__]):
-            if (
-                isinstance(node, ast.Attribute)
-                and _is_self_attribute(node)
-                and isinstance(node.ctx, ast.Store)
-            ):
+        run_constructor(0)
+        for klass in mro:
+            self._check_other_methods(klass, attributes)
+        return tuple(attributes)
+
+    def _method(self, klass: type, name: str) -> Optional[ast.FunctionDef]:
+        for item in self.classes[klass.__name__].body:
+            if isinstance(item, ast.FunctionDef) and item.name == name:
+                return item
+        return None
+
+    def _check_other_methods(self, klass: type, attributes: list[str]) -> None:
+        """No method may introduce an attribute the constructor did not set."""
+        for method in self.classes[klass.__name__].body:
+            if not isinstance(method, ast.FunctionDef):
+                continue
+            where = f"{klass.__name__}.{method.name}"
+            for node in ast.walk(method):
+                written = None
+                if isinstance(node, ast.Attribute) and _is_self_attribute(node):
+                    if isinstance(node.ctx, ast.Store):
+                        written = node.attr
+                elif method.name not in _ATTRIBUTE_PROTOCOL_METHODS:
+                    written = self._literal_write(node, where)
                 assert (
-                    node.attr in attributes
-                ), f"{klass.__name__} sets self.{node.attr} outside its constructor"
-    return tuple(attributes)
+                    written is None or written in attributes
+                ), f"{where} sets self.{written} outside the constructor"
+                # self.__dict__[...] = ... and self.__dict__.update(...)
+                target = None
+                if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
+                    target = node.value
+                elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+                    if node.func.attr in ("update", "setdefault", "__setitem__"):
+                        target = node.func.value
+                assert not (
+                    isinstance(target, ast.Attribute)
+                    and _is_self_attribute(target)
+                    and target.attr == "__dict__"
+                ), f"{where} writes into self.__dict__"
+
+    def slots(self, cls: type) -> tuple[str, ...]:
+        """Slot attributes of *cls* instances; each must be declared scalar.
+
+        A slot is storage that ``vars(node)`` does not show and that no
+        ``_CHILD_FIELDS`` entry reaches, so it must never hold an AST node.
+        The class that declares the slot says so with a class-level annotation
+        made only of scalar types (``_cache: int | None``); a slot without
+        one, or annotated with anything else, fails.
+        """
+        found: list[str] = []
+        for klass in self._mro(cls):
+            body = self.classes[klass.__name__].body
+            annotations = {
+                item.target.id: item.annotation
+                for item in body
+                if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+            }
+            for item in body:
+                if not (
+                    isinstance(item, ast.Assign)
+                    and any(
+                        isinstance(target, ast.Name) and target.id == "__slots__"
+                        for target in item.targets
+                    )
+                ):
+                    continue
+                try:
+                    names = ast.literal_eval(item.value)
+                except ValueError:
+                    names = None
+                if isinstance(names, str):
+                    names = (names,)
+                assert isinstance(names, (tuple, list)) and all(
+                    isinstance(name, str) for name in names
+                ), f"{klass.__name__}.__slots__ is not a literal tuple of names"
+                for slot in names:
+                    if slot in _LAYOUT_SLOTS:
+                        continue
+                    assert slot in annotations and _is_scalar_annotation(
+                        annotations[slot]
+                    ), (
+                        f"{klass.__name__} slot {slot!r} is not annotated with a "
+                        "scalar-only type; a slot must never hold an AST node"
+                    )
+                    found.append(slot)
+        return tuple(found)
+
+
+def _frog_ast_source() -> _NodeSource:
+    return _NodeSource(inspect.getsource(frog_ast), vars(frog_ast))
 
 
 def _child_fields_problems(child_fields: dict[type, tuple[str, ...]]) -> list[str]:
     """Every way *child_fields* disagrees with the frog_ast constructors."""
-    definitions = _class_definitions()
+    source = _frog_ast_source()
     problems = []
     for cls in _AST_CLASSES:
         if cls not in child_fields:
             problems.append(f"{cls.__name__}: no _CHILD_FIELDS entry")
             continue
-        attributes = _constructor_attributes(cls, definitions)
-        assert attributes[: len(_POSITION_ATTRIBUTES)] == _POSITION_ATTRIBUTES
+        attributes = source.constructor_attributes(cls)
+        slots = source.slots(cls)
+        unset = [name for name in _POSITION_ATTRIBUTES if name not in attributes]
+        if unset:
+            problems.append(f"{cls.__name__}: no constructor sets {unset}")
         scalars = _SCALAR_ATTRIBUTES.get(cls, ())
         stale = [name for name in scalars if name not in attributes]
         if stale:
             problems.append(f"{cls.__name__}: scalar allowlist names unset {stale}")
-        both = [name for name in scalars if name in child_fields[cls]]
+        both = [name for name in (*scalars, *slots) if name in child_fields[cls]]
         if both:
             problems.append(f"{cls.__name__}: {both} listed as scalar and as child")
         # Constructor order is the order the vars() walk used; traversal order
@@ -447,8 +629,9 @@ def _every_node(value: Any) -> Iterator[frog_ast.ASTNode]:
 def _corpus_problems(
     roots: list[tuple[str, frog_ast.ASTNode]], child_fields: dict[type, Any]
 ) -> tuple[list[str], set[type]]:
-    definitions = _class_definitions()
+    source = _frog_ast_source()
     expected_attributes: dict[type, tuple[str, ...]] = {}
+    slots: dict[type, tuple[str, ...]] = {}
     problems: dict[str, str] = {}  # problem -> first file showing it
     seen: set[type] = set()
     for label, root in roots:
@@ -456,7 +639,8 @@ def _corpus_problems(
             cls = type(node)
             seen.add(cls)
             if cls not in expected_attributes:
-                expected_attributes[cls] = _constructor_attributes(cls, definitions)
+                expected_attributes[cls] = source.constructor_attributes(cls)
+                slots[cls] = source.slots(cls)
             if tuple(vars(node)) != expected_attributes[cls]:
                 problems.setdefault(
                     f"{cls.__name__} carries attributes {tuple(vars(node))}, its "
@@ -469,6 +653,11 @@ def _corpus_problems(
                         f"{cls.__name__}.{name} holds an AST node but is not in "
                         "_CHILD_FIELDS",
                         label,
+                    )
+            for name in slots[cls]:
+                if _holds_node(getattr(node, name, None)):
+                    problems.setdefault(
+                        f"{cls.__name__} slot {name!r} holds an AST node", label
                     )
     return sorted(f"{text} (e.g. {where})" for text, where in problems.items()), seen
 
@@ -511,3 +700,137 @@ def test_parsed_corpus_holds_nodes_only_in_mapped_fields() -> None:
     fields[frog_ast.FuncCall] = ("func",)
     broken, _ = _corpus_problems(roots[:5], fields)
     assert any("FuncCall.args" in problem for problem in broken)
+
+
+# A stand-in module for exercising the reader on constructs frog_ast may or
+# may not use at any given time: a private mixin whose constructor writes the
+# position attributes through an alias of object.__setattr__, a cache slot,
+# and an attribute-invalidating __setattr__.
+_SYNTHETIC_MODULE = """
+_SET = object.__setattr__
+
+
+class ASTNode:
+    __slots__ = ("_cache", "__dict__")
+
+    _cache: int | None
+
+    def __init__(self):
+        self.line_num = -1
+        self.column_num = -1
+        self.origin = None
+
+
+class _Leaf(ASTNode):
+    __slots__ = ()
+
+    def __init__(self):
+        _SET(self, "line_num", -1)
+        object.__setattr__(self, "column_num", -1)
+        super().__setattr__("origin", None)
+
+    def __setattr__(self, name, value):
+        _SET(self, name, value)
+
+
+class Name(_Leaf):
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+
+
+class Pair(ASTNode):
+    def __init__(self, left, right):
+        super().__init__()
+        self.left = left
+        setattr(self, "right", right)
+"""
+
+
+def _synthetic(source: str) -> _NodeSource:
+    namespace: dict[str, Any] = {"__name__": "synthetic_nodes"}
+    exec(source, namespace)  # pylint: disable=exec-used
+    return _NodeSource(source, namespace)
+
+
+def test_reader_follows_mixins_aliases_and_slots() -> None:
+    source = _synthetic(_SYNTHETIC_MODULE)
+    classes = {cls.__name__: cls for cls in source.node_classes()}
+    # The private mixin is not a node class of its own ...
+    assert sorted(classes) == ["ASTNode", "Name", "Pair"]
+    # ... but what its constructor writes belongs to the classes built on it.
+    assert source.constructor_attributes(classes["Name"]) == (
+        *_POSITION_ATTRIBUTES,
+        "name",
+    )
+    assert source.constructor_attributes(classes["Pair"]) == (
+        *_POSITION_ATTRIBUTES,
+        "left",
+        "right",
+    )
+    assert source.slots(classes["Name"]) == ("_cache",)
+
+
+@pytest.mark.parametrize(
+    "old, new, message",
+    [
+        # A write under a computed name could be any attribute.
+        (
+            'setattr(self, "right", right)',
+            'setattr(self, "ri" + "ght", right)',
+            "non-literal name",
+        ),
+        (
+            '_SET(self, "line_num", -1)',
+            "_SET(self, LINE, -1)",
+            "non-literal name",
+        ),
+        ("self.left = left", "vars(self)['left'] = left", "uses vars"),
+        ("self.left = left", "self.__dict__['left'] = left", "uses __dict__"),
+        # An attribute the constructor never sets, introduced later.
+        (
+            "        self.left = left",
+            "        self.left = left\n\n    def late(self, node):\n"
+            "        self.extra = node",
+            "sets self.extra outside the constructor",
+        ),
+        (
+            "        self.left = left",
+            "        self.left = left\n\n    def late(self, node):\n"
+            '        object.__setattr__(self, "extra", node)',
+            "sets self.extra outside the constructor",
+        ),
+        (
+            "        self.left = left",
+            "        self.left = left\n\n    def late(self, node):\n"
+            "        self.__dict__.update(extra=node)",
+            "writes into self.__dict__",
+        ),
+    ],
+)
+def test_reader_rejects_writes_it_cannot_account_for(
+    old: str, new: str, message: str
+) -> None:
+    assert old in _SYNTHETIC_MODULE
+    source = _synthetic(_SYNTHETIC_MODULE.replace(old, new))
+    classes = {cls.__name__: cls for cls in source.node_classes()}
+    with pytest.raises(AssertionError, match=message):
+        for cls in classes.values():
+            source.constructor_attributes(cls)
+
+
+@pytest.mark.parametrize(
+    "old, new",
+    [
+        ("    _cache: int | None\n", ""),  # undeclared
+        ("_cache: int | None", "_cache: ASTNode | None"),  # may hold a node
+        ("_cache: int | None", "_cache: object"),
+        ('__slots__ = ("_cache", "__dict__")', '__slots__ = ("_cache", "_other", "__dict__")'),
+    ],
+)
+def test_reader_rejects_a_slot_not_declared_scalar(old: str, new: str) -> None:
+    assert old in _SYNTHETIC_MODULE
+    source = _synthetic(_SYNTHETIC_MODULE.replace(old, new))
+    classes = {cls.__name__: cls for cls in source.node_classes()}
+    with pytest.raises(AssertionError, match="scalar-only type"):
+        source.slots(classes["Pair"])

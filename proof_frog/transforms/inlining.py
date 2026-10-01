@@ -1272,7 +1272,15 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
     ``InlineSingleUseVariableTransformer`` (which skips Tuple RHS to avoid
     breaking the tuple-expansion pipeline).
 
-    Preconditions for firing on ``[T0,...,Tn-1] v = [e0,...,en-1];``:
+    Fires on ``[T0,...,Tn-1] v = [e0,...,en-1];`` and on the optional form
+    ``[T0,...,Tn-1]? v = [e0,...,en-1];``.  A tuple literal is never
+    ``None``, so the optional local holds the same value as the
+    non-optional one and the same preconditions apply.  A null guard
+    ``if (v == None)`` is a bare use of ``v`` (precondition 1), so the
+    optional form is inlined only once ``DeadNullGuardElimination`` has
+    removed the guard.
+
+    Preconditions:
 
     1. No bare reference to ``v`` in the remaining block (every reference
        is the ``the_array`` child of an ``ArrayAccess`` node).

@@ -83,7 +83,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | InlineSingleUseField (cross-method) | Extends field inlining across methods when expression is pure with stable field free vars. |
 | CollapseAssignment | Collapses a declaration followed by reassignment into one statement. |
 | ExtractRepeatedTupleAccess | Extracts repeated `var[constant]` accesses into named local variables (CSE for tuple destructuring). |
-| InlineLocalTupleLiteral | Substitutes `[T0,...] v = [e0,...]` through constant-index accesses when accesses are pure. |
+| InlineLocalTupleLiteral | Substitutes `[T0,...] v = [e0,...]` through constant-index accesses when accesses are pure. Also fires on the optional form `[T0,...]? v = [e0,...]` under the same conditions, since a tuple literal is never `None`: every later reference to `v` is a constant-index access `v[k]` (a bare use such as `v == None` or `return v` blocks it, so a null guard on `v` must first be removed by DeadNullGuardElimination), `v` and the free variables of the elements are not written later, and an element with a non-deterministic call is projected exactly once and not inside a loop. Declines when an element that indexes a map or array (a potential undefined read) would be dropped or moved: such an element must be projected by the statement right after the declaration, which must not be a branch or loop. Declines when an element mentions a same-named outer `v`. |
 | InlineMultiUsePureExpression | Inlines multi-use pure (call-free) expressions at every use site; also inlines `Function<D,R>` proof-let calls. |
 | RedundantFieldCopy | Eliminates intermediate locals used only to assign to a field. |
 
@@ -132,7 +132,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 
 | Pass | Description |
 |---|---|
-| DeadNullGuardElimination | Removes `if (x == None)` guards when x cannot be null. |
+| DeadNullGuardElimination | Removes `if (x == None)` guards when x cannot be null: `x` is declared with a non-optional type, `x` is a call to a primitive/scheme method with a non-optional return type, or `x` is an optional local initialised from a non-nullable expression (a non-optional variable, such a call, or a tuple literal, which is never `None`) and not written later in the block. A later write at any depth keeps the guard and records a near-miss: an assignment, sample, element write, loop binder of the same name, or redeclaration. The declared type of a name the method binds under two different types is not trusted. |
 | SubsetTypeNormalization | Normalizes subset types to their superset equivalents. |
 
 ### Tuples (`tuples.py`)

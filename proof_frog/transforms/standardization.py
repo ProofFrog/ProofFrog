@@ -110,7 +110,8 @@ class VariableStandardizingTransformer(Transformer):
         """Every name in *method* that no local binder resolves where it occurs.
 
         This is the rename walk run in collecting mode: binders keep their
-        names and ``_rewrite`` records the names it would have left alone. A
+        names, and ``_rewrite`` records each name it meets that no active
+        binder resolves instead of renaming the ones that one does. A
         binder covers references from its own statement onward, and a nested
         block binds nothing for its parent, so a name bound in one branch and
         read elsewhere is free there; a whole-method ``references - binders``

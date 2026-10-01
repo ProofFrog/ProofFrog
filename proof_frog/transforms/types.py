@@ -491,10 +491,14 @@ class DeadNullGuardElimination(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
-        instantiables = {
+        # Primitives and schemes only.  Removing a guard on a call removes
+        # the call, which is fine for a stateless primitive or scheme method
+        # but would lose the state change of a game's oracle.  The engine
+        # never binds a game in the proof namespace, so this costs nothing.
+        instantiables: dict[str, frog_ast.Instantiable] = {
             k: v
             for k, v in ctx.proof_namespace.items()
-            if isinstance(v, (frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game))
+            if isinstance(v, (frog_ast.Primitive, frog_ast.Scheme))
         }
         return (
             DeadNullGuardEliminator(type_map, instantiables, ctx)

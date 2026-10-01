@@ -519,3 +519,60 @@ class TestConflictingBindings:
         )
         assert str(result).count("v == None") == 1
         assert "v == None" not in str(result.methods[0])
+
+
+class TestGuardOnCall:
+    """Case 3: the guarded expression is a call on a proof-namespace name."""
+
+    _GAME = """
+        Game G() {
+            Int Test(Int x) {
+                if (P.Eval(x) == None) {
+                    return 0;
+                }
+                return 1;
+            }
+        }
+        """
+
+    def _apply(self, namespace: frog_ast.Namespace) -> frog_ast.Game:
+        ctx = PipelineContext(
+            variables={},
+            proof_let_types=visitors.NameTypeMap(),
+            proof_namespace=namespace,
+            subsets_pairs=[],
+        )
+        game = frog_parser.parse_game(self._GAME)
+        return DeadNullGuardElimination().apply(game, ctx)
+
+    def test_guard_on_primitive_call_removed(self) -> None:
+        primitive = frog_parser.parse_primitive_file("""
+            Primitive P() {
+                Int Eval(Int x);
+            }
+            """)
+        assert "== None" not in str(self._apply({"P": primitive}))
+
+    def test_guard_on_optional_primitive_call_kept(self) -> None:
+        primitive = frog_parser.parse_primitive_file("""
+            Primitive P() {
+                Int? Eval(Int x);
+            }
+            """)
+        assert "== None" in str(self._apply({"P": primitive}))
+
+    def test_guard_on_game_call_kept(self) -> None:
+        """A game's oracle can change the game's state, so removing the guard
+        (and the call with it) would be observable: here each call to Eval
+        increments a counter that a later call returns.  The engine does not
+        bind games in the proof namespace; the pass does not rely on that."""
+        stateful = frog_parser.parse_game("""
+            Game P() {
+                Int count;
+                Int Eval(Int x) {
+                    count = count + 1;
+                    return count;
+                }
+            }
+            """)
+        assert "== None" in str(self._apply({"P": stateful}))

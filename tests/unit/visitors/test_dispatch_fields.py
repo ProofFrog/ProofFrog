@@ -3,13 +3,14 @@
 import ast
 import gc
 import inspect
-import weakref
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
 import pytest
 
 from proof_frog import frog_ast, frog_parser, visitors
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 class _GameNames(visitors.Visitor[list[str]]):
@@ -93,49 +94,59 @@ def test_repeated_reference_collection_keeps_one_dispatch_table() -> None:
     )
 
 
-def test_dispatch_caches_bound_transient_classes(monkeypatch) -> None:
-    monkeypatch.setattr(visitors, "_VISITOR_METHODS_CACHE_LIMIT", 8)
-    monkeypatch.setattr(visitors, "_TRANSFORM_CACHE_LIMIT", 8)
-    monkeypatch.setattr(visitors, "_TRANSFORM_FALLBACK_CACHE_LIMIT", 8)
-    visitors._VISITOR_METHODS_CACHE.clear()
-    visitors._TRANSFORM_CACHE.clear()
-    visitors._TRANSFORM_FALLBACK_CACHE.clear()
-    node = frog_ast.Variable("x")
-    integer = frog_ast.Integer(1)
-    first_visitor = None
-    first_transformer = None
+def test_transformer_dispatch_caches_do_not_grow_with_use() -> None:
+    node = frog_ast.BinaryOperation(
+        frog_ast.BinaryOperators.ADD, frog_ast.Variable("x"), frog_ast.Integer(1)
+    )
+    replacement = frog_ast.Variable("y")
 
-    for _ in range(24):
+    def run() -> None:
+        for _ in range(200):
+            visitors.ReplaceTransformer(node.left_expression, replacement).transform(
+                node
+            )
 
-        class _TransientVisitor(visitors.Visitor[None]):
-            def result(self) -> None:
-                pass
+    run()
+    sizes = (
+        len(visitors._TRANSFORM_CACHE),
+        len(visitors._TRANSFORM_FALLBACK_CACHE),
+    )
+    run()
+    assert sizes == (
+        len(visitors._TRANSFORM_CACHE),
+        len(visitors._TRANSFORM_FALLBACK_CACHE),
+    )
 
-            def visit_variable(self, var: frog_ast.Variable) -> None:
-                super().should_descend(var)
 
-        class _TransientTransformer(visitors.Transformer):
-            def transform_variable(self, var: frog_ast.Variable) -> frog_ast.Variable:
-                return super()._transform_children(var)
+# Classes that are defined inside a function on purpose, as (file, class name).
+# frog_parser's decorator runs once, at import, and its class is not one of
+# the visitors.py bases.
+_ALLOWED_LOCAL_CLASSES = {("frog_parser.py", "ModifiedClass")}
 
-            def transform_ast_node(self, _node: frog_ast.ASTNode) -> None:
-                return None
 
-        _TransientVisitor().visit(node)
-        _TransientTransformer().transform(node)
-        _TransientTransformer().transform(integer)
-        if first_visitor is None:
-            first_visitor = weakref.ref(_TransientVisitor)
-            first_transformer = weakref.ref(_TransientTransformer)
+def test_proof_frog_defines_no_class_inside_a_function() -> None:
+    """The dispatch caches never evict, so their keys must be a fixed set.
 
-    gc.collect()
-    assert len(visitors._VISITOR_METHODS_CACHE) == 8
-    assert len(visitors._TRANSFORM_CACHE) == 8
-    assert len(visitors._TRANSFORM_FALLBACK_CACHE) == 8
-    # The caches hold the methods strongly (and through their ``super()``
-    # closures, the classes); an evicted class is still collected.
-    assert first_visitor() is None
-    assert first_transformer() is None
+    A Visitor or Transformer subclass defined inside a function is a new class
+    on every call; each one would leave entries in the caches for good.  The
+    check is on every class, whatever its bases, so that it cannot be dodged
+    through an intermediate base class: a class that is not a visitor and has
+    a reason to be local can be added to ``_ALLOWED_LOCAL_CLASSES``.
+    """
+    package = _REPO_ROOT / "proof_frog"
+    local_classes = set()
+    for path in sorted(package.rglob("*.py")):
+        if "parsing" in path.relative_to(package).parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for function in ast.walk(tree):
+            if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for inner in ast.walk(function):
+                    if isinstance(inner, ast.ClassDef):
+                        local_classes.add((path.name, inner.name))
+    assert local_classes <= _ALLOWED_LOCAL_CLASSES, sorted(
+        local_classes - _ALLOWED_LOCAL_CLASSES
+    )
 
 
 def test_every_frog_ast_node_class_has_child_fields() -> None:
@@ -409,7 +420,6 @@ def _corpus_problems(
     return sorted(f"{text} (e.g. {where})" for text, where in problems.items()), seen
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
 _CORPUS_SUFFIXES = (".primitive", ".scheme", ".game", ".proof")
 
 

@@ -46,10 +46,19 @@ _NOT_CACHED = object()
 # visitor or transformer class, which already keeps that class (and so its
 # methods) alive for as long as the entry exists; nothing would be freed any
 # sooner by holding the methods weakly.
+#
+# The caches are unbounded and never evict.  Their size is at most (number of
+# visitor/transformer classes) x (number of AST node classes), and both are
+# fixed once the modules are imported, PROVIDED every visitor and transformer
+# class is defined at module level.  A class defined inside a function is a
+# new class on every call and would add entries here that are never released,
+# so do not define one there (tests/unit/visitors/test_dispatch_fields.py
+# checks this).  With no eviction, concurrent use from the web server's and
+# the LSP's threads needs no lock: a racing miss just stores the same value
+# twice.
 
 # visitor_class -> node_class -> (visit_method | None, leave_method | None)
 _VISITOR_METHODS_CACHE: dict[type, dict[type, tuple[Any, Any]]] = {}
-_VISITOR_METHODS_CACHE_LIMIT = 128
 
 # Only fields that can contain AST nodes belong here. Unknown node classes
 # retain the dynamic walk, including any attributes added by their callers.
@@ -135,11 +144,9 @@ _CHILD_FIELDS: dict[type, tuple[str, ...]] = {
 
 # (transformer_class, node_class) -> method | _NOT_FOUND
 _TRANSFORM_CACHE: dict[tuple[type, type], Any] = {}
-_TRANSFORM_CACHE_LIMIT = 4096
 
 # transformer_class -> method | _NOT_FOUND
 _TRANSFORM_FALLBACK_CACHE: dict[type, Any] = {}
-_TRANSFORM_FALLBACK_CACHE_LIMIT = 128
 
 
 def _lookup_visitor_methods(cls: type, node_cls: type) -> tuple[Any, Any]:
@@ -160,7 +167,7 @@ def _lookup_visitor_methods(cls: type, node_cls: type) -> tuple[Any, Any]:
 
 
 def _visitor_methods(cls: type) -> dict[type, tuple[Any, Any]]:
-    """Build a bounded dispatch table cache for visitor classes."""
+    """The dispatch table of a visitor class, built on first use."""
     methods = _VISITOR_METHODS_CACHE.get(cls)
     if methods is None:
         methods = {}
@@ -169,8 +176,6 @@ def _visitor_methods(cls: type) -> dict[type, tuple[Any, Any]]:
             node_cls = pending.pop()
             methods[node_cls] = _lookup_visitor_methods(cls, node_cls)
             pending.extend(node_cls.__subclasses__())
-        if len(_VISITOR_METHODS_CACHE) >= _VISITOR_METHODS_CACHE_LIMIT:
-            _VISITOR_METHODS_CACHE.pop(next(iter(_VISITOR_METHODS_CACHE)))
         _VISITOR_METHODS_CACHE[cls] = methods
     return methods
 
@@ -188,8 +193,6 @@ def _lookup_transform(cls: type, node_cls: type) -> Any:
     if method is _NOT_CACHED:
         snake = _to_snake_case(node_cls.__name__)
         method = getattr(cls, "transform_" + snake, _NOT_FOUND)
-        if len(_TRANSFORM_CACHE) >= _TRANSFORM_CACHE_LIMIT:
-            _TRANSFORM_CACHE.pop(next(iter(_TRANSFORM_CACHE)))
         _TRANSFORM_CACHE[key] = method
     return method
 
@@ -199,8 +202,6 @@ def _lookup_transform_fallback(cls: type) -> Any:
     method = _TRANSFORM_FALLBACK_CACHE.get(cls, _NOT_CACHED)
     if method is _NOT_CACHED:
         method = getattr(cls, "transform_ast_node", _NOT_FOUND)
-        if len(_TRANSFORM_FALLBACK_CACHE) >= _TRANSFORM_FALLBACK_CACHE_LIMIT:
-            _TRANSFORM_FALLBACK_CACHE.pop(next(iter(_TRANSFORM_FALLBACK_CACHE)))
         _TRANSFORM_FALLBACK_CACHE[cls] = method
     return method
 

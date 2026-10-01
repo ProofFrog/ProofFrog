@@ -81,8 +81,8 @@ def test_repeated_reference_collection_keeps_one_dispatch_table() -> None:
         len(table) for table in visitors._VISITOR_METHODS_CACHE.values()
     )
     assert len(visitors._VISITOR_METHODS_CACHE) == 1
-    table = next(iter(visitors._VISITOR_METHODS_CACHE.values()))
-    assert isinstance(table[frog_ast.Variable][0], weakref.ReferenceType)
+    visitor_cls, table = next(iter(visitors._VISITOR_METHODS_CACHE.items()))
+    assert table[frog_ast.Variable] == (visitor_cls.visit_variable, None)
 
     for _ in range(1000):
         visitors.referenced_variables_in_order(node)
@@ -132,22 +132,10 @@ def test_dispatch_caches_bound_transient_classes(monkeypatch) -> None:
     assert len(visitors._VISITOR_METHODS_CACHE) == 8
     assert len(visitors._TRANSFORM_CACHE) == 8
     assert len(visitors._TRANSFORM_FALLBACK_CACHE) == 8
+    # The caches hold the methods strongly (and through their ``super()``
+    # closures, the classes); an evicted class is still collected.
     assert first_visitor() is None
     assert first_transformer() is None
-    assert any(
-        isinstance(method, weakref.ReferenceType)
-        for table in visitors._VISITOR_METHODS_CACHE.values()
-        for methods in table.values()
-        for method in methods
-    )
-    assert any(
-        isinstance(method, weakref.ReferenceType)
-        for method in visitors._TRANSFORM_CACHE.values()
-    )
-    assert all(
-        isinstance(method, weakref.ReferenceType)
-        for method in visitors._TRANSFORM_FALLBACK_CACHE.values()
-    )
 
 
 def test_every_frog_ast_node_class_has_child_fields() -> None:

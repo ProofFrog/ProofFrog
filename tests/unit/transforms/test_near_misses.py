@@ -2801,6 +2801,67 @@ def test_dead_null_guard_near_miss_describes_renamed_local() -> None:
     assert "__a" not in misses[0].reason
 
 
+def _dead_null_guard_tuple_misses(body: str, rename: bool = False) -> list[NearMiss]:
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Int Test(Int x, Int y, Bool c) {{
+                [Int, Int]? v = [x, y];
+                {body}
+                return 1;
+            }}
+        }}
+        """)
+    if rename:
+        game = AlphaRename().apply(game, ctx)
+    DeadNullGuardElimination().apply(game, ctx)
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Dead Null Guard Elimination"
+    ]
+
+
+@pytest.mark.parametrize(
+    "write, kind",
+    [
+        ("if (c) { v = None; }", "an assignment"),
+        ("if (c) { v = [y, x]; }", "an assignment"),
+        ("v[0] = 5;", "an element write"),
+    ],
+)
+def test_dead_null_guard_near_miss_on_written_tuple_literal(
+    write: str, kind: str
+) -> None:
+    """A tuple literal is non-null, so a guard kept on an optional local
+    initialised to one, because of a later write, is reported like any
+    other."""
+    misses = _dead_null_guard_tuple_misses(f"{write} if (v == None) {{ return 0; }}")
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert misses[0].method == "Test"
+    assert kind in misses[0].reason
+
+
+def test_dead_null_guard_near_miss_describes_renamed_tuple_local() -> None:
+    misses = _dead_null_guard_tuple_misses(
+        "if (c) { v = None; } if (v == None) { return 0; }", rename=True
+    )
+    assert len(misses) == 1
+    assert misses[0].variable is None
+    assert "'[Int, Int]?'" in misses[0].reason and "'[x, y]'" in misses[0].reason
+    assert "__a" not in misses[0].reason
+
+
+def test_dead_null_guard_no_near_miss_when_tuple_literal_guard_removed() -> None:
+    assert not _dead_null_guard_tuple_misses("if (v == None) { return 0; }")
+
+
 def test_dead_null_guard_no_near_miss_when_guard_removed() -> None:
     assert not _dead_null_guard_misses("if (v == None) { return 0; }")
 

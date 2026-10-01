@@ -184,3 +184,72 @@ def test_element_reading_other_field_still_inlined() -> None:
         """)
     assert "v" not in out.replace("Void", "")
     assert "return w[0];" in out
+
+
+def _map_game(body: str) -> str:
+    return f"""
+        Game G() {{
+            Map<Int, Int> M;
+            Int Test(Int k, Bool c) {{
+                {body}
+            }}
+        }}
+        """
+
+
+@pytest.mark.parametrize("declared", ["[Int, Int]", "[Int, Int]?"])
+@pytest.mark.parametrize(
+    "rest",
+    [
+        # Dropped: element 0 is never projected.  Test(k) with k absent from
+        # M reads M[k] before inlining and not after.
+        "return v[1];",
+        # Moved under a branch: with c false the read no longer happens.
+        "if (c) { return v[0]; } return v[1];",
+        # Moved past a statement that can return first.
+        "if (c) { return 0; } return v[0] + v[1];",
+        # Moved into a loop body, which may run zero times.
+        "Int s = 0; for (Int i = 0 to k) { s = s + v[0]; } return s + v[1];",
+    ],
+)
+def test_undefined_read_element_not_dropped_or_moved(declared: str, rest: str) -> None:
+    """F-157: reading an absent map key is observable, so an element that
+    indexes a map may not be dropped or moved to where fewer traces reach."""
+    game = frog_parser.parse_game(_map_game(f"{declared} v = [M[k], 1]; {rest}"))
+    ctx = _ctx()
+    assert InlineLocalTupleLiteral().apply(game, ctx) == game
+    assert any(
+        nm.transform_name == "Inline Local Tuple Literal"
+        and "indexes a map or array" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+@pytest.mark.parametrize("declared", ["[Int, Int]", "[Int, Int]?"])
+def test_undefined_read_element_projected_next_still_inlined(declared: str) -> None:
+    """Control: every element is projected by the statement right after the
+    declaration, so the read stays on the same traces."""
+    out = _inline(_map_game(f"{declared} v = [M[k], 1]; return v[0] + v[1];"))
+    assert "v" not in out.replace("Void", "")
+    assert "return M[k] + 1;" in out
+
+
+@pytest.mark.parametrize("declared", ["[Int, Int]", "[Int, Int]?"])
+def test_index_free_element_still_dropped(declared: str) -> None:
+    """Control: no element indexes anything, so dropping one is fine."""
+    out = _inline(_map_game(f"{declared} v = [k, 1]; if (c) {{ return 0; }} return v[1];"))
+    assert "return 1;" in out and "[k, 1]" not in out
+
+
+def test_engine_rejects_dropped_map_read_in_optional_tuple() -> None:
+    """The optional form of the F-157 attack: the left game reads M[k] and
+    the right does not.  (The non-optional form is still accepted through
+    other passes; that is the open finding.)"""
+    assert not _engine_equal(
+        _map_game("""
+            [Int, Int]? v = [M[k], 1];
+            if (v == None) { return 0; }
+            return v[1];
+            """),
+        _map_game("return 1;"),
+    )

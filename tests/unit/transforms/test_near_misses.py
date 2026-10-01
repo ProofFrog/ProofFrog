@@ -2902,7 +2902,8 @@ def _inline_tuple_literal_misses(body: str) -> list[NearMiss]:
         Game G() {{
             [Int, Int] v;
             [Int, Int] w;
-            Int Test(Int y) {{
+            Map<Int, Int> M;
+            Int Test(Int y, Bool c) {{
                 {body}
             }}
         }}
@@ -2924,3 +2925,31 @@ def test_inline_local_tuple_literal_near_miss_on_self_reference() -> None:
 
 def test_inline_local_tuple_literal_no_near_miss_without_self_reference() -> None:
     assert not _inline_tuple_literal_misses("[Int, Int] v = [w[0], y]; return v[0];")
+
+
+@pytest.mark.parametrize(
+    "body, what",
+    [
+        ("[Int, Int] v = [M[y], 1]; return v[1];", "drop that read"),
+        ("[Int, Int]? v = [M[y], 1]; return v[1];", "drop that read"),
+        (
+            "[Int, Int] v = [M[y], 1]; if (c) { return v[0]; } return v[1];",
+            "move that read",
+        ),
+    ],
+)
+def test_inline_local_tuple_literal_near_miss_on_undefined_read(
+    body: str, what: str
+) -> None:
+    """F-157: an element that indexes a map is not dropped or moved."""
+    misses = _inline_tuple_literal_misses(body)
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert "element 0 indexes a map or array" in misses[0].reason
+    assert what in misses[0].reason
+
+
+def test_inline_local_tuple_literal_no_near_miss_when_read_stays_put() -> None:
+    assert not _inline_tuple_literal_misses(
+        "[Int, Int] v = [M[y], 1]; return v[0] + v[1];"
+    )

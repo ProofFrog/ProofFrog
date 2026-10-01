@@ -67,6 +67,83 @@ _LITERAL_RELATIONS: dict[frog_ast.BinaryOperators, Callable[[Any, Any], bool]] =
 }
 
 
+# Node kinds that may appear inside the literal ``L`` of a ``None == L`` fold.
+# Anything else (a call, an index, a slice, an unknown node) declines.
+_LITERAL_INTERIOR_NODES = _NON_NONE_LITERALS + (
+    frog_ast.NoneExpression,
+    frog_ast.Variable,
+    frog_ast.FieldAccess,
+    frog_ast.BinaryOperation,
+    frog_ast.UnaryOperation,
+)
+
+
+def _initialized_binder(node: frog_ast.ASTNode) -> str | None:
+    """The name a typed ``T x = e;`` / ``T x <- D;`` statement binds."""
+    if (
+        isinstance(node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+        and node.the_type is not None
+        and isinstance(node.var, frog_ast.Variable)
+    ):
+        return node.var.name
+    return None
+
+
+def _bare_declared_names(method: frog_ast.Method) -> list[str]:
+    return [
+        node.name
+        for node in _walk_nodes(method.block)
+        if isinstance(node, frog_ast.VariableDeclaration)
+    ]
+
+
+def _method_binders(method: frog_ast.Method) -> dict[str, int]:
+    """How many times *method* binds each name: parameters, typed
+    declarations (with or without a value) and loop binders."""
+    names = _bare_declared_names(method)
+    names.extend(parameter.name for parameter in method.signature.parameters)
+    for node in _walk_nodes(method.block):
+        name = _initialized_binder(node)
+        if isinstance(node, frog_ast.NumericFor):
+            name = node.name
+        elif isinstance(node, frog_ast.GenericFor):
+            name = node.var_name
+        if name is not None:
+            names.append(name)
+    return {name: names.count(name) for name in names}
+
+
+def _initialize_assigned_fields(game: frog_ast.Game) -> set[str]:
+    """Fields every oracle call may read: those ``Initialize`` assigns in a
+    top-level statement no earlier ``return`` can skip (F-349), plus fields
+    with a declared initializer.
+
+    A name that ``Initialize`` also binds as a local is left out: an
+    assignment to that name may target the local.
+    """
+    assigned = {field.name for field in game.fields if field.value is not None}
+    initialize = next(
+        (m for m in game.methods if m.signature.name == "Initialize"), None
+    )
+    if initialize is None:
+        return assigned
+    shadowed = _method_binders(initialize)
+    statements = initialize.block.statements
+    for index, statement in enumerate(statements):
+        if (
+            isinstance(
+                statement,
+                (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+            )
+            and statement.the_type is None
+            and isinstance(statement.var, frog_ast.Variable)
+            and statement.var.name not in shadowed
+            and not may_return_before(statements, index)
+        ):
+            assigned.add(statement.var.name)
+    return assigned
+
+
 class FoldLiteralConditionsTransformer(Transformer):
     """Folds comparisons whose value is fixed by literal operands.
 
@@ -78,10 +155,204 @@ class FoldLiteralConditionsTransformer(Transformer):
       are equal. A literal inlined into a ``ModInt<q>`` slot compares mod
       ``q``, so distinct literals may still be equal.
     - ``None == L`` / ``L == None`` (and ``!=``) folds to ``false`` / ``true``
-      when ``L`` is a tuple, set, integer, boolean, or bitstring literal
-      that makes no call and indexes nothing, so dropping its evaluation has
-      no effect. ``None`` against a variable or call never folds.
+      when ``L`` is a tuple, set, integer, boolean, or bitstring literal.
+
+    The folds above the last have only literal operands, so they drop no
+    evaluation. (``1 == 1`` and ``true == true`` are also
+    ``ReflexiveComparison``'s; either pass may fold them.) The last fold
+    drops the evaluation of ``L``, and reading an unassigned variable is an
+    event the adversary observes. It therefore fires only when evaluating
+    ``L`` cannot fail:
+
+    - ``L`` contains only literals, variables, field accesses and unary or
+      binary operations other than division. A call, an index, a slice or
+      any other node declines.
+    - Every variable ``L`` reads is definitely assigned at that point:
+
+      * a parameter of the enclosing method;
+      * a local in lexical scope bound by an initialized declaration
+        (``T x = e;``, ``T x <- D;``, ``T x <-uniq[S] D;``) or a loop
+        binder;
+      * a game field with a declared initializer, or one ``Initialize``
+        assigns in a top-level statement that no earlier ``return`` can
+        skip (F-349), read from a method other than ``Initialize``;
+      * a game parameter or a proof ``let:`` name.
+
+      A name is declined when its binding is ambiguous: the method binds it
+      more than once, declares it bare (``T x;``) anywhere, or it names both
+      a local and a field (or a game parameter). So are a field assigned
+      only by another oracle, any field read inside ``Initialize``, and any
+      variable outside a method.
+
+    ``None`` against a variable or call never folds.
     """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+        self._game: frog_ast.Game | None = None
+        self._init_fields: set[str] = set()
+        self._method: frog_ast.Method | None = None
+        self._binders: dict[str, int] = {}
+        self._bare: set[str] = set()
+        # Lexical scopes, innermost last; each holds the names bound by a
+        # parameter, an initialized declaration or a loop binder.
+        self._scopes: list[set[str]] = []
+
+    # -- context ---------------------------------------------------------
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        saved = (self._game, self._init_fields)
+        self._game = game
+        self._init_fields = _initialize_assigned_fields(game)
+        try:
+            return self._transform_children(game)
+        finally:
+            self._game, self._init_fields = saved
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        saved = (self._method, self._binders, self._bare, self._scopes)
+        self._method = method
+        self._binders = _method_binders(method)
+        self._bare = set(_bare_declared_names(method))
+        self._scopes = [{p.name for p in method.signature.parameters}]
+        try:
+            return self._transform_children(method)
+        finally:
+            self._method, self._binders, self._bare, self._scopes = saved
+
+    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
+        self._scopes.append(set())
+        try:
+            statements: list[frog_ast.Statement] = []
+            changed = False
+            for statement in block.statements:
+                new_statement = self.transform(statement)
+                changed = changed or new_statement is not statement
+                statements.append(new_statement)
+                # Bound only after the statement itself: ``T x = e;`` does
+                # not have ``x`` in scope while ``e`` is evaluated.
+                name = _initialized_binder(statement)
+                if name is not None:
+                    self._scopes[-1].add(name)
+        finally:
+            self._scopes.pop()
+        if not changed:
+            return block
+        new_block = copy.copy(block)
+        new_block.statements = statements
+        return new_block
+
+    def transform_numeric_for(self, loop: frog_ast.NumericFor) -> frog_ast.NumericFor:
+        new_loop: frog_ast.NumericFor = self._transform_loop(
+            loop, loop.name, ("start", "end")
+        )
+        return new_loop
+
+    def transform_generic_for(self, loop: frog_ast.GenericFor) -> frog_ast.GenericFor:
+        new_loop: frog_ast.GenericFor = self._transform_loop(
+            loop, loop.var_name, ("over",)
+        )
+        return new_loop
+
+    def _transform_loop(self, loop: Any, binder: str, headers: tuple[str, ...]) -> Any:
+        """Transforms a loop with its binder in scope for the body only."""
+        new_attrs = {attr: self.transform(getattr(loop, attr)) for attr in headers}
+        self._scopes.append({binder})
+        try:
+            new_attrs["block"] = self.transform(loop.block)
+        finally:
+            self._scopes.pop()
+        if all(new_val is getattr(loop, attr) for attr, new_val in new_attrs.items()):
+            return loop
+        new_loop = copy.copy(loop)
+        for attr, new_val in new_attrs.items():
+            setattr(new_loop, attr, new_val)
+        return new_loop
+
+    # -- definedness -----------------------------------------------------
+
+    def _unassigned_reason(self, name: str) -> str | None:
+        """Why *name* may be unassigned where it is read, or ``None`` when
+        it is definitely assigned."""
+        # pylint: disable=too-many-return-statements
+        if self._method is None:
+            return "it is read outside a method"
+        fields = {f.name for f in self._game.fields} if self._game else set()
+        params = {p.name for p in self._game.parameters} if self._game else set()
+        if name in self._binders:
+            if name in self._bare:
+                return "it is declared without a value"
+            if self._binders[name] != 1:
+                return "the method binds that name more than once"
+            if name in fields or name in params:
+                return "it names both a local and a game field or parameter"
+            if not any(name in scope for scope in self._scopes):
+                return "its declaration is not in scope"
+            return None
+        if name in fields:
+            if name in params:
+                return "it names both a game field and a game parameter"
+            if self._method.signature.name == "Initialize":
+                return "it is a field read inside Initialize"
+            if name not in self._init_fields:
+                return (
+                    "it is a field that Initialize does not assign in a "
+                    "top-level statement before any return"
+                )
+            return None
+        if name in params:
+            return None
+        if self.ctx is not None and (
+            name in self.ctx.proof_namespace
+            or self.ctx.proof_let_types.get(name) is not None
+        ):
+            return None
+        return "it is not a parameter, local, field or let name"
+
+    def _literal_is_total(self, literal: frog_ast.Expression) -> bool:
+        """True if evaluating *literal* cannot fail, so dropping it is
+        unobservable. Records a near-miss for a possibly unassigned read."""
+        nodes = _walk_nodes(literal)
+        for node in nodes:
+            if not isinstance(node, _LITERAL_INTERIOR_NODES):
+                return False
+            if (
+                isinstance(node, frog_ast.BinaryOperation)
+                and node.operator == frog_ast.BinaryOperators.DIVIDE
+            ):
+                return False
+        method_name = self._method.signature.name if self._method else None
+        total = True
+        for node in nodes:
+            if not isinstance(node, frog_ast.Variable):
+                continue
+            reason = self._unassigned_reason(node.name)
+            if reason is None:
+                continue
+            total = False
+            if self.ctx is not None:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Fold Literal Conditions",
+                        reason=(
+                            f"None-vs-literal comparison against '{literal}' "
+                            f"not folded: '{node.name}' may be unassigned when "
+                            f"the literal is evaluated ({reason})"
+                        ),
+                        location=literal.origin,
+                        suggestion=(
+                            f"Make '{node.name}' definitely assigned: declare "
+                            "a local with a value, or assign a field in a "
+                            "top-level statement of Initialize before any "
+                            "return"
+                        ),
+                        variable=node.name,
+                        method=method_name,
+                    )
+                )
+        return total
+
+    # -- folds -----------------------------------------------------------
 
     def transform_unary_operation(
         self, unary_op: frog_ast.UnaryOperation
@@ -121,10 +392,7 @@ class FoldLiteralConditionsTransformer(Transformer):
             other = left
         else:
             return new_op
-        if isinstance(other, _NON_NONE_LITERALS) and not any(
-            isinstance(node, (frog_ast.FuncCall, frog_ast.ArrayAccess, frog_ast.Slice))
-            for node in _walk_nodes(other)
-        ):
+        if isinstance(other, _NON_NONE_LITERALS) and self._literal_is_total(other):
             return frog_ast.Boolean(op == frog_ast.BinaryOperators.NOTEQUALS)
         return new_op
 
@@ -3450,7 +3718,7 @@ class FoldLiteralConditions(TransformPass):
     name = "Fold Literal Conditions"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return FoldLiteralConditionsTransformer().transform(game)
+        return FoldLiteralConditionsTransformer(ctx).transform(game)
 
 
 class BranchElimination(TransformPass):

@@ -6,6 +6,11 @@ Games whose literal conditions select different behavior must be rejected.
 
 from __future__ import annotations
 
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
 from sympy import Symbol
 
 from proof_frog import frog_parser
@@ -186,3 +191,71 @@ def test_optional_bool_from_argument_not_folded_rejected() -> None:
         }
         """)
     assert not _engine().check_equivalent(guarded, plain).valid
+
+
+# ---------------------------------------------------------------------------
+# Fixtures: the folded shapes reached from type-correct proofs.
+#
+# The typechecker rejects ``None == [x, b]`` written directly, so the games
+# above exist only as ASTs. In the fixtures the shapes arise the way they do
+# in practice: a scheme method (``return s == None;``, ``return !f;``,
+# ``return a >= b;``) is inlined at a call with literal arguments.
+# ---------------------------------------------------------------------------
+
+REPO_ROOT = Path(__file__).parent.parent.parent
+FIXTURES = Path(__file__).parent / "fold_literal_fixtures"
+
+
+def _run_prove(proof_file: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "proof_frog", "prove", str(FIXTURES / proof_file)],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    )
+
+
+@pytest.mark.parametrize(
+    "proof_file",
+    [
+        "FoldNone.proof",  # [x, b] == None over method parameters
+        "FoldNot.proof",  # !false
+        "FoldGe.proof",  # 0 >= 1
+        "DefinedField.proof",  # [x, f] == None, f assigned by Initialize
+    ],
+)
+def test_inlined_literal_condition_folds(proof_file: str) -> None:
+    result = _run_prove(proof_file)
+    assert "Proof Succeeded" in result.stdout, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "proof_file",
+    [
+        "WrongBranch.proof",  # the literal conditions select the other branch
+        "AlwaysNone.proof",  # ![x, b] == None always holds
+    ],
+)
+def test_inlined_literal_condition_selecting_other_behavior_rejected(
+    proof_file: str,
+) -> None:
+    result = _run_prove(proof_file)
+    assert "Proof Failed" in result.stdout, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "proof_file",
+    [
+        "UndefField.proof",  # field assigned only by another oracle
+        "UndefLocal.proof",  # local declared bare, assigned under an if
+        "UndefInitReturn.proof",  # field assigned after Initialize may return
+    ],
+)
+def test_none_fold_keeps_read_of_possibly_unassigned_variable(
+    proof_file: str,
+) -> None:
+    """Real evaluates a tuple that reads a variable which may be unassigned,
+    and Random does not. Folding the comparison would drop that read and
+    make the games equal, so ``prove`` must fail."""
+    result = _run_prove(proof_file)
+    assert "Proof Failed" in result.stdout, result.stdout + result.stderr

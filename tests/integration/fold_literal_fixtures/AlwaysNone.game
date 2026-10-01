@@ -1,0 +1,26 @@
+// Must FAIL. IsNone([x, b]) is always false, so Real always returns None:
+// Query(1, true) returns None in Real and [1, true] in Random.
+import 'Chan.primitive';
+
+Game Real(Chan C) {
+    Int count;
+    Void Initialize() { count = 0; }
+    [Int, Bool]? Query(Int x, Bool b) {
+        count = count + x;
+        if (!C.IsNone([x, b])) {
+            return None;
+        }
+        return [count, b];
+    }
+}
+
+Game Random(Chan C) {
+    Int count;
+    Void Initialize() { count = 0; }
+    [Int, Bool]? Query(Int x, Bool b) {
+        count = count + x;
+        return [count, b];
+    }
+}
+
+export as AlwaysNone;

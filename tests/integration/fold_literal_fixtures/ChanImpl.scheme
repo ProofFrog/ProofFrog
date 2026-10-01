@@ -1,0 +1,13 @@
+import 'Chan.primitive';
+
+Scheme ChanImpl(Int lambda) extends Chan {
+    Bool IsNone([Int, Bool]? s) {
+        return s == None;
+    }
+    Bool Neg(Bool f) {
+        return !f;
+    }
+    Bool Ge(Int a, Int b) {
+        return a >= b;
+    }
+}

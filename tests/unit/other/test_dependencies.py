@@ -69,7 +69,7 @@ from proof_frog import dependencies
             """,
             [[], [0]],
         ),
-        # Write after Read
+        # Write after Read: below every earlier mention of x, nearest first
         (
             """
             Void f() {
@@ -78,7 +78,7 @@ from proof_frog import dependencies
                 x = 2;
             }
             """,
-            [[], [0], [1]],
+            [[], [0], [1, 0]],
         ),
         # Write after write
         (
@@ -91,7 +91,9 @@ from proof_frog import dependencies
             [[], [0]],
         ),
         # A shadowing bare declaration depends on every earlier reader of
-        # the outer binding, not only the nearest one.
+        # the outer binding, not only the nearest one. So does the write
+        # below it, which also depends on the declaration: with the enclosing
+        # scope unknown, every bare declaration is a binder.
         (
             """
             Int f() {
@@ -102,7 +104,7 @@ from proof_frog import dependencies
                 return a + b + x;
             }
             """,
-            [[], [], [1, 0], [1], [0, 1, 3]],
+            [[], [], [1, 0], [2, 1, 0], [0, 1, 3]],
         ),
     ],
 )

@@ -32,46 +32,50 @@ class FileType(Enum):
 
 
 class ASTNode:
-    _HASH_METADATA = frozenset({"line_num", "column_num", "origin", "_structural_hash"})
+    # The structural-hash cache of a scalar leaf (see `_ScalarLeaf`) lives in
+    # a slot, NOT in the instance `__dict__`: `vars(node)` is the engine's
+    # generic "all attributes of this node" view (`__eq__` below, the
+    # visitors, `advantage.lemma_instantiation`, ...), and a cache entry
+    # present on some nodes and absent on others would be read there as a
+    # structural difference. Every node still has an ordinary `__dict__` for
+    # its real attributes.
+    __slots__ = ("_structural_hash", "__dict__")
+
+    _structural_hash: int | None
+
+    _NON_SEMANTIC = frozenset({"line_num", "column_num", "origin"})
 
     def __init__(self) -> None:
         self.line_num: int = -1
         self.column_num: int = -1
         self.origin: SourceOrigin | None = None
 
-    def __setattr__(self, name: str, value: object) -> None:
-        if name not in self._HASH_METADATA:
-            self.__dict__.pop("_structural_hash", None)
-        object.__setattr__(self, name, value)
-
-    def __delattr__(self, name: str) -> None:
-        if name not in self._HASH_METADATA:
-            self.__dict__.pop("_structural_hash", None)
-        object.__delattr__(self, name)
-
     def __getstate__(self) -> dict[str, object]:
-        # Python salts string hashes per process, so workers must recompute.
-        return {
-            key: value
-            for key, value in self.__dict__.items()
-            if key != "_structural_hash"
-        }
+        # Only the instance dict is state. Leaving the slot out means a copy
+        # (`copy.copy` / `copy.deepcopy`) or a pickle never carries a cached
+        # hash: Python salts string hashes per process, so a worker must
+        # recompute, and a copy is usually made in order to be mutated.
+        return self.__dict__
 
     def structural_hash(self) -> int:
         """Return a cached structural hash for a scalar leaf node."""
         if type(self) not in _HASHABLE_LEAF_TYPES:
             raise TypeError("structural hash requires a scalar leaf")
-        cached = self.__dict__.get("_structural_hash")
+        try:
+            cached = self._structural_hash
+        except AttributeError:  # slot never written (a copy or an unpickle)
+            cached = None
         if cached is None:
+            non_semantic = self._NON_SEMANTIC
             fields = tuple(
                 sorted(
                     (key, value)
                     for key, value in self.__dict__.items()
-                    if key not in self._HASH_METADATA
+                    if key not in non_semantic
                 )
             )
             cached = hash((type(self), fields))
-            self.__dict__["_structural_hash"] = cached
+            _SET_STRUCTURAL_HASH(self, cached)
         return cached
 
     def __eq__(self, other: object) -> bool:
@@ -102,12 +106,45 @@ class ASTNode:
         # well-formed instances of the same class have identical key sets, so
         # this changes nothing for them; a malformed node now compares
         # unequal (fail-closed) instead of accepting or raising.
-        excluded = self._HASH_METADATA
+        excluded = self._NON_SEMANTIC
         self_keys = self.__dict__.keys() - excluded
         other_keys = other.__dict__.keys() - excluded
         if self_keys != other_keys:
             return False
         return all(getattr(self, attr) == getattr(other, attr) for attr in self_keys)
+
+
+# C-level writer of the hash slot; it does not go through `__setattr__`.
+_SET_STRUCTURAL_HASH = vars(ASTNode)["_structural_hash"].__set__
+_SET_ATTRIBUTE = object.__setattr__
+_DEL_ATTRIBUTE = object.__delattr__
+
+
+class _ScalarLeaf(ASTNode):
+    """Mixin for the scalar leaf classes whose structural hash is cached.
+
+    Any attribute write or delete drops the cached hash, so a mutated leaf is
+    never compared on a stale one. Only these classes pay for a Python-level
+    `__setattr__`; composite nodes never cache a hash and keep the native one.
+    """
+
+    __slots__ = ()
+
+    def __init__(self) -> None:  # pylint: disable=super-init-not-called
+        # Same three attributes as `ASTNode.__init__`, written without the
+        # invalidating `__setattr__` below: a node under construction has no
+        # cached hash to drop, and leaves are built in very large numbers.
+        _SET_ATTRIBUTE(self, "line_num", -1)
+        _SET_ATTRIBUTE(self, "column_num", -1)
+        _SET_ATTRIBUTE(self, "origin", None)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        _SET_STRUCTURAL_HASH(self, None)
+        _SET_ATTRIBUTE(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        _SET_STRUCTURAL_HASH(self, None)
+        _DEL_ATTRIBUTE(self, name)
 
 
 Namespace: TypeAlias = dict[str, Optional[ASTNode]]
@@ -131,17 +168,17 @@ class Type(ASTNode):
     pass
 
 
-class IntType(Type):
+class IntType(_ScalarLeaf, Type):
     def __str__(self) -> str:
         return "Int"
 
 
-class BoolType(Type):
+class BoolType(_ScalarLeaf, Type):
     def __str__(self) -> str:
         return "Bool"
 
 
-class Void(Type):
+class Void(_ScalarLeaf, Type):
     def __str__(self) -> str:
         return "Void"
 
@@ -193,7 +230,7 @@ class ModIntType(Type):
         return f"ModInt<{self.modulus}>"
 
 
-class GroupType(Type):
+class GroupType(_ScalarLeaf, Type):
     """The ``Group`` declaration type (like ``Int`` or ``Set``)."""
 
     def __str__(self) -> str:
@@ -468,7 +505,7 @@ class FuncCall(Expression, Statement):
         return f"{self.func}({arg_str})"
 
 
-class Variable(Expression, Type):
+class Variable(_ScalarLeaf, Expression, Type):
     def __init__(self, name: str) -> None:
         super().__init__()
         self.name = name
@@ -740,7 +777,7 @@ class DestructuringBinding(Statement):
         return f"{self.the_type} {targets} = {self.value};"
 
 
-class Integer(Expression):
+class Integer(_ScalarLeaf, Expression):
     def __init__(self, num: int) -> None:
         super().__init__()
         self.num = num
@@ -749,7 +786,7 @@ class Integer(Expression):
         return str(self.num)
 
 
-class Boolean(Expression):
+class Boolean(_ScalarLeaf, Expression):
     def __init__(self, the_bool: bool) -> None:
         super().__init__()
         self.bool = the_bool
@@ -758,12 +795,12 @@ class Boolean(Expression):
         return str(self.bool).lower()
 
 
-class NoneExpression(Expression, Type):
+class NoneExpression(_ScalarLeaf, Expression, Type):
     def __str__(self) -> str:
         return "None"
 
 
-class BinaryNum(Expression):
+class BinaryNum(_ScalarLeaf, Expression):
     """A binary literal written as ``0bXYZ``.
 
     Carries both the integer value and the explicit bit length.  The length
@@ -797,6 +834,8 @@ _HASHABLE_LEAF_TYPES = frozenset(
         GroupType,
     }
 )
+# Every hashed class must drop its cache on mutation (`_ScalarLeaf`).
+assert all(issubclass(leaf, _ScalarLeaf) for leaf in _HASHABLE_LEAF_TYPES)
 
 
 class BitStringLiteral(Expression):

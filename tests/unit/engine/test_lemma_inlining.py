@@ -297,3 +297,73 @@ def test_instantiation_maps_sampled_parameters_one_to_one() -> None:
         ["H1", "H2"],
     )
     assert isinstance(result, advantage.LemmaInstantiation)
+
+
+def _literal_lets(literal: int, name: str) -> list[frog_ast.Field]:
+    return _lets(f"    Int n;\n    Set C;\n    KEM {name} = KEM(n, BitString<{literal}>, C);")
+
+
+def _hash_literal(lets: list[frog_ast.Field]) -> frog_ast.Integer:
+    """Compare the literal of ``BitString<literal>`` once, which caches its
+    structural hash, as any earlier ``==`` in the lemma's own run would."""
+    value = lets[2].value
+    assert isinstance(value, frog_ast.FuncCall)
+    bitstring = value.args[1]
+    assert isinstance(bitstring, frog_ast.BitStringType)
+    literal = bitstring.parameterization
+    assert isinstance(literal, frog_ast.Integer)
+    assert literal == frog_ast.Integer(literal.num)
+    return literal
+
+
+def test_instantiation_ignores_cached_leaf_hash_on_lemma_side() -> None:
+    """A lemma-side literal whose structural hash is cached must still match
+    the parent's equal literal, whose hash is not: the cache is not an
+    attribute of the node, so the generic attribute walk must not see it."""
+    lemma_lets = _literal_lets(2, "K")
+    parent_lets = _literal_lets(2, "K2")
+    _hash_literal(lemma_lets)
+    result = advantage.lemma_instantiation(
+        [frog_ast.Variable("K")],
+        lemma_lets,
+        frozenset(),
+        [frog_ast.Variable("K2")],
+        parent_lets,
+        frozenset(),
+    )
+    assert isinstance(result, advantage.LemmaInstantiation), result
+
+
+def test_instantiation_ignores_cached_leaf_hash_on_parent_side() -> None:
+    lemma_lets = _literal_lets(2, "K")
+    parent_lets = _literal_lets(2, "K2")
+    _hash_literal(parent_lets)
+    result = advantage.lemma_instantiation(
+        [frog_ast.Variable("K")],
+        lemma_lets,
+        frozenset(),
+        [frog_ast.Variable("K2")],
+        parent_lets,
+        frozenset(),
+    )
+    assert isinstance(result, advantage.LemmaInstantiation), result
+
+
+def test_instantiation_still_rejects_different_literals_when_hashed() -> None:
+    for hash_lemma, hash_parent in [(False, False), (True, False), (True, True)]:
+        lemma_lets = _literal_lets(2, "K")
+        parent_lets = _literal_lets(3, "K2")
+        if hash_lemma:
+            _hash_literal(lemma_lets)
+        if hash_parent:
+            _hash_literal(parent_lets)
+        result = advantage.lemma_instantiation(
+            [frog_ast.Variable("K")],
+            lemma_lets,
+            frozenset(),
+            [frog_ast.Variable("K2")],
+            parent_lets,
+            frozenset(),
+        )
+        assert isinstance(result, str)
+        assert "does not match" in result

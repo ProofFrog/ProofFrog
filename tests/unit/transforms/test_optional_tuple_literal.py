@@ -4,6 +4,8 @@ DeadNullGuardEliminator drops the guard, and InlineLocalTupleLiteral
 folds ``v[k]``, as for a non-optional tuple.
 """
 
+import pytest
+
 from proof_frog import frog_parser, visitors
 from proof_frog.proof_engine import ProofEngine
 from proof_frog.transforms._base import PipelineContext
@@ -140,3 +142,45 @@ def test_engine_rejects_overwritten_optional_tuple() -> None:
         """,
         _PROJECT,
     )
+
+
+@pytest.mark.parametrize("declared", ["[Int, Int]", "[Int, Int]?"])
+@pytest.mark.parametrize("element", ["v[0]", "v[1]", "v[0] + 1"])
+def test_self_referential_element_declined(declared: str, element: str) -> None:
+    """A local tuple that shadows a field `v` and reads the field in its own
+    initialiser.  Substituting the element for `v[0]` reintroduces a `v[...]`
+    access, so the pass used to substitute forever; it now declines."""
+    source = f"""
+        Game G() {{
+            [Int, Int] v;
+            Int Test(Int y) {{
+                {declared} v = [{element}, y];
+                return v[0];
+            }}
+        }}
+        """
+    game = frog_parser.parse_game(source)
+    ctx = _ctx()
+    assert InlineLocalTupleLiteral().apply(game, ctx) == game
+    assert any(
+        nm.transform_name == "Inline Local Tuple Literal"
+        and nm.variable == "v"
+        and "outer variable also named 'v'" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_element_reading_other_field_still_inlined() -> None:
+    """Control for the self-reference guard: the element reads a field of a
+    different name, so the substitution terminates and the pass fires."""
+    out = _inline("""
+        Game G() {
+            [Int, Int] w;
+            Int Test(Int y) {
+                [Int, Int] v = [w[0], y];
+                return v[0];
+            }
+        }
+        """)
+    assert "v" not in out.replace("Void", "")
+    assert "return w[0];" in out

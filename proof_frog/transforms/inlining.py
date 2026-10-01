@@ -1254,6 +1254,10 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
        never used, ``e_i`` must also be deterministic (so dropping it is
        safe). When ``v[i]`` is used exactly once, ``e_i`` may have any
        side effects (single substitution preserves the evaluation count).
+    5. No ``e_i`` mentions ``v``. Such an element reads a same-named outer
+       binding that the declaration shadows; substituting it would put a
+       new ``v[...]`` access into the block for the substitution to find
+       again.
     """
 
     def __init__(
@@ -1382,6 +1386,34 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
             if counts and (
                 max(counts.keys()) >= len(tuple_values) or min(counts.keys()) < 0
             ):
+                continue
+
+            # An element that mentions `v` reads a same-named outer binding
+            # (a field or an enclosing local the declaration shadows).
+            # Substituting it for `v[k]` would put a fresh `v[...]` into the
+            # block, which the substitution loop below would pick up again
+            # and never finish. AlphaRename renames the local first, so this
+            # is not reached from the pipeline.
+            if any(
+                var_name in referenced_variable_names(e_i) for e_i in tuple_values
+            ):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Local Tuple Literal",
+                            reason=(
+                                f"Cannot inline '{var_name}': a tuple element "
+                                f"refers to an outer variable also named "
+                                f"'{var_name}'"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Give the local a name other than '{var_name}'"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:

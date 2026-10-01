@@ -1,0 +1,21 @@
+// Single-hop claim GuardUnassignedField.Real -> GuardUnassignedField.Random with no assumptions.
+// See GuardUnassignedField.game for the expected outcome.
+import 'Probe.primitive';
+import 'ProbeImpl.scheme';
+import 'GuardUnassignedField.game';
+
+proof:
+
+let:
+    Int lambda;
+    ProbeImpl C = ProbeImpl(lambda);
+
+assume:
+
+theorem:
+    GuardUnassignedField(C);
+
+games:
+    GuardUnassignedField(C).Real against GuardUnassignedField(C).Adversary;
+
+    GuardUnassignedField(C).Random against GuardUnassignedField(C).Adversary;

@@ -1,0 +1,35 @@
+// Control for DeclUnassignedField: Initialize assigns f. Expected:
+// accepted.
+import 'Probe.primitive';
+
+Game Real(Probe C) {
+    Bool f;
+    Void Initialize() {
+        f = false;
+    }
+    Void Store(Bool v) {
+        f = v;
+    }
+    [Int, Bool]? Query(Int x) {
+        [Int, Bool]? s = [x, f];
+        if (s == None) {
+            return None;
+        }
+        return [x, true];
+    }
+}
+
+Game Random(Probe C) {
+    Bool f;
+    Void Initialize() {
+        f = false;
+    }
+    Void Store(Bool v) {
+        f = v;
+    }
+    [Int, Bool]? Query(Int x) {
+        return [x, true];
+    }
+}
+
+export as DeclAssignedField;

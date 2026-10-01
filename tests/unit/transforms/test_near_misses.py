@@ -2953,3 +2953,59 @@ def test_inline_local_tuple_literal_no_near_miss_when_read_stays_put() -> None:
     assert not _inline_tuple_literal_misses(
         "[Int, Int] v = [M[y], 1]; return v[0] + v[1];"
     )
+
+
+def _dead_null_guard_unassigned_misses(initialize: str, body: str) -> list[NearMiss]:
+    ctx = _make_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Bool f;
+            {initialize}
+            Void Store(Bool v) {{ f = v; }}
+            Int Query(Int x) {{
+                {body}
+                return x;
+            }}
+        }}
+        """)
+    DeadNullGuardElimination().apply(game, ctx)
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Dead Null Guard Elimination"
+    ]
+
+
+@pytest.mark.parametrize(
+    "body, what",
+    [
+        ("if ([x, f] == None) { return 0; }", "the expression it tests"),
+        (
+            "[Int, Bool]? t = [x, f]; if (t == None) { return 0; }",
+            "the initialiser of the local it tests",
+        ),
+    ],
+)
+def test_dead_null_guard_near_miss_on_unassigned_read(body: str, what: str) -> None:
+    """A guard that can never fire is kept because removing it would drop
+    the read of a field only another oracle assigns."""
+    misses = _dead_null_guard_unassigned_misses("", body)
+    assert len(misses) == 1
+    assert misses[0].variable == "f"
+    assert misses[0].method == "Query"
+    assert what in misses[0].reason
+    assert "reads 'f', which may be unassigned" in misses[0].reason
+    assert "Initialize does not assign" in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if ([x, f] == None) { return 0; }",
+        "[Int, Bool]? t = [x, f]; if (t == None) { return 0; }",
+    ],
+)
+def test_dead_null_guard_no_near_miss_when_read_assigned(body: str) -> None:
+    assert not _dead_null_guard_unassigned_misses(
+        "Void Initialize() { f = false; }", body
+    )

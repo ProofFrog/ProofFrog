@@ -1,0 +1,7 @@
+import 'Probe.primitive';
+
+Scheme ProbeImpl(Int lambda) extends Probe {
+    Bool IsNone([Int, Bool]? s) {
+        return s == None;
+    }
+}

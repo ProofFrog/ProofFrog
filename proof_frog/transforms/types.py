@@ -21,6 +21,7 @@ from ..visitors import (
     lvalue_base_name,
 )
 from ._base import NearMiss, TransformPass, PipelineContext
+from ._definedness import GameDefinedness
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -144,6 +145,13 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
     get the wrong type at some guard, so the declared type of such a name is
     not trusted.  AlphaRename gives every local a distinct name before this
     pass runs; the check is there so the pass does not depend on it.
+
+    Removing a guard removes the evaluation of the expression it tests, and
+    lets the declaration of a local it tests be removed as unused.  Reading
+    an unassigned variable is observable, so a guard that can never fire is
+    kept when the tested expression, or the initialiser of the tested local,
+    reads a variable that may be unassigned at that point (a field only
+    another oracle assigns, a local declared without a value).
     """
 
     def __init__(
@@ -156,11 +164,14 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
         self.proof_instantiables = proof_instantiables or {}
         self.ctx = ctx
         self._method_name: Optional[str] = None
+        self._method: Optional[frog_ast.Method] = None
+        self._facts = GameDefinedness(None, ctx)
         self._outer_bindings: list[tuple[str, frog_ast.Type]] = []
         self._conflicting: set[str] = set()
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.ASTNode:
-        saved = self._outer_bindings
+        saved = (self._outer_bindings, self._facts)
+        self._facts = GameDefinedness(game, self.ctx)
         self._outer_bindings = [(field.name, field.type) for field in game.fields]
         if self._scope_let_types is not None:
             self._outer_bindings += [
@@ -169,16 +180,17 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
         try:
             return self._transform_children(game)
         finally:
-            self._outer_bindings = saved
+            self._outer_bindings, self._facts = saved
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.ASTNode:
-        saved = (self._method_name, self._conflicting)
+        saved = (self._method_name, self._conflicting, self._method)
         self._method_name = method.signature.name
+        self._method = method
         self._conflicting = _conflicting_names(method, self._outer_bindings)
         try:
             return super().transform_method(method)
         finally:
-            self._method_name, self._conflicting = saved
+            self._method_name, self._conflicting, self._method = saved
 
     def _declared_type(self, name: str) -> Optional[frog_ast.Type]:
         """The type *name* is declared with, or None if it is unknown or the
@@ -196,11 +208,21 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
         # mapped to the declaration and that write: a guard on one is kept,
         # and reported.
         written_locals: dict[str, tuple[frog_ast.Assignment, frog_ast.ASTNode]] = {}
+        # Locals initialised non-null from an expression that may read an
+        # unassigned variable, mapped to that read.
+        unassigned_inits: dict[str, tuple[str, str]] = {}
         new_statements: list[frog_ast.Statement] = []
         for index, statement in enumerate(block.statements):
             if isinstance(statement, frog_ast.IfStatement):
                 if self._is_dead_null_guard(statement, non_null_locals):
-                    continue
+                    tested = self._null_guard_subject(statement)
+                    assert tested is not None
+                    unassigned = self._unassigned_reads(statement, tested)
+                    if not unassigned:
+                        continue
+                    self._report_unassigned_read(statement, unassigned[0])
+                else:
+                    self._report_unassigned_initialiser(statement, unassigned_inits)
                 self._report_kept_guard(statement, written_locals)
             new_statements.append(statement)
             if (
@@ -219,11 +241,81 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
                     ),
                     None,
                 )
-                if write is None:
+                # The guard is what keeps this declaration, and so the
+                # evaluation of its initialiser, alive. If the initialiser
+                # may read an unassigned variable, the guard stays.
+                init_reads = self._unassigned_reads(statement, statement.value)
+                if init_reads:
+                    unassigned_inits[name] = init_reads[0]
+                elif write is None:
                     non_null_locals.add(name)
                 else:
                     written_locals[name] = (statement, write)
         return frog_ast.Block(new_statements)
+
+    def _unassigned_reads(
+        self, statement: frog_ast.Statement, expression: frog_ast.ASTNode
+    ) -> list[tuple[str, str]]:
+        """The variables *expression* reads that may be unassigned when
+        *statement*, which evaluates it, runs, as ``(name, reason)``.
+
+        Removing a guard removes the evaluation of the expression it tests,
+        and lets the declaration of a local it tests be removed as unused.
+        Reading an unassigned variable is observable, so a guard that can
+        never fire is still removable only when everything those
+        expressions read is definitely assigned: `if ([x, f] == None)`
+        reads `f`.
+        """
+        if self._method is None:
+            return self._facts.for_method(None).unassigned_reads(expression)
+        scope = self._facts.at_statement(self._method, statement)
+        if scope is None:
+            return [("?", "the statement could not be located in its method")]
+        return scope.unassigned_reads(expression)
+
+    def _report_unassigned(
+        self, if_stmt: frog_ast.IfStatement, what: str, read: tuple[str, str]
+    ) -> None:
+        if self.ctx is None:
+            return
+        name, reason = read
+        internal = name.startswith("__") or name == "?"
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Dead Null Guard Elimination",
+                reason=(
+                    f"Null guard not removed: it can never fire, but {what} "
+                    f"reads '{name}', which may be unassigned ({reason})"
+                ),
+                location=if_stmt.origin,
+                suggestion=(
+                    f"Assign '{name}' before the guard on every path (a "
+                    f"field: in a top-level statement of Initialize)"
+                ),
+                variable=None if internal else name,
+                method=self._method_name,
+            )
+        )
+
+    def _report_unassigned_read(
+        self, if_stmt: frog_ast.IfStatement, read: tuple[str, str]
+    ) -> None:
+        self._report_unassigned(if_stmt, "the expression it tests", read)
+
+    def _report_unassigned_initialiser(
+        self,
+        if_stmt: frog_ast.IfStatement,
+        unassigned_inits: dict[str, tuple[str, str]],
+    ) -> None:
+        """Record a near-miss for a null guard kept because the initialiser
+        of the local it tests may read an unassigned variable."""
+        tested = self._null_guard_subject(if_stmt)
+        if isinstance(tested, frog_ast.Variable) and tested.name in unassigned_inits:
+            self._report_unassigned(
+                if_stmt,
+                "the initialiser of the local it tests",
+                unassigned_inits[tested.name],
+            )
 
     def _report_kept_guard(
         self,

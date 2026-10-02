@@ -37,7 +37,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["mypy", "pylint", "types-colorama", "pytest", "pytest-xdist", "black", "flit", "twine"]
+# The three checkers are pinned to a minor series so that a new release cannot
+# turn CI red on an unrelated change. Upgrade them in a PR of their own.
+dev = ["mypy ~= 2.4.0", "pylint ~= 4.1.1", "types-colorama", "pytest", "pytest-xdist", "black ~= 26.5", "flit", "twine"]
 mcp = ["mcp[cli] >= 1.0"]
 
 [project.urls]

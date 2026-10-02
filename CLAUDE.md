@@ -33,6 +33,8 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - `pylint proof_frog` — style/quality linting (target: 10.00/10)
 - `cd vscode-extension && npx tsc --noEmit` — TypeScript type checking for the VSCode extension
 
+`black`, `mypy` and `pylint` are pinned to a minor series in the `dev` extra of `pyproject.toml`, so CI and a fresh `pip install -e ".[dev]"` use the same checkers. Upgrade them in a PR of their own, fixing whatever the new release flags.
+
 ### Patterns for suppressions
 - ANTLR-generated `ErrorListener` subclasses need `# type: ignore[misc]` on the class line and `# type: ignore[override, no-untyped-def]` on `syntaxError`
 - Flask route functions inside `create_app` should use `-> Any:` return type (avoids `no-untyped-def` and `return-value` errors)

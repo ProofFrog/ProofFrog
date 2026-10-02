@@ -1058,14 +1058,11 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
     def leave_array_access(self, _node: frog_ast.ArrayAccess) -> None:
         index = self.stack.pop() if self.stack else None
         array = self.stack.pop() if self.stack else None
-        if (
-            isinstance(array, tuple)
-            and isinstance(index, int)
-            and 0 <= index < len(array)
-        ):
-            self.stack.append(array[index])
-        else:
-            self.stack.append(None)
+        element = None
+        if isinstance(array, tuple):
+            if isinstance(index, int) and 0 <= index < len(array):
+                element = array[index]
+        self.stack.append(element)
 
     def leave_slice(self, node: frog_ast.Slice) -> None:
         # Bit-slicing is not modelled in Z3 here. Previously the Slice node had

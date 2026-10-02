@@ -1,0 +1,29 @@
+import 'Source.primitive';
+
+// Sound twin of ShadowedMapField: the field read and the draw trade
+// places, both still above the shadowing declaration. The games are equal.
+Game Left(Source S) {
+    Map<Int, Int> __a5__;
+    Void Initialize() { __a5__[0] = 7; }
+    [Bool, Int] O() {
+        Bool hit = 0 in __a5__;
+        Int t = S.Draw();
+        Map<Int, Int> __a5__;
+        __a5__[1] = t;
+        return [hit, __a5__[1]];
+    }
+}
+
+Game Right(Source S) {
+    Map<Int, Int> __a5__;
+    Void Initialize() { __a5__[0] = 7; }
+    [Bool, Int] O() {
+        Int t = S.Draw();
+        Bool hit = 0 in __a5__;
+        Map<Int, Int> __a5__;
+        __a5__[1] = t;
+        return [hit, __a5__[1]];
+    }
+}
+
+export as ShadowedMapFieldControl;

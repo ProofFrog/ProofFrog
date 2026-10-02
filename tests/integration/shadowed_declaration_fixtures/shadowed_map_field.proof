@@ -1,0 +1,16 @@
+import 'Source.primitive';
+import 'ShadowedMapField.game';
+
+proof:
+
+let:
+    Source S;
+
+assume:
+
+theorem:
+    ShadowedMapField(S);
+
+games:
+    ShadowedMapField(S).Left against ShadowedMapField(S).Adversary;
+    ShadowedMapField(S).Right against ShadowedMapField(S).Adversary;

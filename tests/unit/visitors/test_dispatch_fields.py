@@ -706,7 +706,11 @@ def test_parsed_corpus_holds_nodes_only_in_mapped_fields() -> None:
 # may not use at any given time: a private mixin whose constructor writes the
 # position attributes through an alias of object.__setattr__, a cache slot,
 # and an attribute-invalidating __setattr__.
+# It defers annotation evaluation, as Python 3.14 does by default, so a test
+# can swap in an annotation naming a class that is not defined yet.
 _SYNTHETIC_MODULE = """
+from __future__ import annotations
+
 _SET = object.__setattr__
 
 

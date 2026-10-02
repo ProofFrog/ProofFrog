@@ -5,142 +5,160 @@ from . import visitors
 from . import frog_ast
 
 
-def generate_dependency_graph(
-    block: frog_ast.Block,
-    fields: list[frog_ast.Field],
-    proof_namespace: frog_ast.Namespace,
-    shadowed_names: set[str] | None = None,
-) -> DependencyGraph:
-    dependency_graph = DependencyGraph()
-    for statement in block.statements:
-        dependency_graph.add_node(Node(statement))
+class _StatementAccess:
+    """What one statement of a block mentions and writes: everything
+    the dependency graph needs to know about it, computed once per statement
+    instead of once per pair of statements."""
 
-    def add_dependency(node_in_graph: Node, statement: frog_ast.Statement) -> None:
-        node_in_graph.add_neighbour(dependency_graph.get_node(statement))
-
-    field_names = [field.name for field in fields]
-    # Names bound by an enclosing scope (method parameters, fields).  A bare
-    # ``VariableDeclaration`` of such a name is a *shadowing binder*: every
-    # later reference to the name resolves to the inner local, so the
-    # declaration must not be pruned as disconnected dead code (doing so
-    # rebinds those references to the outer binding -- RC1 scope-awareness,
-    # SliceOfInlineConcat attack-1).  We therefore make later uses of the name
-    # depend on the declaration so it is reachable from the return and ordered
-    # ahead of its uses.
-    shadowed = set(shadowed_names or set())
-
-    def binds_shadowed(stmt: frog_ast.Statement, name: str) -> bool:
-        return (
-            isinstance(stmt, frog_ast.VariableDeclaration)
-            and stmt.name == name
-            and name in shadowed
-        )
-
-    def contains_return(node: frog_ast.ASTNode) -> bool:
-        return isinstance(node, frog_ast.ReturnStatement)
-
-    def mutates_field(stmt: frog_ast.Statement) -> bool:
-        # A statement mutates a field if it contains ANYWHERE -- including
-        # nested inside an if/for block -- a write whose l-value base is a
-        # field. Checking only the top-level statement kind missed a field
-        # write buried in a branch (`if (...) { F[k] = v; }`), letting a later
-        # return be hoisted above the side-effecting branch (the branch then
-        # looks dead and is dropped). Peel element/slice/field accesses so
-        # `M[0][0] = v` and `X.f = v` to a field still count.
-        def _is_field_write(node: frog_ast.ASTNode) -> bool:
-            if not isinstance(
-                node, (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample)
-            ):
-                return False
-            base = visitors.lvalue_base_name(node.var)
-            if base is not None and base in field_names:
-                return True
-            # `x <-uniq[S] T` implicitly does `S = S union {x}`, so it mutates
-            # the field S even though its target `x` is a local. Without this,
-            # an unused uniq draw looked side-effect-free and was pruned as
-            # disconnected dead code, erasing the observable insertion (F-004).
-            if isinstance(node, frog_ast.UniqueSample) and node.surface_form == "uniq":
-                set_base = visitors.lvalue_base_name(node.unique_set)
-                return set_base is not None and set_base in field_names
-            return False
-
-        return visitors.SearchVisitor(_is_field_write).visit(stmt) is not None
-
-    def writes_name(node: frog_ast.ASTNode, name: str) -> bool:
-        """True if *node* contains a write whose l-value base is *name* --
-        a plain, element, slice, or field write."""
-
-        def _writes(inner: frog_ast.ASTNode) -> bool:
-            if (
-                isinstance(
-                    inner,
-                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
-                )
-                and visitors.lvalue_base_name(inner.var) == name
-            ):
-                return True
-            # `x <-uniq[S] T` implicitly inserts the draw into S, so a read of S
-            # must be ordered relative to it.
-            return (
-                isinstance(inner, frog_ast.UniqueSample)
-                and inner.surface_form == "uniq"
-                and name in visitors.referenced_variable_names(inner.unique_set)
-            )
-
-        return visitors.SearchVisitor(_writes).visit(node) is not None
-
-    for index, statement in enumerate(block.statements):
-        node_in_graph = dependency_graph.get_node(statement)
-        earlier_statements = list(block.statements[:index])
-        earlier_statements.reverse()
-
-        if visitors.SearchVisitor(contains_return).visit(statement):
-            for preceding_statement in block.statements[:index]:
-                if (
-                    mutates_field(preceding_statement)
-                    or visitors.SearchVisitor(contains_return).visit(
-                        preceding_statement
-                    )
-                    is not None
-                ):
-                    add_dependency(node_in_graph, preceding_statement)
-
-        if mutates_field(statement):
-            for preceding_statement in block.statements[:index]:
-                if (
-                    visitors.SearchVisitor(contains_return).visit(preceding_statement)
-                    is not None
-                ):
-                    add_dependency(node_in_graph, preceding_statement)
-
+    def __init__(self, statement: frog_ast.Statement, field_names: set[str]) -> None:
         # Complete read-set, in first-appearance order so dependency-edge order
         # is deterministic: includes variables referenced through a FieldAccess
         # (`M` in `|M.keys|`) or array/slice access, which
         # VariableCollectionVisitor drops -- without them a read of a map view
         # looks independent of a write to the map and gets reordered across it.
-        statement_write_cache: dict[str, bool] = {}
-        for variable in visitors.referenced_variables_in_order(statement):
-            name = variable.name
-            if name in proof_namespace:
-                continue
-            # Does *this* statement write `name`?  If so it must come after any
-            # earlier statement that references `name` (WAR / WAW); otherwise it
-            # only reads `name` and must come after any earlier writer (RAW).
-            if name not in statement_write_cache:
-                statement_write_cache[name] = writes_name(statement, name)
-            statement_writes = statement_write_cache[name]
-            for depends_on in earlier_statements:
-                if statement_writes:
-                    related = name in visitors.referenced_variable_names(depends_on)
-                else:
-                    related = writes_name(depends_on, name)
-                # A shadowing declaration of `name` is a binder the later use
-                # depends on, whether the use reads or writes.
-                if not related and binds_shadowed(depends_on, name):
-                    related = True
-                if related:
-                    add_dependency(node_in_graph, depends_on)
-                    break
+        # An l-value is a mention too, so this is every name the statement
+        # reads or writes.
+        self.mentions: list[str] = [
+            variable.name
+            for variable in visitors.referenced_variables_in_order(statement)
+        ]
+        # Names the statement may write: the l-value base of every write
+        # ANYWHERE in it -- including nested inside an if/for block -- whether
+        # a plain, element, slice or field write (`M[0][0] = v` and `X.f = v`
+        # are writes of `M` and `X`).
+        self.writes: set[str] = set()
+        # A bare declaration (`T x;`) rebinds its name from here on: it is a
+        # write of the name it declares, and so a mention of it.
+        if isinstance(statement, frog_ast.VariableDeclaration):
+            self.writes.add(statement.name)
+            if statement.name not in self.mentions:
+                self.mentions.insert(0, statement.name)
+        self.mention_set: set[str] = set(self.mentions)
+        self.contains_return = False
+        # A statement mutates a field if it contains ANYWHERE a write whose
+        # l-value base is a field. Checking only the top-level statement kind
+        # missed a field write buried in a branch (`if (...) { F[k] = v; }`),
+        # letting a later return be hoisted above the side-effecting branch
+        # (the branch then looks dead and is dropped).
+        self.mutates_field = False
+
+        def collect(node: frog_ast.ASTNode) -> bool:
+            if isinstance(node, frog_ast.ReturnStatement):
+                self.contains_return = True
+            elif isinstance(
+                node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            ):
+                base = visitors.lvalue_base_name(node.var)
+                if base is not None:
+                    self.writes.add(base)
+                    if base in field_names:
+                        self.mutates_field = True
+                # `x <-uniq[S] T` implicitly does `S = S union {x}`, so it
+                # writes S even though its target `x` is a local: a read of S
+                # must be ordered relative to it. And when S is a field the
+                # draw mutates that field -- without this, an unused uniq draw
+                # looked side-effect-free and was pruned as disconnected dead
+                # code, erasing the observable insertion (F-004).
+                if isinstance(node, frog_ast.UniqueSample) and (
+                    node.surface_form == "uniq"
+                ):
+                    self.writes |= visitors.referenced_variable_names(node.unique_set)
+                    if visitors.lvalue_base_name(node.unique_set) in field_names:
+                        self.mutates_field = True
+            return False
+
+        visitors.SearchVisitor(collect).visit(statement)
+
+
+def generate_dependency_graph(
+    block: frog_ast.Block,
+    fields: list[frog_ast.Field],
+    _proof_namespace: frog_ast.Namespace,
+) -> DependencyGraph:
+    """Build the statement-ordering graph of *block*: an edge from a statement
+    to every earlier statement it must stay below.
+
+    Two statements conflict on a name when one of them writes (or rebinds) it
+    and the other mentions it at all. Every reordering consumer keeps a
+    statement below its in-neighbours, so the graph must connect, directly or
+    through a chain, EVERY conflicting pair:
+
+    - a statement that writes ``x`` depends on every earlier statement that
+      mentions ``x`` (write-after-read and write-after-write). The nearest one
+      is not enough: two earlier readers carry no edge between them, so a
+      reader that is not the nearest -- typically one delayed by a dependency
+      chain of its own -- could be placed after the write and read the new
+      value (F-354);
+    - a statement that only reads ``x`` depends on the nearest earlier writer
+      of ``x`` (read-after-write). Here the nearest one IS enough, because that
+      writer itself depends on every earlier mention of ``x``, earlier writers
+      included.
+
+    A bare declaration ``T x;`` is a write of ``x`` for this purpose: it
+    rebinds the name from there on. That one rule gives a declaration both
+    things it needs. It stays below every earlier mention of its name, which
+    may refer to an outer binding (a field, a method parameter). And every
+    later mention of the name reaches it, directly or through the writers in
+    between, so it is ordered ahead of its uses and is reachable from the
+    return whenever one of them is. Reachability is what keeps a live
+    declaration from being pruned as disconnected dead code. Pruning one that
+    shadows an outer name rebinds the later references to the outer binding
+    (RC1 scope-awareness, SliceOfInlineConcat attack-1); pruning one that
+    shadows nothing leaves its writes with no binder, as with the return slot
+    the inliner declares ahead of a branching callee. Whether the declared
+    name is also bound outside the block makes no difference to either, so the
+    graph does not ask.
+
+    Names are compared textually, with no scope resolution, and a statement
+    with nested blocks counts as one unit that writes whatever any statement
+    inside it writes; both only add edges.
+
+    The proof namespace is unused: a name that no statement of the block writes
+    produces no edge whatever it refers to, and a local or field that happens
+    to share its name with a proof-level definition needs its edges like any
+    other.
+    """
+    dependency_graph = DependencyGraph()
+    for statement in block.statements:
+        dependency_graph.add_node(Node(statement))
+    nodes = dependency_graph.nodes
+
+    field_names = {field.name for field in fields}
+    access = [
+        _StatementAccess(statement, field_names) for statement in block.statements
+    ]
+
+    for index, current in enumerate(access):
+        node_in_graph = nodes[index]
+
+        # Returns and field writes are the observable events of a method, so
+        # their relative order is fixed.
+        if current.contains_return:
+            for earlier_index in range(index):
+                earlier = access[earlier_index]
+                if earlier.mutates_field or earlier.contains_return:
+                    node_in_graph.add_neighbour(nodes[earlier_index])
+
+        if current.mutates_field:
+            for earlier_index in range(index):
+                if access[earlier_index].contains_return:
+                    node_in_graph.add_neighbour(nodes[earlier_index])
+
+        for name in current.mentions:
+            if name in current.writes:
+                # WAR / WAW: below EVERY earlier mention of the name, nearest
+                # first. A bare declaration is a write, and so a mention.
+                for earlier_index in range(index - 1, -1, -1):
+                    if name in access[earlier_index].mention_set:
+                        node_in_graph.add_neighbour(nodes[earlier_index])
+            else:
+                # RAW: below the nearest earlier writer of the name (a bare
+                # declaration included), which is itself below all the
+                # earlier ones.
+                for earlier_index in range(index - 1, -1, -1):
+                    if name in access[earlier_index].writes:
+                        node_in_graph.add_neighbour(nodes[earlier_index])
+                        break
 
     return dependency_graph
 
@@ -159,7 +177,10 @@ class Node:
         )
 
     def add_neighbour(self, neighbour: Node) -> None:
-        if not neighbour in self.in_neighbours:
+        # By identity, not ``==``: two distinct statements that happen to be
+        # structurally equal (`S.Touch(f); S.Touch(f);`) are two neighbours,
+        # and a write below both needs an edge to each.
+        if not any(existing is neighbour for existing in self.in_neighbours):
             self.in_neighbours.append(neighbour)
 
 
@@ -304,6 +325,10 @@ def unnecessary_statement_info(
             if (
                 isinstance(statement, frog_ast.ReturnStatement)
                 or visitors.assigns_variable(necessary_vars, statement)
+                or (
+                    isinstance(statement, frog_ast.VariableDeclaration)
+                    and statement.name in {var.name for var in necessary_vars}
+                )
                 # The stateful `x <-uniq[S] T` form implicitly does
                 # `S = S union {x}`, an adversary-observable mutation of S, so
                 # it is NEVER dead even when its target `x` is unused; dropping

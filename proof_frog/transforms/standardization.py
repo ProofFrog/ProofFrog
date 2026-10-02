@@ -8,14 +8,13 @@ produce identical ASTs.
 # pylint: disable=duplicate-code
 # ``_ParameterStandardizer`` deliberately mirrors ``alpha_rename._AlphaRenamer``'s
 # position-sensitive scope walk (``_active`` / ``_rewrite`` / ``_rename_block``);
-# the two normalize different binder classes (parameters vs typed locals) and the
+# the two normalize different binder classes (parameters vs local binders) and the
 # shared shape is the point, not accidental duplication.
 
 from __future__ import annotations
 
 import copy
 import heapq
-import functools
 from typing import cast
 
 from .. import frog_ast
@@ -23,7 +22,8 @@ from .. import dependencies
 from ..visitors import (
     BlockTransformer,
     SearchVisitor,
-    ReplaceTransformer,
+    Transformer,
+    referenced_variable_names,
     rename_value_references,
     type_position_names,
     walk_children,
@@ -37,83 +37,247 @@ from .alpha_rename import _RefRewriter
 # ---------------------------------------------------------------------------
 
 
-class VariableStandardizingTransformer(BlockTransformer):
-    """Renames all typed local variables to canonical names (v1, v2, v3, ...).
+class VariableStandardizingTransformer(Transformer):
+    """Give each method's local binders canonical ``vN`` names in binder order.
 
-    Variables are numbered in declaration order across all methods.  A
-    two-phase rename is used (first to collision-free intermediates, then
-    to final names) to avoid conflicts when user-written names overlap
-    with the v1/v2/... namespace.
+    Numbering follows the order of the binders themselves (typed assignments
+    and samples, bare declarations, loop binders) in a pre-order walk of the
+    method body, not the order in which the locals are first used.
 
-    Method parameter names are collected before processing each method's
-    block, and the Phase 2 numbering skips any ``vN`` name that would
-    collide with a parameter.
+    The scope walk renames references only while their binder is active. Bare
+    declarations and loop binders count as locals. Untyped writes only follow
+    an explicit binder already in scope.
+
+    A minted name must not be one the method already uses for something else,
+    so every name the walk does not resolve to a local binder is reserved:
+    fields, game and method parameters, type names, every name the signature
+    mentions, and every name that is free at some point of the body. The free
+    names are found by the rename walk itself, run once in collecting mode
+    (``_free_names``), so the two cannot disagree about what a binder covers.
     """
 
     def __init__(self) -> None:
-        self.variable_counter = 0
-        self._param_names: set[str] = set()
+        self._field_names: set[str] = set()
+        self._game_type_names: set[str] = set()
+        self._reserved: set[str] = set()
+        self._counter = 0
+        # Set while the walk runs in collecting mode: the names seen so far
+        # that no active binder resolves. ``None`` while renaming.
+        self._free: set[str] | None = None
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
-        new_game = copy.deepcopy(game)
-        new_game.methods = [self._transform_method(m) for m in new_game.methods]
-        return new_game
+        self._field_names = {field.name for field in game.fields} | {
+            param.name for param in game.parameters
+        }
+        self._game_type_names = type_position_names([*game.parameters, *game.fields])
+        methods = [self.transform_method(method) for method in game.methods]
+        return frog_ast.Game((game.name, game.parameters, game.fields, methods))
 
-    def _transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
-        self._param_names = {p.name for p in method.signature.parameters}
-        return self.transform(method)
+    @staticmethod
+    def _type_names(node: object, in_type: bool = False) -> set[str]:
+        if isinstance(node, frog_ast.Variable):
+            return {node.name} if in_type else set()
+        if isinstance(node, list):
+            names: set[str] = set()
+            for item in node:
+                names.update(
+                    VariableStandardizingTransformer._type_names(item, in_type)
+                )
+            return names
+        if isinstance(node, frog_ast.ASTNode):
+            names = set()
+            for _, child, child_in_type in walk_children(node, in_type, escape=True):
+                names.update(
+                    VariableStandardizingTransformer._type_names(child, child_in_type)
+                )
+            return names
+        return set()
 
-    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        new_block = copy.deepcopy(block)
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        parameters = {param.name for param in method.signature.parameters}
+        self._reserved = (
+            self._field_names
+            | parameters
+            | self._game_type_names
+            | self._type_names(method)
+            | self._free_names(method, parameters)
+        )
+        self._counter = 0
+        block = self._rename_block(method.block, [])
+        return frog_ast.Method(method.signature, block)
 
-        # Collect typed local variable names in statement order.
-        ordered_names: list[str] = []
-        for statement in new_block.statements:
-            if not isinstance(
-                statement, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
-            ):
-                continue
-            if not isinstance(statement.var, frog_ast.Variable):
-                continue
-            if statement.the_type is None:
-                continue
-            ordered_names.append(statement.var.name)
+    def _free_names(self, method: frog_ast.Method, parameters: set[str]) -> set[str]:
+        """Every name in *method* that no local binder resolves where it occurs.
 
-        def replace_all(blk: frog_ast.Block, old: str, new: str) -> frog_ast.Block:
-            # ReplaceTransformer uses identity (`is`) comparison, so we use
-            # SearchVisitor to get the actual object reference first, then
-            # replace one occurrence at a time until none remain.
-            def var_used(var: frog_ast.Variable, node: frog_ast.ASTNode) -> bool:
-                return node == var
+        This is the rename walk run in collecting mode: binders keep their
+        names, and ``_rewrite`` records each name it meets that no active
+        binder resolves instead of renaming the ones that one does. A
+        binder covers references from its own statement onward, and a nested
+        block binds nothing for its parent, so a name bound in one branch and
+        read elsewhere is free there; a whole-method ``references - binders``
+        set misses it.
 
-            while True:
-                found = SearchVisitor[frog_ast.Variable](
-                    functools.partial(var_used, frog_ast.Variable(old))
-                ).visit(blk)
-                if found is None:
-                    break
-                blk = ReplaceTransformer(found, frog_ast.Variable(new)).transform(blk)
-            return blk
-
-        # Phase 1: rename each typed variable to a collision-free intermediate
-        # name. These names cannot conflict with any user-written "v1", "v2", ...
-        # names, so this step is always safe regardless of what names already exist.
-        for i, old_name in enumerate(ordered_names):
-            new_block = replace_all(new_block, old_name, f"__vstandard_{i}__")
-
-        # Phase 2: rename intermediate names to v1, v2, v3, ... in order.
-        # Phase 1 guarantees each source name is unique, so no collision is
-        # possible among locals.  Skip any vN that collides with a method
-        # parameter to avoid shadowing.
-        for i in range(len(ordered_names)):
-            self.variable_counter += 1
-            while f"v{self.variable_counter}" in self._param_names:
-                self.variable_counter += 1
-            new_block = replace_all(
-                new_block, f"__vstandard_{i}__", f"v{self.variable_counter}"
+        The signature is outside every local binder, so each name it mentions
+        is free, including one that occurs only as a length argument
+        (``BitString<n> O(BitString<n> m)``), which ``_type_names`` skips.
+        """
+        self._free = referenced_variable_names(method.signature)
+        try:
+            self._rename_block(
+                method.block, [], {parameter: parameter for parameter in parameters}
             )
+            return self._free
+        finally:
+            self._free = None
 
-        return new_block
+    def _fresh(self) -> str:
+        self._counter += 1
+        while f"v{self._counter}" in self._reserved:
+            self._counter += 1
+        return f"v{self._counter}"
+
+    def _bind(self, name: str, local: dict[str, str]) -> str:
+        """Open the binder *name* in *local* and return the name it gets: a
+        fresh ``vN``, or itself while collecting free names."""
+        new_name = name if self._free is not None else self._fresh()
+        local[name] = new_name
+        return new_name
+
+    @staticmethod
+    def _active(scopes: list[dict[str, str]]) -> dict[str, str]:
+        active: dict[str, str] = {}
+        for scope in scopes:
+            active.update(scope)
+        return active
+
+    def _rewrite(
+        self,
+        node: frog_ast.ASTNode,
+        scopes: list[dict[str, str]],
+        in_type: bool = False,
+    ) -> frog_ast.ASTNode:
+        active = self._active(scopes)
+        if self._free is not None:
+            # Collecting: every name here that no active binder resolves is
+            # free, whatever position it occurs in.
+            self._free.update(referenced_variable_names(node) - active.keys())
+            return node
+        return cast(
+            frog_ast.ASTNode,
+            rename_value_references(node, active, in_type),
+        )
+
+    def _rename_block(
+        self,
+        block: frog_ast.Block,
+        enclosing: list[dict[str, str]],
+        initial: dict[str, str] | None = None,
+    ) -> frog_ast.Block:
+        local = dict(initial) if initial else {}
+        scopes = enclosing + [local]
+        return frog_ast.Block(
+            [self._rename_statement(stmt, scopes, local) for stmt in block.statements]
+        )
+
+    def _rename_statement(
+        self,
+        stmt: frog_ast.Statement,
+        scopes: list[dict[str, str]],
+        local: dict[str, str],
+    ) -> frog_ast.Statement:
+        if isinstance(
+            stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            return self._rename_assignment(stmt, scopes, local)
+        if isinstance(stmt, frog_ast.VariableDeclaration):
+            the_type = self._rewrite(stmt.type, scopes, True)
+            name = self._bind(stmt.name, local)
+            return frog_ast.VariableDeclaration(cast(frog_ast.Type, the_type), name)
+        if isinstance(stmt, frog_ast.IfStatement):
+            conditions = [
+                cast(frog_ast.Expression, self._rewrite(c, scopes))
+                for c in stmt.conditions
+            ]
+            blocks = [self._rename_block(b, scopes) for b in stmt.blocks]
+            return frog_ast.IfStatement(conditions, blocks)
+        if isinstance(stmt, frog_ast.NumericFor):
+            start = cast(frog_ast.Expression, self._rewrite(stmt.start, scopes))
+            end = cast(frog_ast.Expression, self._rewrite(stmt.end, scopes))
+            loop_scope: dict[str, str] = {}
+            name = self._bind(stmt.name, loop_scope)
+            body = self._rename_block(stmt.block, scopes, loop_scope)
+            return frog_ast.NumericFor(name, start, end, body)
+        if isinstance(stmt, frog_ast.GenericFor):
+            over = cast(frog_ast.Expression, self._rewrite(stmt.over, scopes))
+            var_type = cast(frog_ast.Type, self._rewrite(stmt.var_type, scopes, True))
+            loop_scope = {}
+            name = self._bind(stmt.var_name, loop_scope)
+            body = self._rename_block(stmt.block, scopes, loop_scope)
+            return frog_ast.GenericFor(var_type, name, over, body)
+        if isinstance(stmt, frog_ast.Block):
+            return self._rename_block(stmt, scopes)
+        return cast(frog_ast.Statement, self._rewrite(stmt, scopes))
+
+    def _sampling_domain(
+        self,
+        stmt: frog_ast.Sample | frog_ast.UniqueSample,
+        scopes: list[dict[str, str]],
+    ) -> frog_ast.ASTNode:
+        """The ``sampled_from`` of a draw, with every name an active local
+        binder resolves renamed, bare names included.
+
+        ``visitors.TYPE_SLOTS`` lists ``sampled_from`` as a type, and in a
+        meaningful draw it is one: it names no local except in a length
+        argument (``BitString<n>``), which is renamed in type context too. It
+        is rewritten in expression context here because a bare name there can
+        still resolve to a local. The typechecker only asks that the
+        right-hand side of ``<-`` be a ``Type``, and ``Variable`` is one, so
+        ``T x <- s;`` with ``s`` a local value reaches the engine. Under
+        position-sensitive scoping that ``s`` is the local, and AlphaRename's
+        name-keyed rewrite renames it with its binder. Left alone here, the
+        binder would become ``vN`` while this reference kept its ``__aN__``
+        name and referred to nothing. A name with no active local binder (a
+        ``Set`` let, a type alias) is not in the scope map and is left as is.
+        """
+        return self._rewrite(stmt.sampled_from, scopes)
+
+    def _rename_assignment(
+        self,
+        stmt: frog_ast.Assignment | frog_ast.Sample | frog_ast.UniqueSample,
+        scopes: list[dict[str, str]],
+        local: dict[str, str],
+    ) -> frog_ast.Statement:
+        new_stmt: frog_ast.Assignment | frog_ast.Sample | frog_ast.UniqueSample
+        new_type = (
+            cast(frog_ast.Type, self._rewrite(stmt.the_type, scopes, True))
+            if stmt.the_type is not None
+            else None
+        )
+        if isinstance(stmt, frog_ast.Assignment):
+            new_stmt = frog_ast.Assignment(
+                new_type,
+                stmt.var,
+                cast(frog_ast.Expression, self._rewrite(stmt.value, scopes)),
+            )
+        elif isinstance(stmt, frog_ast.Sample):
+            new_stmt = frog_ast.Sample(
+                new_type,
+                stmt.var,
+                cast(frog_ast.Expression, self._sampling_domain(stmt, scopes)),
+            )
+        else:
+            new_stmt = frog_ast.UniqueSample(
+                new_type,
+                stmt.var,
+                cast(frog_ast.Expression, self._rewrite(stmt.unique_set, scopes)),
+                cast(frog_ast.Type, self._sampling_domain(stmt, scopes)),
+                stmt.surface_form,
+            )
+        if stmt.the_type is not None and isinstance(stmt.var, frog_ast.Variable):
+            new_stmt.var = frog_ast.Variable(self._bind(stmt.var.name, local))
+        else:
+            new_stmt.var = cast(frog_ast.Expression, self._rewrite(stmt.var, scopes))
+        return new_stmt
 
 
 class _ParameterStandardizer:

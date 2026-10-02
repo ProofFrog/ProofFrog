@@ -1984,7 +1984,7 @@ class ProofEngine:
             assert isinstance(game_node, frog_ast.Game)
             game = instantiate(game_node, challenger.args, self.proof_namespace)
 
-        lookup = copy.deepcopy(self.method_lookup)
+        lookup = dict(self.method_lookup)
         if reduction:
             reduction_ast = self.resolve_step_game(reduction)
             assert isinstance(reduction_ast, frog_ast.Reduction)
@@ -2007,7 +2007,7 @@ class ProofEngine:
             game = self.apply_reduction(game, reduction_ast)
 
         for _iteration in range(_MAX_FIXED_POINT_ITERATIONS):
-            new_game = visitors.InlineTransformer(lookup).transform(copy.deepcopy(game))
+            new_game = visitors.InlineTransformer(lookup).transform(game)
             if game != new_game:
                 game = new_game
             else:
@@ -2151,21 +2151,16 @@ class ProofEngine:
     def sort_game(self, game: frog_ast.Game) -> frog_ast.Game:
         new_game = copy.deepcopy(game)
         for method in new_game.methods:
-            param_names = {p.name for p in method.signature.parameters}
-            method.block = self.sort_block(game, method.block, param_names)
+            method.block = self.sort_block(game, method.block)
         return new_game
 
     def sort_block(
         self,
         game: frog_ast.Game,
         block: frog_ast.Block,
-        param_names: set[str] | None = None,
     ) -> frog_ast.Block:
-        # A bare declaration that shadows a field or parameter must survive the
-        # sort (its removal would rebind later references to the outer binding).
-        shadowed = {field.name for field in game.fields} | (param_names or set())
         graph = dependencies.generate_dependency_graph(
-            block, game.fields, self.proof_namespace, shadowed_names=shadowed
+            block, game.fields, self.proof_namespace
         )
 
         def is_return(node: frog_ast.ASTNode) -> bool:

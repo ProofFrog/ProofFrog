@@ -1,0 +1,30 @@
+// The guard tests a local initialised to a tuple that reads the
+// unassigned field f. Removing the guard would leave the declaration
+// unused, and the read of f with it. Expected: rejected.
+import 'Probe.primitive';
+
+Game Real(Probe C) {
+    Bool f;
+    Void Store(Bool v) {
+        f = v;
+    }
+    [Int, Bool]? Query(Int x) {
+        [Int, Bool]? s = [x, f];
+        if (s == None) {
+            return None;
+        }
+        return [x, true];
+    }
+}
+
+Game Random(Probe C) {
+    Bool f;
+    Void Store(Bool v) {
+        f = v;
+    }
+    [Int, Bool]? Query(Int x) {
+        return [x, true];
+    }
+}
+
+export as DeclUnassignedField;

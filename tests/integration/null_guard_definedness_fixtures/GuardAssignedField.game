@@ -1,0 +1,34 @@
+// Control for GuardUnassignedField: Initialize assigns f, so the read is
+// always defined and the guard is dead. Expected: accepted.
+import 'Probe.primitive';
+
+Game Real(Probe C) {
+    Bool f;
+    Void Initialize() {
+        f = false;
+    }
+    Void Store(Bool v) {
+        f = v;
+    }
+    [Int, Bool]? Query(Int x) {
+        if (C.IsNone([x, f])) {
+            return None;
+        }
+        return [x, true];
+    }
+}
+
+Game Random(Probe C) {
+    Bool f;
+    Void Initialize() {
+        f = false;
+    }
+    Void Store(Bool v) {
+        f = v;
+    }
+    [Int, Bool]? Query(Int x) {
+        return [x, true];
+    }
+}
+
+export as GuardAssignedField;

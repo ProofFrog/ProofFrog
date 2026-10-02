@@ -3249,19 +3249,20 @@ class MergeNestedGuardTransformer(BlockTransformer):
         return block
 
 
+class _BlockNodeCollector(Visitor[list[frog_ast.ASTNode]]):
+    def __init__(self) -> None:
+        self.nodes: list[frog_ast.ASTNode] = []
+
+    def result(self) -> list[frog_ast.ASTNode]:
+        return self.nodes
+
+    def leave_ast_node(self, node: frog_ast.ASTNode) -> None:
+        self.nodes.append(node)
+
+
 def _iter_block_nodes(block: frog_ast.Block) -> list[frog_ast.ASTNode]:
     """Return every AST node in *block* (the block and all descendants)."""
-    nodes: list[frog_ast.ASTNode] = []
-
-    class _Collector(Visitor[None]):
-        def result(self) -> None:
-            return None
-
-        def leave_ast_node(self, node: frog_ast.ASTNode) -> None:
-            nodes.append(node)
-
-    _Collector().visit(block)
-    return nodes
+    return _BlockNodeCollector().visit(block)
 
 
 def _condition_literal(cond: frog_ast.Expression, holds: bool) -> tuple[str, bool]:

@@ -1,3 +1,4 @@
+import pytest
 from sympy import Symbol
 from proof_frog.transforms._base import (
     NearMiss,
@@ -43,6 +44,8 @@ from proof_frog.transforms.random_functions import (
 from proof_frog.transforms.structural import UniformBijectionElimination
 from proof_frog.transforms.tuples import ExpandTuple, SplitBareTupleDeclarations
 from proof_frog.transforms.map_iteration import LazyMapScan
+from proof_frog.transforms.types import DeadNullGuardElimination
+from proof_frog.transforms.alpha_rename import AlphaRename
 from proof_frog.visitors import NameTypeMap
 
 
@@ -2714,3 +2717,116 @@ def test_local_fn_near_miss_sample_skippable_by_initialize_return() -> None:
     result = LocalFunctionFieldToLet().apply(game, ctx)
     assert result == game
     assert any("read before its sample" in nm.reason for nm in _local_fn_misses(ctx))
+
+
+def _dead_null_guard_misses(body: str) -> list[NearMiss]:
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Int Test(Int x, Bool c) {{
+                Int? v = x;
+                {body}
+                return 1;
+            }}
+        }}
+        """)
+    DeadNullGuardElimination().apply(game, ctx)
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Dead Null Guard Elimination"
+    ]
+
+
+@pytest.mark.parametrize(
+    "write, kind",
+    [
+        ("if (c) { v = None; }", "an assignment"),
+        ("for (Int v = 0 to 2) { x = v; }", "a loop binder"),
+        ("Int? v;", "a redeclaration"),
+    ],
+)
+def test_dead_null_guard_near_miss_on_later_write(write: str, kind: str) -> None:
+    """The guard on a local initialised non-null is kept because a later
+    statement may write the local."""
+    misses = _dead_null_guard_misses(f"{write} if (v == None) {{ return 0; }}")
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert misses[0].method == "Test"
+    assert kind in misses[0].reason
+
+
+def test_dead_null_guard_near_miss_on_write_after_guard() -> None:
+    misses = _dead_null_guard_misses("if (v == None) { return 0; } v = None;")
+    assert len(misses) == 1 and "an assignment" in misses[0].reason
+
+
+def test_dead_null_guard_near_miss_describes_renamed_local() -> None:
+    """AlphaRename runs first, so the local usually has an `__aN__` name that
+    never appears in the canonical diff.  The near-miss then leaves
+    `variable` unset, so the diagnostic matcher keeps it, and describes the
+    local by its declaration."""
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int Test(Int x, Bool c) {
+                Int? v = x;
+                if (c) { v = None; }
+                if (v == None) { return 0; }
+                return 1;
+            }
+        }
+        """)
+    game = AlphaRename().apply(game, ctx)
+    DeadNullGuardElimination().apply(game, ctx)
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Dead Null Guard Elimination"
+    ]
+    assert len(misses) == 1
+    assert misses[0].variable is None
+    assert misses[0].method == "Test"
+    assert "'Int?'" in misses[0].reason and "'x'" in misses[0].reason
+    assert "__a" not in misses[0].reason
+
+
+def test_dead_null_guard_no_near_miss_when_guard_removed() -> None:
+    assert not _dead_null_guard_misses("if (v == None) { return 0; }")
+
+
+def test_dead_null_guard_no_near_miss_without_guard() -> None:
+    """A written local with no guard on it is not a declined rewrite."""
+    assert not _dead_null_guard_misses("if (c) { v = None; }")
+
+
+def test_dead_null_guard_no_near_miss_for_local_initialised_none() -> None:
+    """A guard on a genuinely nullable local is not a near-miss."""
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int Test(Int x) {
+                Int? v = None;
+                v = x;
+                if (v == None) { return 0; }
+                return 1;
+            }
+        }
+        """)
+    DeadNullGuardElimination().apply(game, ctx)
+    assert not ctx.near_misses

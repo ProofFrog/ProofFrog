@@ -12,17 +12,116 @@ from typing import Optional
 
 from .. import frog_ast
 from ..visitors import (
+    SearchVisitor,
     Transformer,
     BlockTransformer,
     NameTypeMap,
     build_game_type_map,
     MethodScopedTypeMapMixin,
+    lvalue_base_name,
 )
-from ._base import TransformPass, PipelineContext
+from ._base import NearMiss, TransformPass, PipelineContext
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
 # ---------------------------------------------------------------------------
+
+
+def _first_write(node: frog_ast.ASTNode, name: str) -> Optional[frog_ast.ASTNode]:
+    """The first statement in *node*, at any depth, that may write *name*.
+
+    Counts assignments, samples, element writes, ``for`` binders, bare
+    redeclarations (``T? v;`` rebinds *name* to an unset, possibly-None
+    variable) and tuple-destructuring bindings.  A write whose l-value has no
+    variable base is counted too, since what it targets cannot be told.
+
+    The last three are defense in depth: AlphaRename renames a redeclaration
+    before this pass runs, the parser desugars destructuring into plain
+    declarations, and the grammar's l-values always have a variable base.
+    """
+
+    def writes(inner: frog_ast.ASTNode) -> bool:
+        if isinstance(
+            inner, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            base = lvalue_base_name(inner.var)
+            return base is None or base == name
+        if isinstance(inner, frog_ast.VariableDeclaration):
+            return inner.name == name
+        if isinstance(inner, frog_ast.DestructuringBinding):
+            return name in inner.names
+        if isinstance(inner, frog_ast.NumericFor):
+            return inner.name == name
+        if isinstance(inner, frog_ast.GenericFor):
+            return inner.var_name == name
+        return False
+
+    return SearchVisitor[frog_ast.ASTNode](writes).visit(node)
+
+
+def _describe_write(write: frog_ast.ASTNode) -> str:
+    """Name the kind of write *write* is, for a near-miss message."""
+    if isinstance(write, (frog_ast.NumericFor, frog_ast.GenericFor)):
+        return "a loop binder of the same name"
+    if isinstance(write, (frog_ast.VariableDeclaration, frog_ast.DestructuringBinding)):
+        return "a redeclaration"
+    assert isinstance(
+        write, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+    )
+    if write.the_type is not None:
+        return "a redeclaration"
+    if not isinstance(write.var, frog_ast.Variable):
+        return "an element write"
+    if isinstance(write, frog_ast.Assignment):
+        return "an assignment"
+    return "a sample"
+
+
+def _conflicting_names(
+    method: frog_ast.Method, outer: list[tuple[str, frog_ast.Type]]
+) -> set[str]:
+    """Names bound in *method*'s scope under more than one type.
+
+    *outer* lists the bindings visible from outside the method (fields,
+    proof lets).  To these are added the method's parameters and every binder
+    in its body, at any depth: typed declarations and ``for`` binders.  A
+    name-to-type map of the method holds one type per name, so for a name
+    returned here it is wrong at some use.
+    """
+    bindings: dict[str, list[frog_ast.Type]] = {}
+    conflicting: set[str] = set()
+
+    def bind(name: str, the_type: frog_ast.Type) -> None:
+        bindings.setdefault(name, []).append(the_type)
+
+    for name, the_type in outer:
+        bind(name, the_type)
+    for param in method.signature.parameters:
+        bind(param.name, param.type)
+
+    def collect(inner: frog_ast.ASTNode) -> bool:
+        if isinstance(
+            inner, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            if inner.the_type is not None and isinstance(inner.var, frog_ast.Variable):
+                bind(inner.var.name, inner.the_type)
+        elif isinstance(inner, frog_ast.VariableDeclaration):
+            bind(inner.name, inner.type)
+        elif isinstance(inner, frog_ast.NumericFor):
+            bind(inner.name, frog_ast.IntType())
+        elif isinstance(inner, frog_ast.GenericFor):
+            bind(inner.var_name, inner.var_type)
+        elif isinstance(inner, frog_ast.DestructuringBinding):
+            conflicting.update(inner.names)
+        return False
+
+    SearchVisitor[frog_ast.ASTNode](collect).visit(method.block)
+    conflicting.update(
+        name
+        for name, types in bindings.items()
+        if any(other != types[0] for other in types[1:])
+    )
+    return conflicting
 
 
 class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
@@ -38,51 +137,139 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
     patterns like `T? v = E.Enc(...); if (v == None) { return ...; } return v;`
     which can be simplified by this rule once E.Enc's non-nullable return
     type is known.
+
+    The type map holds one type per name for a whole method.  A name bound
+    twice under different types (a nullable field or parameter shadowed by a
+    non-nullable local of an inner block, or two sibling-block locals) would
+    get the wrong type at some guard, so the declared type of such a name is
+    not trusted.  AlphaRename gives every local a distinct name before this
+    pass runs; the check is there so the pass does not depend on it.
     """
 
     def __init__(
         self,
         type_map: NameTypeMap,
         proof_instantiables: Optional[dict[str, frog_ast.Instantiable]] = None,
+        ctx: Optional[PipelineContext] = None,
     ) -> None:
         self.type_map = type_map
         self.proof_instantiables = proof_instantiables or {}
+        self.ctx = ctx
+        self._method_name: Optional[str] = None
+        self._outer_bindings: list[tuple[str, frog_ast.Type]] = []
+        self._conflicting: set[str] = set()
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.ASTNode:
+        saved = self._outer_bindings
+        self._outer_bindings = [(field.name, field.type) for field in game.fields]
+        if self._scope_let_types is not None:
+            self._outer_bindings += [
+                (pair.name, pair.type) for pair in self._scope_let_types.type_map
+            ]
+        try:
+            return self._transform_children(game)
+        finally:
+            self._outer_bindings = saved
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.ASTNode:
+        saved = (self._method_name, self._conflicting)
+        self._method_name = method.signature.name
+        self._conflicting = _conflicting_names(method, self._outer_bindings)
+        try:
+            return super().transform_method(method)
+        finally:
+            self._method_name, self._conflicting = saved
+
+    def _declared_type(self, name: str) -> Optional[frog_ast.Type]:
+        """The type *name* is declared with, or None if it is unknown or the
+        method binds *name* under more than one type."""
+        if name in self._conflicting:
+            return None
+        return self.type_map.get(name)
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        # Pre-pass: for nullable declarations `T? v = expr` where expr is
-        # provably non-nullable, record v as effectively non-null.
-        # But invalidate if the variable is later reassigned.
+        # A nullable declaration `T? v = expr` with a provably non-nullable
+        # expr makes v non-null for the guards after it, unless a later
+        # statement, at any depth, may write v.
         non_null_locals: set[str] = set()
-        for stmt in block.statements:
-            if (
-                isinstance(stmt, frog_ast.Assignment)
-                and stmt.the_type is not None
-                and isinstance(stmt.the_type, frog_ast.OptionalType)
-                and isinstance(stmt.var, frog_ast.Variable)
-                and stmt.value is not None
-                and self._is_nonnullable_expr(stmt.value)
-            ):
-                non_null_locals.add(stmt.var.name)
-            elif (
-                isinstance(
-                    stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
-                )
-                and isinstance(stmt.var, frog_ast.Variable)
-                and stmt.var.name in non_null_locals
-                and (not isinstance(stmt, frog_ast.Assignment) or stmt.the_type is None)
-            ):
-                # Variable is reassigned (untyped assignment, sample, or
-                # unique sample) — it may now be nullable.
-                non_null_locals.discard(stmt.var.name)
-
+        # Locals initialised non-null that a later statement may write,
+        # mapped to the declaration and that write: a guard on one is kept,
+        # and reported.
+        written_locals: dict[str, tuple[frog_ast.Assignment, frog_ast.ASTNode]] = {}
         new_statements: list[frog_ast.Statement] = []
-        for statement in block.statements:
-            if isinstance(statement, frog_ast.IfStatement) and self._is_dead_null_guard(
-                statement, non_null_locals
-            ):
-                continue
+        for index, statement in enumerate(block.statements):
+            if isinstance(statement, frog_ast.IfStatement):
+                if self._is_dead_null_guard(statement, non_null_locals):
+                    continue
+                self._report_kept_guard(statement, written_locals)
             new_statements.append(statement)
+            if (
+                isinstance(statement, frog_ast.Assignment)
+                and isinstance(statement.the_type, frog_ast.OptionalType)
+                and isinstance(statement.var, frog_ast.Variable)
+                and statement.value is not None
+                and self._is_nonnullable_expr(statement.value)
+            ):
+                name = statement.var.name
+                write = next(
+                    (
+                        found
+                        for later in block.statements[index + 1 :]
+                        if (found := _first_write(later, name)) is not None
+                    ),
+                    None,
+                )
+                if write is None:
+                    non_null_locals.add(name)
+                else:
+                    written_locals[name] = (statement, write)
         return frog_ast.Block(new_statements)
+
+    def _report_kept_guard(
+        self,
+        if_stmt: frog_ast.IfStatement,
+        written_locals: dict[str, tuple[frog_ast.Assignment, frog_ast.ASTNode]],
+    ) -> None:
+        """Record a near-miss for a null guard kept only because the local it
+        tests, though initialised non-null, may be written later."""
+        if self.ctx is None:
+            return
+        tested = self._null_guard_subject(if_stmt)
+        if not isinstance(tested, frog_ast.Variable):
+            return
+        found = written_locals.get(tested.name)
+        if found is None:
+            return
+        declaration, write = found
+        # AlphaRename has usually given the local an internal `__aN__` name
+        # by now.  That name means nothing to the author and never appears in
+        # the canonical diff, so describe the local by its declaration and
+        # leave `variable` unset (the diagnostic matcher would otherwise look
+        # for the name in the diff and drop the near-miss).
+        internal = tested.name.startswith("__")
+        subject = (
+            f"a local of type '{declaration.the_type}' initialised to "
+            f"'{declaration.value}'"
+            if internal
+            else f"'{tested.name}'"
+        )
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Dead Null Guard Elimination",
+                reason=(
+                    f"Null guard not removed: {subject} starts out non-null, "
+                    f"but {_describe_write(write)} later in the same block "
+                    f"may change it"
+                ),
+                location=if_stmt.origin,
+                suggestion=(
+                    "Declare the local with a non-optional type, or write "
+                    "the later value to a different variable"
+                ),
+                variable=None if internal else tested.name,
+                method=self._method_name,
+            )
+        )
 
     def _is_nonnullable_expr(self, expr: frog_ast.ASTNode) -> bool:
         """Return True if expr is provably non-nullable.
@@ -95,7 +282,7 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
         if isinstance(expr, frog_ast.NoneExpression):
             return False
         if isinstance(expr, frog_ast.Variable):
-            t = self.type_map.get(expr.name)
+            t = self._declared_type(expr.name)
             return t is not None and not isinstance(t, frog_ast.OptionalType)
         if isinstance(expr, frog_ast.FuncCall) and isinstance(
             expr.func, frog_ast.FieldAccess
@@ -117,31 +304,37 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
                             )
         return False
 
+    @staticmethod
+    def _null_guard_subject(
+        if_stmt: frog_ast.IfStatement,
+    ) -> Optional[frog_ast.Expression]:
+        """The `x` of an else-less `if (x == None)` / `if (None == x)`."""
+        if if_stmt.has_else_block() or len(if_stmt.conditions) != 1:
+            return None
+        condition = if_stmt.conditions[0]
+        if not isinstance(condition, frog_ast.BinaryOperation):
+            return None
+        if condition.operator != frog_ast.BinaryOperators.EQUALS:
+            return None
+        if isinstance(condition.right_expression, frog_ast.NoneExpression):
+            return condition.left_expression
+        if isinstance(condition.left_expression, frog_ast.NoneExpression):
+            return condition.right_expression
+        return None
+
     def _is_dead_null_guard(
         self,
         if_stmt: frog_ast.IfStatement,
         non_null_locals: Optional[set[str]] = None,
     ) -> bool:
         """Check if this is a dead `if (x == None) { ... }` guard."""
-        if if_stmt.has_else_block() or len(if_stmt.conditions) != 1:
-            return False
-        condition = if_stmt.conditions[0]
-        if not isinstance(condition, frog_ast.BinaryOperation):
-            return False
-        if condition.operator != frog_ast.BinaryOperators.EQUALS:
-            return False
-
-        # Identify which side is None and which is the tested expression.
-        if isinstance(condition.right_expression, frog_ast.NoneExpression):
-            tested_expr = condition.left_expression
-        elif isinstance(condition.left_expression, frog_ast.NoneExpression):
-            tested_expr = condition.right_expression
-        else:
+        tested_expr = self._null_guard_subject(if_stmt)
+        if tested_expr is None:
             return False
 
         # Case 1: tested expression is a variable with non-nullable type.
         if isinstance(tested_expr, frog_ast.Variable):
-            var_type = self.type_map.get(tested_expr.name)
+            var_type = self._declared_type(tested_expr.name)
             if var_type is not None and not isinstance(var_type, frog_ast.OptionalType):
                 return True
             # Case 2: nullable var was assigned from a provably non-nullable expr.
@@ -300,7 +493,7 @@ class DeadNullGuardElimination(TransformPass):
             if isinstance(v, (frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game))
         }
         return (
-            DeadNullGuardEliminator(type_map, instantiables)
+            DeadNullGuardEliminator(type_map, instantiables, ctx)
             .scope_to_game(game, ctx.proof_let_types)
             .transform(game)
         )

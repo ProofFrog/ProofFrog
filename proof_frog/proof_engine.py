@@ -2151,21 +2151,16 @@ class ProofEngine:
     def sort_game(self, game: frog_ast.Game) -> frog_ast.Game:
         new_game = copy.deepcopy(game)
         for method in new_game.methods:
-            param_names = {p.name for p in method.signature.parameters}
-            method.block = self.sort_block(game, method.block, param_names)
+            method.block = self.sort_block(game, method.block)
         return new_game
 
     def sort_block(
         self,
         game: frog_ast.Game,
         block: frog_ast.Block,
-        param_names: set[str] | None = None,
     ) -> frog_ast.Block:
-        # A bare declaration that shadows a field or parameter must survive the
-        # sort (its removal would rebind later references to the outer binding).
-        shadowed = {field.name for field in game.fields} | (param_names or set())
         graph = dependencies.generate_dependency_graph(
-            block, game.fields, self.proof_namespace, shadowed_names=shadowed
+            block, game.fields, self.proof_namespace
         )
 
         def is_return(node: frog_ast.ASTNode) -> bool:

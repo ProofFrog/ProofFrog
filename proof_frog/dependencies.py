@@ -6,7 +6,7 @@ from . import frog_ast
 
 
 class _StatementAccess:
-    """What one statement of a block mentions, writes and binds: everything
+    """What one statement of a block mentions and writes: everything
     the dependency graph needs to know about it, computed once per statement
     instead of once per pair of statements."""
 
@@ -22,18 +22,18 @@ class _StatementAccess:
             variable.name
             for variable in visitors.referenced_variables_in_order(statement)
         ]
-        self.mention_set: set[str] = set(self.mentions)
         # Names the statement may write: the l-value base of every write
         # ANYWHERE in it -- including nested inside an if/for block -- whether
         # a plain, element, slice or field write (`M[0][0] = v` and `X.f = v`
         # are writes of `M` and `X`).
         self.writes: set[str] = set()
-        # A bare declaration (`T x;`) rebinds its name from here on.
-        self.declares: Optional[str] = (
-            statement.name
-            if isinstance(statement, frog_ast.VariableDeclaration)
-            else None
-        )
+        # A bare declaration (`T x;`) rebinds its name from here on: it is a
+        # write of the name it declares, and so a mention of it.
+        if isinstance(statement, frog_ast.VariableDeclaration):
+            self.writes.add(statement.name)
+            if statement.name not in self.mentions:
+                self.mentions.insert(0, statement.name)
+        self.mention_set: set[str] = set(self.mentions)
         self.contains_return = False
         # A statement mutates a field if it contains ANYWHERE a write whose
         # l-value base is a field. Checking only the top-level statement kind
@@ -74,7 +74,6 @@ def generate_dependency_graph(
     block: frog_ast.Block,
     fields: list[frog_ast.Field],
     _proof_namespace: frog_ast.Namespace,
-    shadowed_names: set[str] | None = None,
 ) -> DependencyGraph:
     """Build the statement-ordering graph of *block*: an edge from a statement
     to every earlier statement it must stay below.
@@ -96,19 +95,23 @@ def generate_dependency_graph(
       included.
 
     A bare declaration ``T x;`` is a write of ``x`` for this purpose: it
-    rebinds the name from there on. Names are compared textually, with no
-    scope resolution, and a statement with nested blocks counts as one unit
-    that writes whatever any statement inside it writes; both only add edges.
+    rebinds the name from there on. That one rule gives a declaration both
+    things it needs. It stays below every earlier mention of its name, which
+    may refer to an outer binding (a field, a method parameter). And every
+    later mention of the name reaches it, directly or through the writers in
+    between, so it is ordered ahead of its uses and is reachable from the
+    return whenever one of them is. Reachability is what keeps a live
+    declaration from being pruned as disconnected dead code. Pruning one that
+    shadows an outer name rebinds the later references to the outer binding
+    (RC1 scope-awareness, SliceOfInlineConcat attack-1); pruning one that
+    shadows nothing leaves its writes with no binder, as with the return slot
+    the inliner declares ahead of a branching callee. Whether the declared
+    name is also bound outside the block makes no difference to either, so the
+    graph does not ask.
 
-    *shadowed_names* are the names bound outside the block (fields, method
-    parameters). A bare declaration of such a name is a *shadowing binder*:
-    every later reference to the name resolves to the inner local, so the
-    declaration must not be pruned as disconnected dead code (doing so rebinds
-    those references to the outer binding -- RC1 scope-awareness,
-    SliceOfInlineConcat attack-1). Later mentions of the name therefore depend
-    on the declaration, which makes it reachable from the return and ordered
-    ahead of its uses. A caller that passes ``None`` does not know the
-    enclosing scope, so every bare declaration is treated as such a binder.
+    Names are compared textually, with no scope resolution, and a statement
+    with nested blocks counts as one unit that writes whatever any statement
+    inside it writes; both only add edges.
 
     The proof namespace is unused: a name that no statement of the block writes
     produces no edge whatever it refers to, and a local or field that happens
@@ -124,11 +127,6 @@ def generate_dependency_graph(
     access = [
         _StatementAccess(statement, field_names) for statement in block.statements
     ]
-
-    def binds(earlier: _StatementAccess, name: str) -> bool:
-        return earlier.declares == name and (
-            shadowed_names is None or name in shadowed_names
-        )
 
     for index, current in enumerate(access):
         node_in_graph = nodes[index]
@@ -146,31 +144,19 @@ def generate_dependency_graph(
                 if access[earlier_index].contains_return:
                     node_in_graph.add_neighbour(nodes[earlier_index])
 
-        names = list(current.mentions)
-        if current.declares is not None and current.declares not in names:
-            names.insert(0, current.declares)
-
-        for name in names:
-            if name == current.declares:
-                # A bare declaration rebinds its name from here on, so it stays
-                # below every earlier statement that mentions or declares it.
+        for name in current.mentions:
+            if name in current.writes:
+                # WAR / WAW: below EVERY earlier mention of the name, nearest
+                # first. A bare declaration is a write, and so a mention.
                 for earlier_index in range(index - 1, -1, -1):
-                    earlier = access[earlier_index]
-                    if name in earlier.mention_set or earlier.declares == name:
-                        node_in_graph.add_neighbour(nodes[earlier_index])
-            elif name in current.writes:
-                # WAR / WAW: below EVERY earlier mention (and binder) of the
-                # name, nearest first.
-                for earlier_index in range(index - 1, -1, -1):
-                    earlier = access[earlier_index]
-                    if name in earlier.mention_set or binds(earlier, name):
+                    if name in access[earlier_index].mention_set:
                         node_in_graph.add_neighbour(nodes[earlier_index])
             else:
-                # RAW: below the nearest earlier writer (or binder) of the
-                # name, which is itself below all the earlier ones.
+                # RAW: below the nearest earlier writer of the name (a bare
+                # declaration included), which is itself below all the
+                # earlier ones.
                 for earlier_index in range(index - 1, -1, -1):
-                    earlier = access[earlier_index]
-                    if name in earlier.writes or binds(earlier, name):
+                    if name in access[earlier_index].writes:
                         node_in_graph.add_neighbour(nodes[earlier_index])
                         break
 
@@ -339,6 +325,10 @@ def unnecessary_statement_info(
             if (
                 isinstance(statement, frog_ast.ReturnStatement)
                 or visitors.assigns_variable(necessary_vars, statement)
+                or (
+                    isinstance(statement, frog_ast.VariableDeclaration)
+                    and statement.name in {var.name for var in necessary_vars}
+                )
                 # The stateful `x <-uniq[S] T` form implicitly does
                 # `S = S union {x}`, an adversary-observable mutation of S, so
                 # it is NEVER dead even when its target `x` is unused; dropping

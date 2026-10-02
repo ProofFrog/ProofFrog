@@ -1,0 +1,4 @@
+Primitive Brancher() {
+    deterministic Int Extra();
+    Int Maybe(Bool choose);
+}

@@ -122,7 +122,7 @@ from .standardization import (
 CORE_PIPELINE: list[TransformPass] = [
     AlphaRename(),
     NormalizeProductLiteral(),
-    # Must run before Topological Sorting (which prunes bare declarations)
+    # Must run before Topological Sorting (which prunes dead bare declarations)
     # and Collapse Assignment (which folds their assignments into use
     # sites): once either fires, the split-declaration tuple spelling can
     # no longer be normalized to the decl-with-initializer route (#255).
@@ -237,7 +237,7 @@ STANDARDIZATION_PIPELINE: list[TransformPass] = [
     BubbleSortFieldAssignments(),
     StabilizeIndependentStatements(),
     # Final VariableStandardize: StabilizeIndependentStatements may have
-    # reordered typed-local declarations after the previous
+    # reordered local declarations after the previous
     # VariableStandardize, leaving locals out of v1, v2, ... order.
     # Re-number locals so canonical forms with the same final declaration
     # order use the same names.

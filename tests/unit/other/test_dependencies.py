@@ -94,8 +94,9 @@ from proof_frog import proof_engine
         ),
         # A shadowing bare declaration depends on every earlier reader of
         # the outer binding, not only the nearest one. So does the write
-        # below it, which also depends on the declaration: with the enclosing
-        # scope unknown, every bare declaration is a binder.
+        # below it, which also depends on the declaration. The return reads
+        # x, so it depends on the nearest writer, which chains back to the
+        # declaration.
         (
             """
             Int f() {
@@ -140,7 +141,6 @@ def test_dependencies(method_code: str, expected_dependencies: list[list[int]]) 
 def _edges(
     method_code: str,
     fields: tuple[str, ...] = (),
-    shadowed: set[str] | None = None,
     namespace: dict | None = None,
 ) -> list[list[int]]:
     """The graph of a method body as, per statement, the indices of the
@@ -151,7 +151,6 @@ def _edges(
         method.block,
         [frog_ast.Field(frog_ast.IntType(), name, None) for name in fields],
         namespace or {},
-        shadowed_names=shadowed,
     )
     index_of = {id(statement): index for index, statement in enumerate(statements)}
     return [
@@ -224,7 +223,6 @@ def test_f354_write_to_outer_binding_depends_on_every_earlier_reader(
         }}
         """,
         fields=("x",) if outer == "field" else (),
-        shadowed={"x"},
     )
     assert edges[4] == [3, 2]
 
@@ -241,7 +239,6 @@ def test_f354_typed_shadowing_declaration_depends_on_every_earlier_reader() -> N
         }
         """,
         fields=("x",),
-        shadowed={"x"},
     )
     assert edges[2] == [1, 0]
     # ... and the use below reads the local.
@@ -347,7 +344,6 @@ def test_independent_statements_stay_free() -> None:
         }
         """,
         fields=("x", "y"),
-        shadowed={"x", "y"},
     )
     assert edges[0] == []
     assert edges[1] == []
@@ -359,9 +355,10 @@ def test_independent_statements_stay_free() -> None:
     assert edges[5] == [2]
 
 
-def test_bare_declaration_binds_later_uses_when_scope_is_unknown() -> None:
-    """With no ``shadowed_names`` (the standardization passes), every bare
-    declaration is a binder: a use below it must stay below it."""
+def test_bare_declaration_binds_later_uses() -> None:
+    """Every bare declaration is a binder, whether or not it shadows an outer
+    name: a use below it must stay below it, and reaches it from the return
+    so the declaration is not pruned."""
     code = """
         Int f() {
             Int a = x;
@@ -371,13 +368,13 @@ def test_bare_declaration_binds_later_uses_when_scope_is_unknown() -> None:
             return a + b;
         }
         """
-    assert _edges(code)[1] == [0]
-    assert _edges(code)[2] == [1, 0]
-    assert _edges(code, shadowed={"x"})[2] == [1, 0]
-    # A caller that knows the enclosing scope and says x is not bound outside
-    # it (the declaration shadows nothing) keeps the declaration out of the
-    # way of later uses, so it stays prunable.
-    assert _edges(code, shadowed=set())[2] == [0]
+    for fields in ((), ("x",)):
+        edges = _edges(code, fields=fields)
+        assert edges[1] == [0]
+        assert edges[2] == [1, 0]
+        # The reader depends on the nearest writer, which depends on the
+        # declaration.
+        assert edges[3] == [2]
 
 
 def test_f354_sort_keeps_delayed_reader_above_write() -> None:

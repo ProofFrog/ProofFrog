@@ -259,3 +259,106 @@ def test_f339_collision_renaming_is_idempotent() -> None:
     once = AlphaRename().apply(game, _ctx())
     twice = AlphaRename().apply(once, _ctx())
     assert once == twice
+
+
+def test_fresh_looking_local_colliding_with_field_is_renamed() -> None:
+    """A ``__aN__`` binder keeps its name so the pass converges, unless it
+    shadows an outer name. Kept, the shadow can be reordered above the field
+    read and conflate the two bindings."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int __a5__;
+            Int O() {
+                Int out = __a5__;
+                Int __a5__;
+                __a5__ = 0;
+                return out + __a5__;
+            }
+        }
+        """)
+    once = AlphaRename().apply(game, _ctx())
+    read_field, declaration, write, ret = once.methods[0].block.statements
+    assert isinstance(declaration, frog_ast.VariableDeclaration)
+    assert declaration.name != "__a5__"
+    assert isinstance(read_field, frog_ast.Assignment)
+    assert read_field.value == frog_ast.Variable("__a5__")
+    assert isinstance(write, frog_ast.Assignment)
+    assert write.var == frog_ast.Variable(declaration.name)
+    assert declaration.name in str(ret)
+    assert "__a5__" not in str(ret)
+    assert AlphaRename().apply(once, _ctx()) == once
+
+
+def test_fresh_looking_binders_colliding_with_let_names_are_renamed() -> None:
+    """A typed local and a loop binder that collide with proof-let names are
+    renamed, and the minted names skip the let names too."""
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={
+            name: frog_ast.Variable(name) for name in ("__a5__", "__a6__", "__a7__")
+        },
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int O() {
+                Int __a5__ = 1;
+                for (Int __a6__ = 0 to 2) {
+                    __a5__ = __a5__ + __a6__;
+                }
+                return __a5__;
+            }
+        }
+        """)
+    once = AlphaRename().apply(game, ctx)
+    for name in ("__a5__", "__a6__", "__a7__"):
+        assert name not in str(once)
+    assert AlphaRename().apply(once, ctx) == once
+
+
+def test_generic_for_binder_type_follows_shadowed_local() -> None:
+    """A local `n` shadows the field `n`, and a later `for (BitString<n> e in
+    S)` names the local in its binder type. The binder type is evaluated in
+    the enclosing scope, like a declaration's (F-239): after the local is
+    renamed it must name the fresh local, not re-bind to the field."""
+    out = _apply("""
+        Game G() {
+            Int n;
+            Set<BitString<8>> S;
+            Void Initialize() { n = 2; }
+            Int O() {
+                Int n = 8;
+                Int count = 0;
+                for (BitString<n> e in S) {
+                    count = count + |e|;
+                }
+                return count + n;
+            }
+        }
+        """)
+    body = out.split("Int O()", 1)[1]
+    assert "Int __a0__ = 8;" in body
+    assert "for (BitString<__a0__> e in S)" in body
+    assert "BitString<n>" not in body
+
+
+def test_generic_for_binder_type_does_not_see_its_own_binder() -> None:
+    """The binder type is outside the scope the binder opens: a loop binder
+    named like a field does not capture the field in its own type."""
+    out = _apply("""
+        Game G() {
+            Int n;
+            Set<BitString<8>> S;
+            Int O() {
+                Int count = 0;
+                for (BitString<n> n in S) {
+                    count = count + |n|;
+                }
+                return count;
+            }
+        }
+        """)
+    body = out.split("Int O()", 1)[1]
+    assert "for (BitString<n> __a1__ in S)" in body
+    assert "|__a1__|" in body

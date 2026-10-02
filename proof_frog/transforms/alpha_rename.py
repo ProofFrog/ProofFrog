@@ -20,22 +20,22 @@ declarations (``BranchElimination``'s ``if(true){...}`` splice,
 local or a game field, a name-blind rewrite conflates the two bindings and can
 certify a hop a distinguisher refutes (audit findings F-124, F-129).
 
-This pass removes the collision at the root: it gives every *typed* local binder
-a fresh, globally-unique name (``__aN__``), rewriting exactly the references that
-resolve to it under position-sensitive scope.  No later splice or normalisation
-then has a same-name collision to mishandle.  Because the renamed binders are
-all typed, the post-pipeline ``VariableStandardize`` pass re-washes them to the
-canonical ``vN`` names, so a sound proof's final canonical form is unchanged.
+This pass removes the collision at the root: it gives local binders fresh,
+globally-unique names (``__aN__``), rewriting exactly the references that
+resolve to them under position-sensitive scope. No later splice or
+normalisation then has a same-name collision to mishandle. The post-pipeline
+``VariableStandardize`` pass re-washes local names to ``vN``, including return
+slots whose bare declarations survive after inlining.
 
 Scope discipline:
 
-* Only *local* binders are renamed -- typed ``Assignment`` / ``Sample`` /
-  ``UniqueSample`` and ``VariableDeclaration``.  Game fields, method parameters,
-  game parameters, and proof-let / scheme / primitive names are left untouched
-  (a reference that does not resolve to a renamed local is emitted verbatim).
-* Names already beginning with ``__`` are skipped, so the pass is idempotent on
-  its own output and does not disturb other passes' reserved-prefix temporaries
-  (this is what lets it sit inside the fixed-point loop without diverging).
+* Local binders are renamed -- typed ``Assignment`` / ``Sample`` /
+  ``UniqueSample`` and ``VariableDeclaration``. Game fields, game parameters,
+  and proof-let / scheme / primitive names are left untouched. A method
+  parameter that collides with an outer name is renamed too.
+* Only names matching ``__aN__`` are skipped on later iterations, so the pass
+  is idempotent on its own output. Other ``__``-prefixed binders are renamed.
+  A ``__aN__`` binder that collides with an outer name is renamed anyway.
 * Loop binders (``for (Int i ...)``) are masked in the loop-body scope so a
   same-named outer local cannot leak in.
 
@@ -114,9 +114,13 @@ class _AlphaRenamer:
     def _fresh(self) -> str:
         if self._fresh_fn is not None:
             return self._fresh_fn()
-        name = _FRESH.format(self._counter)
-        self._counter += 1
-        return name
+        # A proof-let name can look fresh without appearing in the game text,
+        # so the counter alone cannot keep a minted name clear of it.
+        while True:
+            name = _FRESH.format(self._counter)
+            self._counter += 1
+            if name not in self._outer_names:
+                return name
 
     def rename_game(self, game: frog_ast.Game) -> frog_ast.Game:
         # Start the counter above any ``__aN__`` already present, so a binder
@@ -156,8 +160,9 @@ class _AlphaRenamer:
 
     def _binder_name(self, name: str) -> str:
         """The name a loop binder gets: fresh if it collides with an outer
-        name (F-339), else unchanged."""
-        if name in self._outer_names and not _FRESH_RE.fullmatch(name):
+        name (F-339), else unchanged. A fresh-looking name that collides is
+        renamed too; ``_fresh`` never mints an outer name, so this converges."""
+        if name in self._outer_names:
             return self._fresh()
         return name
 
@@ -224,13 +229,18 @@ class _AlphaRenamer:
         (``__cse_slice_...``, ``__rf_extract_...``) are just as capture-prone
         and are safely renamed too: their producing passes re-mint by a
         within-block counter, so a renamed temp is never re-matched.
+
+        A fresh-looking name that collides with an outer name (a field, a game
+        parameter, a proof-let name) is renamed like a loop binder (F-339).
+        Kept, it shadows the outer binding, and a later reorder or splice can
+        conflate the two. ``_fresh`` skips outer names, so this converges.
         """
         if self._only_locals is not None and name not in self._only_locals:
             # Not a name being renamed: bind it to itself so it still masks a
             # same-named outer binding inside its scope.
             local[name] = name
             return None
-        if _FRESH_RE.fullmatch(name):
+        if _FRESH_RE.fullmatch(name) and name not in self._outer_names:
             # Already an AlphaRename fresh name: keep it (identity binding so a
             # later same-name reference resolves to it) to guarantee
             # fixed-point convergence.
@@ -367,11 +377,16 @@ class _AlphaRenamer:
         self, statement: frog_ast.GenericFor, scopes: list[dict[str, str]]
     ) -> frog_ast.GenericFor:
         new_over = self._rewrite(statement.over, scopes)
+        # The binder's type is evaluated in the enclosing scope, like a
+        # declaration's (F-239): a length naming a renamed local must follow
+        # it, or it re-binds to a same-named outer name.
+        new_type = self._rewrite_type(statement.var_type, scopes)
+        assert new_type is not None
         name = self._binder_name(statement.var_name)
         body = self._rename_block(
             statement.block, scopes, initial={statement.var_name: name}
         )
-        return frog_ast.GenericFor(statement.var_type, name, new_over, body)
+        return frog_ast.GenericFor(new_type, name, new_over, body)
 
 
 def rename_colliding_binders(

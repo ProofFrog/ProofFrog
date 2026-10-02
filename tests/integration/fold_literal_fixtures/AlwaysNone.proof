@@ -1,0 +1,21 @@
+// Single-hop claim AlwaysNone.Real -> AlwaysNone.Random with no assumptions.
+// See AlwaysNone.game for the expected outcome.
+import 'Chan.primitive';
+import 'ChanImpl.scheme';
+import 'AlwaysNone.game';
+
+proof:
+
+let:
+    Int lambda;
+    ChanImpl C = ChanImpl(lambda);
+
+assume:
+
+theorem:
+    AlwaysNone(C);
+
+games:
+    AlwaysNone(C).Real against AlwaysNone(C).Adversary;
+
+    AlwaysNone(C).Random against AlwaysNone(C).Adversary;

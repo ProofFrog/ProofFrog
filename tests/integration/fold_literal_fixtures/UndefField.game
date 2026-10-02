@@ -1,0 +1,30 @@
+// Must FAIL. The field f is assigned only by Store. Real.Query evaluates
+// [x, f], so calling Query before Store reads an unassigned field, which
+// the adversary observes; Random.Query never reads f. Folding
+// `[x, f] == None` to false would drop that read.
+import 'Chan.primitive';
+
+Game Real(Chan C) {
+    Bool f;
+    Void Store(Bool v) {
+        f = v;
+    }
+    [Int, Bool]? Query(Int x) {
+        if (C.IsNone([x, f])) {
+            return None;
+        }
+        return [x, true];
+    }
+}
+
+Game Random(Chan C) {
+    Bool f;
+    Void Store(Bool v) {
+        f = v;
+    }
+    [Int, Bool]? Query(Int x) {
+        return [x, true];
+    }
+}
+
+export as UndefField;

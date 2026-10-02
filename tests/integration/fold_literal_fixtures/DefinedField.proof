@@ -1,0 +1,21 @@
+// Single-hop claim DefinedField.Real -> DefinedField.Random with no assumptions.
+// See DefinedField.game for the expected outcome.
+import 'Chan.primitive';
+import 'ChanImpl.scheme';
+import 'DefinedField.game';
+
+proof:
+
+let:
+    Int lambda;
+    ChanImpl C = ChanImpl(lambda);
+
+assume:
+
+theorem:
+    DefinedField(C);
+
+games:
+    DefinedField(C).Real against DefinedField(C).Adversary;
+
+    DefinedField(C).Random against DefinedField(C).Adversary;

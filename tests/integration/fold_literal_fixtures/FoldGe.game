@@ -1,0 +1,26 @@
+// Must SUCCEED. Ge(0, 1) inlines to `0 >= 1`, which folds to false.
+import 'Chan.primitive';
+
+Game Real(Chan C) {
+    Int count;
+    Void Initialize() { count = 0; }
+    [Int, Bool]? Query(Int x, Bool b) {
+        if (C.Ge(0, 1)) {
+            count = 6;
+        } else {
+            count = count + x;
+        }
+        return [count, b];
+    }
+}
+
+Game Random(Chan C) {
+    Int count;
+    Void Initialize() { count = 0; }
+    [Int, Bool]? Query(Int x, Bool b) {
+        count = count + x;
+        return [count, b];
+    }
+}
+
+export as FoldGe;

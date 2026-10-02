@@ -1,0 +1,31 @@
+// Must FAIL. Neg(true) is false and Ge(1, 1) is true, so Real sets count
+// to 6: Query(1, true) returns [6, true] in Real and [1, true] in Random.
+import 'Chan.primitive';
+
+Game Real(Chan C) {
+    Int count;
+    Void Initialize() { count = 0; }
+    [Int, Bool]? Query(Int x, Bool b) {
+        if (C.Neg(true)) {
+            count = count + x;
+        } else {
+            if (C.Ge(1, 1)) {
+                count = 6;
+            } else {
+                count = count + x;
+            }
+        }
+        return [count, b];
+    }
+}
+
+Game Random(Chan C) {
+    Int count;
+    Void Initialize() { count = 0; }
+    [Int, Bool]? Query(Int x, Bool b) {
+        count = count + x;
+        return [count, b];
+    }
+}
+
+export as WrongBranch;

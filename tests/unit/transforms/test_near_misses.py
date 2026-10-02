@@ -14,6 +14,7 @@ from proof_frog.transforms.algebraic import (
 )
 from proof_frog.transforms.control_flow import (
     FoldEquivalentReturnBranch,
+    FoldLiteralConditions,
     FlagSetToAssignment,
     RemoveEmptyIf,
     BranchElimination,
@@ -2719,6 +2720,142 @@ def test_local_fn_near_miss_sample_skippable_by_initialize_return() -> None:
     assert any("read before its sample" in nm.reason for nm in _local_fn_misses(ctx))
 
 
+# ---------------------------------------------------------------------------
+# FoldLiteralConditions
+# ---------------------------------------------------------------------------
+
+
+def _fold_literal_misses(ctx: PipelineContext) -> list[NearMiss]:
+    return [
+        nm for nm in ctx.near_misses if nm.transform_name == "Fold Literal Conditions"
+    ]
+
+
+def test_fold_literal_near_miss_field_assigned_only_by_another_oracle() -> None:
+    """``None == [x, f]`` stays because Query may run before Store assigns f."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool f;
+            Void Store(Bool v) { f = v; }
+            Bool Query(Int x) { return None == [x, f]; }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) == game
+    misses = _fold_literal_misses(ctx)
+    assert [(nm.variable, nm.method) for nm in misses] == [("f", "Query")]
+    assert "'f' may be unassigned" in misses[0].reason
+    assert "Initialize does not assign" in misses[0].reason
+    assert misses[0].suggestion is not None and "Initialize" in misses[0].suggestion
+
+
+def test_fold_literal_near_miss_bare_declared_local() -> None:
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool Query(Int x, Bool c) {
+                Bool y;
+                if (c) { y = true; }
+                return [x, y] != None;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) == game
+    misses = _fold_literal_misses(ctx)
+    assert [(nm.variable, nm.method) for nm in misses] == [("y", "Query")]
+    assert "declared without a value" in misses[0].reason
+
+
+def test_fold_literal_near_miss_initialize_may_return_first() -> None:
+    """F-349: Initialize may return before assigning f."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool f;
+            Bool Initialize() {
+                Bool c <- Bool;
+                if (c) { return true; }
+                f = false;
+                return false;
+            }
+            Bool Query(Int x) { return None == [x, f]; }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) == game
+    misses = _fold_literal_misses(ctx)
+    assert [nm.variable for nm in misses] == ["f"]
+    assert "before any return" in misses[0].reason
+
+
+def test_fold_literal_near_miss_ambiguous_field_and_local() -> None:
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool f;
+            Bool Query(Int x) {
+                Bool f = true;
+                return None == [x, f];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) == game
+    misses = _fold_literal_misses(ctx)
+    assert [nm.variable for nm in misses] == ["f"]
+    assert "both a local and a game field" in misses[0].reason
+
+
+def test_fold_literal_no_near_miss_when_fold_fires() -> None:
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool f;
+            Void Initialize() { f = false; }
+            Bool Query(Int x) { return None == [x, f]; }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) != game
+    assert not _fold_literal_misses(ctx)
+
+
+def test_fold_literal_no_near_miss_for_none_against_variable() -> None:
+    """``None == v`` is not a literal comparison: nothing almost fired."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool Query(Int? v) { return None == v; }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) == game
+    assert not _fold_literal_misses(ctx)
+
+
+def test_fold_literal_near_miss_distinct_integer_literals() -> None:
+    """``0 == 1`` stays: at ModInt<q> the literals may be equal mod q."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int Query(Int x) {
+                if (0 == 1) { return 0; }
+                return x;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) == game
+    misses = _fold_literal_misses(ctx)
+    assert [(nm.variable, nm.method) for nm in misses] == [(None, "Query")]
+    assert "0 == 1" in misses[0].reason
+    assert "ModInt" in misses[0].reason
+
+
+def test_fold_literal_no_near_miss_for_equal_integer_literals() -> None:
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool Query(Int x) { return 1 == 1; }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) != game
+    assert not _fold_literal_misses(ctx)
 def _dead_null_guard_misses(body: str) -> list[NearMiss]:
     ctx = PipelineContext(
         variables={},

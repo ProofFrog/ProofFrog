@@ -1,0 +1,21 @@
+// Single-hop claim FoldGe.Real -> FoldGe.Random with no assumptions.
+// See FoldGe.game for the expected outcome.
+import 'Chan.primitive';
+import 'ChanImpl.scheme';
+import 'FoldGe.game';
+
+proof:
+
+let:
+    Int lambda;
+    ChanImpl C = ChanImpl(lambda);
+
+assume:
+
+theorem:
+    FoldGe(C);
+
+games:
+    FoldGe(C).Real against FoldGe(C).Adversary;
+
+    FoldGe(C).Random against FoldGe(C).Adversary;

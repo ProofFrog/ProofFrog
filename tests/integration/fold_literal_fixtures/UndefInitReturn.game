@@ -1,0 +1,38 @@
+// Must FAIL. Initialize may return before assigning f, so Query can read an
+// unassigned field in Real.
+import 'Chan.primitive';
+
+Game Real(Chan C) {
+    Bool f;
+    Bool Initialize() {
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        f = false;
+        return false;
+    }
+    [Int, Bool]? Query(Int x) {
+        if (C.IsNone([x, f])) {
+            return None;
+        }
+        return [x, true];
+    }
+}
+
+Game Random(Chan C) {
+    Bool f;
+    Bool Initialize() {
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        f = false;
+        return false;
+    }
+    [Int, Bool]? Query(Int x) {
+        return [x, true];
+    }
+}
+
+export as UndefInitReturn;

@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import copy
 import functools
-from typing import Any, Sequence
+from operator import eq, ge, gt, le, lt, ne
+from typing import Any, Callable, Sequence
 
 import z3
 
@@ -41,10 +42,254 @@ from ._base import (
     method_bound_names,
     _lookup_primitive_method,
 )
+from ._definedness import GameDefinedness
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
 # ---------------------------------------------------------------------------
+
+
+_NON_NONE_LITERALS = (
+    frog_ast.Tuple,
+    frog_ast.Set,
+    frog_ast.Integer,
+    frog_ast.Boolean,
+    frog_ast.BinaryNum,
+    frog_ast.BitStringLiteral,
+)
+
+_LITERAL_RELATIONS: dict[frog_ast.BinaryOperators, Callable[[Any, Any], bool]] = {
+    frog_ast.BinaryOperators.EQUALS: eq,
+    frog_ast.BinaryOperators.NOTEQUALS: ne,
+    frog_ast.BinaryOperators.LT: lt,
+    frog_ast.BinaryOperators.GT: gt,
+    frog_ast.BinaryOperators.LEQ: le,
+    frog_ast.BinaryOperators.GEQ: ge,
+}
+
+
+# Node kinds that may appear inside the literal ``L`` of a ``None == L`` fold.
+# Anything else (a call, an index, a slice, an unknown node) declines.
+_LITERAL_INTERIOR_NODES = _NON_NONE_LITERALS + (
+    frog_ast.NoneExpression,
+    frog_ast.Variable,
+    frog_ast.FieldAccess,
+    frog_ast.BinaryOperation,
+    frog_ast.UnaryOperation,
+)
+
+
+class FoldLiteralConditionsTransformer(Transformer):
+    """Folds comparisons whose value is fixed by literal operands.
+
+    - ``!true`` / ``!false`` becomes ``false`` / ``true``.
+    - ``<``, ``>``, ``<=``, ``>=`` on two ``Integer`` literals folds.
+      These operators type-check only on ``Int``.
+    - ``==`` / ``!=`` on two ``Boolean`` literals folds.
+    - ``==`` / ``!=`` on two ``Integer`` literals folds only when the values
+      are equal. A literal inlined into a ``ModInt<q>`` slot compares mod
+      ``q``, so distinct literals may still be equal.
+    - ``None == L`` / ``L == None`` (and ``!=``) folds to ``false`` / ``true``
+      when ``L`` is a tuple, set, integer, boolean, or bitstring literal.
+
+    The folds above the last have only literal operands, so they drop no
+    evaluation. (``1 == 1`` and ``true == true`` are also
+    ``ReflexiveComparison``'s; either pass may fold them.) The last fold
+    drops the evaluation of ``L``, and reading an unassigned variable is an
+    event the adversary observes. It therefore fires only when evaluating
+    ``L`` cannot fail:
+
+    - ``L`` contains only literals, variables, field accesses and unary or
+      binary operations other than division. A call, an index, a slice or
+      any other node declines.
+    - Every variable ``L`` reads is definitely assigned at that point:
+
+      * a parameter of the enclosing method;
+      * a local in lexical scope bound by an initialized declaration
+        (``T x = e;``, ``T x <- D;``, ``T x <-uniq[S] D;``) or a loop
+        binder;
+      * a game field with a declared initializer, or one ``Initialize``
+        assigns in a top-level statement that no earlier ``return`` can
+        skip (F-349), read from a method other than ``Initialize``;
+      * a game parameter or a proof ``let:`` name.
+
+      A name is declined when its binding is ambiguous: the method binds it
+      more than once, declares it bare (``T x;``) anywhere, or it names both
+      a local and a field (or a game parameter). So are a field assigned
+      only by another oracle, any field read inside ``Initialize``, and any
+      variable outside a method.
+
+    ``None`` against a variable or call never folds.
+    """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+        self._game = GameDefinedness(None, ctx)
+        self._scope = self._game.for_method(None)
+
+    # -- context ---------------------------------------------------------
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        saved = (self._game, self._scope)
+        self._game = GameDefinedness(game, self.ctx)
+        self._scope = self._game.for_method(None)
+        try:
+            return self._transform_children(game)
+        finally:
+            self._game, self._scope = saved
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        saved = self._scope
+        self._scope = self._game.for_method(method)
+        try:
+            return self._transform_children(method)
+        finally:
+            self._scope = saved
+
+    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
+        self._scope.enter_block()
+        try:
+            statements: list[frog_ast.Statement] = []
+            changed = False
+            for statement in block.statements:
+                new_statement = self.transform(statement)
+                changed = changed or new_statement is not statement
+                statements.append(new_statement)
+                self._scope.declare(statement)
+        finally:
+            self._scope.exit_block()
+        if not changed:
+            return block
+        new_block = copy.copy(block)
+        new_block.statements = statements
+        return new_block
+
+    def transform_numeric_for(self, loop: frog_ast.NumericFor) -> frog_ast.NumericFor:
+        new_loop: frog_ast.NumericFor = self._transform_loop(loop, ("start", "end"))
+        return new_loop
+
+    def transform_generic_for(self, loop: frog_ast.GenericFor) -> frog_ast.GenericFor:
+        new_loop: frog_ast.GenericFor = self._transform_loop(loop, ("over",))
+        return new_loop
+
+    def _transform_loop(self, loop: Any, headers: tuple[str, ...]) -> Any:
+        """Transforms a loop with its binder in scope for the body only."""
+        new_attrs = {attr: self.transform(getattr(loop, attr)) for attr in headers}
+        self._scope.enter_loop(loop)
+        try:
+            new_attrs["block"] = self.transform(loop.block)
+        finally:
+            self._scope.exit_loop()
+        if all(new_val is getattr(loop, attr) for attr, new_val in new_attrs.items()):
+            return loop
+        new_loop = copy.copy(loop)
+        for attr, new_val in new_attrs.items():
+            setattr(new_loop, attr, new_val)
+        return new_loop
+
+    # -- definedness -----------------------------------------------------
+
+    def _literal_is_total(self, literal: frog_ast.Expression) -> bool:
+        """True if evaluating *literal* cannot fail, so dropping it is
+        unobservable. Records a near-miss for a possibly unassigned read."""
+        for node in _walk_nodes(literal):
+            if not isinstance(node, _LITERAL_INTERIOR_NODES):
+                return False
+            if (
+                isinstance(node, frog_ast.BinaryOperation)
+                and node.operator == frog_ast.BinaryOperators.DIVIDE
+            ):
+                return False
+        unassigned = self._scope.unassigned_reads(literal)
+        if self.ctx is not None:
+            for name, reason in unassigned:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Fold Literal Conditions",
+                        reason=(
+                            f"None-vs-literal comparison against '{literal}' "
+                            f"not folded: '{name}' may be unassigned when "
+                            f"the literal is evaluated ({reason})"
+                        ),
+                        location=literal.origin,
+                        suggestion=(
+                            f"Make '{name}' definitely assigned: declare "
+                            "a local with a value, or assign a field in a "
+                            "top-level statement of Initialize before any "
+                            "return"
+                        ),
+                        variable=name,
+                        method=self._scope.method_name,
+                    )
+                )
+        return not unassigned
+
+    # -- folds -----------------------------------------------------------
+
+    def transform_unary_operation(
+        self, unary_op: frog_ast.UnaryOperation
+    ) -> frog_ast.Expression:
+        new_op = self._transform_children(unary_op)
+        if new_op.operator == frog_ast.UnaryOperators.NOT and isinstance(
+            new_op.expression, frog_ast.Boolean
+        ):
+            return frog_ast.Boolean(not new_op.expression.bool)
+        return new_op
+
+    def transform_binary_operation(
+        self, binary_op: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        new_op = self._transform_children(binary_op)
+        op = new_op.operator
+        if op not in _LITERAL_RELATIONS:
+            return new_op
+        left = new_op.left_expression
+        right = new_op.right_expression
+        relation = _LITERAL_RELATIONS[op]
+        is_eq = op in (
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.BinaryOperators.NOTEQUALS,
+        )
+        if isinstance(left, frog_ast.Integer) and isinstance(right, frog_ast.Integer):
+            if is_eq and left.num != right.num:
+                self._note_distinct_integers(new_op)
+                return new_op
+            return frog_ast.Boolean(relation(left.num, right.num))
+        if not is_eq:
+            return new_op
+        if isinstance(left, frog_ast.Boolean) and isinstance(right, frog_ast.Boolean):
+            return frog_ast.Boolean(relation(left.bool, right.bool))
+        if isinstance(left, frog_ast.NoneExpression):
+            other = right
+        elif isinstance(right, frog_ast.NoneExpression):
+            other = left
+        else:
+            return new_op
+        if isinstance(other, _NON_NONE_LITERALS) and self._literal_is_total(other):
+            return frog_ast.Boolean(op == frog_ast.BinaryOperators.NOTEQUALS)
+        return new_op
+
+    def _note_distinct_integers(self, comparison: frog_ast.BinaryOperation) -> None:
+        """Records why ``0 == 1`` stays: the fold does not know its type."""
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Fold Literal Conditions",
+                reason=(
+                    f"'{comparison}' not folded: distinct integer literals "
+                    "may be equal mod q when compared at type ModInt<q>, "
+                    "and the fold does not know the type"
+                ),
+                location=comparison.origin,
+                suggestion=(
+                    "Keep the comparison in the adjacent game so both games "
+                    "canonicalize to the same condition"
+                ),
+                variable=None,
+                method=self._scope.method_name,
+            )
+        )
 
 
 class BranchEliminiationTransformer(BlockTransformer):
@@ -3363,6 +3608,13 @@ class FoldEquivalentReturnBranch(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return FoldEquivalentReturnBranchTransformer(ctx, game).transform(game)
+
+
+class FoldLiteralConditions(TransformPass):
+    name = "Fold Literal Conditions"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return FoldLiteralConditionsTransformer(ctx).transform(game)
 
 
 class BranchElimination(TransformPass):

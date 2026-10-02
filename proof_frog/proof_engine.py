@@ -1984,7 +1984,7 @@ class ProofEngine:
             assert isinstance(game_node, frog_ast.Game)
             game = instantiate(game_node, challenger.args, self.proof_namespace)
 
-        lookup = copy.deepcopy(self.method_lookup)
+        lookup = dict(self.method_lookup)
         if reduction:
             reduction_ast = self.resolve_step_game(reduction)
             assert isinstance(reduction_ast, frog_ast.Reduction)
@@ -2007,7 +2007,7 @@ class ProofEngine:
             game = self.apply_reduction(game, reduction_ast)
 
         for _iteration in range(_MAX_FIXED_POINT_ITERATIONS):
-            new_game = visitors.InlineTransformer(lookup).transform(copy.deepcopy(game))
+            new_game = visitors.InlineTransformer(lookup).transform(game)
             if game != new_game:
                 game = new_game
             else:

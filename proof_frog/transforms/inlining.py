@@ -268,9 +268,7 @@ class RedundantCopyTransformer(BlockTransformer):
                 # the copy source S: both via the shared `_stmt_mutates_var`.
                 return _stmt_mutates_var(node, copy_name)
 
-            remaining_block = frog_ast.Block(
-                copy.deepcopy(block.statements[index + 1 :])
-            )
+            remaining_block = frog_ast.Block(list(block.statements[index + 1 :]))
             was_written = SearchVisitor[frog_ast.Variable](
                 functools.partial(written_to, copy_name)
             ).visit(remaining_block)
@@ -296,8 +294,7 @@ class RedundantCopyTransformer(BlockTransformer):
                 ).transform(remaining_block)
 
             return self.transform_block(
-                frog_ast.Block(copy.deepcopy(block.statements[:index]))
-                + remaining_block
+                frog_ast.Block(list(block.statements[:index])) + remaining_block
             )
         return block
 
@@ -339,9 +336,9 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
             def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
                 return isinstance(node, frog_ast.Variable) and node.name == name
 
-            remaining_block = frog_ast.Block(
-                copy.deepcopy(list(block.statements[index + 1 :]))
-            )
+            # The scans below only read the suffix. ReplaceTransformer builds
+            # new nodes on a hit, so the original statements can be shared.
+            remaining_block = frog_ast.Block(list(block.statements[index + 1 :]))
 
             # Skip if var is reassigned anywhere in remaining (element/field
             # writes and <-uniq insertion count too, via the shared scanner).

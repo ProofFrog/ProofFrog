@@ -34,6 +34,7 @@ _EXCLUDED = {
     frog_ast.Expression,
     frog_ast.Type,
     frog_ast.Statement,
+    frog_ast._ScalarLeaf,  # pylint: disable=protected-access
     # Top-level containers (not part of game ASTs)
     frog_ast.Root,
     frog_ast.Primitive,

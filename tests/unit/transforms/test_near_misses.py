@@ -2801,6 +2801,67 @@ def test_dead_null_guard_near_miss_describes_renamed_local() -> None:
     assert "__a" not in misses[0].reason
 
 
+def _dead_null_guard_tuple_misses(body: str, rename: bool = False) -> list[NearMiss]:
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Int Test(Int x, Int y, Bool c) {{
+                [Int, Int]? v = [x, y];
+                {body}
+                return 1;
+            }}
+        }}
+        """)
+    if rename:
+        game = AlphaRename().apply(game, ctx)
+    DeadNullGuardElimination().apply(game, ctx)
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Dead Null Guard Elimination"
+    ]
+
+
+@pytest.mark.parametrize(
+    "write, kind",
+    [
+        ("if (c) { v = None; }", "an assignment"),
+        ("if (c) { v = [y, x]; }", "an assignment"),
+        ("v[0] = 5;", "an element write"),
+    ],
+)
+def test_dead_null_guard_near_miss_on_written_tuple_literal(
+    write: str, kind: str
+) -> None:
+    """A tuple literal is non-null, so a guard kept on an optional local
+    initialised to one, because of a later write, is reported like any
+    other."""
+    misses = _dead_null_guard_tuple_misses(f"{write} if (v == None) {{ return 0; }}")
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert misses[0].method == "Test"
+    assert kind in misses[0].reason
+
+
+def test_dead_null_guard_near_miss_describes_renamed_tuple_local() -> None:
+    misses = _dead_null_guard_tuple_misses(
+        "if (c) { v = None; } if (v == None) { return 0; }", rename=True
+    )
+    assert len(misses) == 1
+    assert misses[0].variable is None
+    assert "'[Int, Int]?'" in misses[0].reason and "'[x, y]'" in misses[0].reason
+    assert "__a" not in misses[0].reason
+
+
+def test_dead_null_guard_no_near_miss_when_tuple_literal_guard_removed() -> None:
+    assert not _dead_null_guard_tuple_misses("if (v == None) { return 0; }")
+
+
 def test_dead_null_guard_no_near_miss_when_guard_removed() -> None:
     assert not _dead_null_guard_misses("if (v == None) { return 0; }")
 
@@ -2830,3 +2891,121 @@ def test_dead_null_guard_no_near_miss_for_local_initialised_none() -> None:
         """)
     DeadNullGuardElimination().apply(game, ctx)
     assert not ctx.near_misses
+
+
+def _inline_tuple_literal_misses(body: str) -> list[NearMiss]:
+    # pylint: disable=import-outside-toplevel
+    from proof_frog.transforms.inlining import InlineLocalTupleLiteral
+
+    ctx = _make_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            [Int, Int] v;
+            [Int, Int] w;
+            Map<Int, Int> M;
+            Int Test(Int y, Bool c) {{
+                {body}
+            }}
+        }}
+        """)
+    InlineLocalTupleLiteral().apply(game, ctx)
+    return [
+        nm for nm in ctx.near_misses if nm.transform_name == "Inline Local Tuple Literal"
+    ]
+
+
+def test_inline_local_tuple_literal_near_miss_on_self_reference() -> None:
+    """An element that reads an outer `v` cannot be substituted for the
+    local's `v[k]`: the pass declines and says why."""
+    misses = _inline_tuple_literal_misses("[Int, Int] v = [v[0], y]; return v[0];")
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert "outer variable also named 'v'" in misses[0].reason
+
+
+def test_inline_local_tuple_literal_no_near_miss_without_self_reference() -> None:
+    assert not _inline_tuple_literal_misses("[Int, Int] v = [w[0], y]; return v[0];")
+
+
+@pytest.mark.parametrize(
+    "body, what",
+    [
+        ("[Int, Int] v = [M[y], 1]; return v[1];", "drop that read"),
+        ("[Int, Int]? v = [M[y], 1]; return v[1];", "drop that read"),
+        (
+            "[Int, Int] v = [M[y], 1]; if (c) { return v[0]; } return v[1];",
+            "move that read",
+        ),
+    ],
+)
+def test_inline_local_tuple_literal_near_miss_on_undefined_read(
+    body: str, what: str
+) -> None:
+    """F-157: an element that indexes a map is not dropped or moved."""
+    misses = _inline_tuple_literal_misses(body)
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert "element 0 indexes a map or array" in misses[0].reason
+    assert what in misses[0].reason
+
+
+def test_inline_local_tuple_literal_no_near_miss_when_read_stays_put() -> None:
+    assert not _inline_tuple_literal_misses(
+        "[Int, Int] v = [M[y], 1]; return v[0] + v[1];"
+    )
+
+
+def _dead_null_guard_unassigned_misses(initialize: str, body: str) -> list[NearMiss]:
+    ctx = _make_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Bool f;
+            {initialize}
+            Void Store(Bool v) {{ f = v; }}
+            Int Query(Int x) {{
+                {body}
+                return x;
+            }}
+        }}
+        """)
+    DeadNullGuardElimination().apply(game, ctx)
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Dead Null Guard Elimination"
+    ]
+
+
+@pytest.mark.parametrize(
+    "body, what",
+    [
+        ("if ([x, f] == None) { return 0; }", "the expression it tests"),
+        (
+            "[Int, Bool]? t = [x, f]; if (t == None) { return 0; }",
+            "the initialiser of the local it tests",
+        ),
+    ],
+)
+def test_dead_null_guard_near_miss_on_unassigned_read(body: str, what: str) -> None:
+    """A guard that can never fire is kept because removing it would drop
+    the read of a field only another oracle assigns."""
+    misses = _dead_null_guard_unassigned_misses("", body)
+    assert len(misses) == 1
+    assert misses[0].variable == "f"
+    assert misses[0].method == "Query"
+    assert what in misses[0].reason
+    assert "reads 'f', which may be unassigned" in misses[0].reason
+    assert "Initialize does not assign" in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if ([x, f] == None) { return 0; }",
+        "[Int, Bool]? t = [x, f]; if (t == None) { return 0; }",
+    ],
+)
+def test_dead_null_guard_no_near_miss_when_read_assigned(body: str) -> None:
+    assert not _dead_null_guard_unassigned_misses(
+        "Void Initialize() { f = false; }", body
+    )

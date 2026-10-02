@@ -55,6 +55,36 @@ def _contains_potential_undefined_read(node: frog_ast.ASTNode) -> bool:
     )
 
 
+def _projected_in_next_statement(
+    remaining: frog_ast.Block, name: str, index: int
+) -> bool:
+    """True if ``name[index]`` is read by the first statement of *remaining*,
+    and that statement is not a branch or a loop.
+
+    An expression substituted for such a use is evaluated on exactly the
+    traces that reach the statement before it, so moving it there from the
+    preceding statement keeps an undefined read where it was.
+    """
+    if not remaining.statements:
+        return False
+    first = remaining.statements[0]
+    if isinstance(
+        first, (frog_ast.IfStatement, frog_ast.NumericFor, frog_ast.GenericFor)
+    ):
+        return False
+
+    def is_projection(node: frog_ast.ASTNode) -> bool:
+        return (
+            isinstance(node, frog_ast.ArrayAccess)
+            and isinstance(node.the_array, frog_ast.Variable)
+            and node.the_array.name == name
+            and isinstance(node.index, frog_ast.Integer)
+            and node.index.num == index
+        )
+
+    return SearchVisitor(is_projection).visit(first) is not None
+
+
 def _use_inside_loop(node: frog_ast.ASTNode, name: str) -> bool:
     """True if *name* is referenced inside a for-loop body within *node*.
 
@@ -1242,7 +1272,15 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
     ``InlineSingleUseVariableTransformer`` (which skips Tuple RHS to avoid
     breaking the tuple-expansion pipeline).
 
-    Preconditions for firing on ``[T0,...,Tn-1] v = [e0,...,en-1];``:
+    Fires on ``[T0,...,Tn-1] v = [e0,...,en-1];`` and on the optional form
+    ``[T0,...,Tn-1]? v = [e0,...,en-1];``.  A tuple literal is never
+    ``None``, so the optional local holds the same value as the
+    non-optional one and the same preconditions apply.  A null guard
+    ``if (v == None)`` is a bare use of ``v`` (precondition 1), so the
+    optional form is inlined only once ``DeadNullGuardElimination`` has
+    removed the guard.
+
+    Preconditions:
 
     1. No bare reference to ``v`` in the remaining block (every reference
        is the ``the_array`` child of an ``ArrayAccess`` node).
@@ -1254,6 +1292,14 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
        never used, ``e_i`` must also be deterministic (so dropping it is
        safe). When ``v[i]`` is used exactly once, ``e_i`` may have any
        side effects (single substitution preserves the evaluation count).
+    5. No ``e_i`` that indexes a map or array (a potential undefined read,
+       F-157) is dropped or moved: it must be projected by the statement
+       right after the declaration, and that statement must not be a
+       branch or a loop.
+    6. No ``e_i`` mentions ``v``. Such an element reads a same-named outer
+       binding that the declaration shadows; substituting it would put a
+       new ``v[...]`` access into the block for the substitution to find
+       again.
     """
 
     def __init__(
@@ -1312,15 +1358,19 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
         for index, statement in enumerate(block.statements):
             if not (
                 isinstance(statement, frog_ast.Assignment)
-                and statement.the_type is not None
-                and isinstance(statement.the_type, frog_ast.ProductType)
                 and isinstance(statement.var, frog_ast.Variable)
                 and isinstance(statement.value, frog_ast.Tuple)
             ):
                 continue
+            declared = statement.the_type
+            # A tuple literal is never None, so [T0, T1]? binds like [T0, T1].
+            if isinstance(declared, frog_ast.OptionalType):
+                declared = declared.the_type
+            if not isinstance(declared, frog_ast.ProductType):
+                continue
 
             tuple_values = statement.value.values
-            unfolded_types = statement.the_type.types
+            unfolded_types = declared.types
             if len(tuple_values) != len(unfolded_types):
                 continue
 
@@ -1378,6 +1428,32 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
             if counts and (
                 max(counts.keys()) >= len(tuple_values) or min(counts.keys()) < 0
             ):
+                continue
+
+            # An element that mentions `v` reads a same-named outer binding
+            # (a field or an enclosing local the declaration shadows).
+            # Substituting it for `v[k]` would put a fresh `v[...]` into the
+            # block, which the substitution loop below would pick up again
+            # and never finish. AlphaRename renames the local first, so this
+            # is not reached from the pipeline.
+            if any(var_name in referenced_variable_names(e_i) for e_i in tuple_values):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Local Tuple Literal",
+                            reason=(
+                                f"Cannot inline '{var_name}': a tuple element "
+                                f"refers to an outer variable also named "
+                                f"'{var_name}'"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Give the local a name other than '{var_name}'"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
@@ -1465,6 +1541,52 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
                         )
                     break
             if purity_blocked:
+                continue
+
+            # F-157: an element that indexes a map or array may perform an
+            # observable undefined read. Inlining drops an element that is
+            # never projected, and moves a projected one from the
+            # declaration to its uses. Either changes the traces on which
+            # the read happens, unless a use sits in the statement right
+            # after the declaration, outside any branch or loop.
+            undefined_read_index = next(
+                (
+                    i
+                    for i, e_i in enumerate(tuple_values)
+                    if _contains_potential_undefined_read(e_i)
+                    and not (
+                        counts.get(i, 0) >= 1
+                        and _projected_in_next_statement(remaining, var_name, i)
+                    )
+                ),
+                None,
+            )
+            if undefined_read_index is not None:
+                if self.ctx is not None:
+                    dropped = counts.get(undefined_read_index, 0) == 0
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Local Tuple Literal",
+                            reason=(
+                                f"Cannot inline '{var_name}': element "
+                                f"{undefined_read_index} indexes a map or "
+                                f"array, and inlining would "
+                                + (
+                                    "drop that read (the element is never used)"
+                                    if dropped
+                                    else "move that read past a branch, loop "
+                                    "or other statement"
+                                )
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                "Bind the indexed value to its own local "
+                                "before building the tuple"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             # Substitute every v[k] occurrence with a deep copy of e_k.

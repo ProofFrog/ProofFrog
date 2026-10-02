@@ -36,13 +36,117 @@ def _to_snake_case(camel_case: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Dispatch caches — avoid repeated hasattr / getattr / _to_snake_case lookups
+# Dispatch and child layout caches
 # ---------------------------------------------------------------------------
 
 _NOT_FOUND = object()
+_NOT_CACHED = object()
 
-# (visitor_class, node_class) -> (visit_method | None, leave_method | None)
-_VISITOR_METHODS_CACHE: dict[tuple[type, type], tuple[Any, Any]] = {}
+# The caches hold the looked-up functions directly.  Each entry is keyed by the
+# visitor or transformer class, which already keeps that class (and so its
+# methods) alive for as long as the entry exists; nothing would be freed any
+# sooner by holding the methods weakly.
+#
+# The caches are unbounded and never evict.  Their size is at most (number of
+# visitor/transformer classes) x (number of AST node classes), and both are
+# fixed once the modules are imported, PROVIDED every visitor and transformer
+# class is defined at module level.  A class defined inside a function is a
+# new class on every call and would add entries here that are never released,
+# so do not define one there (tests/unit/visitors/test_dispatch_fields.py
+# checks this).  With no eviction, concurrent use from the web server's and
+# the LSP's threads needs no lock: a racing miss just stores the same value
+# twice.
+
+# visitor_class -> node_class -> (visit_method | None, leave_method | None)
+_VISITOR_METHODS_CACHE: dict[type, dict[type, tuple[Any, Any]]] = {}
+
+# Only fields that can contain AST nodes belong here. Unknown node classes
+# retain the dynamic walk, including any attributes added by their callers.
+#
+# Every Visitor and Transformer descends through these fields and no others. A
+# node-holding field left out of its class's entry is skipped without any
+# error, and the order within an entry is the traversal order (it must stay the
+# constructor's assignment order, which is what the vars() walk followed).
+# tests/unit/visitors/test_dispatch_fields.py checks both against frog_ast.
+_CHILD_FIELDS: dict[type, tuple[str, ...]] = {
+    frog_ast.ASTNode: (),
+    frog_ast.Root: (),
+    frog_ast.Expression: (),
+    frog_ast.Statement: (),
+    frog_ast.Type: (),
+    frog_ast.IntType: (),
+    frog_ast.BoolType: (),
+    frog_ast.Void: (),
+    frog_ast.ArrayType: ("element_type", "count"),
+    frog_ast.MapType: ("key_type", "value_type"),
+    frog_ast.SetType: ("parameterization",),
+    frog_ast.BitStringType: ("parameterization",),
+    frog_ast.ModIntType: ("modulus",),
+    frog_ast.GroupType: (),
+    frog_ast.GroupElemType: ("group",),
+    frog_ast.ProductType: ("types",),
+    frog_ast.FunctionType: ("domain_type", "range_type"),
+    frog_ast.OptionalType: ("the_type",),
+    frog_ast.BinaryOperation: ("left_expression", "right_expression"),
+    frog_ast.UnaryOperation: ("expression",),
+    frog_ast.Set: ("elements",),
+    frog_ast.Field: ("type", "value"),
+    frog_ast.Parameter: ("type",),
+    frog_ast.MethodSignature: ("return_type", "parameters"),
+    frog_ast.Primitive: ("parameters", "fields", "methods"),
+    frog_ast.FuncCall: ("func", "args"),
+    frog_ast.Variable: (),
+    frog_ast.Tuple: ("values",),
+    frog_ast.ReturnStatement: ("expression",),
+    frog_ast.Block: ("statements",),
+    frog_ast.IfStatement: ("conditions", "blocks"),
+    frog_ast.FieldAccess: ("the_object",),
+    frog_ast.ArrayAccess: ("the_array", "index"),
+    frog_ast.Slice: ("the_array", "start", "end"),
+    frog_ast.VariableDeclaration: ("type",),
+    frog_ast.NumericFor: ("start", "end", "block"),
+    frog_ast.GenericFor: ("var_type", "over", "block"),
+    frog_ast.Sample: ("the_type", "var", "sampled_from"),
+    frog_ast.UniqueSample: ("the_type", "var", "unique_set", "sampled_from"),
+    frog_ast.Assignment: ("the_type", "var", "value"),
+    frog_ast.DestructuringBinding: ("the_type", "value", "exclusion"),
+    frog_ast.Integer: (),
+    frog_ast.Boolean: (),
+    frog_ast.NoneExpression: (),
+    frog_ast.BinaryNum: (),
+    frog_ast.BitStringLiteral: ("length",),
+    frog_ast.GroupGenerator: ("group",),
+    frog_ast.GroupOrder: ("group",),
+    frog_ast.Method: ("signature", "block"),
+    frog_ast.Import: (),
+    frog_ast.Scheme: ("parameters", "fields", "requirements", "methods", "imports"),
+    frog_ast.Game: ("parameters", "fields", "methods"),
+    frog_ast.ParameterizedGame: ("args",),
+    frog_ast.EventTheorem: ("game",),
+    frog_ast.ConcreteGame: ("game",),
+    frog_ast.Reduction: ("parameters", "fields", "methods", "to_use", "play_against"),
+    frog_ast.AdvantageClause: ("bound",),
+    frog_ast.AdvantageReference: ("notion", "reduction"),
+    frog_ast.ClaimedBound: ("bound",),
+    frog_ast.GameFile: ("imports", "games", "advantage"),
+    frog_ast.Step: ("challenger", "reduction", "adversary"),
+    frog_ast.StepAssumption: ("expression",),
+    frog_ast.Induction: ("start", "end", "steps"),
+    frog_ast.Lemma: ("game",),
+    frog_ast.StructuralRequirement: ("target",),
+    frog_ast.ProofFile: (
+        "imports",
+        "helpers",
+        "lets",
+        "max_calls",
+        "assumptions",
+        "lemmas",
+        "theorem",
+        "steps",
+        "requirements",
+        "claimed_bound",
+    ),
+}
 
 # (transformer_class, node_class) -> method | _NOT_FOUND
 _TRANSFORM_CACHE: dict[tuple[type, type], Any] = {}
@@ -52,42 +156,72 @@ _TRANSFORM_FALLBACK_CACHE: dict[type, Any] = {}
 
 
 def _lookup_visitor_methods(cls: type, node_cls: type) -> tuple[Any, Any]:
-    """Look up visit/leave methods for a (visitor_class, node_class) pair."""
-    key = (cls, node_cls)
-    cached = _VISITOR_METHODS_CACHE.get(key)
-    if cached is not None:
-        return cached
-    snake = _to_snake_case(node_cls.__name__)
-    visit_method = getattr(cls, "visit_" + snake, None) or getattr(
-        cls, "visit_ast_node", None
-    )
-    leave_method = getattr(cls, "leave_" + snake, None) or getattr(
-        cls, "leave_ast_node", None
-    )
-    result = (visit_method, leave_method)
-    _VISITOR_METHODS_CACHE[key] = result
-    return result
+    """Resolve the visit/leave hooks of visitor class *cls* for *node_cls*.
+
+    The hook is looked up by the node class's own name first, then by the name
+    of each of its AST base classes in MRO order, ending at the generic
+    ``visit_ast_node`` / ``leave_ast_node``.  So ``visit_game`` also fires on a
+    ``Reduction`` unless the visitor defines ``visit_reduction``.
+
+    ``Transformer`` dispatch does NOT do this (see ``_lookup_transform``).
+    """
+    methods: list[Any] = []
+    for prefix in ("visit_", "leave_"):
+        method = None
+        for ancestor in node_cls.__mro__:
+            if not issubclass(ancestor, frog_ast.ASTNode):
+                continue
+            method = getattr(cls, prefix + _to_snake_case(ancestor.__name__), None)
+            if method is not None:
+                break
+        if method is None:
+            method = getattr(cls, prefix + "ast_node", None)
+        methods.append(method)
+    return methods[0], methods[1]
+
+
+def _visitor_methods(cls: type) -> dict[type, tuple[Any, Any]]:
+    """The dispatch table of a visitor class, built on first use."""
+    methods = _VISITOR_METHODS_CACHE.get(cls)
+    if methods is None:
+        methods = {}
+        pending = [frog_ast.ASTNode]
+        while pending:
+            node_cls = pending.pop()
+            methods[node_cls] = _lookup_visitor_methods(cls, node_cls)
+            pending.extend(node_cls.__subclasses__())
+        _VISITOR_METHODS_CACHE[cls] = methods
+    return methods
+
+
+def _child_fields(node: frog_ast.ASTNode) -> tuple[str, ...]:
+    """Return the structural child fields for a node class."""
+    fields = _CHILD_FIELDS.get(type(node))
+    return tuple(vars(node)) if fields is None else fields
 
 
 def _lookup_transform(cls: type, node_cls: type) -> Any:
-    """Look up transform method for a (transformer_class, node_class) pair."""
+    """Look up transform method for a (transformer_class, node_class) pair.
+
+    Exact-name only: the hook for a node is ``transform_<its own class name>``.
+    Unlike ``_lookup_visitor_methods`` there is no fallback through the node
+    class's bases, so ``transform_game`` does not fire on a ``Reduction``.
+    """
     key = (cls, node_cls)
-    cached = _TRANSFORM_CACHE.get(key)
-    if cached is not None:
-        return cached
-    snake = _to_snake_case(node_cls.__name__)
-    method = getattr(cls, "transform_" + snake, _NOT_FOUND)
-    _TRANSFORM_CACHE[key] = method
+    method = _TRANSFORM_CACHE.get(key, _NOT_CACHED)
+    if method is _NOT_CACHED:
+        snake = _to_snake_case(node_cls.__name__)
+        method = getattr(cls, "transform_" + snake, _NOT_FOUND)
+        _TRANSFORM_CACHE[key] = method
     return method
 
 
 def _lookup_transform_fallback(cls: type) -> Any:
     """Look up transform_ast_node fallback for a transformer class."""
-    cached = _TRANSFORM_FALLBACK_CACHE.get(cls)
-    if cached is not None:
-        return cached
-    method = getattr(cls, "transform_ast_node", _NOT_FOUND)
-    _TRANSFORM_FALLBACK_CACHE[cls] = method
+    method = _TRANSFORM_FALLBACK_CACHE.get(cls, _NOT_CACHED)
+    if method is _NOT_CACHED:
+        method = getattr(cls, "transform_ast_node", _NOT_FOUND)
+        _TRANSFORM_FALLBACK_CACHE[cls] = method
     return method
 
 
@@ -117,6 +251,23 @@ U = TypeVar("U")
 
 
 class Visitor(ABC, Generic[U]):
+    """Read-only traversal with ``visit_<node>`` / ``leave_<node>`` hooks.
+
+    Hooks are named after the snake-cased node class.  Dispatch picks the most
+    specific hook the visitor defines along the node class's MRO: the node's
+    own class, then each AST base class in turn, then the generic
+    ``visit_ast_node`` / ``leave_ast_node``.  A ``visit_game`` hook therefore
+    also runs on a ``Reduction`` (a ``Game`` subclass) unless the visitor has
+    a ``visit_reduction``; at most one visit hook and one leave hook run per
+    node.
+
+    This differs from ``Transformer``, whose ``transform_<node>`` hooks match
+    the node's own class name only.
+
+    Children are reached through ``_CHILD_FIELDS``.  A field missing from that
+    map is never visited.
+    """
+
     @abstractmethod
     def result(self) -> U:
         pass
@@ -133,26 +284,33 @@ class Visitor(ABC, Generic[U]):
 
     def visit(self, visiting_node: frog_ast.ASTNode) -> U:
         cls = type(self)
+        dispatch = _visitor_methods(cls)
 
         def visit_helper(node: frog_ast.ASTNode) -> None:
-            visit_method, leave_method = _lookup_visitor_methods(cls, type(node))
+            node_cls = type(node)
+            methods = dispatch.get(node_cls)
+            if methods is None:
+                # A node class defined after this visitor's table was built.
+                methods = _lookup_visitor_methods(cls, node_cls)
+                dispatch[node_cls] = methods
+            visit_method, leave_method = methods
 
             if visit_method is not None:
                 visit_method(self, node)
 
-            def visit_children(child: Any) -> Any:
-                if isinstance(child, frog_ast.ASTNode):
-                    visit_helper(child)
-                if isinstance(child, (list, tuple)):
-                    for item in child:
-                        visit_children(item)
-
             if self.should_descend(node):
-                for attr in vars(node):
+                for attr in _child_fields(node):
                     visit_children(getattr(node, attr))
 
             if leave_method is not None:
                 leave_method(self, node)
+
+        def visit_children(child: Any) -> None:
+            if isinstance(child, frog_ast.ASTNode):
+                visit_helper(child)
+            elif isinstance(child, (list, tuple)):
+                for item in child:
+                    visit_children(item)
 
         visit_helper(visiting_node)
         return self.result()
@@ -164,6 +322,20 @@ T = TypeVar("T", bound=frog_ast.ASTNode)
 
 
 class Transformer(ABC):
+    """Copy-on-write rewriting with ``transform_<node>`` hooks.
+
+    Dispatch is exact-name: a node is handed to ``transform_<snake-cased name
+    of its own class>`` if the transformer defines it.  There is NO fallback
+    through the node class's bases, unlike ``Visitor``: ``transform_game`` is
+    not called for a ``Reduction``, and a transformer that must handle both
+    defines ``transform_reduction`` as well.  Failing an exact match, the
+    generic ``transform_ast_node`` is tried and its result used if truthy;
+    otherwise the node's children are transformed (``_transform_children``).
+
+    Children are reached through ``_CHILD_FIELDS``.  A field missing from that
+    map is never transformed.
+    """
+
     def transform(self, node: T) -> T:
         cls = type(self)
         node_cls = type(node)
@@ -185,16 +357,14 @@ class Transformer(ABC):
         # transformer's own per-node hooks for *node* itself. Subclasses that
         # override a container hook (e.g. ``transform_game``) to set up state
         # call this to perform the default structural descent.
-        changed = False
         new_attrs: dict[str, Any] = {}
-        for attr_name in vars(node):
+        for attr_name in _child_fields(node):
             old_val = getattr(node, attr_name)
             new_val = _cow_transform_child(self, old_val)
-            new_attrs[attr_name] = new_val
             if new_val is not old_val:
-                changed = True
+                new_attrs[attr_name] = new_val
 
-        if not changed:
+        if not new_attrs:
             return node
 
         node_copy = copy.copy(node)
@@ -1594,6 +1764,20 @@ def referenced_variable_names(node: frog_ast.ASTNode) -> set[str]:
     return names
 
 
+class _OrderedReferenceVisitor(Visitor[list[frog_ast.Variable]]):
+    def __init__(self) -> None:
+        self.variables: list[frog_ast.Variable] = []
+        self.seen: set[str] = set()
+
+    def result(self) -> list[frog_ast.Variable]:
+        return self.variables
+
+    def visit_variable(self, inner: frog_ast.Variable) -> None:
+        if inner.name not in self.seen:
+            self.seen.add(inner.name)
+            self.variables.append(inner)
+
+
 def referenced_variables_in_order(
     node: frog_ast.ASTNode,
 ) -> list[frog_ast.Variable]:
@@ -1601,19 +1785,6 @@ def referenced_variables_in_order(
     deduplicated by name -- the FieldAccess-complete analogue of
     :class:`VariableCollectionVisitor`.  Used where iteration order is
     observable (e.g. dependency-edge order)."""
-
-    class _OrderedReferenceVisitor(Visitor[list[frog_ast.Variable]]):
-        def __init__(self) -> None:
-            self.variables: list[frog_ast.Variable] = []
-            self.seen: set[str] = set()
-
-        def result(self) -> list[frog_ast.Variable]:
-            return self.variables
-
-        def visit_variable(self, inner: frog_ast.Variable) -> None:
-            if inner.name not in self.seen:
-                self.seen.add(inner.name)
-                self.variables.append(inner)
 
     return _OrderedReferenceVisitor().visit(node)
 

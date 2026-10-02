@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import copy
 from abc import ABC, abstractmethod
+from collections.abc import Hashable
 from dataclasses import dataclass
-from typing import Hashable, Optional
+from typing import Optional
 
 from .. import frog_ast
 from ..visitors import SearchVisitor, lvalue_base_name

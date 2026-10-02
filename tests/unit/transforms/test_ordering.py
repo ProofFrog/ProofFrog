@@ -13,10 +13,16 @@ from proof_frog.transforms._ordering import node_sort_key
 
 
 def _concrete_subclasses(base: type) -> set[type]:
-    """Recursively collect all non-abstract concrete subclasses of *base*."""
+    """Recursively collect all non-abstract concrete subclasses of *base*.
+
+    Only classes defined in ``frog_ast`` count.  ``__subclasses__()`` also
+    lists node classes that other test modules define (and that are still
+    alive when this test runs in the same process); those are not node types
+    ``node_sort_key`` has to know.
+    """
     result: set[type] = set()
     for cls in base.__subclasses__():
-        if not inspect.isabstract(cls):
+        if not inspect.isabstract(cls) and cls.__module__ == frog_ast.__name__:
             result.add(cls)
         result |= _concrete_subclasses(cls)
     return result

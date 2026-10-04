@@ -19,6 +19,8 @@ from ..visitors import NameTypeMap, SearchVisitor
 
 _MAX_FIXED_POINT_ITERATIONS = 200
 
+_NON_SEMANTIC = frog_ast.ASTNode._NON_SEMANTIC  # pylint: disable=protected-access
+
 
 @dataclass
 class NearMiss:
@@ -164,6 +166,39 @@ class TransformPass(ABC):
         """Apply this transformation pass. Return the (possibly new) game AST."""
 
 
+def same_structure(left: object, right: object) -> bool:
+    """True if two AST values are the same tree, node class for node class.
+
+    Stricter than ``ASTNode.__eq__``: every node must have exactly the same
+    class as its counterpart (no ``ProductType``/``Tuple`` cross-equality, no
+    subclass overrides), and every scalar the same type and value. Source
+    positions are ignored, as in ``__eq__``. Two values for which this holds
+    are interchangeable as the input of any pass.
+    """
+    if left is right:
+        return True
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, frog_ast.ASTNode):
+        assert isinstance(right, frog_ast.ASTNode)
+        left_attrs = vars(left)
+        right_attrs = vars(right)
+        if len(left_attrs) != len(right_attrs):
+            return False
+        for name, value in left_attrs.items():
+            if name in _NON_SEMANTIC:
+                continue
+            if name not in right_attrs or not same_structure(value, right_attrs[name]):
+                return False
+        return True
+    if isinstance(left, (list, tuple)):
+        assert isinstance(right, (list, tuple))
+        return len(left) == len(right) and all(
+            same_structure(a, b) for a, b in zip(left, right)
+        )
+    return bool(left == right)
+
+
 def run_pipeline(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     game: frog_ast.Game,
     pipeline: list[TransformPass],
@@ -177,12 +212,47 @@ def run_pipeline(  # pylint: disable=too-many-arguments,too-many-positional-argu
     If *verbose_lines* is provided, verbose output is appended there instead
     of being printed directly.  This allows callers (e.g. parallel workers)
     to collect output for later ordered printing.
+
+    A pass is not re-applied to a game it has already left unchanged: once
+    nothing fires any more, the iteration that confirms the fixed point would
+    otherwise re-run every pass on the very game each of them just declined.
+    This relies on a pass's output being a function of the game and of
+    ``ctx``, whose only state that changes during a run is ``pinned_fields``;
+    a skip therefore also requires ``pinned_fields`` to be what it was when
+    the pass declined. Near-misses are unaffected: the declining application
+    already recorded them, and they are deduplicated.
+
+    "Left unchanged" means :func:`same_structure`, NOT ``==``: AST equality
+    is deliberately loose in places (a ``ProductType`` equals a ``Tuple``
+    with the same elements), and a pass such as ``Normalize Product-Literal
+    Tuples`` makes exactly such a change, which later passes depend on.
     """
+    # declined[i]: the game object pass i last left unchanged, with the
+    # pinned fields it saw. Holding the game keeps the identity test valid.
+    declined: list[tuple[frog_ast.Game, frozenset[str]] | None] = [None] * len(pipeline)
     for _ in range(max_iterations):
         new_game = game
-        for pass_ in pipeline:
+        for index, pass_ in enumerate(pipeline):
+            last = declined[index]
+            if (
+                last is not None
+                and last[0] is new_game
+                and last[1] == ctx.pinned_fields
+            ):
+                continue
+            pinned_before = frozenset(ctx.pinned_fields)
             result = pass_.apply(new_game, ctx)
-            if verbose and result != new_game:
+            if result is new_game or same_structure(result, new_game):
+                # Keep the input object, so that every later pass (and the
+                # next iteration) can recognise an unchanged game by identity.
+                declined[index] = (
+                    (new_game, pinned_before)
+                    if pinned_before == ctx.pinned_fields
+                    else None
+                )
+                continue
+            declined[index] = None
+            if verbose:
                 msg1 = f"APPLIED {pass_.name}"
                 msg2 = str(result)
                 if verbose_lines is not None:

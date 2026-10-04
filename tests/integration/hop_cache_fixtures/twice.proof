@@ -1,0 +1,17 @@
+import 'Fn.primitive';
+import 'Twice.game';
+
+proof:
+
+let:
+    Int n;
+    Fn F = Fn(n);
+
+assume:
+
+theorem:
+    Twice(F);
+
+games:
+    Twice(F).Shared against Twice(F).Adversary;
+    Twice(F).Separate against Twice(F).Adversary;

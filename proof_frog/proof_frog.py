@@ -10,6 +10,7 @@ from colorama import init
 
 from . import frog_parser
 from . import frog_ast
+from . import hop_cache
 from . import proof_engine
 from . import semantic_analysis
 
@@ -167,6 +168,17 @@ def check(file: str, json_output: bool) -> None:
         "Can also be forced via the PROOFFROG_SEQUENTIAL environment variable."
     ),
 )
+@click.option(
+    "--cache/--no-cache",
+    "use_cache",
+    default=None,
+    help=(
+        "Skip equivalence hops this same engine verified in an earlier run "
+        "(off by default; PROOFFROG_HOP_CACHE=1 turns it on). Cached hops are "
+        "marked in the output. The cache lives in ~/.cache/prooffrog "
+        "(or PROOFFROG_CACHE_DIR) and is trusted."
+    ),
+)
 def prove(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     file: str,
     verbose: int,
@@ -175,6 +187,7 @@ def prove(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     skip_lemmas: bool,
     skip_bound: bool,
     sequential: bool,
+    use_cache: bool | None,
 ) -> None:
     """Run proof verification on a .proof file."""
     if json_output:
@@ -208,6 +221,7 @@ def prove(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         skip_lemmas=skip_lemmas,
         parallel=not sequential,
         skip_bound=skip_bound,
+        hop_cache=hop_cache.open_hop_cache(use_cache),
     )
     proof_file: frog_ast.ProofFile
     try:

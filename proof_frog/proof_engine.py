@@ -21,6 +21,7 @@ from . import dependencies
 from . import diagnostics
 from . import advantage
 from . import upto
+from . import hop_cache as hop_cache_module
 from .transforms._base import (
     NearMiss,
     PipelineContext,
@@ -60,6 +61,11 @@ class EquivalenceResult:
     failure_detail: str = ""
     diagnosis: diagnostics.Diagnosis | None = None
     verbose_output: str = ""
+    # True when the verdict came from the hop cache (see hop_cache.py).
+    cached: bool = False
+    # Fingerprint of the engine code that produced the verdict, when the task
+    # asked for it (a pool worker loads the engine afresh; see hop_cache.py).
+    engine_fingerprint: str | None = None
 
 
 @dataclasses.dataclass
@@ -82,6 +88,9 @@ class HopResult:
     justification: frog_ast.ParameterizedGame | None = None
     reduction: frog_ast.ParameterizedGame | None = None
     direction: tuple[str, str] | None = None
+    # True when an equivalence hop was not re-checked: an identical hop was
+    # verified by this same engine in an earlier run (see hop_cache.py).
+    cached: bool = False
 
 
 class FailedProof(Exception):
@@ -99,12 +108,29 @@ class _EquivalenceTask:
     verbosity: Verbosity
     no_diagnose: bool
     proof_let_types: visitors.NameTypeMap
+    # Report the worker's engine fingerprint with the result (hop cache on).
+    report_fingerprint: bool = False
 
 
 def _check_equivalent_worker(task: _EquivalenceTask) -> EquivalenceResult:
     """Top-level function for multiprocessing: check equivalence of two games.
 
-    This must be a module-level function so it is picklable.
+    This must be a module-level function so it is picklable. When the task
+    asks, the result carries the engine fingerprint of the process that ran
+    the check ("" if it cannot be computed, which matches no cache).
+    """
+    result = _check_equivalent_task(task)
+    if task.report_fingerprint:
+        try:
+            result.engine_fingerprint = hop_cache_module.engine_fingerprint()
+        except OSError:
+            result.engine_fingerprint = ""
+    return result
+
+
+def _check_equivalent_task(task: _EquivalenceTask) -> EquivalenceResult:
+    """Check equivalence of two games for `_check_equivalent_worker`.
+
     Verbose output is collected into a list and returned in the result
     so the main process can print it in step order.
     """
@@ -524,7 +550,10 @@ class ProofEngine:
         skip_lemmas: bool = False,
         parallel: bool = True,
         skip_bound: bool = False,
+        hop_cache: hop_cache_module.HopCache | None = None,
     ) -> None:
+        # Verified-hop cache (opt-in; None = every hop is checked).
+        self.hop_cache = hop_cache
         self.definition_namespace: frog_ast.Namespace = {}
         self.proof_namespace: frog_ast.Namespace = {}
         self.proof_let_types: visitors.NameTypeMap = visitors.NameTypeMap()
@@ -795,6 +824,7 @@ class ProofEngine:
                     verbosity=self.verbosity,
                     no_diagnose=True,
                     skip_lemmas=self.skip_lemmas,
+                    hop_cache=self.hop_cache,
                 )
                 print(f"{Fore.GREEN}Lemma verified.{Fore.RESET}\n")
             except (FailedProof, Exception) as e:
@@ -834,6 +864,12 @@ class ProofEngine:
 
         print()
         self._print_summary_table()
+        cached_hops = sum(1 for r in self.hop_results if r.cached)
+        if cached_hops:
+            print(
+                f"\n  {cached_hops} equivalence hop(s) not re-checked: verified by "
+                "this engine in an earlier run (--no-cache re-checks them)."
+            )
         print()
 
         # Level 2: Print full diagnostics for failed hops
@@ -992,7 +1028,7 @@ class ProofEngine:
             elif r.kind == "by_upto" and r.valid:
                 result_str = Fore.CYAN + "upto" + Fore.RESET
             elif r.valid:
-                result_str = Fore.GREEN + "ok" + Fore.RESET
+                result_str = Fore.GREEN + ("cached" if r.cached else "ok") + Fore.RESET
             else:
                 result_str = Fore.RED + "FAILED" + Fore.RESET
 
@@ -1423,6 +1459,7 @@ class ProofEngine:
             verbosity=self.verbosity,
             no_diagnose=self.no_diagnose,
             proof_let_types=self.proof_let_types,
+            report_fingerprint=self.hop_cache is not None,
         )
 
     def _report_hop(
@@ -1439,7 +1476,9 @@ class ProofEngine:
             print(f"Current: {hop.current_desc}")
             print(f"Hop To: {hop.next_desc}\n")
         if equiv_result.valid:
-            self._print_step_status(hop_desc, "ok", Fore.GREEN)
+            self._print_step_status(
+                hop_desc, "ok (cached)" if equiv_result.cached else "ok", Fore.GREEN
+            )
         else:
             self._print_step_status(hop_desc, "FAILED", Fore.RED)
             self._print_failure_inline(equiv_result)
@@ -1455,6 +1494,7 @@ class ProofEngine:
                 next_desc=hop.next_desc,
                 failure_detail=equiv_result.failure_detail,
                 diagnosis=equiv_result.diagnosis,
+                cached=equiv_result.cached,
             )
         )
 
@@ -1530,12 +1570,58 @@ class ProofEngine:
         # Collect equivalence tasks for parallel dispatch
         equiv_indices: list[int] = []
         tasks: list[_EquivalenceTask] = []
+        results: dict[int, EquivalenceResult] = {}
+        cache_keys: dict[int, str | None] = {}
         for idx, hop in enumerate(prepared):
             if not hop.kind:  # equivalence hop
+                task = self._make_task(hop)
+                # The worker reads `task.proof_let_types` as well as the
+                # context's copy; the key covers only the latter, so a task
+                # where they are not the same object is never cached.
+                cache_keys[idx] = (
+                    self._hop_cache_key(
+                        task.ctx,
+                        task.current_game_ast,
+                        task.next_game_ast,
+                        task.step_assumptions,
+                    )
+                    if task.proof_let_types is task.ctx.proof_let_types
+                    else None
+                )
+                if self._hop_cache_hit(cache_keys[idx]):
+                    results[idx] = EquivalenceResult(valid=True, cached=True)
+                    continue
                 equiv_indices.append(idx)
-                tasks.append(self._make_task(hop))
+                tasks.append(task)
 
-        # Run equivalence checks in parallel with progress bar
+        total = len(tasks)
+        if total < 4:
+            # Too few uncached hops left to be worth a process pool.
+            for idx, task in zip(equiv_indices, tasks):
+                results[idx] = _check_equivalent_worker(task)
+        else:
+            results.update(self._run_tasks_in_pool(equiv_indices, tasks))
+        if self.hop_cache is not None:
+            for idx in equiv_indices:
+                if results[idx].valid:
+                    self.hop_cache.add(
+                        cache_keys[idx], verified_by=results[idx].engine_fingerprint
+                    )
+
+        # Report all hops in order, printing captured verbose output
+        for idx, hop in enumerate(prepared):
+            if hop.kind:
+                self._report_assumption_hop(hop, _depth)
+            else:
+                result = results[idx]
+                if result.verbose_output:
+                    sys.stdout.write(result.verbose_output)
+                self._report_hop(hop, result, _depth)
+
+    def _run_tasks_in_pool(
+        self, equiv_indices: list[int], tasks: list[_EquivalenceTask]
+    ) -> dict[int, EquivalenceResult]:
+        """Run equivalence checks in a process pool, with a progress bar."""
         total = len(tasks)
         results: dict[int, EquivalenceResult] = {}
         with ProcessPoolExecutor() as executor:
@@ -1557,16 +1643,7 @@ class ProofEngine:
                 # Clear the progress bar line
                 sys.stderr.write("\r" + " " * shutil.get_terminal_size().columns + "\r")
                 sys.stderr.flush()
-
-        # Report all hops in order, printing captured verbose output
-        for idx, hop in enumerate(prepared):
-            if hop.kind:
-                self._report_assumption_hop(hop, _depth)
-            else:
-                result = results[idx]
-                if result.verbose_output:
-                    sys.stdout.write(result.verbose_output)
-                self._report_hop(hop, result, _depth)
+        return results
 
     @staticmethod
     def _print_progress_bar(done: int, total: int) -> None:
@@ -1598,7 +1675,7 @@ class ProofEngine:
                 continue
 
             self.step_assumptions = hop.step_assumptions
-            equiv_result = self.check_equivalent(
+            equiv_result = self._check_equivalent_cached(
                 hop.current_game_ast, hop.next_game_ast  # type: ignore[arg-type]
             )
             self._report_hop(hop, equiv_result, _depth)
@@ -1650,12 +1727,18 @@ class ProofEngine:
                     print(f"Current: {rollover_current_desc}")
                     print(f"Hop To: {rollover_next_desc}\n")
                 self.set_up_assumptions(rollover_assumptions, last_step, first_step)
-                rollover_result = self.check_equivalent(last_step_ast, first_step_ast)
+                rollover_result = self._check_equivalent_cached(
+                    last_step_ast, first_step_ast
+                )
                 rollover_hop = (
                     f"[rollover] {rollover_current_desc} -> {rollover_next_desc}"
                 )
                 if rollover_result.valid:
-                    self._print_step_status(rollover_hop, "ok", Fore.GREEN)
+                    self._print_step_status(
+                        rollover_hop,
+                        "ok (cached)" if rollover_result.cached else "ok",
+                        Fore.GREEN,
+                    )
                 else:
                     self._print_step_status(rollover_hop, "FAILED", Fore.RED)
                     self._print_failure_inline(rollover_result)
@@ -1669,6 +1752,7 @@ class ProofEngine:
                         next_desc=rollover_next_desc,
                         failure_detail=rollover_result.failure_detail,
                         diagnosis=rollover_result.diagnosis,
+                        cached=rollover_result.cached,
                     )
                 )
                 self.proof_let_types.remove(the_induction.name)
@@ -1750,6 +1834,55 @@ class ProofEngine:
             sampled_let_names=self.sampled_let_names,
             requirements=list(self.requirements),
         )
+
+    def _hop_cache_key(
+        self,
+        ctx: PipelineContext,
+        current_game_ast: frog_ast.Game,
+        next_game_ast: frog_ast.Game,
+        step_assumptions: list[ProcessedAssumption],
+    ) -> str | None:
+        """The hop's cache digest, or None when caching is off or impossible."""
+        if self.hop_cache is None:
+            return None
+        return self.hop_cache.key(
+            ctx, current_game_ast, next_game_ast, step_assumptions
+        )
+
+    def _hop_cache_hit(self, key: str | None) -> bool:
+        """True if the hop *key* may be reported verified without checking.
+
+        At NORMAL verbosity and above the user asked to see the canonical
+        games, so the hop is always re-checked (and still recorded).
+        """
+        return (
+            self.hop_cache is not None
+            and self.verbosity < Verbosity.NORMAL
+            and self.hop_cache.lookup(key)
+        )
+
+    def _check_equivalent_cached(
+        self, current_game_ast: frog_ast.Game, next_game_ast: frog_ast.Game
+    ) -> EquivalenceResult:
+        """`check_equivalent`, consulting and updating the hop cache.
+
+        Only a success is ever stored, so a failing hop is always re-checked
+        and its diagnostics are never served from the cache.
+        """
+        if self.hop_cache is None:
+            return self.check_equivalent(current_game_ast, next_game_ast)
+        key = self._hop_cache_key(
+            self._build_context(),
+            current_game_ast,
+            next_game_ast,
+            self.step_assumptions,
+        )
+        if self._hop_cache_hit(key):
+            return EquivalenceResult(valid=True, cached=True)
+        result = self.check_equivalent(current_game_ast, next_game_ast)
+        if result.valid:
+            self.hop_cache.add(key)
+        return result
 
     def check_equivalent(
         self, current_game_ast: frog_ast.Game, next_game_ast: frog_ast.Game
@@ -2492,12 +2625,13 @@ def verify_proof_file(
     return proof_file
 
 
-def _verify_proof_file_with_engine(
+def _verify_proof_file_with_engine(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     proof_path: str,
     verbosity: Verbosity = Verbosity.QUIET,
     no_diagnose: bool = True,
     skip_lemmas: bool = False,
     skip_bound: bool = False,
+    hop_cache: hop_cache_module.HopCache | None = None,
 ) -> tuple[frog_ast.ProofFile, "ProofEngine"]:
     """As :func:`verify_proof_file`, also returning the engine (for its bound)."""
     # pylint: disable=import-outside-toplevel,cyclic-import
@@ -2511,6 +2645,7 @@ def _verify_proof_file_with_engine(
         no_diagnose=no_diagnose,
         skip_lemmas=skip_lemmas,
         skip_bound=skip_bound,
+        hop_cache=hop_cache,
     )
 
     for imp in proof_file.imports:

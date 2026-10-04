@@ -146,6 +146,10 @@ def _check_equivalent_task(task: _EquivalenceTask) -> EquivalenceResult:
     for index, game in enumerate((current_game_ast, next_game_ast)):
         which = WhichGame.CURRENT if index == 0 else WhichGame.NEXT
         ctx.near_misses = []
+        # Each game is canonicalized on its own: fields pinned while
+        # canonicalizing the current game must not affect the next one, so
+        # that a game's canonical form does not depend on its hop partner.
+        ctx.pinned_fields = set()
 
         if verbose:
             label = "CURRENT" if index == 0 else "NEXT"
@@ -1894,6 +1898,10 @@ class ProofEngine:
         for index, game in enumerate((current_game_ast, next_game_ast)):
             which = WhichGame.CURRENT if index == 0 else WhichGame.NEXT
             ctx.near_misses = []  # Reset for each game
+            # Each game is canonicalized on its own: fields pinned while
+            # canonicalizing the current game must not affect the next one, so
+            # that a game's canonical form does not depend on its hop partner.
+            ctx.pinned_fields = set()
 
             if self.verbosity >= Verbosity.VERBOSE:
                 label = "CURRENT" if index == 0 else "NEXT"

@@ -3146,3 +3146,60 @@ def test_dead_null_guard_no_near_miss_when_read_assigned(body: str) -> None:
     assert not _dead_null_guard_unassigned_misses(
         "Void Initialize() { f = false; }", body
     )
+
+
+# ---------------------------------------------------------------------------
+# ExtractRepeatedTupleAccess: tuple-typed field bases
+# ---------------------------------------------------------------------------
+
+
+def _extract_field_misses(methods: str, init: str) -> list[NearMiss]:
+    game = frog_parser.parse_game(
+        f"""
+        Game TestGame() {{
+            [Int, Int] f;
+            Void Initialize() {{ {init} }}
+            {methods}
+        }}
+        """
+    )
+    ctx = _make_ctx()
+    result = ExtractRepeatedTupleAccess().apply(game, ctx)
+    assert result == game  # transform should NOT have fired
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Extract Repeated Tuple Access"
+    ]
+
+
+@pytest.mark.parametrize(
+    "methods, init, reason",
+    [
+        (
+            "Void Store() { f = K.Get(); } Int Q() { return f[1] + f[1]; }",
+            "",
+            "not definitely assigned",
+        ),
+        (
+            "Int Q() { Int x = f[1]; f = K.Get(); return x + f[1]; }",
+            "f = K.Get();",
+            "writes or rebinds the field",
+        ),
+        (
+            "Void Reset() { f = K.Get(); }"
+            " Int Q() { Int x = f[1]; Reset(); return x + f[1]; }",
+            "f = K.Get();",
+            "calls a method of the game",
+        ),
+    ],
+)
+def test_extract_field_near_miss(methods: str, init: str, reason: str) -> None:
+    """A repeated read of a tuple field that the pass declines to extract is
+    reported, naming the field, the oracle and the unmet condition."""
+    misses = _extract_field_misses(methods, init)
+    assert len(misses) == 1
+    assert misses[0].variable == "f"
+    assert misses[0].method == "Q"
+    assert "f[1]" in misses[0].reason
+    assert reason in misses[0].reason

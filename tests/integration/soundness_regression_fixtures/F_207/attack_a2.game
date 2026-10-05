@@ -1,0 +1,56 @@
+// AUDIT ARTIFACT (HoistDuplicateBranchCall, Attack 2 -- PROSECUTION.md).
+// Hypothesis: _writes requires isinstance(node.var, Variable), so the map
+// element write `M[c] = v;` (target is an ArrayAccess) between the hoist
+// point and the second return-position occurrence of F.eval(M[c]) is not
+// counted, and the pass hoists the call above the write. Random below is the
+// post-hoist form of Real, so if the pass fires on Real the engine sees the
+// two games as identical.
+// Real and Random are DISTINGUISHABLE: instantiate eval as the identity.
+//   Adversary: Store(0, w); output O(false, 0, v) with v != w.
+//   Real:   the branch is skipped, M[0] is overwritten with v, and O returns
+//           eval(v) = v, with probability 1.
+//   Random: __hoist_0__ is computed from the OLD value M[0] = w before the
+//           overwrite, and O returns eval(w) = w, with probability 1.
+// Advantage 1. (Variant with no Store call: O(false, 0, v) returns eval(v)
+// in Real but performs an adversary-observable undefined read of M[0] in
+// Random -- abort vs. defined, also advantage 1, per SEMANTICS S4.1/S6.7.)
+// If the engine is SOUND it must REJECT the interchangeability hop; if the
+// prosecution is right, the pass hoists Real's call above the element write
+// and the engine ACCEPTS.
+
+import 'attack.primitive';
+
+Game Real(P F, Int n) {
+    Map<Int, BitString<n>> M;
+
+    Void Store(Int k, BitString<n> v) {
+        M[k] = v;
+    }
+
+    BitString<n> O(Bool b, Int c, BitString<n> v) {
+        if (b) {
+            return F.eval(M[c]);
+        }
+        M[c] = v;
+        return F.eval(M[c]);
+    }
+}
+
+Game Random(P F, Int n) {
+    Map<Int, BitString<n>> M;
+
+    Void Store(Int k, BitString<n> v) {
+        M[k] = v;
+    }
+
+    BitString<n> O(Bool b, Int c, BitString<n> v) {
+        BitString<n> __hoist_0__ = F.eval(M[c]);
+        if (b) {
+            return __hoist_0__;
+        }
+        M[c] = v;
+        return __hoist_0__;
+    }
+}
+
+export as AttackA2;

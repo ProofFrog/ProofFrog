@@ -1,0 +1,57 @@
+// AUDIT ARTIFACT (SubsetTypeNormalization dir, Attack 4 -- DeadNullGuard
+// cross-method type collision via __-prefixed binder).
+// Target pass: Dead Null Guard Elimination (transforms/types.py L291-301),
+// the sibling pass in the audited file. It keys guard-deletion on
+// `type_map.get(name)` (types.py L143), where type_map comes from
+// build_game_type_map / GetTypeMapVisitor (visitors.py L1281-1294,
+// L1235-1278) -- a FLAT, un-namespaced, last-write-wins merge of EVERY
+// method's binders.
+//
+// AlphaRename (transforms/alpha_rename.py L36-38, L88-101) renames locals to
+// globally-unique __aN__ names -- BUT it SKIPS names already beginning with
+// `__`. So a `__`-prefixed local in two different oracles keeps its name in
+// both, and the flat type map collapses them by last-write-wins.
+//
+// Here oracle Poison declares a NON-nullable `BitString<n> __v` (sampled, so
+// it survives copy elimination); oracle Q declares a genuinely nullable
+// `BitString<n>? __v = P.May(m)` and guards it with `if (__v == None)`.
+// Poison is textually last, so the flat map records __v as NON-nullable and
+// Q's LIVE None-guard is deleted as "dead".
+//
+// Guarded vs Unguarded differ observably: when P.May(m) == None, Guarded
+// returns a fresh random witness; Unguarded returns None. Distinguisher:
+// query Q(m0) at an m0 where May(m0)==None (exists for some instantiation of
+// the abstract primitive Maybe), test result==None. Advantage ~1.
+// If the engine is SOUND it must REJECT Guarded ~ Unguarded.
+
+import 'maybe.primitive';
+
+Game Guarded(Int n, Maybe P) {
+    BitString<n>? Q(BitString<n> m) {
+        BitString<n>? __v = P.May(m);
+        if (__v == None) {
+            BitString<n> w <- BitString<n>;
+            return w;
+        }
+        return __v;
+    }
+
+    BitString<n>? Poison() {
+        BitString<n> __v <- BitString<n>;
+        return __v;
+    }
+}
+
+Game Unguarded(Int n, Maybe P) {
+    BitString<n>? Q(BitString<n> m) {
+        BitString<n>? __v = P.May(m);
+        return __v;
+    }
+
+    BitString<n>? Poison() {
+        BitString<n> __v <- BitString<n>;
+        return __v;
+    }
+}
+
+export as Attack4;

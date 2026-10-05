@@ -1,0 +1,23 @@
+// Attack 3 proof-level escalation, RESERVED-PREFIX variant (audit:
+// UniformXorSimplification). Left returns m, Right returns 0^lambda (see
+// attack3_reserved_prop.game); they are NOT interchangeable (distinguisher:
+// O(1^lambda), advantage 1). AlphaRename skips __-prefixed binders, so the
+// shadowing collision reaches UniformXorSimplification inside the pipeline.
+// If `prove` ACCEPTS this file, the pass's name-only matching is unsound at
+// proof level even with AlphaRename in front of it.
+
+import 'attack3_reserved_prop.game';
+
+proof:
+
+let:
+    Int lambda;
+
+assume:
+
+theorem:
+    Attack3ReservedSec(lambda);
+
+games:
+    Attack3ReservedSec(lambda).Left against Attack3ReservedSec(lambda).Adversary;
+    Attack3ReservedSec(lambda).Right against Attack3ReservedSec(lambda).Adversary;

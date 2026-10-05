@@ -1,0 +1,7 @@
+// Audit support file (ExtractRepeatedTupleAccess, Round 2 Phase 1).
+// Trivial scheme instantiating the Dummy primitive.
+import 'Dummy.primitive';
+
+Scheme TrivialDummy(Int n) extends Dummy {
+    Int n = n;
+}

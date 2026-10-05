@@ -1,0 +1,60 @@
+// Gold-standard artifact for HoistFieldPureAlias (commit 9043065), attack 4.
+// Target pass: HoistFieldPureAlias (proof_frog/transforms/inlining.py L1901-1908).
+// Hypothesis: the pass computes expr's read-set with VariableCollectionVisitor,
+// which suppresses collection inside any FieldAccess subtree, so the mutable
+// map M read via |M.keys| inside expr = A[|M.keys|] is never stability-checked;
+// the write M[7] = 1 between j and i changes the value the hoist snapshots.
+// (The earlier use is a FIELD assignment `g = A[|M.keys|];` so that single-use
+// local inlining cannot dissolve the j-use before the hoist pass runs.)
+// Left  : f = A[|M.keys|] runs after M[7] = 1, so f = A[1] = 20; O2() -> 20.
+// Right : exactly what the pass produces - f = A[0] = 10; O2() -> 10.
+// Distinguisher: call O1() then O2(); Left gives 20, Right gives 10 -
+// advantage 1. A sound engine must reject Left -> Right.
+
+Game Left() {
+    Map<Int, Int> M;
+    Map<Int, Int> A;
+    Int f;
+    Int g;
+
+    Void Initialize() {
+        A[0] = 10;
+        A[1] = 20;
+    }
+
+    Int O1() {
+        g = A[|M.keys|];
+        M[7] = 1;
+        f = A[|M.keys|];
+        return g;
+    }
+
+    Int O2() {
+        return f;
+    }
+}
+
+Game Right() {
+    Map<Int, Int> M;
+    Map<Int, Int> A;
+    Int f;
+    Int g;
+
+    Void Initialize() {
+        A[0] = 10;
+        A[1] = 20;
+    }
+
+    Int O1() {
+        f = A[|M.keys|];
+        g = f;
+        M[7] = 1;
+        return g;
+    }
+
+    Int O2() {
+        return f;
+    }
+}
+
+export as A4Sep;

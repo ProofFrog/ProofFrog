@@ -1,0 +1,20 @@
+// AUDIT ATTACK FILE -- target pass: InlineLocalTupleLiteral (inlining.py L1271-1279).
+// ATK-4 proof-level probe: single no-assumption hop between
+// Atk4FieldAccessBlind.Real (returns |M.keys| captured BEFORE `M = N;` = 1)
+// and .Random (hand-applied pass output: returns it AFTER = 2). One-query
+// distinguisher: output 1 iff reply == 2. Advantage 1.
+// Expected if pass is SOUND: prove rejects. Expected if UNSOUND: "Proof Succeeded!".
+
+import 'atk4_fieldaccess_blind.game';
+
+proof:
+
+let:
+    Int lambda;
+
+theorem:
+    Atk4FieldAccessBlind(lambda);
+
+games:
+    Atk4FieldAccessBlind(lambda).Real against Atk4FieldAccessBlind(lambda).Adversary;
+    Atk4FieldAccessBlind(lambda).Random against Atk4FieldAccessBlind(lambda).Adversary;

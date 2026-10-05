@@ -1,0 +1,21 @@
+// Target pass: HoistGroupExpToInitialize. Attack A1 proof-level probe.
+// Hypothesis: _free_var_names (VariableCollectionVisitor) does not see M
+// inside |M.keys|, so the pass hoists h ^ |M.keys| to an Initialize-time
+// cache (exponent frozen at 0) and the engine wrongly proves Left
+// interchangeable with Right, Left's literal post-hoist image.
+// Expected if pass SOUND: proof INVALID (distinguisher Write(1,1);
+// Write(2,2); Chal() separates: Left g^2, Right g^0; advantage 1).
+// Expected if pass UNSOUND as prosecuted: proof accepted as valid.
+import 'Atk1.game';
+
+proof:
+
+let:
+    Group G;
+
+theorem:
+    Atk1(G);
+
+games:
+    Atk1(G).Left against Atk1(G).Adversary;
+    Atk1(G).Right against Atk1(G).Adversary;

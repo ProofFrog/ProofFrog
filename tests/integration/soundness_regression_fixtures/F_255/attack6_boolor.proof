@@ -1,0 +1,18 @@
+// AUDIT ARTIFACT (ConcatEqualityDecompose, attack 6 proof-level probe).
+// Left == Right is TRUE (commuted logical Bool OR). See
+// attack6_boolor.game header for expected outcomes.
+
+import './attack6_boolor.game';
+
+proof:
+
+let:
+
+assume:
+
+theorem:
+    BoolOrCollision();
+
+games:
+    BoolOrCollision().Left against BoolOrCollision().Adversary;
+    BoolOrCollision().Right against BoolOrCollision().Adversary;

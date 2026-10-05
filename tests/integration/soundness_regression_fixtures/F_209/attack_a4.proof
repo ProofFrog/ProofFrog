@@ -1,0 +1,22 @@
+// AUDIT ARTIFACT (HoistDuplicateBranchCall, Attack 4 -- PROSECUTION.md).
+// Claims AttackA4(F, n).Real and .Random are interchangeable in a SINGLE
+// no-assumption interchangeability hop. They are not: with cardI the set
+// cardinality, O(false) returns 2 from Real and 1 from Random (see
+// attack_a4.game). Advantage 1. Engine acceptance of this proof is the
+// CONFIRMED-UNSOUND artifact.
+
+import 'attack.primitive';
+import 'attack_a4.game';
+
+proof:
+
+let:
+    Int n;
+    P F = P(n);
+
+theorem:
+    AttackA4(F, n);
+
+games:
+    AttackA4(F, n).Real against AttackA4(F, n).Adversary;
+    AttackA4(F, n).Random against AttackA4(F, n).Adversary;

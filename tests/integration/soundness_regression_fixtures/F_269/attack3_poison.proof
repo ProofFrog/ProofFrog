@@ -1,0 +1,23 @@
+// ModIntSimplification audit, attack 3 (proof-level).
+//
+// This proof SHOULD verify: Real.Chal returns x ^ 0 = Grp.identity for every
+// group element x (SEMANTICS.md 2.2 / 9.1), i.e. exactly Random.Chal. If
+// `prove` REJECTS this file, the cross-method type-map poisoning in
+// ModIntSimplification has corrupted Real's canonical form (Chal rewritten
+// to the integer literal 1). See attack3_poison.game; the renamed-parameter
+// control attack3_control.proof verifies.
+
+import 'attack3_poison.game';
+
+proof:
+
+let:
+    Group Grp;
+    Int q;
+
+theorem:
+    PoisonedExp(Grp, q);
+
+games:
+    PoisonedExp(Grp, q).Real against PoisonedExp(Grp, q).Adversary;
+    PoisonedExp(Grp, q).Random against PoisonedExp(Grp, q).Adversary;

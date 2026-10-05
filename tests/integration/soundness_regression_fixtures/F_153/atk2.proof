@@ -1,0 +1,20 @@
+// AUDIT ATTACK FILE -- target pass: InlineLocalTupleLiteral (inlining.py L1271-1279).
+// ATK-2 proof-level probe: single no-assumption hop between Atk2MapWrite.Real
+// (returns pre-increment M[0]: 0, 1, 2, ... across calls) and .Random
+// (hand-applied pass output: returns post-increment M[0]: 1, 2, 3, ...).
+// One-query distinguisher: output 1 iff first reply == 1. Advantage 1.
+// Expected if pass is SOUND: prove rejects. Expected if UNSOUND: "Proof Succeeded!".
+
+import 'atk2_map_write.game';
+
+proof:
+
+let:
+    Int lambda;
+
+theorem:
+    Atk2MapWrite(lambda);
+
+games:
+    Atk2MapWrite(lambda).Real against Atk2MapWrite(lambda).Adversary;
+    Atk2MapWrite(lambda).Random against Atk2MapWrite(lambda).Adversary;

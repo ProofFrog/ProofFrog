@@ -1,0 +1,48 @@
+// Attack 4 (DeduplicateDeterministicCalls): nested element write invisible.
+// Left = input game: O reads M[0][0], writes M[0][0] = z, reads M[0][0] again.
+//   The intermediate write M[0][0] = z is a DOUBLY-indexed ArrayAccess target;
+//   is_written_to only recognizes single-level ArrayAccess(Variable), so the
+//   write to M is invisible to the stability scan.
+// Right = the pass's own output: single __determ_0__ = F.Eval(M[0][0]); reused
+//   for both y1 and y2.
+// Distinguisher: O(z) once with z \!= 0^n; observe return. Under Eval =
+//   identity: Left returns F(0^n) + F(z) = 0^n + z = z (\!= 0^n); Right returns
+//   __determ_0__ + __determ_0__ = 0^n always. Advantage 1.
+import 'DetPrimS.primitive';
+
+Game Left(DetPrimS F) {
+    Map<Int, Map<Int, F.Block>> M;
+
+    Void Initialize() {
+        Map<Int, F.Block> inner;
+        inner[0] = F.Gen();
+        M[0] = inner;
+    }
+
+    F.Block O(F.Block z) {
+        F.Block y1 = F.Eval(M[0][0]);
+        M[0][0] = z;
+        F.Block y2 = F.Eval(M[0][0]);
+        return y1 + y2;
+    }
+}
+
+Game Right(DetPrimS F) {
+    Map<Int, Map<Int, F.Block>> M;
+
+    Void Initialize() {
+        Map<Int, F.Block> inner;
+        inner[0] = F.Gen();
+        M[0] = inner;
+    }
+
+    F.Block O(F.Block z) {
+        F.Block t = F.Eval(M[0][0]);
+        F.Block y1 = t;
+        M[0][0] = z;
+        F.Block y2 = t;
+        return y1 + y2;
+    }
+}
+
+export as Attack4Prop;

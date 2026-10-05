@@ -1,0 +1,65 @@
+// ATTACK-4 proof-level artifact (RefactorGroupElemFieldExp soundness audit,
+// Round 2, Phase 1, family 4). Commit 9043065.
+//
+// Target pass: RefactorGroupElemFieldExp (proof_frog/transforms/inlining.py
+// wrapper L3247-3251; transformer L3065-3244).
+//
+// Hypothesis (PROSECUTION.md Attack 4): the pass matches exponents by
+// STRUCTURAL equality with no purity/determinism check. C.flip() is an
+// abstract-primitive call with no `deterministic` annotation, so the two
+// structurally equal C.flip() occurrences in Left denote INDEPENDENT draws
+// (SEMANTICS sec 6.4, ruling 7.A.6). The buggy rewrite replaces
+// `A = G.generator ^ (C.flip() * 2)` by `A = B ^ 2`, forging perfect
+// correlation between A and B.
+//
+// Left  (honest): B = g^d1; A = g^(2*d2) with d1, d2 independent flips.
+// Right (honest): d = C.flip(); B = g^d; A = g^(d * 2) = B^2 always.
+//                 (On Right the same rewrite IS sound: one shared draw.)
+//
+// These are NOT interchangeable. Distinguisher: output
+// [GetA() == GetB()^2]. Right: probability 1. Left: probability
+// Pr[2*d1 == 2*d2 mod G.order] < 1 for any nondegenerate flip()
+// distribution (e.g. flip() uniform on {0,1}, odd G.order: probability 1/2).
+// Advantage >= 1/2 under that resolution.
+//
+// Expected engine behavior if the pass is SOUND (or defended downstream):
+// `prove` REJECTS the Left -> Right hop. Expected if UNSOUND end-to-end:
+// `prove` ACCEPTS (both sides canonicalize to B = g^C.flip(); A = B ^ 2).
+import 'coin.primitive';
+
+Game Left(Group G, Coin C) {
+    GroupElem<G> B;
+    GroupElem<G> A;
+
+    Void Initialize() {
+        B = G.generator ^ C.flip();
+        A = G.generator ^ (C.flip() * 2);
+    }
+
+    GroupElem<G> GetA() {
+        return A;
+    }
+    GroupElem<G> GetB() {
+        return B;
+    }
+}
+
+Game Right(Group G, Coin C) {
+    GroupElem<G> B;
+    GroupElem<G> A;
+
+    Void Initialize() {
+        Int d = C.flip();
+        B = G.generator ^ d;
+        A = G.generator ^ (d * 2);
+    }
+
+    GroupElem<G> GetA() {
+        return A;
+    }
+    GroupElem<G> GetB() {
+        return B;
+    }
+}
+
+export as Attack4NondetExp;

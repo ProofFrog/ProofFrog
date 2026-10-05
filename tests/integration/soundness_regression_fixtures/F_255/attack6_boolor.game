@@ -1,0 +1,31 @@
+// AUDIT ARTIFACT (ConcatEqualityDecompose, attack 6 proof-level probe).
+// Target pass: ConcatEqualityDecompose (proof_frog/transforms/algebraic.py).
+// Left.O1 and Right.O1 differ only by commuting a LOGICAL Bool OR
+// (x == (p || q) vs x == (q || p)) - a true equivalence (both operands
+// always defined; SEMANTICS.md 3.4 value-level commutativity).
+// The flat type map gives Bool p/q the BitString<1> types of O2's
+// parameters, so the pass "decomposes" the Bool disjunction into slice
+// comparisons, destroying the logical structure. The two corrupted
+// forms assign p and q to different slices and no longer match.
+// Expected if the corruption is pipeline-reachable: engine REJECTS this
+// true equivalence. Expected if defused: engine accepts.
+
+Game Left() {
+    Bool O1(Bool p, Bool q, Bool x) {
+        return x == (p || q);
+    }
+    BitString<1> O2(BitString<1> p, BitString<1> q) {
+        return p + q;
+    }
+}
+
+Game Right() {
+    Bool O1(Bool p, Bool q, Bool x) {
+        return x == (q || p);
+    }
+    BitString<1> O2(BitString<1> p, BitString<1> q) {
+        return p + q;
+    }
+}
+
+export as BoolOrCollision;

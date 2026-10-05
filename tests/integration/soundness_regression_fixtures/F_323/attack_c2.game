@@ -1,0 +1,72 @@
+// AUDIT ARTIFACT (ExpandTuple, Attack C2 -- field/local shadow that SURVIVES
+// the pipeline; upgrades Attack C from BLOCKED to WORKS).
+// Target: proof_frog/transforms/tuples.py ExpandTupleTransformer branch 2
+// (element write, L113-124) + gate AllConstantFieldAccesses (visitors.py
+// L1121-1143, which has NO visit_variable_declaration).
+//
+// Why the naive Attack C is blocked, and how C2 defeats both blockers:
+//   * A NON-__ shadow name is renamed by AlphaRename (locals -> __aN__), so
+//     the collision with the field disappears. C2 names the binder __v__;
+//     AlphaRename SKIPS __-prefixed binders (alpha_rename.py L143-145), so the
+//     name collision survives to ExpandTuple.
+//   * A tuple-LITERAL-initialised shadow local (`[Int,Int] __v__ = [9,9];`) is
+//     folded away by `Inline Local Tuple Literal` BEFORE ExpandTuple runs
+//     (verified: it rewrites `return __v__[0]` to `return 9`). C2 declares the
+//     shadow local UNINITIALISED (`[Int,Int] __v__;`) and writes it by
+//     element (`__v__[0]=9; __v__[1]=8;`). The declaration is a
+//     VariableDeclaration node, invisible to the gate's visit_assignment; the
+//     element writes are branch 2, which rewrites `__v__[i]=e` to a write of
+//     the split FIELD component `__v__@i` -- corrupting persistent game state.
+//
+// Real  = shadow game. TRUE semantics: from the local declaration point on,
+//         `__v__` binds to the method-LOCAL (position-sensitive scoping,
+//         alpha_rename.py L3-12); Poke writes the local, the FIELD is never
+//         mutated; Get() always returns [0,0].
+// Mutate = a game whose Poke GENUINELY mutates the field.
+//          TRUE semantics: after Poke(), Get() = [9,8].
+// DISTINGUISHABLE deterministically and across calls:
+//   Adversary: Poke(); Y := Get(); output 1 iff Y == [9, 8].
+//   Real:   field untouched;  Get() = [0,0].  Pr[Y==[9,8]] = 0.
+//   Mutate: field set to [9,8]; Get() = [9,8]. Pr[Y==[9,8]] = 1.
+// Advantage = 1. ExpandTuple mis-compiles Real's shadow-local element writes
+// into field-component writes, so Real and Mutate canonicalize identically and
+// the engine ACCEPTS. Engine acceptance is the CONFIRMED-UNSOUND artifact.
+
+Game Real() {
+    [Int, Int] __v__;
+
+    Void Initialize() {
+        __v__ = [0, 0];
+    }
+
+    Int Poke() {
+        [Int, Int] __v__;
+        __v__[0] = 9;
+        __v__[1] = 8;
+        return __v__[0];
+    }
+
+    [Int, Int] Get() {
+        return __v__;
+    }
+}
+
+Game Mutate() {
+    [Int, Int] __v__;
+
+    Void Initialize() {
+        __v__ = [0, 0];
+    }
+
+    Int Poke() {
+        __v__[0] = 9;
+        __v__[1] = 8;
+        return __v__[0];
+    }
+
+    [Int, Int] Get() {
+        return __v__;
+    }
+}
+
+export as C2;

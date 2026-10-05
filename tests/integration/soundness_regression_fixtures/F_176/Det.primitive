@@ -1,0 +1,7 @@
+// Audit artifact: CrossMethodFieldAlias (attacks 1-5 shared primitive).
+// Hypothesis: an abstract deterministic method f suffices; interchangeability
+// must hold for every implementation of f (e.g. f = identity).
+// Expected if sound: irrelevant. Expected if unsound: used by all attacks.
+Primitive Det(Int lambda) {
+    deterministic Int f(Int x);
+}

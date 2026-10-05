@@ -1,0 +1,59 @@
+// Target pass: HoistGroupExpToInitialize (transforms/inlining.py L2664-3009).
+// Attack A5 (non-deterministic opaque call in the exponent frozen).
+//
+// N.f is an unannotated abstract-primitive method: per SEMANTICS 6.4 /
+// ruling 7.A.6 each invocation resolves with fresh i.i.d. coins. Two
+// asymmetries let the pass freeze it: (1) has_nondeterministic_call is
+// applied to the base RHS only, never to exp_x; (2) the callee name N sits
+// under the FuncCall's FieldAccess so _free_var_names(exp_x) = {k} only --
+// N is never surfaced to the "free vars must be fields/params" fence.
+// The pass caches ONE draw of N.f(k) at Initialize-end and returns it forever.
+//
+// The base h = G.generator ^ s references the Initialize-local s, so
+// InlineSingleUseField / constant folding cannot eliminate h before the hoist
+// pass runs (a pure-constant base like `h = G.generator` gets inlined away and
+// the hoist never fires -- the Init-local sample is load-bearing here).
+//
+//   Left  live Chal: each call evaluates h ^ N.f(k) with fresh coins.
+//   Right cached:    _hge_0 = (G.generator^s) ^ N.f(k) drawn ONCE.
+// Distinguisher: Chal(); Chal(); output 1 iff the two answers are EQUAL.
+//   Right: always equal (prob 1).  Left: equal only with collision prob < 1.
+// Advantage 1 - p > 0; the interchangeability contract is exact.
+// Right is the literal post-hoist image of Left.
+// If the pass is SOUND, Atk5.proof must FAIL; if UNSOUND as prosecuted,
+// it is accepted.
+import 'Noise.primitive';
+
+Game Left(Group G, Noise N) {
+    GroupElem<G> h;
+    Int k;
+
+    Void Initialize() {
+        ModInt<G.order> s <- ModInt<G.order>;
+        k = 7;
+        h = G.generator ^ s;
+    }
+
+    GroupElem<G> Chal() {
+        return h ^ N.f(k);
+    }
+}
+
+Game Right(Group G, Noise N) {
+    GroupElem<G> h;
+    Int k;
+    GroupElem<G> _hge_0;
+
+    Void Initialize() {
+        ModInt<G.order> s <- ModInt<G.order>;
+        k = 7;
+        h = G.generator ^ s;
+        _hge_0 = (G.generator ^ s) ^ N.f(k);
+    }
+
+    GroupElem<G> Chal() {
+        return _hge_0;
+    }
+}
+
+export as Atk5;

@@ -1,0 +1,6 @@
+// Audit support file (ExtractRepeatedTupleAccess, Round 2 Phase 1).
+// Trivial primitive carrying only a length parameter n; exists so the
+// attack security properties have a scheme to be instantiated with.
+Primitive Dummy(Int n) {
+    Int n = n;
+}

@@ -1,0 +1,27 @@
+// AUDIT ARTIFACT (SubsetTypeNormalization dir, Attack 4 -- DeadNullGuard
+// cross-method type collision).
+// Claims Attack4(n, P).Guarded ~ Attack4(n, P).Unguarded in ONE hop, no
+// assume: block. They are NOT interchangeable: on inputs m where
+// P.May(m) == None (which exists for some instantiation of the abstract
+// primitive Maybe), Guarded returns a fresh random witness while Unguarded
+// returns None. The only thing that could equate them is Dead Null Guard
+// Elimination deleting Guarded's LIVE `if (x == None)` guard -- which it
+// wrongly does, because the flat build_game_type_map collapses `x` to the
+// non-nullable type contributed by the Poison oracle.
+// Engine acceptance of this proof is a CONFIRMED-UNSOUND artifact.
+
+import 'maybe.primitive';
+import 'attack_4.game';
+
+proof:
+
+let:
+    Int n;
+    Maybe P = Maybe(n);
+
+theorem:
+    Attack4(n, P);
+
+games:
+    Attack4(n, P).Guarded against Attack4(n, P).Adversary;
+    Attack4(n, P).Unguarded against Attack4(n, P).Adversary;

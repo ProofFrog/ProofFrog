@@ -1,0 +1,23 @@
+// ATTACK-4 proof-level artifact (RefactorGroupElemFieldExp soundness audit).
+// See attack4_property.game header for the full hypothesis.
+//
+// This proof claims Left and Right of Attack4NondetExp are interchangeable.
+// They are NOT (distinguisher: GetA() == GetB()^2; advantage >= 1/2 for
+// flip() uniform on {0,1} and odd G.order). If `prove` accepts this single
+// hop, RefactorGroupElemFieldExp has unsoundly identified two independent
+// nondeterministic draws via structural equality of the call expressions.
+import 'coin.primitive';
+import 'attack4_property.game';
+
+proof:
+
+let:
+    Group G;
+    Coin C = Coin();
+
+theorem:
+    Attack4NondetExp(G, C);
+
+games:
+    Attack4NondetExp(G, C).Left against Attack4NondetExp(G, C).Adversary;
+    Attack4NondetExp(G, C).Right against Attack4NondetExp(G, C).Adversary;

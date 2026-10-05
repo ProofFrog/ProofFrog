@@ -1,0 +1,39 @@
+// Attack file for transform pass: ExtractRepeatedTupleAccess
+// (proof_frog/transforms/inlining.py L1634-1640 / L1282-1631).
+// Prosecution attack 3: tuple phase. An element write v[0] = e; is an
+// Assignment whose var is an ArrayAccess, so it neither blocks the CSE
+// (the reassignment guard requires node.var to be a Variable) nor is left
+// intact: the structural replace loop rewrites the write TARGET v[0] into
+// the CSE temporary, silently decoupling v from its own element update.
+//
+// v is a ProductType method parameter (eligible for tuple extraction per
+// transform_method, inlining.py L1365-1383); using a parameter also keeps
+// FoldTupleIndex from folding v[0] away before the pass fires.
+//
+// True semantics: Real.O(v) sets v[0] = v[0] + v[0] = 0^n and returns
+// [0^n, v[1]]. Random.O(v) returns v unchanged.
+// Distinguisher: call O([1^n, 1^n]); output 1 iff first component == 0^n.
+// Real: 1. Random: 0. Advantage 1.
+//
+// If the pass is UNSOUND as prosecuted, Real becomes
+//   __cse_v_0__ = v[0]; x = __cse_v_0__; __cse_v_0__ = x + x; return v;
+// where the element write lands in the dead temporary, so Real
+// canonicalizes to `return v;` == Random.
+// Expected if SOUND: prove REJECTS the hop. If UNSOUND: prove ACCEPTS.
+import 'Dummy.primitive';
+
+Game Real(Dummy D) {
+    [BitString<D.n>, BitString<D.n>] O([BitString<D.n>, BitString<D.n>] v) {
+        BitString<D.n> x = v[0];
+        v[0] = x + x;
+        return v;
+    }
+}
+
+Game Random(Dummy D) {
+    [BitString<D.n>, BitString<D.n>] O([BitString<D.n>, BitString<D.n>] v) {
+        return v;
+    }
+}
+
+export as Attack3Prop;

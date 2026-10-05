@@ -1,0 +1,60 @@
+// Gold-standard artifact for HoistFieldPureAlias (commit 9043065), attack 2.
+// Target pass: HoistFieldPureAlias (proof_frog/transforms/inlining.py L1901-1908).
+// Hypothesis: _modifies_var peels exactly one ArrayAccess level, so the nested
+// element write `A[0][5] = 9;` between j and i is invisible, and the hoisted
+// `f = A[0]` snapshots the pre-mutation value (bug class F-079, unfixed here).
+// (The earlier use is a FIELD assignment `g = A[0][0];` so that single-use
+// local inlining cannot dissolve the j-use before the hoist pass runs.)
+// Left  : f = A[0] executes after the nested write, so f = {0: 1, 5: 9} and
+//         O2() returns |f.keys| = 2.
+// Right : exactly what the pass produces - f snapshots {0: 1}; O2() returns 1.
+// Distinguisher: call O1() then O2(); Left gives 2, Right gives 1 -
+// advantage 1. A sound engine must reject Left -> Right.
+
+Game Left() {
+    Map<Int, Map<Int, Int>> A;
+    Map<Int, Int> f;
+    Int g;
+
+    Void Initialize() {
+        Map<Int, Int> inner;
+        inner[0] = 1;
+        A[0] = inner;
+    }
+
+    Int O1() {
+        g = A[0][0];
+        A[0][5] = 9;
+        f = A[0];
+        return g;
+    }
+
+    Int O2() {
+        return |f.keys|;
+    }
+}
+
+Game Right() {
+    Map<Int, Map<Int, Int>> A;
+    Map<Int, Int> f;
+    Int g;
+
+    Void Initialize() {
+        Map<Int, Int> inner;
+        inner[0] = 1;
+        A[0] = inner;
+    }
+
+    Int O1() {
+        f = A[0];
+        g = f[0];
+        A[0][5] = 9;
+        return g;
+    }
+
+    Int O2() {
+        return |f.keys|;
+    }
+}
+
+export as A2Sep;

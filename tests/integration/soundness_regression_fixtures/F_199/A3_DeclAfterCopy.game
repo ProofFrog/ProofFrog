@@ -1,0 +1,42 @@
+// Audit artifact: RedundantFieldCopy (inlining.py wrapper L1657-1661,
+// transformer L659-771), attack A3 (PROSECUTION Attack 3) - engine-robustness
+// probe, e2e reachability check.
+// Hypothesis: with a typed declaration of v AFTER the copy (decl_index >
+// index), the reconstruction slices overlap, the copy survives, statements
+// are duplicated, and the recursion diverges (confirmed at pass level:
+// block doubles 3 -> 4 -> 6 -> ... -> 4.2M statements).
+// This file probes whether the shape reaches the pass through the full
+// pipeline (`check` acceptance + `prove` under timeout). Expected: Alpha
+// Rename (first pass in CORE_PIPELINE) freshens the redeclared v before
+// RedundantFieldCopy runs, so the pipeline terminates; the divergence is
+// reachable only from a mid-iteration upstream pass that emits duplicate
+// names between Alpha Rename and this pass.
+// Expected if pass-reachable: prove hangs / RecursionError.
+
+Game Real(Int n) {
+    BitString<n> f;
+
+    Void Initialize() {
+        BitString<n> v = 0^n;
+        f = v;
+        BitString<n> v <- BitString<n>;
+    }
+
+    BitString<n> Get() {
+        return f;
+    }
+}
+
+Game Ideal(Int n) {
+    BitString<n> f;
+
+    Void Initialize() {
+        f = 0^n;
+    }
+
+    BitString<n> Get() {
+        return f;
+    }
+}
+
+export as A3DeclAfterCopy;

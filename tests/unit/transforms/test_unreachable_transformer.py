@@ -841,3 +841,169 @@ def test_remove_unreachable_branch_write_clears_seen_condition() -> None:
     assert (
         _count_ifs(transformed) == 3
     ), f"live `if (x==0) return 2` was wrongly deleted:\n{transformed}"
+
+
+# ---------------------------------------------------------------------------
+# Set literals: the Z3 encoding leaked a literal's elements, so a false set
+# comparison read as `t == t` and the code after it was deleted.
+# ---------------------------------------------------------------------------
+
+
+def _count_returns(node) -> int:
+    return str(node).count("return ")
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "({3} \\ 3) == {t, t}",
+        "{3} == {t, t}",
+        "{t, t} == {1, 1}",
+        "{2, 3} == {t, t}",
+    ],
+)
+def test_remove_unreachable_keeps_return_after_set_comparison(condition: str) -> None:
+    method = frog_parser.parse_method(f"""
+        Bool Read() {{
+            Int t = 1;
+            if ({condition}) {{
+                return false;
+            }}
+            return true;
+        }}
+        """)
+    transformed = RemoveUnreachableTransformer(method).transform(method)
+    assert _count_returns(transformed) == 2, transformed
+
+
+def test_remove_unreachable_keeps_nested_return_after_set_comparison() -> None:
+    """The reproducer: `Left` falls through to `return true` when the
+    `else` branch loses its final `return false`."""
+    method = frog_parser.parse_method("""
+        Bool Read(Bool e) {
+            Int t = 1;
+            if (e) {
+            } else {
+                if (({3} \\ 3) == {t, t}) {
+                    return false;
+                }
+                return false;
+            }
+            return true;
+        }
+        """)
+    transformed = RemoveUnreachableTransformer(method).transform(method)
+    assert _count_returns(transformed) == 3, transformed
+
+
+def test_remove_unreachable_set_equality_is_not_last_elements_equal() -> None:
+    """`{a, b} == {c, b}` read as `c == b`. With a = 0, b = 1, c = 1
+    neither guard fires and `O` returns 3."""
+    method = frog_parser.parse_method("""
+        Int O(Int a, Int b, Int c) {
+            if ({a, b} == {c, b}) { return 1; }
+            if (c != b) { return 2; }
+            return 3;
+        }
+        """)
+    transformed = RemoveUnreachableTransformer(method).transform(method)
+    assert _count_returns(transformed) == 3, transformed
+
+
+def test_remove_unreachable_membership_in_literal_keeps_conjunct() -> None:
+    """`!c && (x in {y, z})` read as `x && (x in {y, z})`. With c, x and y
+    true no guard fires and `O` returns 4."""
+    method = frog_parser.parse_method("""
+        Int O(Bool c, Bool x, Bool y, Bool z) {
+            if (!c && (x in {y, z})) { return 1; }
+            if (!x) { return 2; }
+            if (!(x in {y, z})) { return 3; }
+            return 4;
+        }
+        """)
+    transformed = RemoveUnreachableTransformer(method).transform(method)
+    assert _count_returns(transformed) == 4, transformed
+
+
+@pytest.mark.parametrize(
+    "method,returns",
+    [
+        # Code after `if (true) { return ...; }`.
+        (
+            """
+            Int O(Int x) {
+                Int y = x + 1;
+                if (true) { return y; }
+                return 2;
+            }
+            """,
+            1,
+        ),
+        # Code after a bare `return`.
+        (
+            """
+            Int O(Int x) {
+                Int y = x + 1;
+                return y;
+                return 2;
+            }
+            """,
+            1,
+        ),
+        # An `if (false) { return ...; }` block.
+        (
+            """
+            Int O(Int x) {
+                Int y = x + 1;
+                if (false) { return 1; }
+                return y;
+            }
+            """,
+            1,
+        ),
+        (
+            """
+            Int O(Bool b) {
+                if (b) { return 0; }
+                if (false) { return 1; }
+                return 2;
+            }
+            """,
+            2,
+        ),
+        # Set comparisons Z3 decides.
+        (
+            """
+            Int O(Int t) {
+                if ({t} == {t}) { return 1; }
+                return 2;
+            }
+            """,
+            1,
+        ),
+        (
+            """
+            Int O(Set<Int> S, Set<Int> T) {
+                if (S == T) { return 1; }
+                if (S != T) { return 2; }
+                return 3;
+            }
+            """,
+            2,
+        ),
+        (
+            """
+            Int O(Int x, Int y, Int z) {
+                if (x in {y, z}) { return 1; }
+                if (!(x in {y, z})) { return 2; }
+                return 3;
+            }
+            """,
+            2,
+        ),
+    ],
+)
+def test_remove_unreachable_still_removes_dead_code(method: str, returns: int) -> None:
+    method_ast = frog_parser.parse_method(method)
+    transformed = RemoveUnreachableTransformer(method_ast).transform(method_ast)
+    assert _count_returns(transformed) == returns, transformed

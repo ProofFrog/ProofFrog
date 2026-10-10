@@ -1,0 +1,13 @@
+import 'SetEquality.game';
+
+proof:
+
+let:
+    Int lambda;
+
+theorem:
+    SetEquality(lambda);
+
+games:
+    SetEquality(lambda).Left against SetEquality(lambda).Adversary;
+    SetEquality(lambda).Right against SetEquality(lambda).Adversary;

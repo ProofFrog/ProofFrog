@@ -17,6 +17,11 @@ Soundness argument: see design spec §3.3.  Per-recognizer preconditions
 for group exponentiation) are enforced by
 :meth:`WrapperShape.precondition_misses` and
 :meth:`WrapperShape.context_args_readonly_check`.
+
+Re-keying moves the entry at key ``k`` to ``w(k)``.  The pass wraps raw-key
+writes and strips ``w(e[0])`` in ``M.entries`` loops, but leaves every other
+key access unchanged, so it declines to re-key a map with such an access.
+With nothing to re-key, only the key type changes.
 """
 
 from __future__ import annotations
@@ -417,6 +422,38 @@ def _collect_writes(
     return plans if ok else None
 
 
+def _kept_key_access(
+    game: frog_ast.Game,
+    map_name: str,
+    shape: WrapperShape,
+) -> Optional[tuple[str, str]]:
+    """If the rewrite re-keys ``M`` and leaves some key access unchanged,
+    return the methods of a re-keyed access and of the unchanged one."""
+    wrapped_ids: set[int] = set()
+    rekeyed: Optional[str] = None
+    for method in game.methods:
+        plans = _collect_writes(method, map_name, shape)
+        assert plans is not None
+        for plan in plans:
+            if plan.needs_wrapping:
+                assert isinstance(
+                    plan.write_node,
+                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+                )
+                wrapped_ids.add(id(plan.write_node.var))
+                rekeyed = rekeyed or method.signature.name
+        for loop in _find_entries_loops(method, map_name):
+            if _collect_all_e0_occurrences(loop.block, loop.var_name):
+                rekeyed = rekeyed or method.signature.name
+    if rekeyed is None:
+        return None
+    for method in game.methods:
+        for hit in _all_accesses_of_map(method, map_name):
+            if _extract_read_key(hit) is not None and id(hit) not in wrapped_ids:
+                return rekeyed, method.signature.name
+    return None
+
+
 class _WrapKeyTransformer(Transformer):
     """Rewrite occurrences of ``wrapper(..., e[0], ...)`` inside a loop body to
     just ``e[0]`` when the wrapper matches the discovered shape.
@@ -470,6 +507,7 @@ class MapKeyReindex(TransformPass):
         reason: str,
         map_name: str,
         method_name: Optional[str],
+        suggestion: Optional[str] = None,
     ) -> None:
         ctx.near_misses.append(
             NearMiss(
@@ -480,7 +518,8 @@ class MapKeyReindex(TransformPass):
                     + f": {reason}"
                 ),
                 location=None,
-                suggestion=(
+                suggestion=suggestion
+                or (
                     "MapKeyReindex fires only when every use of the map's "
                     "keys is wrapped in a single recognized injective form "
                     "(deterministic injective primitive call, or x^k on "
@@ -535,6 +574,24 @@ class MapKeyReindex(TransformPass):
                     method.signature.name,
                 )
                 return None
+
+        kept = _kept_key_access(game, map_name, shape)
+        if kept is not None:
+            rekeyed, kept_method = kept
+            self._emit_near_miss(
+                ctx,
+                f"a key access in '{kept_method}' already applies the wrapper, "
+                "so re-keying the other accesses would make them address "
+                "different keys",
+                map_name,
+                rekeyed,
+                suggestion=(
+                    "Key the map the same way at every access: either apply "
+                    "the wrapper at every key access, or write raw keys and "
+                    "read them only through the wrapper in an M.entries loop."
+                ),
+            )
+            return None
 
         new_game = copy.deepcopy(game)
         self._execute_rewrite(new_game, map_name, shape, ctx)

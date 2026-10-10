@@ -374,11 +374,12 @@ def test_lazy_map_scan_multicall() -> None:
 
 
 def test_map_key_reindex_multicall() -> None:
-    """``MapKeyReindex``: when every read of ``M`` goes through an
-    injective deterministic call ``TT.Eval(.)``, re-keying ``M`` on the
-    Eval'd value (and rewriting writes accordingly) preserves cross-call
-    observation. Store and Lookup are separate oracles so any mismatch
-    between the rewritten write site and the read site would surface."""
+    """``MapKeyReindex``: when the stored keys are read only through an
+    injective deterministic call ``TT.Eval(e[0])`` in an ``M.entries``
+    scan, re-keying ``M`` on the Eval'd value (and rewriting writes
+    accordingly) preserves cross-call observation. Store and Lookup are
+    separate oracles so any mismatch between the rewritten write site and
+    the read site would surface."""
     prim = frog_parser.parse_primitive_file("""
         Primitive T(Set I, Set Y) {
             Set Input = I;
@@ -393,8 +394,10 @@ def test_map_key_reindex_multicall() -> None:
                 M[a] = s;
             }
             BitString<16>? Lookup(TT.Input a2) {
-                if (TT.Eval(a2) in M) {
-                    return M[TT.Eval(a2)];
+                for ([TT.Input, BitString<16>] e in M.entries) {
+                    if (TT.Eval(e[0]) == TT.Eval(a2)) {
+                        return e[1];
+                    }
                 }
                 return None;
             }
@@ -417,6 +420,53 @@ def test_map_key_reindex_multicall() -> None:
     engine = _engine_with(T=prim, TT=prim)
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
+
+
+def test_map_key_reindex_keeps_wrapped_read() -> None:
+    """``MapKeyReindex`` must not wrap a raw-key write while a read already
+    applies the wrapper. After ``Put(0b00)``, ``Get(0b00)`` returns true in
+    Right but in Left only if ``Tag(0b00) = 0b00``."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive P() {
+            deterministic injective BitString<2> Tag(BitString<2> x0);
+        }
+        """)
+    left = frog_parser.parse_game("""
+        Game Left(P S) {
+            Map<BitString<2>, Bool> e;
+            Bool Initialize() {
+                return false;
+            }
+            Void Put(BitString<2> pk) {
+                e[pk] = true;
+            }
+            Bool Get(BitString<2> pk) {
+                if ((S.Tag(0^2) in e)) {
+                    return e[S.Tag(0^2)];
+                }
+                return false;
+            }
+        }
+        """)
+    right = frog_parser.parse_game("""
+        Game Right(P S) {
+            Map<BitString<2>, Bool> e;
+            Bool Initialize() {
+                return false;
+            }
+            Void Put(BitString<2> pk) {
+                e[S.Tag(pk)] = true;
+            }
+            Bool Get(BitString<2> pk) {
+                if (S.Tag(0^2) in e) {
+                    return e[S.Tag(0^2)];
+                }
+                return false;
+            }
+        }
+        """)
+    engine = _engine_with(P=prim, S=prim)
+    assert not engine.check_equivalent(left, right).valid
 
 
 def test_distinct_const_rf_symbolic_length_not_uniform() -> None:

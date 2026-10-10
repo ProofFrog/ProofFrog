@@ -1098,6 +1098,70 @@ def test_map_key_reindex_near_miss_bare_e0():
     assert any("e[0]" in nm.reason or "wrapper" in nm.reason for nm in misses)
 
 
+_MAP_REINDEX_SAME_TYPE_PRIMITIVE = """
+Primitive T() {
+    deterministic injective BitString<8> Eval(BitString<8> x);
+}
+"""
+
+
+_MAP_REINDEX_SCAN = """
+    Bool Scan(BitString<8> y) {
+        for ([BitString<8>, Int] e in M.entries) {
+            if (TT.Eval(e[0]) == y) { return true; }
+        }
+        return false;
+    }
+"""
+
+
+def _map_reindex_misses(*methods: str) -> list[NearMiss]:
+    body = "\n".join(methods)
+    game = frog_parser.parse_game(f"""
+        Game G(T TT) {{
+            Map<BitString<8>, Int> M;
+            {body}
+        }}
+        """)
+    ctx = _ctx_for_map_reindex(_MAP_REINDEX_SAME_TYPE_PRIMITIVE)
+    assert MapKeyReindex().apply(game, ctx) == game
+    return [nm for nm in ctx.near_misses if nm.transform_name == "Map Key Reindex"]
+
+
+def test_map_key_reindex_near_miss_raw_write_with_wrapped_read():
+    misses = _map_reindex_misses(
+        "Void Store(BitString<8> a) { M[a] = 0; }",
+        "Bool Has(BitString<8> b) { return TT.Eval(b) in M; }",
+    )
+    assert len(misses) == 1
+    assert misses[0].method == "Store"
+    assert misses[0].variable == "M"
+    assert "in 'Has' already applies the wrapper" in misses[0].reason
+
+
+def test_map_key_reindex_near_miss_scan_with_wrapped_write():
+    misses = _map_reindex_misses(
+        "Void Put(BitString<8> b) { M[TT.Eval(b)] = 0; }",
+        _MAP_REINDEX_SCAN,
+    )
+    assert len(misses) == 1
+    assert misses[0].method == "Scan"
+    assert "in 'Put' already applies the wrapper" in misses[0].reason
+
+
+def test_map_key_reindex_no_near_miss_when_reindexed():
+    game = frog_parser.parse_game(f"""
+        Game G(T TT) {{
+            Map<BitString<8>, Int> M;
+            Void Store(BitString<8> a) {{ M[a] = 0; }}
+            {_MAP_REINDEX_SCAN}
+        }}
+        """)
+    ctx = _ctx_for_map_reindex(_MAP_REINDEX_SAME_TYPE_PRIMITIVE)
+    assert MapKeyReindex().apply(game, ctx) != game
+    assert not [nm for nm in ctx.near_misses if nm.transform_name == "Map Key Reindex"]
+
+
 def _lazy_pair_ctx() -> PipelineContext:
     return PipelineContext(
         variables={},

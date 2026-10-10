@@ -541,3 +541,76 @@ def test_f015_joint_guard_full_tuple_input_still_fires() -> None:
     game = frog_parser.parse_game(source)
     result = ChallengeExclusionRFToUniformTransformer().transform(game)
     assert "field <- BitString<16>" in str(result)  # fired
+
+
+# --------------------------------------------------------------------------
+# The Initialize argument must denote the challenge point for the whole game.
+# --------------------------------------------------------------------------
+
+
+def _reassign_game(initialize: str, oracle: str = "") -> str:
+    return f"""
+    Game G(Bool c) {{
+        Function<BitString<2>, BitString<2>> e;
+        BitString<2> U;
+        BitString<2> p;
+        Void Initialize() {{
+            e <- Function<BitString<2>, BitString<2>>;
+            U = 0b00;
+            {initialize}
+        }}
+        {oracle}
+        BitString<2> Hash(BitString<2> pm) {{
+            if (pm == U) {{
+                return 0^2;
+            }}
+            return e(pm);
+        }}
+    }}
+    """
+
+
+@pytest.mark.parametrize(
+    "initialize",
+    [
+        # Hash excludes the new U, not the 0b00 that e was queried on.
+        "p = e(U); U <- BitString<2>;",
+        "p = e(U); U = 0b11;",
+        "p = e(U); if (c) { U = 0b11; }",
+        "p = e(U); for (Int i = 0 to 2) { U = 0b11; }",
+        # The call writes the point it reads.
+        "U = e(U);",
+        # The resolver reads the last assignment of x, made after the call.
+        "BitString<2> x = 0b11; p = e(x); x = U;",
+        # x holds the old U.
+        "BitString<2> x = U; U <- BitString<2>; p = e(x);",
+        "BitString<2> x = U; if (c) { x = 0b11; } p = e(x);",
+        # x holds the old y.
+        "BitString<2> y = 0b11; BitString<2> x = y; y = U; p = e(x);",
+    ],
+)
+def test_reassigned_challenge_argument_not_simplified(initialize: str) -> None:
+    assert not _fired(_reassign_game(initialize))
+
+
+def test_challenge_field_written_by_oracle_through_alias_not_simplified() -> None:
+    oracle = "Void Write(BitString<2> v) { if (c) { U = v; } }"
+    assert not _fired(_reassign_game("BitString<2> x = U; p = e(x);", oracle))
+
+
+@pytest.mark.parametrize(
+    "initialize",
+    [
+        "p = e(U);",
+        "U <- BitString<2>; p = e(U);",
+        "if (c) { U = 0b11; } p = e(U);",
+        "BitString<2> x = U; p = e(x);",
+        "U <- BitString<2>; BitString<2> x = U; p = e(x);",
+        "BitString<2> y = U; BitString<2> x = y; p = e(x);",
+        # Writes to names the argument does not read.
+        "p = e(U); p = 0b11;",
+        "BitString<2> x = U; p = e(x); BitString<2> z = x;",
+    ],
+)
+def test_stable_challenge_argument_still_simplified(initialize: str) -> None:
+    assert _fired(_reassign_game(initialize))

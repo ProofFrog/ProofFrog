@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import functools
 from dataclasses import dataclass, field
+from typing import Sequence
 from sympy import Rational, Symbol, simplify as sympy_simplify
 
 from .. import frog_ast
@@ -2125,6 +2126,49 @@ def _rf_aliased_in_game(game: frog_ast.Game, rf_name: str) -> bool:
     return _rf_value_escapes(game, rf_name)
 
 
+def _rf_arg_rewritten(
+    statements: Sequence[frog_ast.Statement],
+    call_idx: int,
+    field_names: set[str],
+) -> str | None:
+    """Name a variable the Initialize RF argument depends on that Initialize
+    may write after reading it, or return ``None``.
+
+    The oracle guards compare against the resolved argument, so every name it
+    reads must keep its value to the end of Initialize.  A local resolves
+    through its last top-level assignment, so no later statement may write it.
+    """
+    call = statements[call_idx]
+    assert isinstance(call, frog_ast.Assignment)
+    assert isinstance(call.value, frog_ast.FuncCall)
+    pending: list[tuple[int, frog_ast.Expression]] = [(call_idx, call.value.args[0])]
+    visited: set[str] = set()
+    while pending:
+        idx, expr = pending.pop()
+        reads = referenced_variable_names(expr)
+        for name in sorted(reads):
+            if reassigns_or_rebinds({name}, frog_ast.Block(list(statements[idx:]))):
+                return name
+        for name in sorted(reads - field_names - visited):
+            visited.add(name)
+            defs = [
+                i
+                for i, stmt in enumerate(statements)
+                if isinstance(stmt, frog_ast.Assignment)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name == name
+            ]
+            if not defs:
+                continue
+            later = frog_ast.Block(list(statements[defs[-1] + 1 :]))
+            if reassigns_or_rebinds({name}, later):
+                return name
+            definition = statements[defs[-1]]
+            assert isinstance(definition, frog_ast.Assignment)
+            pending.append((defs[-1], definition.value))
+    return None
+
+
 class ChallengeExclusionRFToUniformTransformer:
     """Replace an RF field call in Initialize with a uniform sample when the
     call's input is guaranteed distinct from all oracle RF calls by a
@@ -2303,6 +2347,34 @@ class ChallengeExclusionRFToUniformTransformer:
                             ),
                             variable=rf_name,
                             method=None,
+                        )
+                    )
+                continue
+
+            # The same holds inside Initialize: after `p = H(U); U = v;` the
+            # guard `param == U` excludes v, not the point H was queried on.
+            rewritten = _rf_arg_rewritten(
+                init_method.block.statements, init_idx, field_name_set
+            )
+            if rewritten is not None:
+                if ctx is not None:
+                    ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Challenge Exclusion RF To Uniform",
+                            reason=(
+                                f"Initialize may write '{rewritten}' after the "
+                                f"argument of its call to '{rf_name}' reads it, "
+                                "so the exclusion guard need not exclude the "
+                                f"point '{rf_name}' was queried on"
+                            ),
+                            location=init_stmt.origin,
+                            suggestion=(
+                                "Do not reassign the challenge value, or anything "
+                                "it is computed from, after the random-function "
+                                "call"
+                            ),
+                            variable=rf_name,
+                            method="Initialize",
                         )
                     )
                 continue

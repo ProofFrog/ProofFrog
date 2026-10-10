@@ -115,3 +115,29 @@ def test_group_exp_reindex_blocked_when_sk_not_known_nonzero() -> None:
     misses = [nm for nm in ctx.near_misses if nm.transform_name == "Map Key Reindex"]
     assert misses, "expected a near-miss citing the non-nonzero exponent"
     assert any("nonzero" in nm.reason for nm in misses), [nm.reason for nm in misses]
+
+
+_GAME_EXP_WRAPPED_READ = """
+Game G(Group G) {
+    ModInt<G.order> sk;
+    Map<GroupElem<G>, Int> M;
+
+    Void Initialize() {
+        sk <- ModInt<G.order> \\ {0};
+    }
+    Void Store(GroupElem<G> a) {
+        M[a] = 0;
+    }
+    Bool Has(GroupElem<G> y) {
+        return y ^ sk in M;
+    }
+}
+"""
+
+
+def test_group_exp_reindex_blocked_by_wrapped_read() -> None:
+    """After ``Store(g)``, ``Has(g)`` is true only if ``g^sk = g``. Wrapping
+    the write as ``M[a ^ sk]`` would make it always true."""
+    ctx = _ctx_with_requirements([_prime_requirement_on("G")])
+    game = frog_parser.parse_game(_GAME_EXP_WRAPPED_READ)
+    assert MapKeyReindex().apply(game, ctx) == game

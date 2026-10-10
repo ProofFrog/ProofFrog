@@ -47,6 +47,7 @@ from proof_frog.transforms.tuples import ExpandTuple, SplitBareTupleDeclarations
 from proof_frog.transforms.map_iteration import LazyMapScan
 from proof_frog.transforms.types import DeadNullGuardElimination
 from proof_frog.transforms.alpha_rename import AlphaRename
+from proof_frog.transforms.symbolic import SymbolicComputation
 from proof_frog.visitors import NameTypeMap
 
 
@@ -3146,3 +3147,63 @@ def test_dead_null_guard_no_near_miss_when_read_assigned(body: str) -> None:
     assert not _dead_null_guard_unassigned_misses(
         "Void Initialize() { f = false; }", body
     )
+
+
+def _symbolic_misses(expression: str) -> list[NearMiss]:
+    ctx = _make_ctx_with_n()
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Int Test(Int x) {{
+                return {expression};
+            }}
+        }}
+        """)
+    SymbolicComputation().apply(game, ctx)
+    return [nm for nm in ctx.near_misses if nm.transform_name == "Symbolic Computation"]
+
+
+@pytest.mark.parametrize(
+    "expression, operand",
+    [
+        ("5 - -3", "-3"),
+        ("-2 + 2", "-2"),
+        ("n + -n", "-n"),
+        ("-2 + -n", "-2"),
+    ],
+)
+def test_symbolic_near_miss_on_negated_operand(expression: str, operand: str) -> None:
+    """The pass does not evaluate a negation, so arithmetic on ``-c`` stays."""
+    misses = _symbolic_misses(expression)
+    assert len(misses) == 1
+    assert misses[0].variable is None
+    assert misses[0].method == "Test"
+    assert f"'{expression}' not folded" in misses[0].reason
+    assert f"operand '{operand}' is a negation" in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "5 - 3",
+        "x + -3",  # x has no value either way
+        "-x + 3",  # x is not a constant
+        "x == -3",  # not arithmetic
+        "|0b11| * 5",  # not a negation
+    ],
+)
+def test_symbolic_no_near_miss(expression: str) -> None:
+    assert not _symbolic_misses(expression)
+
+
+def test_symbolic_no_near_miss_on_bit_string_literal() -> None:
+    """XOR of bit-string literals is not arithmetic the pass skipped."""
+    ctx = _make_ctx()
+    game = frog_parser.parse_game("""
+        Game G() {
+            BitString<2> Test() {
+                return 1^2 + 0^2;
+            }
+        }
+        """)
+    SymbolicComputation().apply(game, ctx)
+    assert not ctx.near_misses

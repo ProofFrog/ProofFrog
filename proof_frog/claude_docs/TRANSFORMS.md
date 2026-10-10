@@ -27,7 +27,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 
 | Pass | Description |
 |---|---|
-| SymbolicComputation | Evaluates arithmetic sub-expressions symbolically using SymPy. |
+| SymbolicComputation | Evaluates arithmetic over Int literals and Int parameters symbolically using SymPy. |
 
 ### Structural (`structural.py`)
 

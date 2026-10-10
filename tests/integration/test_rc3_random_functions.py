@@ -254,3 +254,31 @@ def test_guard_var_reassigned_to_challenge_not_equivalent() -> None:
         }
         """)
     assert not engine.check_equivalent(real, random).valid
+
+
+def test_challenge_field_reassigned_in_initialize_not_equivalent() -> None:
+    """Initialize reassigns cf after the call.  Query excludes the new cf, so
+    Query(0^n) returns H(0^n) = field unless cf is 0^n."""
+    engine = _engine()
+    template = """
+        Game G(Int n) {{
+            Function<BitString<n>, BitString<n>> H;
+            BitString<n> cf;
+            BitString<n> field;
+            BitString<n> Initialize() {{
+                H <- Function<BitString<n>, BitString<n>>;
+                cf = 0^n;
+                {init_field}
+                cf <- BitString<n>;
+                return cf;
+            }}
+            BitString<n> Reveal() {{ return field; }}
+            BitString<n>? Query(BitString<n> param) {{
+                if (param == cf) {{ return None; }}
+                return H(param);
+            }}
+        }}
+        """
+    real = frog_parser.parse_game(template.format(init_field=_REAL_FIELD))
+    random = frog_parser.parse_game(template.format(init_field=_RANDOM_FIELD))
+    assert not engine.check_equivalent(real, random).valid

@@ -3146,3 +3146,55 @@ def test_dead_null_guard_no_near_miss_when_read_assigned(body: str) -> None:
     assert not _dead_null_guard_unassigned_misses(
         "Void Initialize() { f = false; }", body
     )
+
+
+def _challenge_exclusion_misses(initialize: str) -> list[NearMiss]:
+    ctx = _rc3_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G(Bool c) {{
+            Function<BitString<2>, BitString<2>> e;
+            BitString<2> U;
+            BitString<2> p;
+            Void Initialize() {{
+                e <- Function<BitString<2>, BitString<2>>;
+                U = 0b00;
+                {initialize}
+            }}
+            BitString<2> Hash(BitString<2> pm) {{
+                if (pm == U) {{
+                    return 0^2;
+                }}
+                return e(pm);
+            }}
+        }}
+        """)
+    _RC3_ChalExcl().apply(game, ctx)
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Challenge Exclusion RF To Uniform"
+    ]
+
+
+@pytest.mark.parametrize(
+    "initialize, name",
+    [
+        ("p = e(U); U = 0b11;", "U"),
+        ("BitString<2> x = U; if (c) { x = 0b11; } p = e(x);", "x"),
+        ("BitString<2> x = U; U <- BitString<2>; p = e(x);", "U"),
+    ],
+)
+def test_challenge_exclusion_near_miss_on_rewritten_argument(
+    initialize: str, name: str
+) -> None:
+    """The Initialize call is kept because Initialize may write something its
+    argument depends on after reading it."""
+    misses = _challenge_exclusion_misses(initialize)
+    assert len(misses) == 1
+    assert misses[0].variable == "e"
+    assert misses[0].method == "Initialize"
+    assert f"may write '{name}' after the argument" in misses[0].reason
+
+
+def test_challenge_exclusion_no_near_miss_on_stable_argument() -> None:
+    assert not _challenge_exclusion_misses("BitString<2> x = U; p = e(x);")

@@ -94,8 +94,58 @@ class _BijectionReplacer(visitors.Transformer):
         return result
 
 
-def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
-    """Remove fields that have the same type and always contain the same value."""
+def _initializer_mismatch(field: frog_ast.Field, other: frog_ast.Field) -> str | None:
+    """Why *field* and *other* may start with different values, or None.
+
+    Two fields start equal with no initializer, or with equal initializers
+    that make no call.
+    """
+    if field.value != other.value:
+        return "they start from different initializers"
+    if (
+        field.value is not None
+        and visitors.SearchVisitor(
+            lambda node: isinstance(node, frog_ast.FuncCall)
+        ).visit(field.value)
+        is not None
+    ):
+        return "their initializers make calls, which may return different values"
+    return None
+
+
+def _report_initializer_mismatch(
+    ctx: PipelineContext | None,
+    field: frog_ast.Field,
+    other: frog_ast.Field,
+    mismatch: str,
+) -> None:
+    if ctx is None:
+        return
+    ctx.near_misses.append(
+        NearMiss(
+            transform_name="Remove Duplicate Fields",
+            reason=(
+                f"Fields '{field.name}' and '{other.name}' not merged: every "
+                f"write updates both alike, but {mismatch}"
+            ),
+            location=other.origin,
+            suggestion="Give both fields the same call-free initializer, or none",
+            # Canonical diffs name fields `fieldN`, so the diagnostic matcher
+            # would drop a near miss that names the source field.
+            variable=None,
+            method=None,
+        )
+    )
+
+
+def remove_duplicate_fields(
+    game: frog_ast.Game, ctx: PipelineContext | None = None
+) -> frog_ast.Game:
+    """Remove fields that have the same type and always contain the same value.
+
+    Two fields always hold the same value if they start equal and every write
+    updates both alike.  Near misses go to *ctx* when it is given.
+    """
     for field in game.fields:
         for other_field in game.fields:
             if field.type == other_field.type and field.name < other_field.name:
@@ -103,6 +153,10 @@ def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
                     (field.name, other_field.name)
                 ).visit(game)
                 if duplicated_statements is not None:
+                    mismatch = _initializer_mismatch(field, other_field)
+                    if mismatch is not None:
+                        _report_initializer_mismatch(ctx, field, other_field, mismatch)
+                        continue
                     # Capture-aware (F-337): ``Variable`` is both Expression and
                     # Type, so a name-keyed substitution would also retype every
                     # position naming a set/alias called ``other_field.name``.
@@ -142,7 +196,7 @@ class RemoveDuplicateFields(TransformPass):
     name = "Remove Duplicate Fields"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return remove_duplicate_fields(game)
+        return remove_duplicate_fields(game, ctx)
 
 
 class RemoveUnnecessaryFields(TransformPass):

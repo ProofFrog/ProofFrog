@@ -1,5 +1,12 @@
 from proof_frog import frog_ast
-from proof_frog.export.latex.proof_context import ProofContext, StepRender  # noqa: E402
+from proof_frog.export.latex.proof_context import (  # noqa: E402
+    GameEntry,
+    GameRef,
+    Hop,
+    Loop,
+    ProofContext,
+    StepRender,
+)
 
 DDH = "examples/Proofs/Group/DDH_implies_CDH.proof"
 # TriplingPRG has explicit `let: PRG G = PRG(...); TriplingPRG T = TriplingPRG(G);`
@@ -12,6 +19,9 @@ ELGAMAL = "examples/Proofs/PubKeyEnc/ElGamal_INDCPA_MultiChal.proof"
 # GHP18's let `KEMCombiner KC = KEMCombiner(...);` destructures inside its own
 # Encaps body -- an instantiated *construction* (Construction section).
 GHP18 = "examples/applications/KEMCombiner-GHP18/GHP18_INDCPA_First.proof"
+MULTICHAL = "examples/Proofs/PubKeyEnc/INDCPA_implies_INDCPA_MultiChal.proof"
+HASHED_ELGAMAL = "examples/Proofs/KEM/HashedElGamalKEM_INDCCA.proof"
+STEP_ASSUMPTION = "tests/unit/export/latex/fixtures/step_assumption.proof"
 
 
 def _has_destructuring(block: frog_ast.Block) -> bool:
@@ -122,3 +132,74 @@ def test_let_constructions_render_destructuring_not_desugared():
     encaps = next(m for m in kc.methods if m.signature.name == "Encaps")
     assert _has_destructuring(encaps.block)
     assert not _has_tup_temp(encaps.block)
+
+
+def test_sequence_unrolls_induction_into_hybrid():
+    # G_0, induction(i from 1 to q) { G_1,i; G_2,i }, G_3: the loop's games
+    # stay in the sequence, between its entry, rollover and exit hops.
+    ctx = ProofContext(MULTICHAL)
+    seq = ctx.sequence()
+    assert [type(e) for e in seq] == [
+        GameEntry,
+        Loop,
+        Hop,  # entry: G_0 -> G_1,1
+        GameEntry,
+        Hop,  # G_1,i -> G_2,i
+        GameEntry,
+        Hop,  # rollover: G_2,i -> G_1,i+1
+        Hop,  # exit: G_2,q -> G_3
+        GameEntry,
+    ]
+    assert len(ctx.game_steps()) == 4
+    loop = seq[1]
+    assert (loop.name, str(loop.start), str(loop.end)) == ("i", "1", "q")
+    assert (loop.first, loop.last) == (1, 2)
+    entry, inner, rollover, exit_hop = ctx.hop_kinds()
+    assert [str(i) for i in entry.target.indices] == ["1"]
+    assert inner.kind == "assumption" and str(inner.assumption) == "INDCPA(E)"
+    assert inner.loops == [loop] and not inner.rollover
+    assert rollover.rollover and rollover.kind == "interchangeable"
+    assert [str(i) for i in rollover.target.indices] == ["i + 1"]
+    assert [str(i) for i in exit_hop.source.indices] == ["q"]
+    assert exit_hop.target == GameRef(3)
+
+
+def test_step_assumptions_are_hop_conditions():
+    # `assume e;` states a condition of the next hop; it never licenses one.
+    ctx = ProofContext(MULTICHAL)
+    entry, inner, rollover, exit_hop = ctx.hop_kinds()
+    assert [str(c) for c in entry.conditions] == [
+        "R(E, 1).count >= 1",
+        "INDCPA(E).Left.count == 1",
+    ]
+    assert inner.conditions == []
+    assert len(rollover.conditions) == 2
+    assert [str(c) for c in exit_hop.conditions][0] == "R(E, q).count < q + 1"
+
+
+def test_step_assumption_outside_induction_keeps_hop_kind():
+    ctx = ProofContext(STEP_ASSUMPTION)
+    hops = ctx.hop_kinds()
+    assert [h.kind for h in hops] == [
+        "interchangeable",
+        "assumption",
+        "interchangeable",
+        "assumption",
+        "interchangeable",
+    ]
+    assert [str(c) for c in hops[2].conditions] == ["n >= 1"]
+    assert all(not h.conditions for i, h in enumerate(hops) if i != 2)
+
+
+def test_lemma_side_flip_is_lemma_hop():
+    ctx = ProofContext(HASHED_ELGAMAL)
+    hops = ctx.hop_kinds()
+    assert [h.kind for h in hops] == [
+        "interchangeable",
+        "assumption",
+        "interchangeable",
+        "lemma",
+        "interchangeable",
+    ]
+    assert hops[3].lemma_path == "../Group/GapCDH_implies_GapCDH_NZ.proof"
+    assert hops[1].lemma_path is None

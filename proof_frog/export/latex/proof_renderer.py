@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from ... import frog_ast
 from ... import upto
+from ... import visitors
 from . import ir
 from .backends.base import Backend
 from .document import assemble
 from .expr_renderer import _looks_like_algorithm_name
 from .macros import MacroRegistry
 from .module_renderer import ModuleRenderer
+from .proof_context import GameEntry, GameRef, Hop, Loop
 
 if TYPE_CHECKING:
     from ...advantage import AdvTerm, AdvantageBound
-    from .proof_context import Hop, ProofContext
+    from .proof_context import ProofContext
 
 
 @dataclass
@@ -30,7 +33,7 @@ class _SymbolicHeading:
     body points back to where it was drawn).
     """
 
-    index: int
+    game_tex: str  # ``G_{i}``, or ``G_{i,j}`` inside an induction
     challenger_tex: str
     reduction_tex: str | None
     sections_ref: bool  # start/end step: heading-only, references shared sections
@@ -384,11 +387,55 @@ def _bound_sentence(lhs: str, terms: list[str], adversaries: list[str]) -> str:
     return sentence
 
 
-def _theorem_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
-    # pylint: disable=too-many-locals
-    a_tex = r"\mathcal{A}"
+def _mentions(node: frog_ast.ASTNode, name: str) -> bool:
+    found = visitors.SearchVisitor[frog_ast.Variable](
+        lambda n: isinstance(n, frog_ast.Variable) and n.name == name
+    ).visit(node)
+    return found is not None
+
+
+def _loop_range(loop: Loop, renderer: ModuleRenderer, rollover: bool = False) -> str:
+    """``a \\le i \\le b``, or ``a \\le i < b`` over a rollover's indices."""
+    var = renderer.expr.render(frog_ast.Variable(loop.name))
+    start = renderer.expr.render(loop.start)
+    end = renderer.expr.render(loop.end)
+    upper = "<" if rollover else r"\le"
+    return rf"{start} \le {var} {upper} {end}"
+
+
+def _for_each(node: frog_ast.ASTNode, hops: list[Hop], renderer: ModuleRenderer) -> str:
+    """`` for each $a \\le i \\le b$`` over the loops whose hops use ``node``.
+
+    A loop counts when one of its hops cites or assumes ``node`` and ``node``
+    names the loop variable.
+    """
+    ranges: list[str] = []
+    for hop in hops:
+        used = str(hop.assumption) == str(node) or any(
+            str(c) == str(node) for c in hop.conditions
+        )
+        if not used:
+            continue
+        for loop in hop.loops:
+            rollover = hop.rollover and loop is hop.loops[-1]
+            text = f"${_loop_range(loop, renderer, rollover)}$"
+            if _mentions(node, loop.name) and text not in ranges:
+                ranges.append(text)
+    return f" for each {' and '.join(ranges)}" if ranges else ""
+
+
+def _file_tex(path: str) -> str:
+    return rf"\texttt{{{_latex_escape(PurePosixPath(path).name)}}}"
+
+
+def _theorem_premises(
+    ctx: "ProofContext", renderer: ModuleRenderer, a_tex: str
+) -> list[str]:
+    """Assumptions, then lemmas, then the step assumptions of ``games:``."""
+    hops = ctx.hop_kinds()
     game_hyps = [
         f"${_render_game_ref(a, renderer, as_notion=True)}$"
+        + _for_each(a, hops, renderer)
         for a in ctx.assumptions()
         if not isinstance(a, frog_ast.EventTheorem)
     ]
@@ -402,6 +449,39 @@ def _theorem_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
         premises.append(f"indistinguishability holds for {' and '.join(game_hyps)}")
     if event_hyps:
         premises.append(f"{' and '.join(event_hyps)} is small")
+    lemma_hyps = [
+        f"${_render_game_ref(lemma.game, renderer, as_notion=True)}$"
+        + _for_each(lemma.game, hops, renderer)
+        + f" (proved in {_file_tex(lemma.proof_path)})"
+        for lemma in ctx.lemmas()
+        if not isinstance(lemma.game, frog_ast.EventTheorem)
+    ]
+    lemma_events = [
+        f"${_render_event(lemma.game, renderer, a_tex)}$ is small"
+        + f" (proved in {_file_tex(lemma.proof_path)})"
+        for lemma in ctx.lemmas()
+        if isinstance(lemma.game, frog_ast.EventTheorem)
+    ]
+    if lemma_hyps:
+        premises.append(f"indistinguishability holds for {' and '.join(lemma_hyps)}")
+    if lemma_events:
+        premises.append(" and ".join(lemma_events))
+    conditions: list[str] = []
+    for hop in hops:
+        for cond in hop.conditions:
+            text = f"${renderer.expr.render(cond)}$" + _for_each(cond, [hop], renderer)
+            if text not in conditions:
+                conditions.append(text)
+    if len(conditions) == 1:
+        premises.append(conditions[0])
+    elif conditions:
+        premises.append(f"{_join_with_and(conditions)} hold")
+    return premises
+
+
+def _theorem_section(ctx: "ProofContext", renderer: ModuleRenderer) -> str:
+    a_tex = r"\mathcal{A}"
+    premises = _theorem_premises(ctx, renderer, a_tex)
     theorem = ctx.theorem()
     if isinstance(theorem, frog_ast.EventTheorem):
         lhs = _render_event(theorem, renderer, a_tex)
@@ -461,8 +541,9 @@ def _games_sequence(
     # pylint: disable=import-outside-toplevel
     from .diff import mark_diff
 
-    steps = ctx.game_steps()
-    hops = ctx.hop_kinds()
+    sequence = ctx.sequence()
+    games = [e for e in sequence if isinstance(e, GameEntry)]
+    hops = [e for e in sequence if isinstance(e, Hop)]
     bound = ctx.advantage_bound()
     # Per-hop loss terms align 1:1 with `hops` (both are one-per-transition in
     # game-step order) when the bound synthesized; otherwise annotate without a
@@ -472,29 +553,58 @@ def _games_sequence(
         if bound.supported and len(bound.hop_terms) == len(hops)
         else [None] * len(hops)
     )
-    built = [
-        _step_figure_ir(ctx, step, renderer, i, composition)
-        for i, step in enumerate(steps)
-    ]
+    labels = [_game_tex(g.ref, renderer) for g in games]
+    built = [_step_figure_ir(ctx, g, renderer, composition) for g in games]
     figures = [fig for fig, _ in built]
     headings = [head for _, head in built]
     if composition == "symbolic":
-        _apply_symbolic_diff(figures, headings, diff)
+        _apply_symbolic_diff(figures, headings, labels, diff)
     elif diff:
         for i in range(1, len(figures)):
             mark_diff(figures[i - 1].body, figures[i].body)
     chunks: list[str] = []
-    for i, fig in enumerate(figures):
-        if i > 0:
-            chunks.append(_hop_annotation(i, hops[i - 1], renderer, hop_terms[i - 1]))
-        heading = fig.heading or f"$G_{{{i}}}$"
-        chunks.append(backend.render_game_step(heading, fig.body))
+    drawn = iter(zip(figures, labels))
+    losses = iter(hop_terms)
+    for entry in sequence:
+        if isinstance(entry, GameEntry):
+            fig, label = next(drawn)
+            heading = fig.heading or f"${label}$"
+            chunks.append(backend.render_game_step(heading, fig.body))
+        elif isinstance(entry, Hop):
+            chunks.append(_hop_annotation(entry, renderer, next(losses)))
+        else:
+            chunks.append(_hybrid_lead(entry, renderer))
     return "\n\n".join(chunks)
+
+
+def _game_tex(ref: GameRef, renderer: ModuleRenderer) -> str:
+    """``G_{n}``, or ``G_{n,i}`` at induction index ``i``."""
+    subscript = [str(ref.number), *(renderer.expr.render(i) for i in ref.indices)]
+    return rf"G_{{{','.join(subscript)}}}"
+
+
+def _hybrid_lead(loop: Loop, renderer: ModuleRenderer) -> str:
+    """Introduce an induction block as a hybrid over its variable."""
+    indices: list[frog_ast.Expression] = [
+        frog_ast.Variable(outer.name) for outer in [*loop.outer, loop]
+    ]
+    first = _game_tex(GameRef(loop.first, indices), renderer)
+    last = _game_tex(GameRef(loop.last, indices), renderer)
+    var = renderer.expr.render(frog_ast.Variable(loop.name))
+    span = f"${renderer.expr.render(loop.start)}$ to ${renderer.expr.render(loop.end)}$"
+    if loop.first == loop.last:
+        games = f"Game ${first}$ forms"
+    elif loop.last == loop.first + 1:
+        games = f"Games ${first}$ and ${last}$ form"
+    else:
+        games = f"Games ${first}$ through ${last}$ form"
+    return f"{games} a hybrid over ${var}$ from {span}."
 
 
 def _apply_symbolic_diff(
     figures: list[ir.Figure],
     headings: list["_SymbolicHeading | None"],
+    labels: list[str],
     diff: bool,
 ) -> None:
     """Assemble headings, and (when ``diff``) highlight changes + de-dup repeats.
@@ -521,11 +631,11 @@ def _apply_symbolic_diff(
         if head is None:
             continue
         prev_body = original_bodies[i - 1] if i > 0 else None
-        deduped_from: int | None = None
+        deduped_from: str | None = None
         if diff and figures[i].body is not None and prev_body is not None:
             if bodies_equal(prev_body, figures[i].body):
                 figures[i].body = None
-                deduped_from = i - 1
+                deduped_from = labels[i - 1]
             else:
                 mark_diff(prev_body, figures[i].body)
         figures[i].heading = _symbolic_heading_tex(head, deduped_from)
@@ -533,27 +643,47 @@ def _apply_symbolic_diff(
 
 def _symbolic_heading_tex(
     head: "_SymbolicHeading",
-    deduped_from: int | None,
+    deduped_from: str | None,
 ) -> str:
     """Assemble the ``$G_i = ...$`` heading.
 
     Heading components are no longer highlighted -- what changed between two
     games is stated in the hop prose, so the heading reads plainly.
+    ``deduped_from`` is the ``G_{...}`` label of the game whose body repeats.
     """
     body_tex = head.challenger_tex
     if head.reduction_tex is not None:
         body_tex = rf"{body_tex} \circ {head.reduction_tex}"
-    math = rf"$G_{{{head.index}}} = {body_tex}$"
+    math = rf"${head.game_tex} = {body_tex}$"
     if head.sections_ref:
         return math + r"\\\textit{(see Definitions and Construction)}"
     if deduped_from is not None:
-        return math + rf"\\\textit{{(reduction as in $G_{{{deduped_from}}}$)}}"
+        return math + rf"\\\textit{{(reduction as in ${deduped_from}$)}}"
     return math
 
 
+def _hop_subject(hop: Hop, renderer: ModuleRenderer) -> str:
+    """``Games $G_a$ and $G_b$``, after the hop's loop ranges and conditions."""
+    clauses = []
+    if hop.loops:
+        ranges = [
+            f"${_loop_range(loop, renderer, hop.rollover and loop is hop.loops[-1])}$"
+            for loop in hop.loops
+        ]
+        clauses.append(f"for each {' and '.join(ranges)}")
+    if hop.conditions:
+        conditions = [f"${renderer.expr.render(c)}$" for c in hop.conditions]
+        clauses.append(f"assuming {_join_with_and(conditions)}")
+    games = (
+        f"games ${_game_tex(hop.source, renderer)}$ and "
+        f"${_game_tex(hop.target, renderer)}$"
+    )
+    sentence = ", ".join([*clauses, games])
+    return sentence[0].upper() + sentence[1:]
+
+
 def _hop_annotation(
-    i: int,
-    hop: "Hop",
+    hop: Hop,
     renderer: ModuleRenderer,
     loss: "AdvTerm | None" = None,
 ) -> str:
@@ -562,18 +692,23 @@ def _hop_annotation(
     An interchangeability hop states the games are perfectly indistinguishable
     ($\\Pr[G_{i-1}=1] = \\Pr[G_i=1]$); an assumption hop names the assumption and
     (when the bound synthesized) states the advantage bound $|\\Pr[G_{i-1}=1] -
-    \\Pr[G_i=1]| \\le \\Adv{...}{...}$. Each paragraph is followed by an invisible
-    LaTeX comment inviting the author to supply the intuition.
+    \\Pr[G_i=1]| \\le \\Adv{...}{...}$; a lemma hop also names the lemma's proof
+    file. A hop inside an induction says for which indices it repeats, and a
+    hop with step assumptions states them as conditions. Each paragraph is
+    followed by an invisible LaTeX comment inviting the author to supply the
+    intuition.
     """
-    prev = rf"G_{{{i-1}}}"
-    cur = rf"G_{{{i}}}"
+    prev = _game_tex(hop.source, renderer)
+    cur = _game_tex(hop.target, renderer)
+    subject = _hop_subject(hop, renderer)
+    lemma = None if hop.lemma_path is None else _file_tex(hop.lemma_path)
     if hop.kind == "upto" and isinstance(hop.assumption, frog_ast.EventTheorem):
         event = hop.assumption
         pair = _render_game_ref(event.game, renderer, as_notion=True)
         flag = event.flag.replace("_", r"\_")
-        source = "the event lemma" if hop.by_lemma else "assumption"
+        source = "assumption" if lemma is None else f"the event lemma in {lemma}"
         sentence = (
-            rf"Games $G_{{{i-1}}}$ and $G_{{{i}}}$ differ only in the side of "
+            rf"{subject} differ only in the side of "
             rf"the ${pair}$ challenger, whose two sides are identical until "
             rf"$\mathit{{{flag}}}$ is set; by the fundamental lemma of game "
             rf"playing"
@@ -589,42 +724,63 @@ def _hop_annotation(
                 rf" the loss is at most the probability that "
                 rf"$\mathit{{{flag}}}$ is set, bounded by {source}."
             )
-    elif hop.kind == "assumption" and hop.assumption is not None:
+    elif hop.kind in ("assumption", "lemma") and hop.assumption is not None:
         ref = _render_game_ref(hop.assumption, renderer, as_notion=True)
         if loss is not None:
             adversary = _adversary_tex(loss.adversary)
             adv = _render_adv_term(loss, renderer)
+            by_lemma = (
+                ""
+                if lemma is None
+                else f", whose sides the lemma in {lemma} proves indistinguishable"
+            )
             sentence = (
-                rf"Games $G_{{{i-1}}}$ and $G_{{{i}}}$ differ only in the "
-                rf"${ref}$ challenger; the reduction turns any distinguisher "
-                rf"into an adversary ${adversary}$ with "
+                rf"{subject} differ only in the "
+                rf"${ref}$ challenger{by_lemma}; the reduction turns any "
+                rf"distinguisher into an adversary ${adversary}$ with "
                 rf"$\lvert \Pr[{prev} = 1] - \Pr[{cur} = 1] \rvert \le {adv}$."
             )
         else:
+            under = (
+                "under that assumption" if lemma is None else f"by the lemma in {lemma}"
+            )
             sentence = (
-                rf"Games $G_{{{i-1}}}$ and $G_{{{i}}}$ differ only in the "
-                rf"${ref}$ challenger, and are indistinguishable under that "
-                r"assumption."
+                rf"{subject} differ only in the "
+                rf"${ref}$ challenger, and are indistinguishable {under}."
             )
     else:
         sentence = (
-            rf"Games $G_{{{i-1}}}$ and $G_{{{i}}}$ are perfectly "
+            rf"{subject} are perfectly "
             rf"indistinguishable: $\Pr[{prev} = 1] = \Pr[{cur} = 1]$."
         )
+    if hop.rollover:
+        sentence += " " + _chain_sentence(hop.loops[-1], renderer)
+    # A comment-only line is invisible in the PDF but visible in the source,
+    # so the marker names the games in plain text (`G_2,i -> G_1,i + 1`).
     comment = (
-        rf"% commentary (author): explain the intuition for the {prev} -> {cur} hop"
+        "% commentary (author): explain the intuition for the "
+        f"{_game_plain(hop.source)} -> {_game_plain(hop.target)} hop"
     )
-    # A comment-only line is invisible in the PDF but visible in the source;
-    # strip the math braces from the marker so it reads plainly in the source.
-    comment = comment.replace("{", "").replace("}", "")
     return sentence + "\n" + comment
+
+
+def _game_plain(ref: GameRef) -> str:
+    return "G_" + ",".join([str(ref.number), *(str(i) for i in ref.indices)])
+
+
+def _chain_sentence(loop: Loop, renderer: ModuleRenderer) -> str:
+    """The hybrid's conclusion: its hops chain index ``start`` to ``end``."""
+    outer: list[frog_ast.Expression] = [frog_ast.Variable(o.name) for o in loop.outer]
+    first = _game_tex(GameRef(loop.first, [*outer, loop.start]), renderer)
+    last = _game_tex(GameRef(loop.last, [*outer, loop.end]), renderer)
+    var = renderer.expr.render(frog_ast.Variable(loop.name))
+    return f"Chained over ${var}$, these hops connect ${first}$ to ${last}$."
 
 
 def _step_figure_ir(
     ctx: "ProofContext",
-    step: frog_ast.Step,
+    game: GameEntry,
     renderer: ModuleRenderer,
-    index: int,
     composition: str,
 ) -> tuple[ir.Figure, "_SymbolicHeading | None"]:
     """Build the IR ``Figure`` for one game step, plus its symbolic heading.
@@ -643,14 +799,16 @@ def _step_figure_ir(
     the raw step text in a ``\\pccomment`` fallback block so partial proofs
     still export.
     """
-    caption = f"Game $G_{{{index}}}$"
-    label = f"fig:G{index}"
-    plain_heading = f"$G_{{{index}}}$"
+    step = game.step
+    game_tex = _game_tex(game.ref, renderer)
+    caption = f"Game ${game_tex}$"
+    label = f"fig:G{game.ref.number}"
+    plain_heading = f"${game_tex}$"
     try:
         if composition == "inlined":
-            game = ctx.resolve_inlined(step)
+            inlined = ctx.resolve_inlined(step)
             block = renderer._method_blocks_vstack(  # pylint: disable=protected-access
-                game
+                inlined
             )
             return (
                 ir.Figure(
@@ -667,7 +825,7 @@ def _step_figure_ir(
                 sr.reduction_ref, renderer, as_notion=False
             )
         head = _SymbolicHeading(
-            index=index,
+            game_tex=game_tex,
             challenger_tex=challenger_ref,
             reduction_tex=reduction_ref,
             sections_ref=sr.novel is None,
@@ -683,7 +841,10 @@ def _step_figure_ir(
     except Exception as exc:  # pylint: disable=broad-exception-caught
         import sys  # pylint: disable=import-outside-toplevel
 
-        print(f"latex-export: could not render step {index}: {exc}", file=sys.stderr)
+        print(
+            f"latex-export: could not render step {game.ref.number}: {exc}",
+            file=sys.stderr,
+        )
         return (
             ir.Figure(
                 body=ir.ProcedureBlock(

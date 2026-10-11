@@ -58,6 +58,19 @@ emitted with a `Frog` prefix (e.g. `\FrogPr`) to avoid clobbering them.
   probability as the left-hand side of its concrete-security inequality.
   As for other helper games, a clause on the pair is not substituted:
   the exporter's bound keeps it symbolic.
+- Inductions: `induction(i from a to b)` renders as a hybrid over `i`.
+  Its games are labeled `G_{k,i}`, and each hop inside it holds for each
+  `a \le i \le b`.
+  The entry hop (at `i = a`), the rollover hop (`i` to `i + 1`) and the
+  exit hop (at `i = b`) are stated too.
+  Inductive proofs get no concrete bound.
+- Step assumptions: `assume e;` in `games:` renders as a condition of
+  the hop after it ("Assuming e, games ...").
+- Lemmas: a hop over a `lemma:` entry cites the lemma's proof file.
+- The theorem lists every premise: assumptions, lemmas (with their proof
+  files) and step assumptions.
+  An assumption indexed by an induction variable holds "for each
+  `a \le i \le b`".
 - XOR rendering: `+` between two `BitString` operands renders as
   `\oplus` only when the orchestrator passes a `type_of` map to the
   expression renderer. The proof orchestrator does not yet populate

@@ -4,7 +4,7 @@ from proof_frog import frog_ast, frog_parser
 from proof_frog.export.latex.backends.cryptocode import CryptocodeBackend
 from proof_frog.export.latex.macros import MacroRegistry
 from proof_frog.export.latex.module_renderer import ModuleRenderer
-from proof_frog.export.latex.proof_context import ProofContext
+from proof_frog.export.latex.proof_context import GameRef, Hop, ProofContext
 from proof_frog.export.latex import proof_renderer as pr
 
 DDH = "examples/Proofs/Group/DDH_implies_CDH.proof"
@@ -13,6 +13,11 @@ CFRG_LEAK = (
     "examples/applications/cfrg-hybrid-kems/proofs/CG/"
     "CG_expanded_LEAK_BIND_K_CT_DIFFKEY.proof"
 )
+HASHED_ELGAMAL = "examples/Proofs/KEM/HashedElGamalKEM_INDCCA.proof"
+RFRP = "examples/Proofs/PRP/RFRP_Switching.proof"
+FIXTURES = "tests/unit/export/latex/fixtures"
+HYBRID = f"{FIXTURES}/hybrid_threshold.proof"
+STEP_ASSUMPTION = f"{FIXTURES}/step_assumption.proof"
 
 
 def _claim(src: str) -> frog_ast.Expression:
@@ -135,12 +140,7 @@ def test_theorem_falls_back_to_synthesized_without_claim():
 
 def test_hop_annotation_assumption_states_prose_bound():
     _b, _m, mr = _renderer()
-    loss_hop = pr._hop_annotation(
-        1,
-        _make_assumption_hop(),
-        mr,
-        loss=_make_adv_term(),
-    )
+    loss_hop = pr._hop_annotation(_make_assumption_hop(), mr, loss=_make_adv_term())
     # Prose names the assumption and states the advantage bound inequality.
     assert r"\DDH(\G)" in loss_hop
     assert r"\le" in loss_hop
@@ -149,24 +149,23 @@ def test_hop_annotation_assumption_states_prose_bound():
     # An invisible author-commentary placeholder follows (a LaTeX comment).
     assert "% commentary (author)" in loss_hop
     # An equivalence hop states perfect indistinguishability, with no bound.
-    plain = pr._hop_annotation(1, _make_interchangeable_hop(), mr, loss=None)
+    plain = pr._hop_annotation(_make_interchangeable_hop(), mr, loss=None)
     assert "perfectly indistinguishable" in plain
     assert r"\le" not in plain
     assert r"\Pr[G_{0} = 1] = \Pr[G_{1} = 1]" in plain
 
 
 def _make_assumption_hop():
-    from proof_frog.export.latex.proof_context import Hop
-
     return Hop(
-        "assumption", frog_ast.ParameterizedGame("DDH", [frog_ast.Variable("G")])
+        "assumption",
+        frog_ast.ParameterizedGame("DDH", [frog_ast.Variable("G")]),
+        GameRef(0),
+        GameRef(1),
     )
 
 
 def _make_interchangeable_hop():
-    from proof_frog.export.latex.proof_context import Hop
-
-    return Hop("interchangeable", None)
+    return Hop("interchangeable", None, GameRef(0), GameRef(1))
 
 
 def _make_adv_term():
@@ -325,3 +324,141 @@ def test_symbolic_no_diff_keeps_full_sequence():
     _ctx, out = _symbolic_ddh(diff=False)
     assert r"\pfhighlight{" not in out
     assert "(reduction as in" not in out
+
+
+def _symbolic(path):
+    backend = CryptocodeBackend()
+    macros = MacroRegistry()
+    mr = ModuleRenderer(backend, macros)
+    return pr.render_proof(ProofContext(path), backend, macros, mr)
+
+
+def test_plain_proof_prose_unchanged():
+    # A proof with no induction, step assumption or lemma keeps its prose.
+    out = _symbolic(DDH)
+    assert (
+        r"If indistinguishability holds for $\DDH(\G)$ and "
+        r"$\RandomTargetGuessing(\G)$, then indistinguishability holds for "
+        r"$\CDH(\G)$. Concretely,"
+    ) in out
+    hops = [line for line in out.splitlines() if line.startswith("Games $G_")]
+    assert hops == [
+        r"Games $G_{0}$ and $G_{1}$ are perfectly indistinguishable: "
+        r"$\Pr[G_{0} = 1] = \Pr[G_{1} = 1]$.",
+        r"Games $G_{1}$ and $G_{2}$ differ only in the $\DDH(\G)$ challenger; "
+        r"the reduction turns any distinguisher into an adversary "
+        r"$\mathcal{B}_{1}$ with $\lvert \Pr[G_{1} = 1] - \Pr[G_{2} = 1] \rvert "
+        r"\le \Adv{\DDH(\G)}{\mathcal{B}_{1}}$.",
+        r"Games $G_{2}$ and $G_{3}$ are perfectly indistinguishable: "
+        r"$\Pr[G_{2} = 1] = \Pr[G_{3} = 1]$.",
+        r"Games $G_{3}$ and $G_{4}$ differ only in the "
+        r"$\RandomTargetGuessing(\G)$ challenger; the reduction turns any "
+        r"distinguisher into an adversary $\mathcal{B}_{2}$ with "
+        r"$\lvert \Pr[G_{3} = 1] - \Pr[G_{4} = 1] \rvert "
+        r"\le \Adv{\RandomTargetGuessing(\G)}{\mathcal{B}_{2}}$.",
+        r"Games $G_{4}$ and $G_{5}$ are perfectly indistinguishable: "
+        r"$\Pr[G_{4} = 1] = \Pr[G_{5} = 1]$.",
+    ]
+    assert "% commentary (author): explain the intuition for the G_0 -> G_1 hop" in out
+
+
+def test_induction_renders_as_hybrid():
+    out = _symbolic(MULTICHAL)
+    assert (
+        "Games $G_{1,i}$ and $G_{2,i}$ form a hybrid over $i$ from $1$ to $q$." in out
+    )
+    assert r"$G_{1,i} = \INDCPA(\E).\Left \circ \R(\E, i)$" in out
+    assert (
+        r"For each $1 \le i \le q$, games $G_{1,i}$ and $G_{2,i}$ differ only in "
+        r"the $\INDCPA(\E)$ challenger, and are indistinguishable under that "
+        "assumption."
+    ) in out
+    # The rollover runs i -> i + 1 below the upper bound.
+    assert r"For each $1 \le i < q$, assuming" in out
+    assert r"games $G_{2,i}$ and $G_{1,i + 1}$ are perfectly indistinguishable" in out
+    assert r"Chained over $i$, these hops connect $G_{1,1}$ to $G_{2,q}$." in out
+    assert r"(reduction as in $G_{1,i}$)" in out
+    assert out.count(r"\begin{center}") == 4
+    assert "explain the intuition for the G_2,i -> G_1,i + 1 hop" in out
+
+
+def test_step_assumption_renders_as_condition():
+    out = _symbolic(STEP_ASSUMPTION)
+    assert (
+        r"Assuming $n \ge 1$, games $G_{2}$ and $G_{3}$ are perfectly "
+        "indistinguishable"
+    ) in out
+    assert r"$n \ge 1$ challenger" not in out
+    assert r"and $n \ge 1$, then indistinguishability holds for" in out
+
+
+def test_induction_step_assumptions_are_not_challengers():
+    out = _symbolic(MULTICHAL)
+    assert r"\mathit{count} = 1$ challenger" not in out
+    assert (
+        r"Assuming $\R(\E, q).\mathit{count} < q + 1$ and "
+        r"$\INDCPA(\E).\Right.\mathit{count} = 1$, games $G_{2,q}$ and $G_{3}$"
+    ) in out
+    # Each distinct step assumption is a theorem premise.
+    theorem = out[out.find(r"\begin{theorem}") : out.find(r"\end{theorem}")]
+    assert (
+        r"$\R(\E, 1).\mathit{count} \ge 1$, $\INDCPA(\E).\Left.\mathit{count} = 1$, "
+        r"$\INDCPA(\E).\Right.\mathit{count} = 1$, and "
+        r"$\R(\E, q).\mathit{count} < q + 1$ hold, then"
+    ) in theorem
+
+
+def test_indexed_assumption_is_quantified_in_theorem():
+    out = _symbolic(HYBRID)
+    theorem = out[out.find(r"\begin{theorem}") : out.find(r"\end{theorem}")]
+    assert (
+        r"If indistinguishability holds for $\IndexedThreshold(j)$ for each "
+        r"$1 \le j \le q$, and $q \ge 1$, then indistinguishability holds for "
+        r"$\Threshold(q)$."
+    ) in theorem
+    assert (
+        r"For each $1 \le j \le q$, games $G_{1,j}$ and $G_{2,j}$ differ only in "
+        r"the $\IndexedThreshold(j)$ challenger"
+    ) in out
+    assert r"Assuming $q \ge 1$, games $G_{2,q}$ and $G_{3}$" in out
+
+
+def test_lemma_hop_names_lemma_file():
+    out = _symbolic(HASHED_ELGAMAL)
+    lemma = r"\texttt{GapCDH\_implies\_GapCDH\_NZ.proof}"
+    assert (
+        rf"and indistinguishability holds for $\GapCDHNZ(\G)$ (proved in {lemma}), "
+        "then"
+    ) in out
+    assert (
+        rf"differ only in the $\GapCDHNZ(\G)$ challenger, whose sides the lemma "
+        rf"in {lemma} proves indistinguishable; the reduction"
+    ) in out
+    # The assumed ROMProgramming hop still reads as an assumption hop.
+    assert r"$\ROMProgramming(\G, \{0,1\}^{n})$ challenger; the reduction" in out
+
+
+def test_lemma_hop_without_bound_cites_lemma():
+    hop = Hop(
+        "lemma",
+        frog_ast.ParameterizedGame("PRFSecurity", [frog_ast.Variable("F")]),
+        GameRef(1),
+        GameRef(2),
+        lemma_path="../PRF/PRF_lemma.proof",
+    )
+    out = pr._hop_annotation(hop, _renderer()[2])
+    assert out.startswith(
+        r"Games $G_{1}$ and $G_{2}$ differ only in the $\PRFSecurity(\F)$ "
+        r"challenger, and are indistinguishable by the lemma in "
+        r"\texttt{PRF\_lemma.proof}."
+    )
+
+
+def test_event_lemma_is_a_theorem_premise():
+    out = _symbolic(RFRP)
+    lemma = r"\texttt{RFRP\_Switching\_Event.proof}"
+    assert (
+        r"If $\Pr[\mathit{bad} \text{ in } \RFvsRP(\X) \text{ against } "
+        rf"\mathcal{{A}}]$ is small (proved in {lemma}), then"
+    ) in out
+    assert f"which is bounded by the event lemma in {lemma}." in out

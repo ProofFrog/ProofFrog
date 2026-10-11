@@ -7,7 +7,10 @@ layout-only and testable against a fake context.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import itertools
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from typing import TypeAlias
 
 from ... import advantage, frog_ast, frog_parser, proof_engine, visitors
 
@@ -28,14 +31,57 @@ class StepRender:
 
 
 @dataclass
-class Hop:
-    """A hop between two consecutive game steps in a proof sequence."""
+class Loop:
+    """An ``induction`` block: a hybrid over ``name`` from ``start`` to ``end``.
 
-    kind: str  # "interchangeable" | "assumption" | "upto"
-    # The licensing assumption (kind "assumption") or event (kind "upto").
+    ``outer`` lists the enclosing loops, outermost first. ``first`` and
+    ``last`` number the block's first and last games.
+    """
+
+    name: str
+    start: frog_ast.Expression
+    end: frog_ast.Expression
+    outer: list[Loop]
+    first: int = 0
+    last: int = 0
+
+
+@dataclass
+class GameRef:
+    """Game ``G_number``, at one index per enclosing loop (outermost first)."""
+
+    number: int
+    indices: list[frog_ast.Expression] = field(default_factory=list)
+
+
+@dataclass
+class GameEntry:
+    """A game step and the reference that labels it."""
+
+    step: frog_ast.Step
+    ref: GameRef
+
+
+@dataclass
+class Hop:
+    """A hop from game ``source`` to game ``target``."""
+
+    kind: str  # "interchangeable" | "assumption" | "lemma" | "upto"
+    # The licensing game (kinds "assumption", "lemma") or event (kind "upto").
     assumption: frog_ast.Expression | None
-    # For kind "upto": whether the event is proven by a lemma (else assumed).
-    by_lemma: bool = False
+    source: GameRef
+    target: GameRef
+    # The proof file of the licensing lemma (kind "lemma", or "upto" by lemma).
+    lemma_path: str | None = None
+    # Step assumptions (``assume e;`` in ``games:``) stated for this hop.
+    conditions: list[frog_ast.Expression] = field(default_factory=list)
+    # The hop repeats for each value of these loops' variables.
+    loops: list[Loop] = field(default_factory=list)
+    # The rollover of ``loops[-1]``: from index i to i + 1, for i < end.
+    rollover: bool = False
+
+
+SequenceEntry: TypeAlias = GameEntry | Hop | Loop
 
 
 class ProofContext:
@@ -62,6 +108,7 @@ class ProofContext:
         self._render_engine = proof_engine.ProofEngine(False)
         self._load_imports(self._render_engine, desugar=False)
         self._render_engine.set_up_proof_context(self.proof_file)
+        self._sequence: list[SequenceEntry] | None = None
 
     # pylint: disable=duplicate-code
     # (import-loading mirrors web_server._setup_engine_for_proof; kept local
@@ -91,6 +138,16 @@ class ProofContext:
     def assumptions(self) -> list[frog_ast.Notion]:
         return list(self.proof_file.assumptions)
 
+    def lemmas(self) -> list[frog_ast.Lemma]:
+        return list(self.proof_file.lemmas)
+
+    def lemma_path(self, notion: frog_ast.Expression) -> str | None:
+        """The proof file of the lemma entry for ``notion``, or None."""
+        for lemma in self.proof_file.lemmas:
+            if str(lemma.game) == str(notion):
+                return lemma.proof_path
+        return None
+
     def theorem(self) -> frog_ast.Notion:
         return self.proof_file.theorem
 
@@ -110,13 +167,12 @@ class ProofContext:
         names: list[str] = []
         for notion in [*self.proof_file.assumptions, self.proof_file.theorem]:
             names.append(frog_ast.notion_game(notion).name)
-        for step in self.proof_file.steps:
-            if isinstance(step, frog_ast.Step):
-                challenger = step.challenger
-                if isinstance(challenger, frog_ast.ConcreteGame):
-                    names.append(challenger.game.name)
-                elif isinstance(challenger, frog_ast.ParameterizedGame):
-                    names.append(challenger.name)
+        for step in self.game_steps():
+            challenger = step.challenger
+            if isinstance(challenger, frog_ast.ConcreteGame):
+                names.append(challenger.game.name)
+            elif isinstance(challenger, frog_ast.ParameterizedGame):
+                names.append(challenger.name)
         return names
 
     def security_game_files(self) -> list[frog_ast.GameFile]:
@@ -153,8 +209,8 @@ class ProofContext:
         return result
 
     def game_steps(self) -> list[frog_ast.Step]:
-        """Return only top-level ``Step`` nodes from the proof's games list."""
-        return [s for s in self.proof_file.steps if isinstance(s, frog_ast.Step)]
+        """Every ``Step`` of the games list, inductions' included, in order."""
+        return [e.step for e in self.sequence() if isinstance(e, GameEntry)]
 
     def _helper(self, name: str) -> frog_ast.Game | None:
         """Look up a named helper (reduction or intermediate game) by name."""
@@ -188,50 +244,133 @@ class ProofContext:
         )
 
     def hop_kinds(self) -> list[Hop]:
-        """One Hop per transition between consecutive game steps.
+        """Every hop of the games list, in reading order."""
+        return [e for e in self.sequence() if isinstance(e, Hop)]
 
-        A hop is by-assumption when EITHER (a) a ``StepAssumption`` appears
-        between the two game steps (cite that expression), OR (b) the two
-        steps are a *side-flip*: both challengers are ``ConcreteGame``s over
-        the same underlying ``ParameterizedGame`` (same name and ``str``-equal
-        args) with the same reduction (``str``-equal or both None), differing
-        only in ``which`` (cite that underlying game). The side-flip is the
-        middle hop of the standard four-step reduction pattern and carries no
-        ``StepAssumption``, so it must be detected structurally. Otherwise the
-        hop is interchangeability-based.
+    def sequence(self) -> list[SequenceEntry]:
+        """The games list as games, hops and hybrids, in reading order.
+
+        An ``induction`` block contributes its ``Loop``, the entry hop into its
+        first game at ``start``, its body at the loop variable, and the
+        rollover hop from index i to i + 1; the next hop leaves its last game
+        at ``end``. As in the engine, a step assumption is a condition of the
+        hop after it, and only a side flip between two steps is a reduction
+        hop: both challengers are ``ConcreteGame``s over the same underlying
+        game with the same reduction, differing only in ``which``.
         """
-        hops: list[Hop] = []
-        steps = self.proof_file.steps
-        events = self.events_in_scope()
-        lemma_events = {
-            str(lemma.game.game)
-            for lemma in self.proof_file.lemmas
-            if isinstance(lemma.game, frog_ast.EventTheorem)
-        }
-        prev_game: frog_ast.Step | None = None
-        pending_assumption: frog_ast.Expression | None = None
-        for s in steps:
-            if isinstance(s, frog_ast.StepAssumption):
-                pending_assumption = s.expression
+        if self._sequence is None:
+            self._sequence = []
+            self._add_steps(
+                self.proof_file.steps, [], self._sequence, itertools.count()
+            )
+        return self._sequence
+
+    def _add_steps(
+        self,
+        steps: list[frog_ast.ProofStep],
+        loops: list[Loop],
+        out: list[SequenceEntry],
+        numbers: Iterator[int],
+    ) -> tuple[GameEntry | None, GameEntry | None, list[frog_ast.Expression]]:
+        """Append one nesting level of ``steps`` to ``out``.
+
+        Returns the level's first and last games, which the engine's entry,
+        rollover and exit hops use, and its trailing step assumptions.
+        """
+        indices: list[frog_ast.Expression] = [
+            frog_ast.Variable(outer.name) for outer in loops
+        ]
+        first: GameEntry | None = None
+        last: GameEntry | None = None
+        prev: frog_ast.Step | None = None  # a side flip needs two adjacent steps
+        source: GameRef | None = None
+        conditions: list[frog_ast.Expression] = []
+        for step in steps:
+            if isinstance(step, frog_ast.StepAssumption):
+                conditions.append(step.expression)
                 continue
-            if isinstance(s, frog_ast.Step):
-                if prev_game is not None:
-                    if pending_assumption is not None:
-                        hops.append(Hop("assumption", pending_assumption))
-                    else:
-                        flip = self._side_flip_game(prev_game, s)
-                        event = events.get(str(flip)) if flip is not None else None
-                        if event is not None:
-                            hops.append(
-                                Hop("upto", event, by_lemma=str(flip) in lemma_events)
-                            )
-                        elif flip is not None:
-                            hops.append(Hop("assumption", flip))
-                        else:
-                            hops.append(Hop("interchangeable", None))
-                prev_game = s
-                pending_assumption = None
-        return hops
+            if isinstance(step, frog_ast.Step):
+                entry = GameEntry(step, GameRef(next(numbers), list(indices)))
+                if source is not None:
+                    kind, assumption = self._justify(prev, step)
+                    out.append(
+                        Hop(
+                            kind,
+                            assumption,
+                            source,
+                            entry.ref,
+                            lemma_path=(
+                                None
+                                if assumption is None
+                                else self.lemma_path(assumption)
+                            ),
+                            conditions=conditions,
+                            loops=loops,
+                        )
+                    )
+                out.append(entry)
+                first = first or entry
+                last = entry
+                prev, source = step, entry.ref
+            else:
+                loop = Loop(step.name, step.start, step.end, loops)
+                body: list[SequenceEntry] = []
+                body_first, body_last, trailing = self._add_steps(
+                    step.steps, [*loops, loop], body, numbers
+                )
+                if body_first is None or body_last is None:
+                    continue
+                loop.first, loop.last = body_first.ref.number, body_last.ref.number
+                out.append(loop)
+                if source is not None:
+                    target = GameRef(loop.first, [*indices, step.start])
+                    out.append(
+                        Hop(
+                            "interchangeable",
+                            None,
+                            source,
+                            target,
+                            conditions=conditions,
+                            loops=loops,
+                        )
+                    )
+                out.extend(body)
+                var = frog_ast.Variable(step.name)
+                successor = frog_ast.BinaryOperation(
+                    frog_ast.BinaryOperators.ADD, var, frog_ast.Integer(1)
+                )
+                out.append(
+                    Hop(
+                        "interchangeable",
+                        None,
+                        GameRef(loop.last, [*indices, var]),
+                        GameRef(loop.first, [*indices, successor]),
+                        conditions=trailing,
+                        loops=[*loops, loop],
+                        rollover=True,
+                    )
+                )
+                prev, source = None, GameRef(loop.last, [*indices, step.end])
+            conditions = []
+        return first, last, conditions
+
+    def _justify(
+        self, prev: frog_ast.Step | None, step: frog_ast.Step
+    ) -> tuple[str, frog_ast.Expression | None]:
+        """The kind of the hop into ``step`` and what licenses it.
+
+        A side flip from ``prev`` is licensed by an event in scope, a lemma or
+        an assumption; any other hop is an interchangeability hop.
+        """
+        flip = self._side_flip_game(prev, step) if prev is not None else None
+        if flip is None:
+            return "interchangeable", None
+        event = self.events_in_scope().get(str(flip))
+        if event is not None:
+            return "upto", event
+        if self.lemma_path(flip) is not None:
+            return "lemma", flip
+        return "assumption", flip
 
     def events_in_scope(self) -> dict[str, frog_ast.EventTheorem]:
         """Assumed and lemma events keyed by ``str(pair)``, as the engine keys them.

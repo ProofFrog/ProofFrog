@@ -41,6 +41,7 @@ from proof_frog.transforms.random_functions import (
     DistinctConstRFToUniform,
     LazyMapPairToSampledFunction,
     LocalFunctionFieldToLet,
+    UniqueRFSimplification,
 )
 from proof_frog.transforms.structural import UniformBijectionElimination
 from proof_frog.transforms.tuples import ExpandTuple, SplitBareTupleDeclarations
@@ -496,6 +497,84 @@ def test_distinct_const_rf_no_near_miss_when_fires():
     DistinctConstRFToUniform().apply(game, ctx)
     rf_misses = [nm for nm in ctx.near_misses if nm.variable == "RF"]
     assert len(rf_misses) == 0
+
+
+# ---------------------------------------------------------------------------
+# UniqueRFSimplification near-miss tests
+# ---------------------------------------------------------------------------
+
+
+def _unique_rf_game(body: str) -> frog_ast.Game:
+    return frog_parser.parse_game(f"""
+        Game G() {{
+            Set<BitString<8>> S;
+            Function<BitString<8>, BitString<16>> RF;
+            Void Initialize() {{
+                RF <- Function<BitString<8>, BitString<16>>;
+            }}
+            BitString<16> Query(BitString<8> c, Bool b, Set<BitString<8>> E) {{
+                {body}
+                BitString<16> z = RF(r);
+                return z;
+            }}
+        }}
+        """)
+
+
+def _unique_rf_misses(game: frog_ast.Game, ctx: PipelineContext) -> list[NearMiss]:
+    UniqueRFSimplification().apply(game, ctx)
+    return [
+        nm for nm in ctx.near_misses if nm.transform_name == "Unique RF Simplification"
+    ]
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        "if (b) { r = c; }",
+        "for (Int i = 0 to 2) { r = c; }",
+        "for (BitString<8> r in E) { c = r; }",
+        "BitString<8> r;",
+        "Set<BitString<8>> L; r <-uniq[L] BitString<8>;",
+    ],
+)
+def test_unique_rf_near_miss_on_written_draw(write: str) -> None:
+    game = _unique_rf_game(f"BitString<8> r <-uniq[S] BitString<8>; {write}")
+    misses = _unique_rf_misses(game, _make_ctx())
+    assert len(misses) == 1
+    assert misses[0].method == "Query"
+    assert "'RF'" in misses[0].reason and "<-uniq[S]" in misses[0].reason
+
+
+def test_unique_rf_near_miss_after_alpha_rename() -> None:
+    """The local has an `__aN__` name by the time the pass runs.  The
+    near-miss names the function and set instead, and leaves `variable` unset
+    because canonical diffs rename fields."""
+    ctx = _make_ctx()
+    game = _unique_rf_game("BitString<8> r <-uniq[S] BitString<8>; if (b) { r = c; }")
+    game = AlphaRename().apply(game, ctx)
+    misses = _unique_rf_misses(game, ctx)
+    assert len(misses) == 1
+    assert misses[0].variable is None
+    assert "__a" not in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "BitString<8> r <-uniq[S] BitString<8>;",
+        "BitString<8> r <-uniq[S] BitString<8>; if (b) { c = r; }",
+        "BitString<8> r <-uniq[S] BitString<8>; r = c; r <-uniq[S] BitString<8>;",
+    ],
+)
+def test_unique_rf_no_near_miss_when_fires(body: str) -> None:
+    assert not _unique_rf_misses(_unique_rf_game(body), _make_ctx())
+
+
+def test_unique_rf_no_near_miss_without_draw() -> None:
+    """A call on a plain sample was never a fresh query."""
+    game = _unique_rf_game("BitString<8> r <- BitString<8>; if (b) { r = c; }")
+    assert not _unique_rf_misses(game, _make_ctx())
 
 
 # ---------------------------------------------------------------------------

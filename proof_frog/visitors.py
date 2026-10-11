@@ -1901,14 +1901,71 @@ def _statement_can_exit(statement: frog_ast.Statement) -> bool:
     )
 
 
+def _unpaired_field_write(
+    statement: frog_ast.Statement, names: tuple[str, str]
+) -> bool:
+    """True if *statement* writes or rebinds a name in *names* other than by
+    an untyped assignment or sample to the whole variable.
+
+    SameFieldVisitor pairs only those whole writes.  This covers the rest:
+    element writes, ``<-uniq`` and ``\\`` samples, insertion into a
+    ``<-uniq`` exclusion set, local declarations and loop binders.  A write
+    whose l-value has no variable base counts too.
+    """
+    if isinstance(statement, frog_ast.NumericFor):
+        return statement.name in names
+    if isinstance(statement, frog_ast.GenericFor):
+        return statement.var_name in names
+    if isinstance(statement, frog_ast.VariableDeclaration):
+        return statement.name in names
+    if not isinstance(
+        statement, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+    ):
+        return False
+    if (
+        isinstance(statement, frog_ast.UniqueSample)
+        and statement.surface_form == "uniq"
+        and referenced_variable_names(statement.unique_set) & set(names)
+    ):
+        return True
+    base = lvalue_base_name(statement.var)
+    if base is not None and base not in names:
+        return False
+    return (
+        isinstance(statement, frog_ast.UniqueSample)
+        or statement.the_type is not None
+        or not isinstance(statement.var, frog_ast.Variable)
+    )
+
+
 class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
+    """Checks that every write keeps two fields equal.
+
+    The result is the list of second writes of each pair, which the caller
+    deletes, or None.  Initial values are the caller's to check.
+    """
+
     def __init__(self, field_name_pair: tuple[str, str]):
         self.field_name_pair = field_name_pair
         self.are_same = True
         self.paired_statements: list[frog_ast.Statement] = []
+        # Writes the pairing does not model, with their method names.
+        self.unpaired_writes: list[tuple[frog_ast.Statement, Optional[str]]] = []
+        self._method_name: Optional[str] = None
 
     def result(self) -> Optional[list[frog_ast.Statement]]:
-        return None if not self.are_same else self.paired_statements
+        if not self.are_same or self.unpaired_writes:
+            return None
+        return self.paired_statements
+
+    def visit_method(self, method: frog_ast.Method) -> None:
+        self._method_name = method.signature.name
+        # A parameter of either name hides that field in this method.
+        if any(
+            parameter.name in self.field_name_pair
+            for parameter in method.signature.parameters
+        ):
+            self.are_same = False
 
     def visit_block(self, block: frog_ast.Block) -> None:
         if not self.are_same:
@@ -1923,6 +1980,12 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             # The visitor runs on the original game, so the genuinely-paired
             # instances are identity-comparable here.
             if any(statement is paired for paired in self.paired_statements):
+                continue
+
+            # Recorded rather than returned on, so the caller can tell a
+            # merge refused only for these.
+            if _unpaired_field_write(statement, self.field_name_pair):
+                self.unpaired_writes.append((statement, self._method_name))
                 continue
 
             if not isinstance(statement, (frog_ast.Sample, frog_ast.Assignment)):
@@ -1956,8 +2019,10 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
 
                 copy_paired = False
                 for subsequent_statement in block.statements[index + 1 :]:
+                    # A typed write declares a local, so it cannot pair.
                     if (
                         isinstance(subsequent_statement, frog_ast.Assignment)
+                        and subsequent_statement.the_type is None
                         and isinstance(subsequent_statement.var, frog_ast.Variable)
                         and subsequent_statement.var.name == pair_name
                         and isinstance(subsequent_statement.value, frog_ast.Variable)
@@ -2004,6 +2069,7 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             for subsequent_statement in block.statements[index + 1 :]:
                 if (
                     isinstance(subsequent_statement, frog_ast.Assignment)
+                    and subsequent_statement.the_type is None
                     and isinstance(subsequent_statement.var, frog_ast.Variable)
                     and subsequent_statement.var.name == pair_name
                     and subsequent_statement.value in (paired_value, statement.var)

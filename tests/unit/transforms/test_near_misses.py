@@ -3591,12 +3591,59 @@ def test_duplicate_fields_near_miss_on_initial_values(fields: str, why: str) -> 
 
 
 @pytest.mark.parametrize(
+    "fields, body, why",
+    [
+        ("Map<Int, Int> A; Map<Int, Int> B;", "A[k] = 1;", "an element write"),
+        (
+            "Map<Int, Int> A; Map<Int, Int> B;",
+            "A[k] = 1; B[k] = 1;",
+            "an element write changes 'A' alone",
+        ),
+        (
+            "Set<Int> S; BitString<8> A; BitString<8> B;",
+            "A <-uniq[S] BitString<8>;",
+            "an exclusion sample changes 'A' alone",
+        ),
+        (
+            "Set<BitString<8>> A; Set<BitString<8>> B;",
+            "BitString<8> x <-uniq[A] BitString<8>;",
+            "a '<-uniq' sample inserts into 'A' alone",
+        ),
+        (
+            "Int A; Int B;",
+            "for (Int A = 0 to 3) { k = k + B; }",
+            "a loop binder rebinds 'A'",
+        ),
+        ("Int A; Int B;", "Int B = 1;", "a local declaration rebinds 'B'"),
+    ],
+)
+def test_duplicate_fields_near_miss_on_unpaired_write(
+    fields: str, body: str, why: str
+) -> None:
+    """Every other write pairs, so this write alone blocks the merge."""
+    misses = _duplicate_fields_misses(f"""
+        Game G() {{
+            {fields}
+            Void Put(Int k) {{
+                {body}
+            }}
+        }}
+        """)
+    assert len(misses) == 1
+    assert misses[0].variable is None
+    assert misses[0].method == "Put"
+    assert misses[0].reason.startswith("Fields 'A' and 'B' not merged: ")
+    assert why in misses[0].reason
+
+
+@pytest.mark.parametrize(
     "fields, body",
     [
         # Merged.
         ("Int A = 0; Int B = 0;", "A = A + k; B = B + k;"),
         # A write to one field only.
         ("Int A = 0; Int B = 1;", "A = k;"),
+        ("Map<Int, Int> A; Map<Int, Int> B;", "A[k] = 1; B = A;"),
     ],
 )
 def test_duplicate_fields_no_near_miss(fields: str, body: str) -> None:

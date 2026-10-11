@@ -50,12 +50,23 @@ class _RFCallSite:
 
 
 @dataclass
+class _OverwrittenDraw:
+    """A call ``RF(r)`` refused because ``r`` may be written after its
+    ``<-uniq[S]`` draw."""
+
+    unique_set_name: str
+    method: str | None
+    origin: frog_ast.SourceOrigin | None
+
+
+@dataclass
 class _RFAnalysis:
     """Per-RF analysis result."""
 
     eligible: bool = True
     call_sites: list[_RFCallSite] = field(default_factory=list)
     unique_set_name: str | None = None
+    overwritten_draws: list[_OverwrittenDraw] = field(default_factory=list)
 
 
 def _get_unique_set_name(expr: frog_ast.Expression) -> str:
@@ -184,7 +195,9 @@ def _analyze_rf_eligibility(
     field_names = {f.name for f in game.fields}
 
     for method in game.methods:
-        _analyze_block(method.block, analysis, rf_types, field_names)
+        _analyze_block(
+            method.block, analysis, rf_types, field_names, method.signature.name
+        )
 
     # Post-analysis: reject any RF whose function value escapes to a position
     # the call-site walk cannot see (a copy/alias/argument), which could carry
@@ -226,28 +239,21 @@ def _analyze_block(
     analysis: dict[str, _RFAnalysis],
     rf_types: dict[str, frog_ast.FunctionType],
     field_names: set[str] | None = None,
+    method: str | None = None,
 ) -> None:
     """Analyze a block for RF calls and their <-uniq guards."""
     # Build map: variable name -> unique set name (from <-uniq in this block)
     uniq_guards: dict[str, str] = {}
+    # Guards dropped by a write, for the near-miss report.
+    overwritten: dict[str, str] = {}
 
     for statement in block.statements:
-        # F-022: any write to a guarded variable other than a fresh
-        # `<-uniq[S]` draw destroys the freshness that draw established -- after
-        # `r <-uniq[S]; r = c;` the variable holds an arbitrary, possibly
-        # previously-queried value, so `RF(r)` is no longer a distinct input.
-        # Invalidate the guard before this statement's RF-call check below.
-        if isinstance(
-            statement,
-            (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
-        ):
-            written_base = lvalue_base_name(statement.var)
-            is_fresh_uniq = (
-                isinstance(statement, frog_ast.UniqueSample)
-                and statement.surface_form == "uniq"
-            )
-            if written_base in uniq_guards and not is_fresh_uniq:
-                del uniq_guards[written_base]
+        # F-022: after `r <-uniq[S]; r = c;`, `r` may hold an earlier query, so
+        # `RF(r)` is no longer fresh.  Any write of `r` counts, at any depth,
+        # including element writes, loop binders and redeclarations.  A
+        # top-level `<-uniq[S]` redraw from a field set re-seeds the guard below.
+        for name in [n for n in uniq_guards if reassigns_or_rebinds({n}, statement)]:
+            overwritten[name] = uniq_guards.pop(name)
 
         # Track <-uniq bindings. Only the stateful `<-uniq[S]` form
         # accumulates draws into S (S = S union {x}); the pure `x <- T \ E`
@@ -270,6 +276,7 @@ def _analyze_block(
                     # (handled below by not adding to uniq_guards).
                     continue
             uniq_guards[statement.var.name] = set_name
+            overwritten.pop(statement.var.name, None)
 
         # Check RF calls in assignments
         if (
@@ -289,6 +296,12 @@ def _analyze_block(
 
             if arg.name not in uniq_guards:
                 rf_analysis.eligible = False
+                if arg.name in overwritten:
+                    rf_analysis.overwritten_draws.append(
+                        _OverwrittenDraw(
+                            overwritten[arg.name], method, statement.origin
+                        )
+                    )
                 continue
 
             set_name = uniq_guards[arg.name]
@@ -318,9 +331,9 @@ def _analyze_block(
         # Recurse into nested blocks
         if isinstance(statement, frog_ast.IfStatement):
             for nested_block in statement.blocks:
-                _analyze_block(nested_block, analysis, rf_types, field_names)
+                _analyze_block(nested_block, analysis, rf_types, field_names, method)
         elif isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
-            _analyze_block(statement.block, analysis, rf_types, field_names)
+            _analyze_block(statement.block, analysis, rf_types, field_names, method)
 
 
 def _collect_names_in_scope(node: frog_ast.ASTNode) -> set[str]:
@@ -553,6 +566,29 @@ class UniqueRFSimplification(TransformPass):
                             ),
                             variable=rf_name,
                             method=None,
+                        )
+                    )
+            for rf_name, result in analysis.items():
+                for draw in result.overwritten_draws:
+                    ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Unique RF Simplification",
+                            reason=(
+                                f"Random function '{rf_name}' not simplified: "
+                                f"its argument, drawn by '<-uniq["
+                                f"{draw.unique_set_name}]', may be written "
+                                "between the draw and the call, so the call "
+                                "may repeat an earlier query"
+                            ),
+                            location=draw.origin,
+                            suggestion=(
+                                "Call the random function before writing the "
+                                "drawn variable, or write a different variable"
+                            ),
+                            # Canonical diffs rename fields, so a variable
+                            # filter would hide this near miss.
+                            variable=None,
+                            method=draw.method,
                         )
                     )
 

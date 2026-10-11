@@ -40,6 +40,7 @@ from proof_frog.transforms.random_functions import (
     ExtractRFCalls,
     LocalRFToUniform,
     DistinctConstRFToUniform,
+    FreshInputRFToUniform,
     LazyMapPairToSampledFunction,
     LocalFunctionFieldToLet,
     UniqueRFSimplification,
@@ -3752,4 +3753,80 @@ def test_challenge_exclusion_near_miss_on_oracle_rewritten_value(
 def test_challenge_exclusion_no_near_miss_on_stable_oracle_value() -> None:
     assert not _challenge_exclusion_oracle_misses(
         "BitString<2> q = pm; if (pm == U) { return 0^2; } return e(q);"
+    )
+
+
+def _fresh_input_misses(initialize: str, oracle: str = "") -> list[NearMiss]:
+    ctx = _make_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Function<BitString<2>, BitString<2>> H;
+            Set<BitString<2>> seen;
+            BitString<2> y;
+            Void Initialize() {{
+                H <- Function<BitString<2>, BitString<2>>;
+                {initialize}
+            }}
+            {oracle}
+            BitString<2> Fresh() {{
+                BitString<2> v <-uniq[seen] BitString<2>;
+                return H(v);
+            }}
+        }}
+        """)
+    FreshInputRFToUniform().apply(game, ctx)
+    return [
+        nm for nm in ctx.near_misses if nm.transform_name == "Fresh Input RF To Uniform"
+    ]
+
+
+@pytest.mark.parametrize(
+    "initialize, oracle, method, name",
+    [
+        (
+            "BitString<2> u = 0b00; seen = seen union {u}; u = 0b11; y = H(u);",
+            "",
+            "Initialize",
+            "u",
+        ),
+        (
+            "",
+            "BitString<2> Hash(BitString<2> x) "
+            "{ seen = seen union {x}; x = 0b00; return H(x); }",
+            "Hash",
+            "x",
+        ),
+        (
+            "",
+            "BitString<2> Hash(BitString<2> x) "
+            "{ BitString<2> w <-uniq[seen] BitString<2>; w = x; return H(w); }",
+            "Hash",
+            "w",
+        ),
+    ],
+)
+def test_fresh_input_near_miss_on_rewritten_insertion(
+    initialize: str, oracle: str, method: str, name: str
+) -> None:
+    """Fresh keeps H(v) because a method may change the value it inserted
+    into seen before querying H on it."""
+    misses = _fresh_input_misses(initialize, oracle)
+    assert len(misses) == 1
+    assert misses[0].variable == "H"
+    assert f"'{method}' inserts '{name}' into 'seen' but may change it" in (
+        misses[0].reason
+    )
+
+
+def test_fresh_input_near_miss_on_uninserted_call() -> None:
+    misses = _fresh_input_misses(
+        "", "BitString<2> Hash(BitString<2> x) { return H(x); }"
+    )
+    assert len(misses) == 1
+    assert "does not add its argument" in misses[0].reason
+
+
+def test_fresh_input_no_near_miss_on_recorded_value() -> None:
+    assert not _fresh_input_misses(
+        "BitString<2> u = 0b00; seen = seen union {u}; y = H(u);"
     )

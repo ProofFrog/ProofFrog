@@ -876,7 +876,30 @@ class NameResolutionVisitor(VariableTypeVisitor):
             hint=hint,
         )
 
+    def _check_assignment_target(
+        self, statement: frog_ast.Statement, target: frog_ast.Expression
+    ) -> None:
+        # The target of an assignment or sample is a variable, or an element
+        # a[i] / M[k] of one, at any depth. A member access (`M.keys`, a
+        # scheme's field `E.x`, `G.generator`) is read-only: the engine reads
+        # a write to `M.keys` as no write to `M`.
+        node = target
+        while isinstance(node, frog_ast.ArrayAccess):
+            node = node.the_array
+        if isinstance(node, frog_ast.FieldAccess):
+            print_error(
+                statement,
+                f"Cannot assign to '{target}': '{node}' is a member access, "
+                "and members are read-only",
+                self.file_name,
+                hint=(
+                    "the target of an assignment or sample must be a "
+                    "variable or an element (a[i], M[k]) of one"
+                ),
+            )
+
     def visit_assignment(self, assignment: frog_ast.Assignment) -> None:
+        self._check_assignment_target(assignment, assignment.var)
         if assignment.the_type is not None:
             self.defining_variable = assignment.var
 
@@ -885,6 +908,7 @@ class NameResolutionVisitor(VariableTypeVisitor):
         self.defining_variable = None
 
     def visit_sample(self, sample: frog_ast.Sample) -> None:
+        self._check_assignment_target(sample, sample.var)
         if sample.the_type is not None:
             self.defining_variable = sample.var
 
@@ -893,6 +917,7 @@ class NameResolutionVisitor(VariableTypeVisitor):
         self.defining_variable = None
 
     def visit_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
+        self._check_assignment_target(unique_sample, unique_sample.var)
         self.defining_variable = unique_sample.var
 
     def leave_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:

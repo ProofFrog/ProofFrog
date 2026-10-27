@@ -1,0 +1,30 @@
+// Left writes S into M.keys and then tests k against it; Right returns 3
+// after the write. With S = {k} (and k not yet in M.keys) Left returns 2
+// and Right returns 3.
+
+Game Left() {
+    Map<Int, Int> M;
+    Int O(Set<Int> S, Int k) {
+        if (k in M.keys) {
+            return 1;
+        }
+        M.keys = S;
+        if (k in M.keys) {
+            return 2;
+        }
+        return 3;
+    }
+}
+
+Game Right() {
+    Map<Int, Int> M;
+    Int O(Set<Int> S, Int k) {
+        if (k in M.keys) {
+            return 1;
+        }
+        M.keys = S;
+        return 3;
+    }
+}
+
+export as KeysWrite;

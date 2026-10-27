@@ -163,7 +163,7 @@ The essentials for writing correct FrogLang:
 - `Function<D, R> H <- Function<D, R>;` — sample a random function (ROM)
 - A sampling domain must be finite: `Bool`, `BitString<n>`, `ModInt<q>`, `Set` members etc. are samplable, but `Int` (unbounded) and optional types `T?` (no weight for `None`) are rejected on both sampling forms
 
-**Calls:** a game or reduction may not call its own methods or any game's (only primitive/scheme methods, plus `challenger.` in a reduction; `this.` is scheme-only). The type checker rejects such a call.
+**Calls and assignment targets:** a game or reduction may not call its own methods or any game's (only primitive/scheme methods, plus `challenger.` in a reduction; `this.` is scheme-only), and the target of `=` / `<-` / `<-uniq` is a variable or an element `a[i]` / `M[k]`, never a member access such as `M.keys` or `E.lambda`. The type checker rejects both.
 
 **Non-determinism default:** Scheme method calls (e.g., `F.evaluate(k, x)`) are **non-deterministic by default** — each invocation may return a different result even with the same arguments.
 

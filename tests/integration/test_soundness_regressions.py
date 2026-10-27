@@ -131,6 +131,10 @@ CASES = [
      "a reduction's call of its own oracle was dropped as side-effect free"),
     ("GAME-SELF-CALL", "scheme_this_call_control.proof", "accept",
      "type checker", "positive control: a scheme still calls itself via this."),
+    ("MEMBER-ASSIGN", "keys_write.proof", "type_error", "RemoveUnreachable",
+     "M.keys = S was read as no write to M; a live branch was deleted"),
+    ("MEMBER-ASSIGN", "element_write_control.proof", "accept", "type checker",
+     "positive control: a map element write M[k] = v is still accepted"),
 ]
 # fmt: on
 
@@ -141,6 +145,9 @@ TYPE_ERROR = {
     ),
     ("GAME-SELF-CALL", "reduction_self_call.proof"): (
         "error: Reduction 'R' may not call its own method 'Inc'"
+    ),
+    ("MEMBER-ASSIGN", "keys_write.proof"): (
+        "error: Cannot assign to 'M.keys': 'M.keys' is a member access"
     ),
 }
 

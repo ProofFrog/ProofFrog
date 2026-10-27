@@ -153,6 +153,7 @@ The arithmetic levels match C, Java and Python. The comparison and set levels do
 - **Declaration only**: `Type x;` — declares an uninitialized variable. The value is undefined until assigned.
 - **Declaration with assignment**: `Type x = expr;` — declares and initializes.
 - **Assignment**: `x = expr;` or `a[i] = expr;` — assigns to an existing variable or updates an array/map element.
+- **Assignment targets**: the target of an assignment or sample (`=`, `<-`, `<-uniq`) is a variable or an element `a[i]` / `M[k]` of one, at any depth (`M[k][0]`). A member access is read-only and cannot be a target, anywhere in it: `M.keys = S;`, `M.keys[0] = v;`, `E.lambda = 5;` or `this.x = v;` is a type error. An index may read a member (`M[|M.keys|] = v;` is fine).
 
 ### 4.2 Sampling
 
@@ -460,6 +461,7 @@ Maps (`Map<K, V>`) are finite partial functions:
 - **Sampling into map**: `M[k] <- Type;` samples a uniform value from `Type` and stores it at key `k`.
 - **Membership**: `k in M` tests whether `k` is in the map's domain.
 - **Size**: `|M|` returns the number of key-value pairs.
+- **Read-only members**: `M.keys`, `M.values` and `M.entries` can be read but not assigned (section 4.1); change a map through its elements.
 
 ### 6.8 Optional Type Semantics
 

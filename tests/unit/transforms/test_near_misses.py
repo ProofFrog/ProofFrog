@@ -3534,3 +3534,61 @@ def test_challenge_exclusion_near_miss_on_rewritten_argument(
 
 def test_challenge_exclusion_no_near_miss_on_stable_argument() -> None:
     assert not _challenge_exclusion_misses("BitString<2> x = U; p = e(x);")
+
+
+def _challenge_exclusion_oracle_misses(hash_body: str) -> list[NearMiss]:
+    ctx = _rc3_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G(Bool c) {{
+            Function<BitString<2>, BitString<2>> e;
+            BitString<2> U;
+            BitString<2> p;
+            Void Initialize() {{
+                e <- Function<BitString<2>, BitString<2>>;
+                U = 0b00;
+                p = e(U);
+            }}
+            BitString<2> Hash(BitString<2> pm) {{
+                {hash_body}
+            }}
+        }}
+        """)
+    _RC3_ChalExcl().apply(game, ctx)
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Challenge Exclusion RF To Uniform"
+    ]
+
+
+@pytest.mark.parametrize(
+    "hash_body, name",
+    [
+        (
+            "BitString<2> q = pm; pm = 0b11; "
+            "if (pm == U) { return 0^2; } return e(q);",
+            "pm",
+        ),
+        (
+            "BitString<2> q = pm; if (pm == U) { return 0^2; } "
+            "if (c) { q = U; } return e(q);",
+            "q",
+        ),
+    ],
+)
+def test_challenge_exclusion_near_miss_on_oracle_rewritten_value(
+    hash_body: str, name: str
+) -> None:
+    """The Initialize call is kept because the oracle may write something its
+    guard or its random-function argument reads."""
+    misses = _challenge_exclusion_oracle_misses(hash_body)
+    assert len(misses) == 1
+    assert misses[0].variable == "e"
+    assert misses[0].method == "Hash"
+    assert f"may write '{name}', which its exclusion guard" in misses[0].reason
+
+
+def test_challenge_exclusion_no_near_miss_on_stable_oracle_value() -> None:
+    assert not _challenge_exclusion_oracle_misses(
+        "BitString<2> q = pm; if (pm == U) { return 0^2; } return e(q);"
+    )

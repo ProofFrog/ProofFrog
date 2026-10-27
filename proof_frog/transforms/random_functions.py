@@ -2169,6 +2169,67 @@ def _rf_arg_rewritten(
     return None
 
 
+def _single_valued_in_method(name: str, method: frog_ast.Method) -> bool:
+    """True if *name* holds one value wherever *method* reads it.
+
+    That is the case when nothing in the method writes or rebinds *name*, or
+    when its only write is its own top-level typed declaration (``T x = e;``,
+    ``T x <- S;``), which runs once and before any read.  A method parameter
+    must not be written at all: it is read before any write.
+    """
+    statements = method.block.statements
+    decls = [
+        i
+        for i, stmt in enumerate(statements)
+        if isinstance(
+            stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        )
+        and stmt.the_type is not None
+        and isinstance(stmt.var, frog_ast.Variable)
+        and stmt.var.name == name
+    ]
+    if len(decls) > 1:
+        return False
+    if decls and any(p.name == name for p in method.signature.parameters):
+        return False
+    rest = [stmt for i, stmt in enumerate(statements) if i not in decls]
+    return not reassigns_or_rebinds({name}, frog_ast.Block(rest))
+
+
+def _oracle_names_not_single_valued(
+    method: frog_ast.Method,
+    guard_cond: frog_ast.Expression,
+    call_arg: frog_ast.Expression,
+    aliases: dict[str, frog_ast.Expression],
+    stop_names: set[str],
+) -> str | None:
+    """Name a variable that the exclusion guard or the oracle RF argument
+    reads and that may hold different values within *method*, or return
+    ``None``.
+
+    The pass compares the guard and the call argument after resolving local
+    aliases, which is only meaningful if every name involved denotes the same
+    value at the alias definitions, the guard and the call.  The names checked
+    are those of the guard condition, those of the call argument, and those
+    of every alias definition the resolver may expand, transitively.
+    """
+    names = referenced_variable_names(guard_cond)
+    expanded: set[str] = set()
+    pending = list(referenced_variable_names(call_arg))
+    while pending:
+        name = pending.pop()
+        if name in expanded:
+            continue
+        expanded.add(name)
+        names.add(name)
+        if name not in stop_names and name in aliases:
+            pending.extend(referenced_variable_names(aliases[name]))
+    for name in sorted(names):
+        if not _single_valued_in_method(name, method):
+            return name
+    return None
+
+
 class ChallengeExclusionRFToUniformTransformer:
     """Replace an RF field call in Initialize with a uniform sample when the
     call's input is guaranteed distinct from all oracle RF calls by a
@@ -2490,6 +2551,48 @@ class ChallengeExclusionRFToUniformTransformer:
 
                 for call in all_post_calls:
                     if len(call.args) != 1:
+                        all_oracle_ok = False
+                        break
+
+                    # The guard must compare the value the call queries.  In
+                    # `q = pm; pm = v; if (pm == cf) {...} return H(q);` the
+                    # guard excludes v, but q resolves to `pm` as if it held
+                    # the guarded value.  So every name the guard or the
+                    # resolved argument reads must hold one value throughout
+                    # the method.
+                    unstable = _oracle_names_not_single_valued(
+                        oracle_method,
+                        guard_stmt.conditions[0],
+                        call.args[0],
+                        oracle_aliases,
+                        oracle_stop,
+                    )
+                    if unstable is not None:
+                        if ctx is not None:
+                            ctx.near_misses.append(
+                                NearMiss(
+                                    transform_name=(
+                                        "Challenge Exclusion RF To Uniform"
+                                    ),
+                                    reason=(
+                                        f"'{oracle_method.signature.name}' may "
+                                        f"write '{unstable}', which its "
+                                        "exclusion guard or its call to "
+                                        f"'{rf_name}' reads, so the guard need "
+                                        "not compare the value the call "
+                                        "queries"
+                                    ),
+                                    location=call.origin,
+                                    suggestion=(
+                                        "Assign each variable the guard and "
+                                        "the random-function argument read "
+                                        "exactly once, at its declaration, and "
+                                        "do not reassign method parameters"
+                                    ),
+                                    variable=rf_name,
+                                    method=oracle_method.signature.name,
+                                )
+                            )
                         all_oracle_ok = False
                         break
 

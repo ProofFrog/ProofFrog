@@ -1234,6 +1234,20 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         else:
             self.stack.append(tuple(items))
 
+    def leave_set(self, node: frog_ast.Set) -> None:
+        # Set literals are not modeled. Without this handler the elements
+        # leaked onto the stack, so `{a, b} == {c, b}` encoded as `c == b`.
+        # Pop them and intern the whole literal as an opaque atom, like a
+        # Set-typed variable. An untranslatable element (e.g. a call) refuses.
+        items = [self.stack.pop() if self.stack else None for _ in node.elements]
+        if any(item is None for item in items):
+            self.stack.append(None)
+        else:
+            # Deliberately not gated on `opaque_func_call_fallback`, unlike
+            # `leave_slice` / `leave_bit_string_literal`: `in` / `subsets`
+            # atoms and Set-typed variables are encoded ungated too.
+            self.stack.append(self._intern_opaque(node))
+
     def leave_array_access(self, _node: frog_ast.ArrayAccess) -> None:
         index = self.stack.pop() if self.stack else None
         array = self.stack.pop() if self.stack else None

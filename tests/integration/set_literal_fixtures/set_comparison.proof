@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'SetComparison.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    SetComparison(S);
+
+games:
+    SetComparison(S).Left against SetComparison(S).Adversary;
+    SetComparison(S).Right against SetComparison(S).Adversary;

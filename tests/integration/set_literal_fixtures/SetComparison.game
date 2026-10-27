@@ -1,0 +1,38 @@
+import 'P.primitive';
+
+// ({3} \ 3) == {t, t} is false, so Left's else branch returns false.
+// Right returns true. Read() differs whenever S.E(0) is false.
+Game Left(P S) {
+    [Bool, Bool] g = [true, false];
+    BitString<2> Initialize() {
+        return 0^2;
+    }
+    Bool Read() {
+        Int t = 1;
+        if (S.E(0)) {
+        } else {
+            if ((({3} \ 3) == {t, t})) {
+                return false;
+            }
+            return ({false} != {false});
+        }
+        return g[0];
+    }
+}
+
+Game Right(P S) {
+    BitString<2> Initialize() {
+        return 0^2;
+    }
+    Bool Read() {
+        if (S.E(0)) {
+        } else {
+            if (({3} \ 3) == {1, 1}) {
+                return false;
+            }
+        }
+        return true;
+    }
+}
+
+export as SetComparison;

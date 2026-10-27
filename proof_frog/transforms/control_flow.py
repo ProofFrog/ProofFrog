@@ -42,7 +42,7 @@ from ._base import (
     method_bound_names,
     _lookup_primitive_method,
 )
-from ._definedness import GameDefinedness
+from ._definedness import GameDefinedness, method_binder_counts
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
@@ -1696,8 +1696,12 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
 
         # Definitions an earlier return in their method may skip (F-349).
         skippable: set[str] = set()
+        # Parameters and locals of Initialize, where every kept definition is.
+        init_local_names: set[str] = set()
 
         for method in game.methods:
+            if method.signature.name == "Initialize":
+                init_local_names |= set(method_binder_counts(method))
             # Collect top-level definitions (for the expression value)
             for idx, stmt in enumerate(method.block.statements):
                 if (
@@ -1737,17 +1741,26 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
             # leaving the field at its initial value.
             if name in skippable:
                 continue
-            used_vars = VariableCollectionVisitor().visit(expr)
-            if not all(v.name in self.field_names for v in used_vars):
+            used_names = {v.name for v in VariableCollectionVisitor().visit(expr)}
+            if not used_names <= set(self.field_names):
                 continue
+            # A name read only through a member access (`M` in `|M.keys|`,
+            # `KEM` in `KEM.Decaps(...)`) is missed by the collector above. A
+            # field read that way is game state like any other, so it is held
+            # to the same discipline below; any other such name must not be
+            # local to Initialize, where the definition would be out of scope.
+            member_only = referenced_variable_names(expr) - used_names
+            if member_only & init_local_names:
+                continue
+            read_fields = used_names | (member_only & set(self.field_names))
             # Referenced fields must also be single-assignment — if a
             # referenced field is reassigned after this definition, the
             # stored value diverges from the current field value.
-            if not all(assign_counts.get(v.name, 0) == 1 for v in used_vars):
+            if not all(assign_counts.get(n, 0) == 1 for n in read_fields):
                 continue
             # ...and that single assignment must be in Initialize too, so the
             # referenced field cannot be re-set by an interleaved oracle call.
-            if not all(def_methods.get(v.name) == "Initialize" for v in used_vars):
+            if not all(def_methods.get(n) == "Initialize" for n in read_fields):
                 continue
             if has_nondeterministic_call(
                 expr, self._proof_namespace, self._proof_let_types

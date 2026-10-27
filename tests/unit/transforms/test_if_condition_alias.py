@@ -738,3 +738,97 @@ def test_f349_definition_not_inlined_into_initialize_branch_before_it() -> None:
         }
         """)
     assert "r = A;" in out, out
+
+
+def test_member_read_field_written_in_oracle_not_inlined() -> None:
+    # MEMBER-READ-IF-CONDITION-ALIAS: f's definition reads M only through
+    # `|M.keys|`, and O writes M before the branch, so f is no longer
+    # c + |M.keys| there.
+    out = _transform_game("""
+        Game Test() {
+            Map<Int, Bool> M;
+            Int c;
+            Int f;
+            Void Initialize(Int x) {
+                c = x;
+                f = c + |M.keys|;
+            }
+            Int O(Int v) {
+                M[v] = true;
+                if (v == c) {
+                    return f;
+                }
+                return v + |M.keys|;
+            }
+        }
+        """)
+    assert "return f;" in out, out
+
+
+def test_member_read_field_set_once_in_initialize_inlined() -> None:
+    # Positive control: M is set once in Initialize and never again, so
+    # f == c + |M.keys| holds in every oracle.
+    out = _transform_game("""
+        Game Test() {
+            Map<Int, Bool> M;
+            Int c;
+            Int f;
+            Void Initialize(Int x, Map<Int, Bool> N) {
+                M = N;
+                c = x;
+                f = c + |M.keys|;
+            }
+            Int O(Int v) {
+                if (v == c) {
+                    return f;
+                }
+                return v + |M.keys|;
+            }
+        }
+        """)
+    assert "return f;" not in out, out
+    assert out.count("return v + |M.keys|;") == 2, out
+
+
+def test_member_read_of_initialize_local_not_inlined() -> None:
+    # `m` is a local of Initialize, read only through `|m.keys|`; it is out of
+    # scope in O, so f's definition must not be inlined there.
+    out = _transform_game("""
+        Game Test() {
+            Int c;
+            Int f;
+            Void Initialize(Int x, Map<Int, Bool> m) {
+                c = x;
+                f = c + |m.keys|;
+            }
+            Int O(Int v) {
+                if (v == c) {
+                    return f;
+                }
+                return v;
+            }
+        }
+        """)
+    assert "return f;" in out, out
+
+
+def test_member_read_of_non_state_receiver_still_inlined() -> None:
+    # A receiver that is neither game state nor local to Initialize (a scheme
+    # or primitive instance such as `S` in `S.n`) does not block the inline.
+    out = _transform_game("""
+        Game Test() {
+            Int c;
+            Int f;
+            Void Initialize(Int x) {
+                c = x;
+                f = c + S.n;
+            }
+            Int O(Int v) {
+                if (v == c) {
+                    return f;
+                }
+                return v + S.n;
+            }
+        }
+        """)
+    assert "return f;" not in out, out

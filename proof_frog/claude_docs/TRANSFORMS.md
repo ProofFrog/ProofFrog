@@ -114,7 +114,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 
 | Pass | Description |
 |---|---|
-| IfConditionAliasSubstitution | Substitutes field references with local aliases inside equality-guarded if-branches. |
+| IfConditionAliasSubstitution | Substitutes field references with local aliases inside equality-guarded if-branches. Before that, a field whose definition mentions the compared field is replaced in the branch by that definition when the field is assigned once, at the top level of `Initialize` with no earlier `return`, and every field the definition reads, including one read only through a member access (`M` in `\|M.keys\|`), is likewise assigned once, in `Initialize`. The definition may not read a parameter or local of `Initialize`. |
 | RedundantConditionalReturn | Removes `if (c) { return X; } return X;` patterns. |
 | AbsorbRedundantEarlyReturn | Absorbs `if (P) { return X; } ... if (Q) { ... } return X;` into `if (!P && Q) { ... } return X;` (outermost-block-only). |
 | IfFalseReturnToConjunction | Absorbs `if (P) { return false; } ...; return Q;` into `...; return Q && !P;`. |

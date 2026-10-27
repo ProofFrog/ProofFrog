@@ -1,7 +1,7 @@
 // Positive control: the only query recorded by an insertion is made in
 // Initialize, before any draw, and the other query is the draw itself, so
 // H(v) is a fresh point of H in every execution and the games are
-// interchangeable.
+// interchangeable. Both sides draw v, since the draw also inserts v into seen.
 import 'P.primitive';
 
 Game Left(P S) {
@@ -37,6 +37,7 @@ Game Right(P S) {
         return y;
     }
     BitString<2> Fresh() {
+        BitString<2> v <-uniq[seen] BitString<2>;
         BitString<2> z <- BitString<2>;
         return z;
     }

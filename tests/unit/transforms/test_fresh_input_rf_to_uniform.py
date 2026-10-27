@@ -81,6 +81,7 @@ def test_fires_when_exclusion_is_rf_domain() -> None:
                 H <- Function<BitString<8>, BitString<16>>;
             }
             BitString<16> Challenge() {
+                BitString<8> c <-uniq[H.domain] BitString<8>;
                 BitString<16> __fresh_rf_c__ <- BitString<16>;
                 BitString<16> z = __fresh_rf_c__;
                 return z;
@@ -120,6 +121,7 @@ def test_fires_rf_domain_even_with_adversary_oracle() -> None:
                 H <- Function<BitString<8>, BitString<16>>;
             }
             BitString<16> Challenge() {
+                BitString<8> c <-uniq[H.domain] BitString<8>;
                 BitString<16> __fresh_rf_c__ <- BitString<16>;
                 BitString<16> z = __fresh_rf_c__;
                 return z;
@@ -171,6 +173,7 @@ def test_fires_projection_tracking_tuple_in_initialize() -> None:
                 y = H([k, k]);
             }
             BitString<16> Challenge(BitString<8> x) {
+                BitString<8> c <-uniq[seen] BitString<8>;
                 BitString<16> __fresh_rf_c__ <- BitString<16>;
                 BitString<16> z = __fresh_rf_c__;
                 return z;
@@ -859,3 +862,47 @@ def test_draw_not_found_in_game_not_adequate() -> None:
     args = (game, "H", "seen", None, {f.name for f in game.fields}, {})
     assert _exclusion_adequate(*args, draw)
     assert not _exclusion_adequate(*args, copy.deepcopy(draw))
+
+
+@pytest.mark.parametrize(
+    "exclusion, oracles",
+    [
+        ("seen", "Int Size() { return |seen|; }"),
+        ("H.domain", ""),
+    ],
+)
+def test_rewrite_keeps_the_draw(exclusion: str, oracles: str) -> None:
+    """`v <-uniq[S] T` also inserts v into S, which may be read elsewhere,
+    so only the call is replaced; the draw stays for dead-code elimination
+    to judge."""
+    _assert_game(
+        f"""
+        Game G() {{
+            Function<BitString<2>, BitString<2>> H;
+            Set<BitString<2>> seen;
+            Void Initialize() {{
+                H <- Function<BitString<2>, BitString<2>>;
+            }}
+            {oracles}
+            BitString<2> Fresh() {{
+                BitString<2> v <-uniq[{exclusion}] BitString<2>;
+                return H(v);
+            }}
+        }}
+        """,
+        f"""
+        Game G() {{
+            Function<BitString<2>, BitString<2>> H;
+            Set<BitString<2>> seen;
+            Void Initialize() {{
+                H <- Function<BitString<2>, BitString<2>>;
+            }}
+            {oracles}
+            BitString<2> Fresh() {{
+                BitString<2> v <-uniq[{exclusion}] BitString<2>;
+                BitString<2> __fresh_rf_v__ <- BitString<2>;
+                return __fresh_rf_v__;
+            }}
+        }}
+        """,
+    )

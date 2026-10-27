@@ -107,8 +107,14 @@ def _game(initialize: str, fresh: str) -> str:
 
 
 def _equal(initialize: str) -> bool:
+    # The ideal side keeps the draw: it inserts v into seen, and the rewrite
+    # of H(v) keeps it too.
     real = _game(initialize, "BitString<2> v <-uniq[seen] BitString<2>; return H(v);")
-    ideal = _game(initialize, "BitString<2> z <- BitString<2>; return z;")
+    ideal = _game(
+        initialize,
+        "BitString<2> v <-uniq[seen] BitString<2>; "
+        "BitString<2> z <- BitString<2>; return z;",
+    )
     return (
         ProofEngine()
         .check_equivalent(frog_parser.parse_game(real), frog_parser.parse_game(ideal))

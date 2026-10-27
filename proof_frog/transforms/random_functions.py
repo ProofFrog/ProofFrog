@@ -2059,10 +2059,12 @@ class _FreshInputRFTransformer(BlockTransformer):
                 copy.deepcopy(range_type),  # type: ignore[arg-type]
             )
 
-            # Drop the original v sample (now dead) and prepend the
-            # fresh-result sample.
+            # Keep the v draw: `v <-uniq[S] T` also inserts v into S, and
+            # S may be read elsewhere (|S|, `x in S`, later draws).  Dead-code
+            # elimination drops the draw once that insertion is unobservable.
+            # The fresh-result sample follows it.
             new_stmts = (
-                list(block.statements[:sample_idx])
+                list(block.statements[: sample_idx + 1])
                 + [sample_stmt]
                 + list(new_remaining.statements)
             )

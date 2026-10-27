@@ -6,6 +6,10 @@ import dataclasses
 import re
 from typing import Callable
 
+import sympy
+
+from . import frog_ast
+from . import frog_parser
 from .transforms._base import NearMiss
 
 
@@ -248,6 +252,101 @@ def detect_if_condition_reorder_diff(hunk: DiffHunk) -> bool:
     return current_branches == next_branches and current_stripped != next_stripped
 
 
+def _split_statement(line: str) -> tuple[str, str] | None:
+    """Split ``return e;`` or ``<lhs> = e;`` into a head and the expression."""
+    stripped = line.strip()
+    if not stripped.endswith(";"):
+        return None
+    stripped = stripped[:-1].strip()
+    if stripped.startswith("return "):
+        return "return", stripped[len("return ") :].strip()
+    head, sep, expression = stripped.partition(" = ")
+    if not sep:
+        return None
+    return head.strip(), expression.strip()
+
+
+_RING_OPERATORS = {
+    frog_ast.BinaryOperators.ADD: lambda a, b: a + b,
+    frog_ast.BinaryOperators.SUBTRACT: lambda a, b: a - b,
+    frog_ast.BinaryOperators.MULTIPLY: lambda a, b: a * b,
+}
+
+
+def _ring_value(node: frog_ast.Expression) -> sympy.Expr | None:
+    """The polynomial ``node`` denotes, if it is ``+``/``-``/``*``/negation
+    over Int literals and names; otherwise ``None``."""
+    if isinstance(node, frog_ast.Integer):
+        return sympy.Integer(node.num)
+    if isinstance(node, (frog_ast.Variable, frog_ast.FieldAccess)):
+        return sympy.Symbol(str(node))
+    if (
+        isinstance(node, frog_ast.UnaryOperation)
+        and node.operator == frog_ast.UnaryOperators.MINUS
+    ):
+        inner = _ring_value(node.expression)
+        return None if inner is None else -inner
+    if isinstance(node, frog_ast.BinaryOperation) and node.operator in _RING_OPERATORS:
+        left = _ring_value(node.left_expression)
+        right = _ring_value(node.right_expression)
+        if left is None or right is None:
+            return None
+        return sympy.sympify(_RING_OPERATORS[node.operator](left, right))
+    return None
+
+
+def _has_negated_operand(node: frog_ast.Expression) -> bool:
+    """Whether an arithmetic operand in ``node`` is ``-c`` for a literal or
+    name ``c``."""
+    if not isinstance(node, frog_ast.BinaryOperation):
+        return False
+    for operand in (node.left_expression, node.right_expression):
+        if (
+            isinstance(operand, frog_ast.UnaryOperation)
+            and operand.operator == frog_ast.UnaryOperators.MINUS
+            and isinstance(
+                operand.expression,
+                (frog_ast.Integer, frog_ast.Variable, frog_ast.FieldAccess),
+            )
+        ):
+            return True
+        if _has_negated_operand(operand):
+            return True
+    return False
+
+
+def detect_unfolded_negation_diff(hunk: DiffHunk) -> bool:
+    """Check if two statements differ only in Int arithmetic that is equal
+    as a polynomial, where a side has a negated operand.
+
+    SymbolicComputation does not evaluate a negation, so arithmetic with a
+    ``-c`` operand stays unfolded: ``x + -3`` does not meet ``x - 3``, nor
+    ``2 + -2`` meet ``0``.  The negation may be written in the game or come
+    from an earlier fold (``3 - 5`` becomes ``-2``).  When both operands are
+    constants the pass records a near miss, which explains the hunk first.
+    """
+    if len(hunk.current_lines) != 1 or len(hunk.next_lines) != 1:
+        return False
+    current = _split_statement(_strip_diff_prefix(hunk.current_lines[0]))
+    next_line = _split_statement(_strip_diff_prefix(hunk.next_lines[0]))
+    if current is None or next_line is None:
+        return False
+    if current[0] != next_line[0] or current[1] == next_line[1]:
+        return False
+    try:
+        current_expr = frog_parser.parse_expression(current[1])
+        next_expr = frog_parser.parse_expression(next_line[1])
+    except frog_parser.ParseError:
+        return False
+    if not (_has_negated_operand(current_expr) or _has_negated_operand(next_expr)):
+        return False
+    current_value = _ring_value(current_expr)
+    next_value = _ring_value(next_expr)
+    if current_value is None or next_value is None:
+        return False
+    return bool(sympy.expand(current_value - next_value) == 0)
+
+
 _DETECTORS: list[tuple[Callable[[DiffHunk], bool], str, str]] = []
 
 
@@ -282,6 +381,14 @@ _register(
     detect_if_condition_reorder_diff,
     "The engine does not reorder if/else-if branches",
     "Match the branch order from the previous game",
+)
+_register(
+    detect_unfolded_negation_diff,
+    "The engine does not evaluate a negation in Int arithmetic, so arithmetic"
+    + " with a negated operand (written, or left by an earlier fold such as"
+    + " '3 - 5' becoming '-2') stays unfolded",
+    "Make both games reach the same arithmetic here, for example by writing"
+    + " the subtraction or folded value the other game has",
 )
 
 ENGINE_LIMITATION_DETECTORS = _DETECTORS

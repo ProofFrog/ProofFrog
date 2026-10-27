@@ -1149,6 +1149,34 @@ def test_map_key_reindex_near_miss_scan_with_wrapped_write():
     assert "in 'Put' already applies the wrapper" in misses[0].reason
 
 
+def test_map_key_reindex_near_miss_map_used_whole():
+    misses = _map_reindex_misses(
+        "Void Store(BitString<8> a) { M[a] = 0; }",
+        "Map<BitString<8>, Int> Dump() { return M; }",
+        _MAP_REINDEX_SCAN,
+    )
+    assert len(misses) == 1
+    assert misses[0].method == "Dump"
+    assert misses[0].variable == "M"
+    assert "used other than through" in misses[0].reason
+
+
+def test_map_key_reindex_near_miss_loop_tuple_used_whole():
+    misses = _map_reindex_misses(
+        "Void Store(BitString<8> a) { M[a] = 0; }",
+        """
+        [BitString<8>, Int]? Leak() {
+            for ([BitString<8>, Int] e in M.entries) { return e; }
+            return None;
+        }
+        """,
+        _MAP_REINDEX_SCAN,
+    )
+    assert len(misses) == 1
+    assert misses[0].method == "Leak"
+    assert "loop tuple 'e'" in misses[0].reason
+
+
 def test_map_key_reindex_no_near_miss_when_reindexed():
     game = frog_parser.parse_game(f"""
         Game G(T TT) {{

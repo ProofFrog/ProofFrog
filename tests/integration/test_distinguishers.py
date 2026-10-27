@@ -11,6 +11,7 @@ proofs — so a failure points directly at one engine path.
 
 from __future__ import annotations
 
+import pytest
 from sympy import Symbol
 
 from proof_frog import frog_parser, visitors
@@ -466,6 +467,59 @@ def test_map_key_reindex_keeps_wrapped_read() -> None:
         }
         """)
     engine = _engine_with(P=prim, S=prim)
+    assert not engine.check_equivalent(left, right).valid
+
+
+_MAP_REINDEX_WHOLE_USE_PRIMITIVE = """
+    Primitive T() {
+        deterministic injective BitString<8> Eval(BitString<8> x);
+    }
+    """
+
+
+_MAP_REINDEX_WHOLE_USE_SCANS = {
+    "Left": "TT.Eval(e[0]) == y",
+    "Right": "e[0] == y",
+}
+
+
+def _map_reindex_whole_use_game(side: str, extra: str) -> str:
+    key = "a" if side == "Left" else "TT.Eval(a)"
+    return f"""
+        Game {side}(T TT) {{
+            Map<BitString<8>, Int> M;
+            Map<BitString<8>, Int> N;
+            Void Store(BitString<8> a) {{ M[{key}] = 0; }}
+            {extra}
+            Bool Scan(BitString<8> y) {{
+                for ([BitString<8>, Int] e in M.entries) {{
+                    if ({_MAP_REINDEX_WHOLE_USE_SCANS[side]}) {{ return true; }}
+                }}
+                return false;
+            }}
+        }}
+        """
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "Map<BitString<8>, Int> Dump() { return M; }",
+        "Bool Has(BitString<8> b) { N = M; return b in N; }",
+        "Void Put(BitString<8> a) { N[a] = 0; }\n            Void Load() { M = N; }",
+    ],
+    ids=["return-map", "copy-out-then-member", "load-from-other-map"],
+)
+def test_map_key_reindex_keeps_keys_used_whole(extra: str) -> None:
+    """``MapKeyReindex`` must not re-key ``M`` when the map is also used
+    whole. Left stores raw keys and Right stores ``TT.Eval`` of them, so
+    ``Dump`` returns different maps, ``Has`` answers differently, and keys
+    loaded by ``Load`` are found by Left's scan only through ``Eval`` but by
+    Right's scan raw."""
+    prim = frog_parser.parse_primitive_file(_MAP_REINDEX_WHOLE_USE_PRIMITIVE)
+    left = frog_parser.parse_game(_map_reindex_whole_use_game("Left", extra))
+    right = frog_parser.parse_game(_map_reindex_whole_use_game("Right", extra))
+    engine = _engine_with(T=prim, TT=prim)
     assert not engine.check_equivalent(left, right).valid
 
 

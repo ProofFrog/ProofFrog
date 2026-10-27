@@ -482,3 +482,93 @@ def test_reindexes_raw_writes_with_scan_and_size() -> None:
         ),
         _ctx_with_primitive(_SAME_TYPE_PRIMITIVE),
     )
+
+
+# ---------------------------------------------------------------------------
+# A use of the map (or of an entries-loop tuple) the pass does not rewrite
+# blocks re-keying
+# ---------------------------------------------------------------------------
+
+
+def _two_map_game(*methods: str) -> str:
+    body = "\n".join(methods)
+    return f"""
+        Game G(T TT) {{
+            Map<BitString<8>, BitString<16>> M;
+            Map<BitString<8>, BitString<16>> N;
+            {body}
+        }}
+        """
+
+
+_WHOLE_MAP_USES = {
+    "return": "Map<BitString<8>, BitString<16>> Dump() { return M; }",
+    "copy-out": "Void Copy() { N = M; }",
+    "load-in": "Void Load() { M = N; }",
+    "equality": "Bool Same() { return M == N; }",
+    "local-named-M": "Int Other() { Int M = 1; return M; }",
+    "tuple-copied": """
+        BitString<8>? Leak() {
+            for ([BitString<8>, BitString<16>] e in M.entries) {
+                [BitString<8>, BitString<16>] t = e;
+                return t[0];
+            }
+            return None;
+        }
+    """,
+    "tuple-returned": """
+        [BitString<8>, BitString<16>]? Leak() {
+            for ([BitString<8>, BitString<16>] e in M.entries) {
+                return e;
+            }
+            return None;
+        }
+    """,
+    "tuple-variable-index": """
+        BitString<8>? Leak(Int i) {
+            for ([BitString<8>, BitString<16>] e in M.entries) {
+                return e[i];
+            }
+            return None;
+        }
+    """,
+}
+
+
+@pytest.mark.parametrize(
+    "use", list(_WHOLE_MAP_USES.values()), ids=list(_WHOLE_MAP_USES.keys())
+)
+def test_declines_unrecognized_map_use(use: str) -> None:
+    """Re-keying would change what ``use`` observes (the stored raw keys, or
+    keys loaded from ``N`` that the rewrite never wraps), but the pass leaves
+    it unchanged, so it must not re-key."""
+    _apply_and_expect_unchanged(
+        _two_map_game(_RAW_STORE, use, _SCAN),
+        _ctx_with_primitive(_SAME_TYPE_PRIMITIVE),
+    )
+
+
+def test_reindexes_with_values_view() -> None:
+    """``M.values`` does not depend on the keys, so it does not block."""
+    values = (
+        "BitString<16>? AnyValue() { "
+        "for (BitString<16> v in M.values) { return v; } return None; }"
+    )
+    _apply_and_expect(
+        _same_type_game(_RAW_STORE, values, _SCAN),
+        _same_type_game(
+            "Void Store(BitString<8> a, BitString<16> s) { M[TT.Eval(a)] = s; }",
+            values,
+            """
+            BitString<16>? Scan(BitString<8> y) {
+                for ([BitString<8>, BitString<16>] e in M.entries) {
+                    if (e[0] == y) {
+                        return e[1];
+                    }
+                }
+                return None;
+            }
+            """,
+        ),
+        _ctx_with_primitive(_SAME_TYPE_PRIMITIVE),
+    )

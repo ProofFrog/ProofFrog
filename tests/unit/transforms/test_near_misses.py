@@ -3936,7 +3936,8 @@ def _extract_field_misses(methods: str, init: str) -> list[NearMiss]:
         (
             "Void Store() { f = K.Get(); } Int Q() { return f[1] + f[1]; }",
             "",
-            "not definitely assigned",
+            "may be unassigned when the oracle runs, because Initialize does"
+            " not assign it",
         ),
         (
             "Int Q() { Int x = f[1]; f = K.Get(); return x + f[1]; }",
@@ -3949,6 +3950,34 @@ def _extract_field_misses(methods: str, init: str) -> list[NearMiss]:
             "f = K.Get();",
             "calls a method of the game",
         ),
+        # Initialize runs Q before it assigns f.
+        (
+            "Int Q(Bool c) { if (c) { return 0; } return f[1] + f[1]; }",
+            "Int r = TestGame.Q(true); f = K.Get();",
+            "because Initialize calls a method of the game before assigning it",
+        ),
+        # Initialize does assign f at top level, but a local of the same name
+        # may be what the assignment targets.
+        (
+            "Int Q() { return f[1] + f[1]; }",
+            "[Int, Int] f = K.Get(); f = K.Get();",
+            "because Initialize also binds a local named 'f'",
+        ),
+        # Q binds a local named f in a branch, so the pass leaves the field
+        # alone in the whole method, though the reads after the branch are of
+        # the field.
+        (
+            "Int Q(Bool c) { if (c) { [Int, Int] f = K.Get(); return f[0]; }"
+            " return f[1] + f[1]; }",
+            "f = K.Get();",
+            "the method also binds a local or loop binder named 'f'",
+        ),
+        (
+            "Int Q(Set<[Int, Int]> S) { for ([Int, Int] f in S) { }"
+            " return f[1] + f[1]; }",
+            "f = K.Get();",
+            "the method also binds a local or loop binder named 'f'",
+        ),
     ],
 )
 def test_extract_field_near_miss(methods: str, init: str, reason: str) -> None:
@@ -3960,3 +3989,30 @@ def test_extract_field_near_miss(methods: str, init: str, reason: str) -> None:
     assert misses[0].method == "Q"
     assert "f[1]" in misses[0].reason
     assert reason in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "methods, init",
+    [
+        # A parameter named f: every read of f in Q is of the parameter.
+        ("Int Q(Array<Int, 2> f) { return f[1] + f[1]; }", ""),
+        # The full reconstruction [f[0], f[1]] declines the extraction for
+        # any base, so the unassigned field is not what blocks it.
+        (
+            "Void Store() { f = K.Get(); }"
+            " [Int, Int] Q() { Int x = f[1] + f[1]; return [f[0], f[1]]; }",
+            "",
+        ),
+        # An index outside the tuple declines for any base as well.
+        (
+            "Void Store() { f = K.Get(); } Int Q() { return f[2] + f[2]; }",
+            "",
+        ),
+    ],
+)
+def test_extract_field_no_near_miss_when_another_rule_declines(
+    methods: str, init: str
+) -> None:
+    """A field condition is reported only when it is what blocks the
+    extraction."""
+    assert not _extract_field_misses(methods, init)

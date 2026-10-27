@@ -38,7 +38,7 @@ from ._base import (
 )
 from ._definedness import (
     calls_game_method,
-    initialize_assigned_fields,
+    initialize_unassigned_fields,
     method_binder_counts,
 )
 
@@ -1708,12 +1708,14 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
     returns, so a field is used only when (a) it is definitely assigned
     before any oracle runs (a declared initializer, or a top-level
     ``Initialize`` assignment that no earlier ``return`` can skip and no
-    call to a method of the game precedes: ``initialize_assigned_fields``),
+    call to a method of the game precedes: ``initialize_unassigned_fields``),
     since reading an unassigned variable is observable; (b) the method binds
-    no local of the same name; (c) the block writes or rebinds the field
-    nowhere (element writes included); and (d) the block calls no method of
-    the game (``M(...)`` or ``G.M(...)``), which could write the field
-    between two reads.
+    no parameter, local or loop binder of the same name; (c) the block
+    writes or rebinds the field nowhere (element writes included); and (d)
+    the block calls no method of the game, which could write the field
+    between two reads. When these conditions are all that stand in the way
+    of an extraction, the first that fails (in the order b, c, d, a) is
+    reported as a near miss.
 
     **Slice phase.** When a ``v[A:B]`` slice expression (variable base,
     syntactically-equal bounds) appears 2+ times *after ``v``'s
@@ -1758,38 +1760,34 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
         self._scope_types: dict[str, frog_ast.Type] = {}
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
-        # Product-typed game fields: those definitely assigned before any
-        # oracle runs (eligible bases) and the rest (reported, never used).
-        self._eligible_fields: dict[str, frog_ast.Type] = {}
-        self._unassigned_fields: set[str] = set()
+        # The game being transformed, its product-typed fields, and why each
+        # one an oracle may find unassigned is (reported, never used).
         self._game: Optional[frog_ast.Game] = None
-        # Fields usable as bases in the current method, and the method name.
+        self._field_types: dict[str, frog_ast.ProductType] = {}
+        self._field_gaps: dict[str, str] = {}
+        # In the current method: the fields every read of that name refers
+        # to, the fields whose name the method also binds as a local or loop
+        # binder, and the method name.
         self._field_scope: set[str] = set()
+        self._shadowed_fields: set[str] = set()
         self._method_name: Optional[str] = None
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
-        saved = (self._eligible_fields, self._unassigned_fields, self._game)
-        assigned = initialize_assigned_fields(game)
-        self._eligible_fields = {
+        saved = (self._game, self._field_types, self._field_gaps)
+        self._game = game
+        self._field_types = {
             field.name: field.type
             for field in game.fields
-            if isinstance(field.type, frog_ast.ProductType) and field.name in assigned
-        }
-        self._unassigned_fields = {
-            field.name
-            for field in game.fields
             if isinstance(field.type, frog_ast.ProductType)
-            and field.name not in assigned
         }
-        self._game = game
+        gaps = initialize_unassigned_fields(game)
+        self._field_gaps = {
+            name: gaps[name] for name in self._field_types if name in gaps
+        }
         try:
             return self._transform_children(game)
         finally:
-            (
-                self._eligible_fields,
-                self._unassigned_fields,
-                self._game,
-            ) = saved
+            self._game, self._field_types, self._field_gaps = saved
 
     def _field_near_miss(self, field: str, idx_val: int, reason: str) -> None:
         """Report a repeated ``field[idx_val]`` left unextracted."""
@@ -1806,9 +1804,57 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
             )
         )
 
-    def _calls_game_method(self, block: frog_ast.Block) -> bool:
-        """True if *block* calls a method of the game being transformed."""
-        return self._game is not None and calls_game_method(self._game, block)
+    def _field_extractable(
+        self,
+        field: str,
+        idx_val: int,
+        block: frog_ast.Block,
+        block_facts: dict[str, bool],
+    ) -> bool:
+        """Whether the repeated read ``field[idx_val]`` in *block* may be
+        extracted to the top of the block.
+
+        Called after every check that declines silently for any base, so a
+        near miss names a condition that actually blocks the extraction.
+        *block_facts* caches, per block, whether it calls a method of the
+        game (key ``""``) and whether it writes or rebinds each field (key:
+        the field name).
+        """
+        if field in self._shadowed_fields:
+            self._field_near_miss(
+                field,
+                idx_val,
+                f"the method also binds a local or loop binder named '{field}',"
+                " and the pass does not take a field whose name the method"
+                " binds",
+            )
+            return False
+        if field not in block_facts:
+            block_facts[field] = reassigns_or_rebinds({field}, block)
+        if block_facts[field]:
+            self._field_near_miss(
+                field, idx_val, "the block writes or rebinds the field"
+            )
+            return False
+        if "" not in block_facts:
+            assert self._game is not None
+            block_facts[""] = calls_game_method(self._game, block)
+        if block_facts[""]:
+            self._field_near_miss(
+                field,
+                idx_val,
+                "the block calls a method of the game, which may write the field",
+            )
+            return False
+        gap = self._field_gaps.get(field)
+        if gap is not None:
+            self._field_near_miss(
+                field,
+                idx_val,
+                f"the field may be unassigned when the oracle runs, because {gap}",
+            )
+            return False
+        return True
 
     def _record_unreachable_occurrences(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
@@ -1891,25 +1937,39 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
         return SearchVisitor(is_full_recon).visit(block) is not None
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
-        """Expose ProductType method parameters for tuple-extraction.
+        """Expose ProductType method parameters and game fields for
+        tuple-extraction.
 
         Symmetrises games whose source-level code already extracts
         ``v = ct0[1]`` against games whose source uses the param access
         ``ct0[1]`` inline.  Block-local declarations still shadow params
         on name collision.
+
+        Outside ``Initialize``, a product-typed field whose name the method
+        does not bind (as a parameter, local or loop binder) is in scope for
+        the whole method; one that an oracle may find unassigned is tracked
+        for its near miss but never used as a base. A field whose name the
+        method binds is left out altogether: every read of the name is then
+        of the parameter, or may be of the local. (In the pipeline
+        ``AlphaRename`` runs first and renames every such binder.)
         """
         saved = dict(self._scope_types)
-        saved_fields, saved_method = self._field_scope, self._method_name
+        saved_fields = (self._field_scope, self._shadowed_fields, self._method_name)
         try:
             self._method_name = method.signature.name
-            # Fields first, so a parameter of the same name overrides; a field
-            # whose name the method binds anywhere is left out altogether.
             self._field_scope = set()
+            self._shadowed_fields = set()
             if method.signature.name != "Initialize":
                 bound = method_binder_counts(method)
-                for name, field_type in self._eligible_fields.items():
-                    if name not in bound:
-                        self._field_scope.add(name)
+                parameters = {param.name for param in method.signature.parameters}
+                for name, field_type in self._field_types.items():
+                    if name in parameters:
+                        continue
+                    if name in bound:
+                        self._shadowed_fields.add(name)
+                        continue
+                    self._field_scope.add(name)
+                    if name not in self._field_gaps:
                         self._scope_types[name] = field_type
             for param in method.signature.parameters:
                 if isinstance(param.type, frog_ast.ProductType):
@@ -1917,7 +1977,7 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
             new_block = self.transform(method.block)
         finally:
             self._scope_types = saved
-            self._field_scope, self._method_name = saved_fields, saved_method
+            self._field_scope, self._shadowed_fields, self._method_name = saved_fields
         if new_block is method.block:
             return method
         return frog_ast.Method(method.signature, new_block)
@@ -1960,50 +2020,32 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
 
         # Find first pattern with 2+ replaceable uses whose base var has a
         # product type
+        block_facts: dict[str, bool] = {}
         for (var_name, idx_val), occurrence_idxs in access_stmt_idxs.items():
             if len(occurrence_idxs) < 2:
                 continue
-            if var_name not in var_types:
-                if (
-                    var_name in self._unassigned_fields
-                    and self._method_name is not None
-                    and self._method_name != "Initialize"
-                ):
-                    self._field_near_miss(
-                        var_name,
-                        idx_val,
-                        "the field is not definitely assigned before oracles run"
-                        " (assign it at the top level of Initialize, before any"
-                        " return)",
-                    )
-                continue
-            if var_def_idx[var_name] == -1 and var_name in self._field_scope:
-                if reassigns_or_rebinds({var_name}, block):
-                    self._field_near_miss(
-                        var_name, idx_val, "the block writes or rebinds the field"
-                    )
-                    continue
-                if self._calls_game_method(block):
-                    self._field_near_miss(
-                        var_name,
-                        idx_val,
-                        "the block calls a method of the game, which may write"
-                        " the field",
-                    )
-                    continue
-            base_type = var_types[var_name]
+            # A read of a game field: one in scope for the whole method, or
+            # one whose name the method binds, but not in this block. Either
+            # way the base is scope-external here.
+            is_field = var_name in self._field_scope or (
+                var_name in self._shadowed_fields and var_name not in var_types
+            )
+            def_idx = var_def_idx.get(var_name, -1)
+            base_type = (
+                self._field_types[var_name] if is_field else var_types.get(var_name)
+            )
             if not isinstance(base_type, frog_ast.ProductType):
                 continue
             if idx_val < 0 or idx_val >= len(base_type.types):
                 continue
 
-            count = sum(1 for i in occurrence_idxs if i > var_def_idx[var_name])
+            count = sum(1 for i in occurrence_idxs if i > def_idx)
             if count < 2:
                 self._record_unreachable_occurrences(
                     block,
                     f"'{var_name}[{idx_val}]'",
                     var_name,
-                    var_def_idx[var_name],
+                    def_idx,
                     len(occurrence_idxs),
                     count,
                 )
@@ -2026,11 +2068,13 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
                     and lvalue_base_name(node.var) == name
                 )
 
-            remaining_after_def = frog_ast.Block(
-                list(block.statements[var_def_idx[var_name] + 1 :])
-            )
+            # A field is checked over the whole block by _field_extractable
+            # below, with reassigns_or_rebinds, which catches every write this
+            # scan does.
+            remaining_after_def = frog_ast.Block(list(block.statements[def_idx + 1 :]))
             if (
-                SearchVisitor(functools.partial(_is_reassigned, var_name)).visit(
+                not is_field
+                and SearchVisitor(functools.partial(_is_reassigned, var_name)).visit(
                     remaining_after_def
                 )
                 is not None
@@ -2043,6 +2087,13 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
             # ``SimplifyTuple``'s ``[v[0], v[1], ...] -> v`` fold-back,
             # leaving the canonical form less reduced.
             if self._has_full_reconstruction(var_name, base_type, block):
+                continue
+
+            # The field conditions come last, so a near miss is recorded only
+            # when nothing above declines.
+            if is_field and not self._field_extractable(
+                var_name, idx_val, block, block_facts
+            ):
                 continue
 
             elem_type = base_type.types[idx_val]
@@ -2059,7 +2110,7 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
             )
 
             # Insert after the base variable's definition
-            insert_at = var_def_idx[var_name] + 1
+            insert_at = def_idx + 1
 
             # Replace all occurrences of var[idx] with the CSE variable
             new_stmts = list(block.statements[:insert_at])

@@ -386,6 +386,230 @@ class TestInitialValues:
         ]
 
 
+class TestUnpairedWrites:
+    """The pass pairs only whole-field assignments and samples.  Any other
+    write to a field changes it alone, so the pair is not merged."""
+
+    @pytest.mark.parametrize(
+        "the_type, write",
+        [
+            ("Map<Int, Int>", "A[k] = 1;"),
+            ("Map<Int, BitString<8>>", "A[k] <- BitString<8>;"),
+            ("Array<Int, 4>", "A[0] = 1;"),
+            ("Array<Array<Int, 4>, 4>", "A[0][1] = 1;"),
+            ("[Int, Int]", "A[0] = 1;"),
+            ("Map<Int, Int>", "if (k == 0) { A[k] = 1; }"),
+            # Paired element writes keep the fields equal, but the pass does
+            # not pair them.
+            ("Map<Int, Int>", "A[k] = 1; B[k] = 1;"),
+        ],
+    )
+    def test_element_write_not_merged(self, the_type: str, write: str) -> None:
+        assert not _merges(f"""
+            Game G() {{
+                {the_type} A;
+                {the_type} B;
+                Void Put(Int k) {{
+                    {write}
+                }}
+                {the_type} Get() {{
+                    return B;
+                }}
+            }}
+            """)
+
+    def test_element_write_in_initialize_not_merged(self) -> None:
+        assert not _merges("""
+            Game G() {
+                Map<Int, Int> A;
+                Map<Int, Int> B;
+                Void Initialize() {
+                    A[0] = 1;
+                }
+                Bool Has(Int k) {
+                    return k in B;
+                }
+            }
+            """)
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            "a <-uniq[S] BitString<8>;",
+            "a <- BitString<8> \\ S;",
+        ],
+    )
+    def test_exclusion_sample_not_merged(self, write: str) -> None:
+        assert not _merges(f"""
+            Game G() {{
+                Set<BitString<8>> S;
+                BitString<8> a;
+                BitString<8> b;
+                Void Draw() {{
+                    {write}
+                }}
+                BitString<8> Get() {{
+                    return b;
+                }}
+            }}
+            """)
+
+    def test_uniq_insertion_not_merged(self) -> None:
+        """`x <-uniq[A] T` adds x to A."""
+        assert not _merges("""
+            Game G() {
+                Set<BitString<8>> A;
+                Set<BitString<8>> B;
+                BitString<8> Draw() {
+                    BitString<8> x <-uniq[A] BitString<8>;
+                    return x;
+                }
+                Int Get() {
+                    return |B|;
+                }
+            }
+            """)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # A local of the same name: its write is not a field write.
+            "Int a = 5; b = 5;",
+            "Int a; a = 5; b = 5;",
+            # A typed partner declares a local, so it does not pair.
+            "a = 5; Int b = 5;",
+            "a = 5; Int b = a;",
+            # A loop binder of the kept name would capture the renamed reads.
+            "for (Int a = 0 to 3) { s = s + b; }",
+            "for (Int a in T) { s = s + b; }",
+        ],
+    )
+    def test_rebinding_not_merged(self, body: str) -> None:
+        """AlphaRename renames such locals first; the pass does not rely on
+        it."""
+        assert not _merges(f"""
+            Game G() {{
+                Int a;
+                Int b;
+                Set<Int> T;
+                Void Initialize() {{
+                    a = 0;
+                    b = 0;
+                }}
+                Int Use() {{
+                    Int s = 0;
+                    {body}
+                    return s + b;
+                }}
+            }}
+            """)
+
+    def test_parameter_of_either_name_not_merged(self) -> None:
+        """Parameter `a` hides field `a` in `Put`, so `a = 1` writes the
+        parameter and `Get` still returns 0."""
+        assert not _merges("""
+            Game G() {
+                Int a = 0;
+                Int b = 0;
+                Void Put(Int a) {
+                    a = 1;
+                    b = 1;
+                }
+                Int Get() {
+                    return a;
+                }
+            }
+            """)
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            "M[k] = 1;",
+            "BitString<8> x <-uniq[S] BitString<8>;",
+            "BitString<8> x <- BitString<8> \\ A;",
+            "for (Int i = 0 to 3) { M[i] = i; }",
+        ],
+    )
+    def test_writes_to_other_fields_merged(self, write: str) -> None:
+        assert _merges(f"""
+            Game G() {{
+                Map<Int, Int> M;
+                Set<BitString<8>> S;
+                Set<BitString<8>> A;
+                Set<BitString<8>> B;
+                Void Put(Int k) {{
+                    {write}
+                }}
+                Int Get() {{
+                    return |A| + |B|;
+                }}
+            }}
+            """)
+
+
+class TestWritesBetweenPairedWrites:
+    """`g = e; ...; f = e;` pairs only if nothing in between writes a
+    variable that `e` reads, the receiver of a member access included."""
+
+    @staticmethod
+    def _game(value: str, write: str) -> str:
+        return f"""
+            Game G() {{
+                Map<Int, Bool> M;
+                Map<Int, Bool> N;
+                Map<Int, Int> A;
+                Int f;
+                Int g;
+                Void O() {{
+                    g = {value};
+                    {write}
+                    f = {value};
+                }}
+                Int Get() {{
+                    return f + g;
+                }}
+            }}
+            """
+
+    @staticmethod
+    def _merges_f_and_g(source: str) -> bool:
+        # Run to a fixed point: the pass merges one pair per call, and `M`
+        # and `N` merge first when neither is written.
+        game = frog_parser.parse_game(source)
+        while True:
+            merged = remove_duplicate_fields(game)
+            if len(merged.fields) == len(game.fields):
+                break
+            game = merged
+        names = {field.name for field in game.fields}
+        return "f" not in names or "g" not in names
+
+    @pytest.mark.parametrize(
+        "value, write",
+        [
+            ("A[|M.keys|]", "M[7] = true;"),
+            ("|M.keys|", "M[7] = true;"),
+            ("|M.values| + 1", "M = N;"),
+            ("A[|M.keys|]", "if (|N| == 0) { M[7] = true; }"),
+            # The rest of the read set is still checked.
+            ("A[|M.keys|]", "A[7] = 1;"),
+        ],
+    )
+    def test_write_to_read_variable_not_merged(self, value: str, write: str) -> None:
+        assert not self._merges_f_and_g(self._game(value, write))
+
+    @pytest.mark.parametrize(
+        "value, write",
+        [
+            ("A[|M.keys|]", ""),
+            ("A[|M.keys|]", "N[7] = true;"),
+            ("|M.keys|", "A[7] = 1;"),
+        ],
+    )
+    def test_write_to_unread_variable_merged(self, value: str, write: str) -> None:
+        assert self._merges_f_and_g(self._game(value, write))
+
+
 class TestEndToEnd:
     def test_rejects_merge_of_fields_with_different_initializers(self) -> None:
         """After `Flip()`, `Both()` returns [0b0, 0b0] in Left and
@@ -485,6 +709,46 @@ class TestEndToEnd:
         assert any(
             "Fields 'h' and 'n' not merged" in explanation.reason
             for explanation in result.diagnosis.explanations
+        )
+
+    def test_rejects_merge_of_maps_written_by_element(self) -> None:
+        """After `Put(0)`, `Get(0)` returns None in Left and 1 in Right."""
+        game = """
+            Game {side}() {{
+                Map<Int, Int> A;
+                Map<Int, Int> B;
+                Void Put(Int k) {{
+                    A[k] = 1;
+                }}
+                Int? Get(Int k) {{
+                    if (k in {read}) {{
+                        return {read}[k];
+                    }}
+                    return None;
+                }}
+            }}
+            """
+        assert not _engine_equal(
+            game.format(side="Left", read="B"), game.format(side="Right", read="A")
+        )
+
+    def test_rejects_merge_of_sets_grown_by_uniq(self) -> None:
+        """After `Draw()`, `Size()` returns 0 in Left and 1 in Right."""
+        game = """
+            Game {side}() {{
+                Set<BitString<8>> A;
+                Set<BitString<8>> B;
+                BitString<8> Draw() {{
+                    BitString<8> x <-uniq[A] BitString<8>;
+                    return x;
+                }}
+                Int Size() {{
+                    return |{read}|;
+                }}
+            }}
+            """
+        assert not _engine_equal(
+            game.format(side="Left", read="B"), game.format(side="Right", read="A")
         )
 
     def test_accepts_merge_of_fields_with_equal_initializers(self) -> None:

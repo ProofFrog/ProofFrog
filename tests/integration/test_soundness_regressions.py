@@ -89,6 +89,10 @@ CASES = [
      "G.generator == G.identity encoded as G == G; the final return was deleted"),
     ("Z3-FIELD-ACCESS", "map_branch.proof", "reject", "RemoveUnreachable",
      "M.keys == M.values encoded as M == M; the final return was deleted"),
+    ("DUP-FIELDS-MEMBER-READ", "member_read.proof", "reject", "RemoveDuplicateFields",
+     "a write to M between two writes of A[|M.keys|] went unseen; f merged into g"),
+    ("DUP-FIELDS-MEMBER-READ", "member_read_control.proof", "accept",
+     "RemoveDuplicateFields", "positive control for the attack above"),
 ]
 # fmt: on
 

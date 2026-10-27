@@ -113,30 +113,56 @@ def _initializer_mismatch(field: frog_ast.Field, other: frog_ast.Field) -> str |
     return None
 
 
-def _report_initializer_mismatch(
+def _describe_unpaired_write(
+    statement: frog_ast.Statement, pair: tuple[str, str]
+) -> str:
+    """Say what *statement*, a write the pairing does not model, does to
+    the fields in *pair*, for a near-miss message."""
+    if isinstance(statement, frog_ast.NumericFor):
+        return f"a loop binder rebinds '{statement.name}'"
+    if isinstance(statement, frog_ast.GenericFor):
+        return f"a loop binder rebinds '{statement.var_name}'"
+    if isinstance(statement, frog_ast.VariableDeclaration):
+        return f"a local declaration rebinds '{statement.name}'"
+    assert isinstance(
+        statement, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+    )
+    base = visitors.lvalue_base_name(statement.var)
+    if base is None or base not in pair:
+        if isinstance(statement, frog_ast.UniqueSample):
+            inserted = sorted(
+                visitors.referenced_variable_names(statement.unique_set) & set(pair)
+            )
+            if inserted:
+                return f"a '<-uniq' sample inserts into '{inserted[0]}' alone"
+        return "a write with no variable base may change either"
+    if statement.the_type is not None:
+        return f"a local declaration rebinds '{base}'"
+    if not isinstance(statement.var, frog_ast.Variable):
+        return f"an element write changes '{base}' alone"
+    return f"an exclusion sample changes '{base}' alone"
+
+
+def _report_unmerged_fields(
     ctx: PipelineContext | None,
-    field: frog_ast.Field,
-    other: frog_ast.Field,
-    mismatch: str,
-    paired_writes: list[frog_ast.Statement],
+    fields: tuple[frog_ast.Field, frog_ast.Field],
+    reason: str,
+    suggestion: str,
+    method: str | None = None,
 ) -> None:
-    # With no paired write the fields are never written: they are just two
-    # different constants, not a near miss.
-    if ctx is None or not paired_writes:
+    if ctx is None:
         return
+    field, other = fields
     ctx.near_misses.append(
         NearMiss(
             transform_name="Remove Duplicate Fields",
-            reason=(
-                f"Fields '{field.name}' and '{other.name}' not merged: every "
-                f"write updates both alike, but {mismatch}"
-            ),
+            reason=f"Fields '{field.name}' and '{other.name}' not merged: {reason}",
             location=other.origin,
-            suggestion="Give both fields the same call-free initializer, or none",
+            suggestion=suggestion,
             # Canonical diffs name fields `fieldN`, so the diagnostic matcher
             # would drop a near miss that names the source field.
             variable=None,
-            method=None,
+            method=method,
         )
     )
 
@@ -152,15 +178,33 @@ def remove_duplicate_fields(
     for field in game.fields:
         for other_field in game.fields:
             if field.type == other_field.type and field.name < other_field.name:
-                duplicated_statements = visitors.SameFieldVisitor(
-                    (field.name, other_field.name)
-                ).visit(game)
+                pair = (field.name, other_field.name)
+                same_field_visitor = visitors.SameFieldVisitor(pair)
+                duplicated_statements = same_field_visitor.visit(game)
+                # Reported only where every other write pairs.
+                if same_field_visitor.are_same and same_field_visitor.unpaired_writes:
+                    write, method = same_field_visitor.unpaired_writes[0]
+                    _report_unmerged_fields(
+                        ctx,
+                        (field, other_field),
+                        _describe_unpaired_write(write, pair),
+                        "Use one field in place of both if they always hold "
+                        "the same value",
+                        method,
+                    )
                 if duplicated_statements is not None:
                     mismatch = _initializer_mismatch(field, other_field)
-                    if mismatch is not None:
-                        _report_initializer_mismatch(
-                            ctx, field, other_field, mismatch, duplicated_statements
+                    # With no paired write the fields are never written: they
+                    # are just two different constants, not a near miss.
+                    if mismatch is not None and duplicated_statements:
+                        _report_unmerged_fields(
+                            ctx,
+                            (field, other_field),
+                            f"every write updates both alike, but {mismatch}",
+                            "Give both fields the same call-free initializer, "
+                            "or none",
                         )
+                    if mismatch is not None:
                         continue
                     # Capture-aware (F-337): ``Variable`` is both Expression and
                     # Type, so a name-keyed substitution would also retype every

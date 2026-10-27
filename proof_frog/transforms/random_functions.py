@@ -1385,16 +1385,20 @@ def _find_rf_call_of_var(
 #       is itself ``<-uniq[S]`` sampled, or the call's method does
 #       ``S = S union {proj}``).  This is the projection-tracking idiom (e.g.
 #       an ``Eval``/``Hash`` oracle doing ``seen = seen union {x[0]}`` before
-#       ``KDF(x)``).
+#       ``KDF(x)``).  The insertion must precede the call on every path, and
+#       nothing ``proj`` reads may be written in between, so the call queries
+#       the value ``S`` holds.  An inserted element may call only methods
+#       annotated ``deterministic``: any other call can return a different
+#       value at the insertion and at the RF call.
 #
 # The previously-missing check is what made an own-outputs-only exclusion set
 # (which does NOT track an adversary Hash oracle's queries) wrongly eligible.
 
 
 def _all_rf_call_args(
-    method: frog_ast.Method, rf_name: str
+    node: frog_ast.ASTNode, rf_name: str
 ) -> list[frog_ast.Expression]:
-    """Every single argument expression of a call ``rf_name(arg)`` in *method*."""
+    """Every single argument expression of a call ``rf_name(arg)`` in *node*."""
     args: list[frog_ast.Expression] = []
 
     def collector(node: frog_ast.ASTNode) -> bool:
@@ -1407,7 +1411,7 @@ def _all_rf_call_args(
             args.append(node.args[0])
         return False
 
-    SearchVisitor(collector).visit(method.block)
+    SearchVisitor(collector).visit(node)
     return args
 
 
@@ -1462,19 +1466,50 @@ def _index_of_var_in_arg(arg: frog_ast.Expression, var_name: str) -> int | None 
     return False
 
 
-def _contains_return(node: frog_ast.ASTNode) -> bool:
-    """True if *node* contains a ``return`` statement anywhere."""
-    return (
-        SearchVisitor(lambda n: isinstance(n, frog_ast.ReturnStatement)).visit(node)
-        is not None
-    )
-
-
-def _is_union_add(
-    stmt: frog_ast.Statement, set_name: str, proj: frog_ast.Expression
+def _calls_only_deterministic(
+    expr: frog_ast.Expression, proof_namespace: frog_ast.Namespace
 ) -> bool:
-    """True if *stmt* is exactly ``set_name = set_name union {... proj ...}``."""
-    return (
+    """True if every call in *expr* is to a primitive method annotated
+    ``deterministic``.
+
+    Any other call (an unannotated primitive or scheme method, a game method,
+    a ``Function``) may return a different value each time it is evaluated, or
+    is not known here not to, so two evaluations of *expr* need not agree.
+    """
+
+    def unstable(node: frog_ast.ASTNode) -> bool:
+        if not isinstance(node, frog_ast.FuncCall):
+            return False
+        method = _lookup_primitive_method(node.func, proof_namespace)
+        return method is None or not method.deterministic
+
+    return SearchVisitor(unstable).visit(expr) is None
+
+
+def _inserted_projections(
+    stmt: frog_ast.Statement, set_name: str
+) -> list[frog_ast.Expression]:
+    """Expressions whose values *stmt* inserts into *set_name*, read after it.
+
+    Two forms insert:
+
+    - ``v <-uniq[set_name] T``: the draw is the insertion.  Only ``<-uniq[S]``
+      inserts; ``x <- T \\ S`` does not.
+    - ``set_name = set_name union {e, ...}``.  An element that reads the set
+      changes with this write, so it is not returned.
+
+    An element may contain calls; :func:`_unrecorded_rf_query` decides whether
+    re-evaluating it gives the inserted value.
+    """
+    if (
+        isinstance(stmt, frog_ast.UniqueSample)
+        and stmt.surface_form == "uniq"
+        and isinstance(stmt.var, frog_ast.Variable)
+        and isinstance(stmt.unique_set, frog_ast.Variable)
+        and stmt.unique_set.name == set_name
+    ):
+        return [stmt.var]
+    if (
         isinstance(stmt, frog_ast.Assignment)
         and isinstance(stmt.var, frog_ast.Variable)
         and stmt.var.name == set_name
@@ -1484,53 +1519,128 @@ def _is_union_add(
         and isinstance(stmt.value.left_expression, frog_ast.Variable)
         and stmt.value.left_expression.name == set_name
         and isinstance(stmt.value.right_expression, frog_ast.Set)
-        and any(elem == proj for elem in stmt.value.right_expression.elements)
-    )
+    ):
+        return [
+            elem
+            for elem in stmt.value.right_expression.elements
+            if set_name not in referenced_variable_names(elem)
+        ]
+    return []
 
 
-def _proj_tracked_in_set(
-    method: frog_ast.Method, set_name: str, proj: frog_ast.Expression
-) -> bool:
-    """True if *proj* is guaranteed to be in *set_name* on EVERY path through
-    *method* (path-sensitive -- audit F-001).
+def _statement_parts(
+    stmt: frog_ast.Statement,
+) -> tuple[list[frog_ast.ASTNode], list[frog_ast.Block]]:
+    """Split *stmt* into what it evaluates itself and its nested blocks."""
+    if isinstance(stmt, frog_ast.IfStatement):
+        return list(stmt.conditions), list(stmt.blocks)
+    if isinstance(stmt, frog_ast.NumericFor):
+        return [stmt.start, stmt.end], [stmt.block]
+    if isinstance(stmt, frog_ast.GenericFor):
+        return [stmt.over], [stmt.block]
+    if isinstance(stmt, frog_ast.Block):
+        return [], [stmt]
+    return [stmt], []
 
-    Two tracking forms qualify:
 
-    - *proj* is a variable sampled ``<-uniq[set_name]``: the draw IS the
-      insertion and the RF call uses the same drawn value, so the two are
-      path-consistent wherever the draw occurs.
-    - an UNCONDITIONAL top-level ``set_name = set_name union {... proj ...}``
-      that runs on every invocation.  A conditional add (nested under an
-      ``if``) or one placed after an early return lets an RF query slip
-      through untracked, so only a top-level add reached before any
-      early-return-bearing statement counts.
+@dataclass
+class _UnrecordedQuery:
+    """An RF call whose queried projection the exclusion set may not hold."""
+
+    proj: frog_ast.Expression
+    # The method inserted ``proj`` earlier but may change it before the call.
+    rewritten: bool
+    # The method inserted ``proj``, but ``proj`` calls a method that is not
+    # annotated ``deterministic``, so the call may query another value.
+    unstable: bool = False
+
+
+@dataclass
+class _InsertionScan:
+    """Insertions into the exclusion set seen while walking a method."""
+
+    proof_namespace: frog_ast.Namespace
+    # Inserted, then possibly changed by a write.
+    dropped: list[frog_ast.Expression] = field(default_factory=list)
+    # Inserted, but a re-evaluation may differ (a non-deterministic call).
+    unstable: list[frog_ast.Expression] = field(default_factory=list)
+
+
+def _unrecorded_rf_query(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    block: frog_ast.Block,
+    rf_name: str,
+    set_name: str,
+    proj_index: int | None,
+    recorded: list[frog_ast.Expression],
+    scan: _InsertionScan,
+) -> _UnrecordedQuery | None:
+    """The first ``rf_name`` call in *block* whose projection *set_name* may
+    not hold, or ``None`` (audit F-001).
+
+    A call counts only when an insertion of the same expression runs before
+    it on every path, and nothing that expression reads is written in
+    between.  *recorded* holds the insertions made before *block*.  A
+    statement's writes, at any depth, count before its own calls.  An
+    inserted element that calls a method not annotated ``deterministic``
+    never counts: the insertion and the call each evaluate it, and the two
+    values may differ.
     """
+    dropped = scan.dropped
+    recorded = list(recorded)
+    for stmt in block.statements:
+        kept = [
+            proj
+            for proj in recorded
+            if not reassigns_or_rebinds(referenced_variable_names(proj), stmt)
+        ]
+        dropped += [proj for proj in recorded if proj not in kept]
+        recorded = kept
+        header, nested = _statement_parts(stmt)
+        for node in header:
+            for arg in _all_rf_call_args(node, rf_name):
+                proj = _projection_expr(arg, proj_index)
+                if proj is None:
+                    return _UnrecordedQuery(arg, False)
+                if proj not in recorded:
+                    return _UnrecordedQuery(
+                        proj, proj in dropped, proj in scan.unstable
+                    )
+        for inner in nested:
+            query = _unrecorded_rf_query(
+                inner, rf_name, set_name, proj_index, recorded, scan
+            )
+            if query is not None:
+                return query
+        for proj in _inserted_projections(stmt, set_name):
+            if _calls_only_deterministic(proj, scan.proof_namespace):
+                recorded.append(proj)
+            else:
+                scan.unstable.append(proj)
+    return None
 
-    # Form 1: <-uniq[set_name] draw (anywhere -- path-consistent with its use).
-    def is_uniq_draw(node: frog_ast.ASTNode) -> bool:
-        return (
-            isinstance(node, frog_ast.UniqueSample)
-            # Only `<-uniq[S]` inserts the draw into S; `x <- T \ S` does not.
-            and node.surface_form == "uniq"
-            and isinstance(node.var, frog_ast.Variable)
-            and isinstance(proj, frog_ast.Variable)
-            and node.var.name == proj.name
-            and isinstance(node.unique_set, frog_ast.Variable)
-            and node.unique_set.name == set_name
+
+def _explained_unrecorded_query(
+    game: frog_ast.Game,
+    rf_name: str,
+    set_name: str,
+    proj_index: int | None,
+    proof_namespace: frog_ast.Namespace,
+) -> tuple[str, _UnrecordedQuery] | None:
+    """A method and an *rf_name* call in it on a projection the method
+    inserts into *set_name*, but which may differ from the inserted value
+    (rewritten, or calling a non-deterministic method), or ``None``."""
+    for method in game.methods:
+        query = _unrecorded_rf_query(
+            method.block,
+            rf_name,
+            set_name,
+            proj_index,
+            [],
+            _InsertionScan(proof_namespace),
         )
-
-    if SearchVisitor(is_uniq_draw).visit(method.block) is not None:
-        return True
-
-    # Form 2: an unconditional top-level union-add, reached before any
-    # statement that can return early on some path.
-    for stmt in method.block.statements:
-        if _is_union_add(stmt, set_name, proj):
-            return True
-        if _contains_return(stmt):
-            # An early return here would skip a later add on some path.
-            break
-    return False
+        if query is not None and (query.rewritten or query.unstable):
+            return method.signature.name, query
+    return None
 
 
 def _set_only_monotone(game: frog_ast.Game, set_name: str) -> bool:
@@ -1584,12 +1694,13 @@ def _set_only_monotone(game: frog_ast.Game, set_name: str) -> bool:
     return ok[0]
 
 
-def _exclusion_adequate(
+def _exclusion_adequate(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     game: frog_ast.Game,
     rf_name: str,
     set_name: str,
     proj_index: int | None,
     field_names: set[str],
+    proof_namespace: frog_ast.Namespace,
 ) -> bool:
     """Whether ``v <-uniq[set_name]`` at projection *proj_index* of an
     ``rf_name(arg)`` call guarantees the queried point is fresh for ``rf_name``.
@@ -1610,14 +1721,18 @@ def _exclusion_adequate(
         return False
     if not _set_only_monotone(game, set_name):
         return False
-    for method in game.methods:
-        for arg in _all_rf_call_args(method, rf_name):
-            proj = _projection_expr(arg, proj_index)
-            if proj is None:
-                return False
-            if not _proj_tracked_in_set(method, set_name, proj):
-                return False
-    return True
+    return all(
+        _unrecorded_rf_query(
+            method.block,
+            rf_name,
+            set_name,
+            proj_index,
+            [],
+            _InsertionScan(proof_namespace),
+        )
+        is None
+        for method in game.methods
+    )
 
 
 class _FreshInputRFTransformer(BlockTransformer):
@@ -1675,6 +1790,63 @@ class _FreshInputRFTransformer(BlockTransformer):
         new_node.block = new_block
         return new_node
 
+    def _record_near_miss(
+        self,
+        stmt: frog_ast.UniqueSample,
+        rf_name: str,
+        set_name: str,
+        explained: tuple[str, _UnrecordedQuery] | None,
+    ) -> None:
+        """Record why ``rf_name`` on the ``stmt`` draw was kept."""
+        if self.ctx is None:
+            return
+        if explained is not None and explained[1].unstable:
+            method_name, query = explained
+            reason = (
+                f"'{method_name}' inserts '{query.proj}' into '{set_name}' "
+                f"and calls '{rf_name}' on it, but it calls a method not "
+                "annotated deterministic, so the call may query a value "
+                f"'{set_name}' does not hold"
+            )
+            suggestion = (
+                "Evaluate the value once into a local, then insert the local "
+                "and call the random function on it"
+            )
+        elif explained is not None:
+            method_name, query = explained
+            reason = (
+                f"'{method_name}' inserts '{query.proj}' into '{set_name}' "
+                f"but may change it before calling '{rf_name}' on it, so "
+                f"'{set_name}' need not hold the point '{rf_name}' is "
+                "queried on"
+            )
+            suggestion = (
+                "Do not reassign the inserted value, or anything it reads, "
+                "before the random-function call"
+            )
+        else:
+            reason = (
+                f"RF '{rf_name}' input is sampled <-uniq[{set_name}], but "
+                f"'{set_name}' is not provably a superset of '{rf_name}'.domain "
+                "(its relevant projection): some RF call site does not add its "
+                "argument to the exclusion set, so RF(input) may not be fresh"
+            )
+            suggestion = (
+                f"sample with <-uniq[{rf_name}.domain], or ensure every RF "
+                "call site inserts its input's matching component into the "
+                "exclusion set"
+            )
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Fresh Input RF To Uniform",
+                reason=reason,
+                location=stmt.origin,
+                suggestion=suggestion,
+                variable=rf_name,
+                method=None,
+            )
+        )
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         # Don't transform inside loop bodies — the same <-uniq sample
         # would be evaluated multiple times per game execution.
@@ -1721,6 +1893,7 @@ class _FreshInputRFTransformer(BlockTransformer):
             # would yield an unsound RF(v) -> uniform replacement.
             set_name = _get_unique_set_name(stmt.unique_set)
             proj_index = _index_of_var_in_arg(rf_call.args[0], var_name)
+            proof_namespace = self.ctx.proof_namespace if self.ctx is not None else {}
             if proj_index is False or self.game is None:
                 _adequate = False
             else:
@@ -1730,30 +1903,19 @@ class _FreshInputRFTransformer(BlockTransformer):
                     set_name,
                     proj_index,  # type: ignore[arg-type]
                     self.field_names,
+                    proof_namespace,
                 )
             if not _adequate:
-                if self.ctx is not None:
-                    self.ctx.near_misses.append(
-                        NearMiss(
-                            transform_name="Fresh Input RF To Uniform",
-                            reason=(
-                                f"RF '{rf_name}' input is sampled <-uniq"
-                                f"[{set_name}], but '{set_name}' is not "
-                                f"provably a superset of '{rf_name}'.domain "
-                                "(its relevant projection): some RF call site "
-                                "does not add its argument to the exclusion "
-                                "set, so RF(input) may not be fresh"
-                            ),
-                            location=stmt.origin,
-                            suggestion=(
-                                f"sample with <-uniq[{rf_name}.domain], or "
-                                "ensure every RF call site inserts its input's "
-                                "matching component into the exclusion set"
-                            ),
-                            variable=rf_name,
-                            method=None,
-                        )
+                explained = None
+                if self.game is not None and proj_index is not False:
+                    explained = _explained_unrecorded_query(
+                        self.game,
+                        rf_name,
+                        set_name,
+                        proj_index,  # type: ignore[arg-type]
+                        proof_namespace,
                     )
+                self._record_near_miss(stmt, rf_name, set_name, explained)
                 continue
 
             range_type = copy.deepcopy(self.rf_types[rf_name].range_type)

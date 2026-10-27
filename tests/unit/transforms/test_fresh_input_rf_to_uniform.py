@@ -7,12 +7,15 @@ projection).  Two regimes are accepted:
 
   (A) ``S`` is the called RF's own ``RF.domain``; or
   (B) ``S`` is a persistent, never-reset game field into which every RF call
-      site inserts its argument's matching component (projection-tracking).
+      site inserts its argument's matching component (projection-tracking),
+      before the call and with the value the call queries.
 
 The transform must NOT fire when neither holds -- in particular when ``S`` is
 an own-outputs-only set that ignores an adversary oracle's queries to the same
 RF (which would make ``RF(v)`` not actually fresh).
 """
+
+import pytest
 
 from proof_frog import frog_ast, frog_parser
 from proof_frog.transforms._base import PipelineContext
@@ -388,3 +391,256 @@ def test_f001_unconditional_tracking_add_still_fires() -> None:
     )
     src = str(transformed)
     assert "<- BitString<m>" in src and "RF(v)" not in src
+
+
+# ---------------------------------------------------------------------------
+# Regime (B): the call must query the value the insertion recorded.
+# ---------------------------------------------------------------------------
+
+
+def _fired(game_src: str) -> bool:
+    transformed, _ = _apply(game_src)
+    return "__fresh_rf_" in str(transformed)
+
+
+def _hash_game(body: str) -> str:
+    return f"""
+    Game G() {{
+        Function<BitString<2>, BitString<2>> H;
+        Set<BitString<2>> seen;
+        Void Initialize() {{
+            H <- Function<BitString<2>, BitString<2>>;
+        }}
+        BitString<2> Hash(BitString<2> x, Bool c) {{
+            {body}
+        }}
+        BitString<2> Fresh() {{
+            BitString<2> v <-uniq[seen] BitString<2>;
+            return H(v);
+        }}
+    }}
+    """
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # Hash records x and queries 0b00, so Fresh may draw 0b00.
+        "seen = seen union {x}; x = 0b00; return H(x);",
+        "seen = seen union {x}; if (c) { x = 0b00; } return H(x);",
+        "seen = seen union {x}; if (c) { } else { x = 0b00; } return H(x);",
+        "seen = seen union {x}; if (c) { if (c) { x = 0b00; } } return H(x);",
+        "seen = seen union {x}; for (Int i = 0 to 1) { x = 0b00; } return H(x);",
+        "seen = seen union {x}; x <- BitString<2>; return H(x);",
+        "seen = seen union {x}; x = 0b00; if (c) { return H(x); } return 0b00;",
+        # The call reads a different binding of x.
+        "seen = seen union {x}; if (c) { BitString<2> x = 0b00; return H(x); } "
+        "return 0b00;",
+        # The insertion follows the call.
+        "BitString<2> y = H(x); x = 0b00; seen = seen union {x}; return y;",
+        "BitString<2> y = H(x); BitString<2> w <-uniq[seen] BitString<2>; "
+        "seen = seen union {x}; return y + H(w);",
+        # The draw records w, then w changes.
+        "BitString<2> w <-uniq[seen] BitString<2>; w = x; return H(w);",
+        # The draw is skipped when c is false.
+        "if (c) { x <-uniq[seen] BitString<2>; } return H(x);",
+    ],
+)
+def test_rewritten_insertion_not_simplified(body: str) -> None:
+    assert not _fired(_hash_game(body))
+
+
+def test_call_on_other_expression_not_simplified() -> None:
+    assert not _fired(_hash_game("seen = seen union {x}; return H(x + 0b01);"))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "seen = seen union {y[0]}; y = [0b00, y[1]]; return H(y);",
+        "seen = seen union {y[0]}; y[0] = 0b00; return H(y);",
+    ],
+)
+def test_rewritten_tuple_projection_not_simplified(body: str) -> None:
+    assert not _fired(f"""
+        Game G() {{
+            Function<[BitString<2>, BitString<2>], BitString<2>> H;
+            Set<BitString<2>> seen;
+            Void Initialize() {{
+                H <- Function<[BitString<2>, BitString<2>], BitString<2>>;
+            }}
+            BitString<2> Challenge(BitString<2> x) {{
+                BitString<2> v <-uniq[seen] BitString<2>;
+                return H([v, x]);
+            }}
+            BitString<2> Eval([BitString<2>, BitString<2>] y) {{
+                {body}
+            }}
+        }}
+        """)
+
+
+def _initialize_game(initialize: str) -> str:
+    # Only Initialize and Fresh query H, so a later query never meets v.
+    return f"""
+    Game G(Bool c) {{
+        Function<BitString<2>, BitString<2>> H;
+        Set<BitString<2>> seen;
+        BitString<2> y;
+        Void Initialize() {{
+            H <- Function<BitString<2>, BitString<2>>;
+            {initialize}
+        }}
+        BitString<2> Reveal() {{
+            return y;
+        }}
+        BitString<2> Fresh() {{
+            BitString<2> v <-uniq[seen] BitString<2>;
+            return H(v);
+        }}
+    }}
+    """
+
+
+@pytest.mark.parametrize(
+    "initialize",
+    [
+        "BitString<2> u = 0b00; seen = seen union {u}; u = 0b11; y = H(u);",
+        "BitString<2> u = 0b00; seen = seen union {u}; if (c) { u = 0b11; } "
+        "y = H(u);",
+    ],
+)
+def test_rewritten_insertion_in_initialize_not_simplified(initialize: str) -> None:
+    assert not _fired(_initialize_game(initialize))
+
+
+@pytest.mark.parametrize(
+    "initialize",
+    [
+        "BitString<2> u = 0b00; seen = seen union {u}; y = H(u);",
+        "BitString<2> u = 0b00; u = 0b01; seen = seen union {u}; y = H(u);",
+        "BitString<2> u = 0b00; seen = seen union {u}; BitString<2> t = 0b01; "
+        "y = H(u);",
+        "BitString<2> u = 0b00; seen = seen union {u}; y = H(u); u = 0b11;",
+        "BitString<2> u = 0b00; seen = seen union {u}; if (c) { y = H(u); }",
+        "BitString<2> u = 0b00; if (c) { seen = seen union {u}; y = H(u); }",
+        "BitString<2> u <-uniq[seen] BitString<2>; y = H(u);",
+        "if (c) { BitString<2> u <-uniq[seen] BitString<2>; y = H(u); }",
+    ],
+)
+def test_recorded_value_still_simplified(initialize: str) -> None:
+    assert _fired(_initialize_game(initialize))
+
+
+# ---------------------------------------------------------------------------
+# Regime (B): an inserted element that calls a method may differ from the
+# queried one, since a method call returns a fresh value each time unless the
+# method is annotated deterministic.
+# ---------------------------------------------------------------------------
+
+_CALL_PRIMITIVE = """
+Primitive P() {
+    BitString<2> G();
+    BitString<2> f(BitString<2> x);
+    deterministic BitString<2> D(BitString<2> x);
+    deterministic BitString<2> DG();
+}
+"""
+
+
+def _fired_with_primitive(game_src: str) -> bool:
+    game = frog_parser.parse_game(game_src)
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"S": frog_parser.parse_primitive_file(_CALL_PRIMITIVE)},
+        subsets_pairs=[],
+    )
+    return "__fresh_rf_" in str(FreshInputRFToUniform().apply(game, ctx))
+
+
+def _call_game(hash_method: str = "", initialize: str = "") -> str:
+    return f"""
+    Game G(P S, BitString<2> k) {{
+        Function<BitString<2>, BitString<2>> H;
+        Set<BitString<2>> seen;
+        BitString<2> y;
+        Void Initialize() {{
+            H <- Function<BitString<2>, BitString<2>>;
+            {initialize}
+        }}
+        BitString<2> Reveal() {{
+            return y;
+        }}
+        {hash_method}
+        BitString<2> Fresh() {{
+            BitString<2> v <-uniq[seen] BitString<2>;
+            return H(v);
+        }}
+    }}
+    """
+
+
+@pytest.mark.parametrize(
+    "hash_method",
+    [
+        # Each S.f(x) / S.G() may return a different value, so seen records
+        # one value while H is queried on another.
+        "BitString<2> Hash(BitString<2> x) "
+        "{ seen = seen union {S.f(x)}; return H(S.f(x)); }",
+        "BitString<2> Hash() { seen = seen union {S.G()}; return H(S.G()); }",
+        "BitString<2> Hash(BitString<2> x) "
+        "{ seen = seen union {S.D(S.f(x))}; return H(S.D(S.f(x))); }",
+        "BitString<2> Hash(BitString<2> x) "
+        "{ seen = seen union {x + S.G()}; return H(x + S.G()); }",
+    ],
+)
+def test_inserted_nondeterministic_call_not_simplified(hash_method: str) -> None:
+    assert not _fired_with_primitive(_call_game(hash_method))
+    # Without the primitive in scope, no call is known to be deterministic.
+    assert not _fired(_call_game(hash_method))
+
+
+@pytest.mark.parametrize(
+    "initialize",
+    [
+        # As in Hash above, but in Initialize, the only other H caller.
+        "seen = seen union {S.f(k)}; y = H(S.f(k));",
+        "seen = seen union {S.G()}; y = H(S.G());",
+    ],
+)
+def test_inserted_nondeterministic_call_in_initialize_not_simplified(
+    initialize: str,
+) -> None:
+    assert not _fired_with_primitive(_call_game(initialize=initialize))
+
+
+# Only Initialize and Fresh query H below, so a later query never meets v.
+@pytest.mark.parametrize(
+    "initialize",
+    [
+        "seen = seen union {S.D(k)}; y = H(S.D(k));",
+        "seen = seen union {S.DG()}; y = H(S.DG());",
+        "seen = seen union {S.D(k + S.DG())}; y = H(S.D(k + S.DG()));",
+        # One evaluation of a non-deterministic call, inserted and queried.
+        "BitString<2> u = S.f(k); seen = seen union {u}; y = H(u);",
+    ],
+)
+def test_inserted_deterministic_call_still_simplified(initialize: str) -> None:
+    assert _fired_with_primitive(_call_game(initialize=initialize))
+
+
+def test_inserted_deterministic_call_rewritten_argument_not_simplified() -> None:
+    assert not _fired_with_primitive(
+        _call_game(
+            initialize="BitString<2> u = k; seen = seen union {S.D(u)}; "
+            "u = 0b00; y = H(S.D(u));"
+        )
+    )
+
+
+def test_inserted_deterministic_call_unknown_primitive_not_simplified() -> None:
+    # With an empty namespace S.D cannot be resolved, so it is not trusted.
+    assert not _fired(
+        _call_game(initialize="seen = seen union {S.D(k)}; y = H(S.D(k));")
+    )

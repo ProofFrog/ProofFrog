@@ -1,0 +1,8 @@
+// Audit artifact: SplitOpaqueTupleField (Round 2, Phase 1, family 4), proof-level.
+// Target pass: SplitOpaqueTupleField (proof_frog/transforms/inlining.py L5020-5024).
+// Trivial abstract primitive supplying an opaque tuple-returning call `Gen()`
+// so a game field assignment `p = S.Gen();` has a non-literal (opaque) RHS,
+// which is exactly the shape the pass exists to split.
+Primitive Sampler() {
+    [Int, Int] Gen();
+}

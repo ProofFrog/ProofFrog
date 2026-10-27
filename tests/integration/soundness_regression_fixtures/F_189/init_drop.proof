@@ -1,0 +1,26 @@
+// Audit artifact: SplitOpaqueTupleField ATTACK-1 (field initializer dropped),
+// proof-level. Claims InitDropProp(S).Real == InitDropProp(S).Random in a
+// single interchangeability hop. The theorem is FALSE: the distinguisher
+// calls Peek() once before Refresh(); Real returns 1 w.p. 1 (field
+// initializer [1, 2]), Random reads an unassigned field (observable
+// undefined-read event, SEMANTICS.md sec 4.1 / 7.A.1). Advantage 1.
+//
+// SOUND engine: prove must REJECT this hop.
+// UNSOUND (as prosecuted): SplitOpaqueTupleField drops Real's field
+// initializer while splitting p, making the canonical forms equal, and
+// prove ACCEPTS a false theorem.
+import 'sampler.primitive';
+import 'init_drop.game';
+
+proof:
+
+let:
+    Sampler S = Sampler();
+
+theorem:
+    InitDropProp(S);
+
+games:
+
+    InitDropProp(S).Real against InitDropProp(S).Adversary;
+    InitDropProp(S).Random against InitDropProp(S).Adversary;

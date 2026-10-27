@@ -1,0 +1,21 @@
+// Attack 5 (DeduplicateDeterministicCalls) e2e artifact.
+// Claims as a THEOREM (no assumptions) that Left == Right in attack5_prop.game.
+// A distinguisher exists (O(w) once: |M.keys| changes 0 -> 1 across the write
+// M[w]=w, so Left computes F(0)+F(1) and Right computes F(0)+F(0)), so a sound
+// engine must reject this proof. If `prove` succeeds, the FieldAccess blind
+// spot in the arg-variable collection is confirmed unsound end-to-end.
+import 'DetPrimS.primitive';
+import 'attack5_prop.game';
+
+proof:
+
+let:
+    Int n;
+    DetPrimS F = DetPrimS(BitString<n>);
+
+theorem:
+    Attack5Prop(F);
+
+games:
+    Attack5Prop(F).Left against Attack5Prop(F).Adversary;
+    Attack5Prop(F).Right against Attack5Prop(F).Adversary;

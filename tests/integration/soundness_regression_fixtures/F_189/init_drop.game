@@ -1,0 +1,50 @@
+// Audit artifact: SplitOpaqueTupleField ATTACK-1 (field initializer dropped),
+// proof-level. Target pass: SplitOpaqueTupleField
+// (proof_frog/transforms/inlining.py L4693-4877; wrapper L5020-5024).
+//
+// Hypothesis: the pass never reads Field.value; it deletes the tuple field
+// `[Int, Int] p = [1, 2];` and replaces it with `Int p_0;` carrying NO
+// initializer (L4816), so Real's defined initial value is lost.
+//
+// Real:   field p = [1, 2]; Peek() returns p[0]; Refresh() overwrites p with
+//         the opaque S.Gen(). Calling Peek() first returns 1 with prob. 1.
+// Random: hand-written image of the (unsound) split: field `Int p0;` with no
+//         initializer; Peek() returns p0; Refresh() stores S.Gen()[0] into p0.
+//         Calling Peek() first is a read of an unassigned field -- an
+//         adversary-observable undefined-read event (SEMANTICS.md sec 4.1,
+//         owner ruling 2026-06-28 sec 7.A.1).
+//
+// Distinguisher: call Peek() once, before Refresh(). Real outputs 1 w.p. 1;
+// Random exhibits the undefined-read event w.p. 1. Advantage 1.
+//
+// If the pass is SOUND: the engine must NOT prove Real == Random.
+// If UNSOUND as prosecuted: the pass canonicalizes Real into exactly Random's
+// shape (initializer dropped) and the hop is wrongly accepted.
+import 'sampler.primitive';
+
+Game Real(Sampler S) {
+    [Int, Int] p = [1, 2];
+
+    Int Peek() {
+        return p[0];
+    }
+
+    Void Refresh() {
+        p = S.Gen();
+    }
+}
+
+Game Random(Sampler S) {
+    Int p0;
+
+    Int Peek() {
+        return p0;
+    }
+
+    Void Refresh() {
+        [Int, Int] t = S.Gen();
+        p0 = t[0];
+    }
+}
+
+export as InitDropProp;

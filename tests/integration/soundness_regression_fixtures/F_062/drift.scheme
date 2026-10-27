@@ -1,0 +1,11 @@
+// Audit artifact: MergeProductSamples ATTACK-1 (sampling-domain drift), proof-level.
+// Identity scheme; exists only so the proof has a target scheme.
+import 'drift.primitive';
+
+Scheme IdScheme(Int lambda) extends Drift {
+    Int lambda = lambda;
+
+    deterministic BitString<lambda> id(BitString<lambda> x) {
+        return x;
+    }
+}

@@ -1,0 +1,10 @@
+// Target pass: DeadGuardedAssignmentElimination (control_flow.py L2269-2273).
+// Support file: trivial scheme implementing Trivial, used only to give the
+// attack proofs a concrete theorem subject.
+import 'Trivial.primitive';
+
+Scheme TrivialScheme() extends Trivial {
+    Int Id(Int x) {
+        return x;
+    }
+}

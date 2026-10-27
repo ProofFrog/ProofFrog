@@ -1,0 +1,24 @@
+// Audit artifact: RedundantFieldCopy (inlining.py L1657-1661 / L659-771), attack A3.
+// E2e reachability probe for the decl_index > index divergence (confirmed at
+// pass level via harness_pass_level.py A3). Real contains the typechecker-
+// accepted redeclaration shape [BitString<n> v = 0^n; f = v;
+// BitString<n> v <- BitString<n>;]. Expected: Alpha Rename freshens the
+// redeclared v before RedundantFieldCopy runs, so prove terminates (no hang).
+// If prove hangs or crashes with RecursionError, the divergence is reachable
+// end-to-end from accepted source. Ideal (f = 0^n) matches the natural
+// last-write reading of Real's Initialize... note: under the natural reading
+// f = v = 0^n deterministically, so Real vs Ideal is a SOUND hop here; this
+// probe is about termination, not acceptance.
+import 'A3_DeclAfterCopy.game';
+
+proof:
+
+let:
+    Int n;
+
+theorem:
+    A3DeclAfterCopy(n);
+
+games:
+    A3DeclAfterCopy(n).Real against A3DeclAfterCopy(n).Adversary;
+    A3DeclAfterCopy(n).Ideal against A3DeclAfterCopy(n).Adversary;

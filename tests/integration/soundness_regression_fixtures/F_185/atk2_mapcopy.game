@@ -1,0 +1,39 @@
+// AUDIT ATTACK FILE -- target pass: ForwardExpressionAlias (inlining.py L1261-1268)
+// ATK-2 (Path P): `F = M;` (field = local, Variable RHS) triggers the
+// local->field propagation path, whose PRIVATE pre-#225 write scanner
+// `is_written_to_fv` (L839-851) only sees writes whose l-value is a plain
+// Variable. The element write `F[0] = 0;` (ArrayAccess l-value) is invisible,
+// so the later read of M is retargeted to the diverged field F.
+//
+// Maps are values (SEMANTICS.md 6.7): `F = M` snapshots M, then F[0] = 0
+// diverges F from M. Left returns M[0] = a; Right returns F[0] = 0.
+// Distinguisher: call Oracle(1) once; output 1 iff result == 1. Advantage 1.
+//
+// Expected engine behavior if the pass is SOUND: the hop Left -> Right is
+// rejected. Expected if UNSOUND: prove accepts (transformed Left IS Right).
+
+Game Left(Int lambda) {
+    Map<Int, Int> F;
+
+    Int Oracle(Int a) {
+        Map<Int, Int> M;
+        M[0] = a;
+        F = M;
+        F[0] = 0;
+        return M[0];
+    }
+}
+
+Game Right(Int lambda) {
+    Map<Int, Int> F;
+
+    Int Oracle(Int a) {
+        Map<Int, Int> M;
+        M[0] = a;
+        F = M;
+        F[0] = 0;
+        return F[0];
+    }
+}
+
+export as MapCopyAlias;

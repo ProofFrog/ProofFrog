@@ -1,0 +1,54 @@
+// Target pass: DeadGuardedAssignmentElimination (control_flow.py L2269-2273).
+// Attack A4 (referential mismatch via shadowing): an inner local x shadows
+// the parameter x; the path fact string "x == 1" (about the inner x, always
+// 1) entails the guard "x == 1" (about the parameter x) by bare string
+// comparison. Right is the literal post-kill image of Left.
+//
+// Distinguisher refuting Left == Right: one call O(5, true).
+//   Left: inner x = 1 makes the fact true, v = true; parameter x = 5 at
+//         the guard, inner guard fails -> returns 1.
+//   Right: v always false -> returns 0.
+// Advantage 1. NOTE: semantic analysis may reject the shadowed
+// redeclaration; if so this shape is only reachable as an AST-level
+// transform artifact (pass-level harness covers it).
+import 'Trivial.primitive';
+
+Game Left(Trivial T) {
+    Int O(Int x, Bool c) {
+        Bool v = false;
+        if (c) {
+            Int x = 1;
+            if (x == 1) {
+                v = c;
+            }
+        }
+        if (v) {
+            if (x == 1) {
+                return 0;
+            }
+            return 1;
+        }
+        return 0;
+    }
+}
+
+Game Right(Trivial T) {
+    Int O(Int x, Bool c) {
+        Bool v = false;
+        if (c) {
+            Int x = 1;
+            if (x == 1) {
+                v = false;
+            }
+        }
+        if (v) {
+            if (x == 1) {
+                return 0;
+            }
+            return 1;
+        }
+        return 0;
+    }
+}
+
+export as DistinguishA4;

@@ -1,0 +1,7 @@
+// Abstract primitive with an UNANNOTATED (hence non-deterministic, per
+// SEMANTICS 6.4 / ruling 7.A.6) Int-valued method. Each invocation of f
+// resolves its non-determinism with fresh i.i.d. coins. Used by Attack A5
+// of the HoistGroupExpToInitialize audit.
+Primitive Noise() {
+    Int f(Int x);
+}

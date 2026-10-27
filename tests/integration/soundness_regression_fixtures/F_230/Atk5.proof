@@ -1,0 +1,22 @@
+// Target pass: HoistGroupExpToInitialize. Attack A5 nondet call in exponent.
+// Hypothesis: has_nondeterministic_call is never applied to the exponent, and
+// the callee name N is hidden under the FuncCall's FieldAccess, so the pass
+// freezes ONE draw of N.f(k) at Initialize-end.
+// Expected if pass SOUND: proof INVALID (two Chal() calls: Right always equal,
+// Left equal only with collision prob < 1; advantage 1 - p > 0).
+// Expected if pass UNSOUND as prosecuted: proof accepted as valid.
+import 'Noise.primitive';
+import 'Atk5.game';
+
+proof:
+
+let:
+    Group G;
+    Noise N = Noise();
+
+theorem:
+    Atk5(G, N);
+
+games:
+    Atk5(G, N).Left against Atk5(G, N).Adversary;
+    Atk5(G, N).Right against Atk5(G, N).Adversary;

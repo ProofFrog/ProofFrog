@@ -1,0 +1,14 @@
+// Set-alias variant of DetPrim for the proof-level (CLI prove) artifacts.
+// Target pass: proof_frog/transforms/inlining.py DeduplicateDeterministicCalls.
+// Uses a Set alias (Block) instead of BitString<n> signatures because the
+// prove-context typechecker does not unify BitString<F.n> (instantiated
+// method return type) with BitString<n> (game-local literal/param types).
+// Eval/EvalInt are deterministic (collected by the pass); Gen is NOT
+// (fresh i.i.d. coins per invocation, SEMANTICS.md 6.4).
+Primitive DetPrimS(Set S) {
+    Set Block = S;
+
+    deterministic Block Eval(Block x);
+    deterministic Block EvalInt(Int c);
+    Block Gen();
+}

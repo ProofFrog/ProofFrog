@@ -1,0 +1,44 @@
+// AUDIT ATTACK FILE -- target pass: InlineLocalTupleLiteral (inlining.py L1271-1279).
+// ATK-2: the write-set helper is_written_to (inlining.py L1111-1123) only
+// matches plain-Variable lvalues, so the map-element write `M[0] = M[0] + 1;`
+// between the tuple declaration and the use of v[0] is invisible, and the
+// pass substitutes the STALE read `M[0]` (captured before the increment) with
+// a FRESH read (after the increment).
+//
+// Real: O() returns the pre-increment value, i.e. n-1 on the n-th call
+// (first call returns 0). Random is, verbatim, the hand-applied pass output:
+// returns the post-increment value, i.e. n on the n-th call (first call
+// returns 1). Distinguisher: call O() once; output 1 iff the reply == 1.
+// Advantage 1.
+//
+// Expected if the pass is SOUND: the hop Real -> Random is rejected.
+// Expected if UNSOUND: prove reports "Proof Succeeded!".
+
+Game Real(Int lambda) {
+    Map<Int, Int> M;
+
+    Void Initialize() {
+        M[0] = 0;
+    }
+
+    Int O() {
+        [Int, Int] v = [M[0], 0];
+        M[0] = M[0] + 1;
+        return v[0];
+    }
+}
+
+Game Random(Int lambda) {
+    Map<Int, Int> M;
+
+    Void Initialize() {
+        M[0] = 0;
+    }
+
+    Int O() {
+        M[0] = M[0] + 1;
+        return M[0];
+    }
+}
+
+export as Atk2MapWrite;

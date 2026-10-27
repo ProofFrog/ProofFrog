@@ -1,0 +1,47 @@
+// AUDIT ATTACK FILE -- target pass: InlineLocalTupleLiteral (inlining.py L1271-1279).
+// ATK-1b: variant of ATK-1 where the written index (v[0]) and the read index
+// (v[1]) DIFFER, so each constant index occurs exactly once and the upstream
+// ExtractRepeatedTupleAccess pass (which intercepted the original ATK-1 shape
+// e2e by CSE-extracting the doubly-occurring v[0]) cannot fire. The lvalue
+// `v[0] = 1;` is an ArrayAccess, so the pass's is_written_to check (plain
+// Variable lvalues only) misses the reassignment, counts the lvalue as an
+// ordinary indexed use, and the substitution rewrites the LVALUE itself into
+// `a = 1;` -- a write-through to the field the tuple was initialized from.
+//
+// Real: `v` is a local copy; `v[0] = 1;` never touches field `a`; O() returns
+// v[1] + a = 0 + 0 = 0 on every call, and `a` stays 0 forever. Random is,
+// verbatim, the hand-applied pass output: `a = 1; return 0 + a;` -- returns 1
+// and persistently corrupts `a`. Distinguisher: call O() once; output the
+// reply. Advantage 1.
+//
+// Expected if the pass is SOUND: the hop Real -> Random is rejected.
+// Expected if UNSOUND: prove reports "Proof Succeeded!".
+
+Game Real(Int lambda) {
+    Int a;
+
+    Void Initialize() {
+        a = 0;
+    }
+
+    Int O() {
+        [Int, Int] v = [a, 0];
+        v[0] = 1;
+        return v[1] + a;
+    }
+}
+
+Game Random(Int lambda) {
+    Int a;
+
+    Void Initialize() {
+        a = 0;
+    }
+
+    Int O() {
+        a = 1;
+        return 0 + a;
+    }
+}
+
+export as Atk1BTupleLvalue;

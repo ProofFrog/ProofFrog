@@ -1,0 +1,25 @@
+// Attack proof for transform pass: ExtractRepeatedTupleAccess (prosecution
+// attack 3: tuple-phase element write v[0] = e evades the reassignment
+// guard and is itself rewritten into a write to the CSE temporary).
+// Hypothesis: Real.O's element update lands in the dead temporary
+// __cse_v_0__, so Real canonicalizes to `return v;` and the hop to Random
+// is accepted, although a distinguisher (call O([1^n, 1^n]), test first
+// component == 0^n) has advantage 1.
+// Expected if pass is SOUND: prove REJECTS the single hop.
+// Expected if pass is UNSOUND as prosecuted: prove ACCEPTS the proof.
+import 'Dummy.primitive';
+import 'TrivialDummy.scheme';
+import 'Attack3Prop.game';
+
+proof:
+
+let:
+    Int n;
+    TrivialDummy T = TrivialDummy(n);
+
+theorem:
+    Attack3Prop(T);
+
+games:
+    Attack3Prop(T).Real against Attack3Prop(T).Adversary;
+    Attack3Prop(T).Random against Attack3Prop(T).Adversary;

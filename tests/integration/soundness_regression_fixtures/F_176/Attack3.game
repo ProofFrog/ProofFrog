@@ -1,0 +1,47 @@
+// Audit artifact: CrossMethodFieldAlias ATTACK 3 (nested lvalue write).
+// Hypothesis: _fields_assigned_in_block only recognizes single-level
+// ArrayAccess lvalues; the write M[0][0] = v in Update is invisible, so the
+// guarded field M appears immutable and P.f(M[0][0]) in Update is replaced
+// by c = P.f(0) from Initialize.
+// Expected if sound: hop rejected (Real Update(5) returns f(5); Ideal returns
+// f(0); f = identity distinguishes with advantage 1).
+// Expected if unsound: hop certified.
+import 'Det.primitive';
+
+Game Real(Det P) {
+    Map<Int, Map<Int, Int>> M;
+    Int c;
+    Void Initialize() {
+        Map<Int, Int> inner;
+        inner[0] = 0;
+        M[0] = inner;
+        c = P.f(M[0][0]);
+    }
+    Int Reveal() {
+        return c;
+    }
+    Int Update(Int v) {
+        M[0][0] = v;
+        return P.f(M[0][0]);
+    }
+}
+
+Game Ideal(Det P) {
+    Map<Int, Map<Int, Int>> M;
+    Int c;
+    Void Initialize() {
+        Map<Int, Int> inner;
+        inner[0] = 0;
+        M[0] = inner;
+        c = P.f(M[0][0]);
+    }
+    Int Reveal() {
+        return c;
+    }
+    Int Update(Int v) {
+        M[0][0] = v;
+        return c;
+    }
+}
+
+export as Attack3;

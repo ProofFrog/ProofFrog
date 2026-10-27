@@ -1,0 +1,23 @@
+// Target pass: DeadGuardedAssignmentElimination (control_flow.py L2269-2273).
+// Attack A4 proof-level probe (shadowing). Hypothesis: string-keyed path
+// facts conflate the inner shadowing local x with the outer parameter x,
+// so the engine wrongly proves Left interchangeable with Right (Left's
+// post-kill image). Distinguisher: O(5, true) -> Left 1, Right 0.
+// Expected if pass SOUND (or if the typechecker rejects shadowing): proof
+// fails / is rejected. Expected if UNSOUND and shadowing typechecks:
+// proof accepted as valid.
+import 'Trivial.primitive';
+import 'Trivial.scheme';
+import 'AttackA4.game';
+
+proof:
+
+let:
+    TrivialScheme S = TrivialScheme();
+
+theorem:
+    DistinguishA4(S);
+
+games:
+    DistinguishA4(S).Left against DistinguishA4(S).Adversary;
+    DistinguishA4(S).Right against DistinguishA4(S).Adversary;

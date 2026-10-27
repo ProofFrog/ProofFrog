@@ -1,0 +1,21 @@
+// Attack 4 (DeduplicateDeterministicCalls) e2e artifact.
+// Claims as a THEOREM (no assumptions) that Left == Right in attack4_prop.game.
+// A distinguisher exists (O(z) with z \!= 0^n: Left returns F(M[0][0]) + F(z)
+// with M[0][0] mutated between the reads; Right reuses the stale first read),
+// so a sound engine must reject this proof. If `prove` succeeds, the pass's
+// single-level-only element-write detector is confirmed unsound end-to-end.
+import 'DetPrimS.primitive';
+import 'attack4_prop.game';
+
+proof:
+
+let:
+    Int n;
+    DetPrimS F = DetPrimS(BitString<n>);
+
+theorem:
+    Attack4Prop(F);
+
+games:
+    Attack4Prop(F).Left against Attack4Prop(F).Adversary;
+    Attack4Prop(F).Right against Attack4Prop(F).Adversary;

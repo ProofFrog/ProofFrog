@@ -1,0 +1,19 @@
+// AUDIT ARTIFACT (ExpandTuple, Attack C2 SOUND CONTROL -- PROSECUTION.md).
+// C2Control.Real and .Mutate ARE interchangeable (both mutate the field to
+// [9,8]; Get() == [9,8] after Poke()). ExpandTuple fires soundly on the tuple
+// field's element writes. A correct engine ACCEPTS -- the SOUND partner to
+// attack_c2.proof.
+
+import 'attack_c2_control.game';
+
+proof:
+
+let:
+    Int n;
+
+theorem:
+    C2Control(n);
+
+games:
+    C2Control(n).Real against C2Control(n).Adversary;
+    C2Control(n).Mutate against C2Control(n).Adversary;

@@ -118,8 +118,11 @@ def _report_initializer_mismatch(
     field: frog_ast.Field,
     other: frog_ast.Field,
     mismatch: str,
+    paired_writes: list[frog_ast.Statement],
 ) -> None:
-    if ctx is None:
+    # With no paired write the fields are never written: they are just two
+    # different constants, not a near miss.
+    if ctx is None or not paired_writes:
         return
     ctx.near_misses.append(
         NearMiss(
@@ -155,7 +158,9 @@ def remove_duplicate_fields(
                 if duplicated_statements is not None:
                     mismatch = _initializer_mismatch(field, other_field)
                     if mismatch is not None:
-                        _report_initializer_mismatch(ctx, field, other_field, mismatch)
+                        _report_initializer_mismatch(
+                            ctx, field, other_field, mismatch, duplicated_statements
+                        )
                         continue
                     # Capture-aware (F-337): ``Variable`` is both Expression and
                     # Type, so a name-keyed substitution would also retype every

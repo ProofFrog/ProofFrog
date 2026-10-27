@@ -3307,3 +3307,39 @@ def test_duplicate_fields_no_near_miss(fields: str, body: str) -> None:
             }}
         }}
         """)
+
+
+def test_duplicate_fields_no_near_miss_for_never_written_constants() -> None:
+    """No write pairs the fields: they are two different constants."""
+    assert not _duplicate_fields_misses("""
+        Game G() {
+            Int a = 1;
+            Int b = 2;
+            Int Get() {
+                return a + b;
+            }
+        }
+        """)
+
+
+def test_duplicate_fields_constants_do_not_hide_real_near_miss() -> None:
+    """Never-written constants `a`, `b` report nothing, so after dedupe the
+    surviving near miss is the one for `c`, `d`, which every write updates
+    alike."""
+    misses = deduplicate_near_misses(_duplicate_fields_misses("""
+        Game G() {
+            Int a = 1;
+            Int b = 2;
+            Int c = 0;
+            Int d = 5;
+            Void Flip() {
+                c = c + 1;
+                d = d + 1;
+            }
+            Int Get() {
+                return a + b + d;
+            }
+        }
+        """))
+    assert len(misses) == 1
+    assert "Fields 'c' and 'd' not merged" in misses[0].reason

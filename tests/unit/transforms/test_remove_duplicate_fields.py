@@ -249,6 +249,23 @@ class TestInitialValues:
             }}
             """)
 
+    def test_copy_paired_different_initial_values_not_merged(self) -> None:
+        """`b = a` pairs every write, but before any `Put` the fields hold
+        different values."""
+        assert not _merges("""
+            Game G() {
+                Int a = 0;
+                Int b = 1;
+                Void Put(Int k) {
+                    a = k;
+                    b = a;
+                }
+                Int Get() {
+                    return b;
+                }
+            }
+            """)
+
     def test_initializers_that_call_not_merged(self) -> None:
         """Each initializer's call may return a different value."""
         assert not _merges("""
@@ -402,6 +419,72 @@ class TestEndToEnd:
                 }
             }
             """,
+        )
+
+    def test_rejects_merge_of_copy_paired_fields_with_different_initializers(
+        self,
+    ) -> None:
+        """Before any `Put`, `Get()` returns 1 in Left and 0 in Right."""
+        assert not _engine_equal(
+            """
+            Game Left() {
+                Int a = 0;
+                Int b = 1;
+                Void Put(Int k) {
+                    a = k;
+                    b = a;
+                }
+                Int Get() {
+                    return b;
+                }
+            }
+            """,
+            """
+            Game Right() {
+                Int a = 0;
+                Void Put(Int k) {
+                    a = k;
+                }
+                Int Get() {
+                    return a;
+                }
+            }
+            """,
+        )
+
+    def test_initializer_near_miss_reaches_diagnosis(self) -> None:
+        """The near miss is matched to the failing hop's diff hunks."""
+        result = ProofEngine().check_equivalent(
+            frog_parser.parse_game("""
+                Game Left() {
+                    Int h = 0;
+                    Int n = 1;
+                    Void Flip() {
+                        h = h + 1;
+                        n = n + 1;
+                    }
+                    Int Both() {
+                        return n + h;
+                    }
+                }
+                """),
+            frog_parser.parse_game("""
+                Game Right() {
+                    Int h = 0;
+                    Void Flip() {
+                        h = h + 1;
+                    }
+                    Int Both() {
+                        return h + 7;
+                    }
+                }
+                """),
+        )
+        assert not result.valid
+        assert result.diagnosis is not None
+        assert any(
+            "Fields 'h' and 'n' not merged" in explanation.reason
+            for explanation in result.diagnosis.explanations
         )
 
     def test_accepts_merge_of_fields_with_equal_initializers(self) -> None:

@@ -1,0 +1,18 @@
+// Positive control: both sides compute the same values under left-associative
+// shared levels for + / - and * / /.
+import 'SameLevel.game';
+
+proof:
+
+let:
+    Int lambda;
+    Int n;
+
+assume:
+
+theorem:
+    SameLevel(lambda, n);
+
+games:
+    SameLevel(lambda, n).Left against SameLevel(lambda, n).Adversary;
+    SameLevel(lambda, n).Right against SameLevel(lambda, n).Adversary;

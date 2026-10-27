@@ -189,13 +189,13 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#addExp.
-    def visitAddExp(self, ctx:GameParser.AddExpContext):
+    # Visit a parse tree produced by GameParser#notEqualsExp.
+    def visitNotEqualsExp(self, ctx:GameParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#notEqualsExp.
-    def visitNotEqualsExp(self, ctx:GameParser.NotEqualsExpContext):
+    # Visit a parse tree produced by GameParser#addSubtractExp.
+    def visitAddSubtractExp(self, ctx:GameParser.AddSubtractExpContext):
         return self.visitChildren(ctx)
 
 
@@ -224,23 +224,18 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#subtractExp.
-    def visitSubtractExp(self, ctx:GameParser.SubtractExpContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by GameParser#equalsExp.
     def visitEqualsExp(self, ctx:GameParser.EqualsExpContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#multiplyExp.
-    def visitMultiplyExp(self, ctx:GameParser.MultiplyExpContext):
+    # Visit a parse tree produced by GameParser#subsetsExp.
+    def visitSubsetsExp(self, ctx:GameParser.SubsetsExpContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#subsetsExp.
-    def visitSubsetsExp(self, ctx:GameParser.SubsetsExpContext):
+    # Visit a parse tree produced by GameParser#multiplyDivideExp.
+    def visitMultiplyDivideExp(self, ctx:GameParser.MultiplyDivideExpContext):
         return self.visitChildren(ctx)
 
 
@@ -301,11 +296,6 @@ class GameVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by GameParser#setMinusExp.
     def visitSetMinusExp(self, ctx:GameParser.SetMinusExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#divideExp.
-    def visitDivideExp(self, ctx:GameParser.DivideExpContext):
         return self.visitChildren(ctx)
 
 

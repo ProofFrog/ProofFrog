@@ -12,11 +12,9 @@ proof: PROOF COLON (LET COLON lets)? (ASSUME COLON assumptions)? (REQUIRES COLON
 
 boundExpression
 	: <assoc=right> boundExpression CARET boundExpression   #boundExponentiate
-	| boundExpression TIMES boundExpression                 #boundMultiply
-	| boundExpression DIVIDE boundExpression                #boundDivide
+	| boundExpression op=(TIMES | DIVIDE) boundExpression   #boundMultiplyDivide
 	| SUBTRACT boundExpression                              #boundNegate
-	| boundExpression PLUS boundExpression                  #boundAdd
-	| boundExpression SUBTRACT boundExpression              #boundSubtract
+	| boundExpression op=(PLUS | SUBTRACT) boundExpression  #boundAddSubtract
 	| VBAR type VBAR                                        #boundCardinality
 	| ADVANTAGE L_PAREN notion (COMPOSE reductionRef)? R_PAREN #boundAdvantage
 	| lvalue                                                #boundLvalue

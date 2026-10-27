@@ -9,6 +9,7 @@ from antlr4 import (
     CommonTokenStream,
     BailErrorStrategy,
     ParserRuleContext,
+    Token,
     error as antlr_error,
 )
 from antlr4.error.ErrorListener import ErrorListener
@@ -706,6 +707,21 @@ def _binary_operation(
     )
 
 
+# `*`/`/` and `+`/`-` are each one left-associative grammar alternative
+# (`expression op=(PLUS | SUBTRACT) expression`), so the operator is read
+# from the matched token rather than from the alternative's label.
+_ARITHMETIC_OPERATORS: dict[str, frog_ast.BinaryOperators] = {
+    "+": frog_ast.BinaryOperators.ADD,
+    "-": frog_ast.BinaryOperators.SUBTRACT,
+    "*": frog_ast.BinaryOperators.MULTIPLY,
+    "/": frog_ast.BinaryOperators.DIVIDE,
+}
+
+
+def _arithmetic_operator(token: Token) -> frog_ast.BinaryOperators:
+    return _ARITHMETIC_OPERATORS[token.text]
+
+
 def _bound_binary_operation(
     operator: frog_ast.BinaryOperators,
     visit: Type[PrimitiveVisitor.visit],
@@ -874,25 +890,15 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
     ) -> frog_ast.BinaryOperation:
         return _binary_operation(frog_ast.BinaryOperators.SETMINUS, self.visit, ctx)
 
-    def visitAddExp(
-        self, ctx: PrimitiveParser.AddExpContext
+    def visitAddSubtractExp(
+        self, ctx: PrimitiveParser.AddSubtractExpContext
     ) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.ADD, self.visit, ctx)
+        return _binary_operation(_arithmetic_operator(ctx.op), self.visit, ctx)
 
-    def visitSubtractExp(
-        self, ctx: PrimitiveParser.SubtractExpContext
+    def visitMultiplyDivideExp(
+        self, ctx: PrimitiveParser.MultiplyDivideExpContext
     ) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.SUBTRACT, self.visit, ctx)
-
-    def visitMultiplyExp(
-        self, ctx: PrimitiveParser.MultiplyExpContext
-    ) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.MULTIPLY, self.visit, ctx)
-
-    def visitDivideExp(
-        self, ctx: PrimitiveParser.DivideExpContext
-    ) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.DIVIDE, self.visit, ctx)
+        return _binary_operation(_arithmetic_operator(ctx.op), self.visit, ctx)
 
     def visitExponentiationExp(
         self, ctx: PrimitiveParser.ExponentiationExpContext
@@ -931,18 +937,8 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             exp = self.visit(ctx.lvalue())
             return exp
 
-        operator: frog_ast.BinaryOperators
-        if ctx.PLUS():
-            operator = frog_ast.BinaryOperators.ADD
-        elif ctx.SUBTRACT():
-            operator = frog_ast.BinaryOperators.SUBTRACT
-        elif ctx.TIMES():
-            operator = frog_ast.BinaryOperators.MULTIPLY
-        elif ctx.DIVIDE():
-            operator = frog_ast.BinaryOperators.DIVIDE
-
         return frog_ast.BinaryOperation(
-            operator,
+            _arithmetic_operator(ctx.op),
             self.visit(ctx.integerExpression()[0]),
             self.visit(ctx.integerExpression()[1]),
         )
@@ -1501,29 +1497,15 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
             frog_ast.BinaryOperators.EXPONENTIATE, self.visit, ctx
         )
 
-    def visitBoundMultiply(
-        self, ctx: ProofParser.BoundMultiplyContext
+    def visitBoundMultiplyDivide(
+        self, ctx: ProofParser.BoundMultiplyDivideContext
     ) -> frog_ast.BinaryOperation:
-        return _bound_binary_operation(
-            frog_ast.BinaryOperators.MULTIPLY, self.visit, ctx
-        )
+        return _bound_binary_operation(_arithmetic_operator(ctx.op), self.visit, ctx)
 
-    def visitBoundDivide(
-        self, ctx: ProofParser.BoundDivideContext
+    def visitBoundAddSubtract(
+        self, ctx: ProofParser.BoundAddSubtractContext
     ) -> frog_ast.BinaryOperation:
-        return _bound_binary_operation(frog_ast.BinaryOperators.DIVIDE, self.visit, ctx)
-
-    def visitBoundAdd(
-        self, ctx: ProofParser.BoundAddContext
-    ) -> frog_ast.BinaryOperation:
-        return _bound_binary_operation(frog_ast.BinaryOperators.ADD, self.visit, ctx)
-
-    def visitBoundSubtract(
-        self, ctx: ProofParser.BoundSubtractContext
-    ) -> frog_ast.BinaryOperation:
-        return _bound_binary_operation(
-            frog_ast.BinaryOperators.SUBTRACT, self.visit, ctx
-        )
+        return _bound_binary_operation(_arithmetic_operator(ctx.op), self.visit, ctx)
 
     def visitBoundNegate(
         self, ctx: ProofParser.BoundNegateContext

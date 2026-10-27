@@ -131,12 +131,19 @@ The following are NOT commutative:
 - `|x|` — cardinality of a set or map, or bit-length of a bitstring, or element count of an array
 
 **Operator precedence** (highest to lowest):
-1. `^` (right-associative)
-2. `*`, `/`
-3. `+`, `-`
-4. `==`, `!=`, `<`, `>`, `<=`, `>=`, `in`, `subsets`
-5. `&&`
-6. `||`, `union`, `\`
+1. Calls `f(x)`, slices `a[i : j]`, `!x`, `|x|`
+2. `^` (right-associative: `a ^ b ^ c` is `a ^ (b ^ c)`)
+3. `*`, `/` (one level, left-associative: `a / b * c` is `(a / b) * c`)
+4. Unary `-` (`-a * b` is `-(a * b)`, `-a + b` is `(-a) + b`)
+5. `+`, `-` (one level, left-associative: `a - b + c` is `(a - b) + c`)
+6. Comparisons and set tests, each its own level in this order: `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `subsets` (so `a != b == c` is `a != (b == c)`)
+7. `&&`
+8. `||`
+9. `union`
+10. `\` (so `S \ T union U` is `S \ (T union U)`)
+
+The arithmetic levels match C, Java and Python. The comparison and set levels do not: write parentheses when mixing two operators from rows 6 to 10 (for example `(S \ T) union U`).
+`||` binds looser than the comparisons, including as bitstring concatenation: `k == a || b` is `(k == a) || b`.
 
 ## 4. Statements
 

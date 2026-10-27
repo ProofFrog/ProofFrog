@@ -5,6 +5,9 @@ A ``reject`` proof claims two distinguishable games are interchangeable: it
 used to print ``Proof Succeeded!`` and must now be refused. An ``accept``
 proof is a true equivalence (or a positive control next to a reject proof)
 that the engine used to reject, crash on, or loop on, and must now verify.
+A ``reject-bound`` proof verifies but claims a ``bound:`` that is not an
+upper bound on what it establishes: the claim used to be reported verified
+and must now be reported ``NOT verified``, failing ``prove``.
 
 Each finding's proof and the files it imports live in
 ``soundness_regression_fixtures/F_<nnn>/``, copied from the audit's attack
@@ -101,6 +104,12 @@ CASES = [
      "a local's concat read M only via M.keys; M[y] = true went unchecked"),
     ("MEMBER-READ-CONCAT-EQUALITY", "stable_concat.proof", "accept",
      "ConcatEqualityDecompose", "positive control for the attack above"),
+    ("ARITH-PRECEDENCE", "sum_reorder.proof", "reject", "SymbolicComputation",
+     "+ bound tighter than -, so SymPy's a - b + 3 re-parsed as a - (b + 3)"),
+    ("ARITH-PRECEDENCE", "same_level_control.proof", "accept", "parser",
+     "positive control: + with -, and * with /, share left-associative levels"),
+    ("ARITH-PRECEDENCE", "claimed_bound.proof", "reject-bound", "parser",
+     "2 - 1 + 1 in a bound: clause read as 2 - (1 + 1), so a too-small claim passed"),
     ("Z3-FIELD-ACCESS", "group_equality.proof", "reject", "Z3 residual check",
      "G.generator == G.identity encoded as G == G"),
     ("Z3-FIELD-ACCESS", "group_branch.proof", "reject", "RemoveUnreachable",
@@ -149,6 +158,10 @@ def test_regression_proof(
     if expected == "accept":
         assert result.returncode == 0, context
         assert "Proof Succeeded!" in output, context
+    elif expected == "reject-bound":
+        assert result.returncode != 0, context
+        assert "Claimed bound NOT verified" in output, context
+        assert "Traceback" not in output, context
     else:
         assert result.returncode != 0, context
         assert "Proof Failed!" in output, context

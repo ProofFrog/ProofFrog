@@ -358,6 +358,15 @@ class BinaryOperation(Expression, Type):
         right_assoc: bool = False,
     ) -> str:
         """Wrap child in parens if needed based on precedence."""
+        # Unary minus binds looser than `*`, `/` and `^` (`-a * b` parses as
+        # `-(a * b)`, `-a ^ 2` as `-(a ^ 2)`), so it needs parentheses as an
+        # operand of those operators.
+        if (
+            isinstance(child, UnaryOperation)
+            and child.operator == UnaryOperators.MINUS
+            and parent_prec > BinaryOperators.ADD.precedence()
+        ):
+            return f"({child})"
         if isinstance(child, BinaryOperation):
             child_prec = child.operator.precedence()
             if child_prec < parent_prec:
@@ -393,6 +402,14 @@ class UnaryOperation(Expression):
         if self.operator == UnaryOperators.SIZE:
             return f"|{self.expression}|"
         if self.operator == UnaryOperators.MINUS:
+            # The operand of a unary minus extends over `*`, `/` and `^`
+            # only; an additive or looser operand needs parentheses.
+            if (
+                isinstance(self.expression, BinaryOperation)
+                and self.expression.operator.precedence()
+                <= BinaryOperators.ADD.precedence()
+            ):
+                return f"-({self.expression})"
             return f"-{self.expression}"
         return "UNDEFINED UNARY OPERATOR"
 

@@ -418,6 +418,12 @@ class NameResolutionVisitor(VariableTypeVisitor):
         self.in_field_access = False
         self.in_parameter_type = False
         self.defining_variable: Optional[frog_ast.Expression] = None
+        # The game or reduction whose body is being walked, and the type this
+        # walk registered for each game and reduction name it has entered, with
+        # its node. A call on a name bound to one of these types reaches a
+        # game's methods rather than a primitive's or scheme's.
+        self.enclosing_game: Optional[frog_ast.Game] = None
+        self.game_types: list[tuple[PossibleType, frog_ast.Game]] = []
 
     def _check_duplicate_names(
         self, node: frog_ast.Primitive | frog_ast.Scheme | frog_ast.Game
@@ -777,6 +783,98 @@ class NameResolutionVisitor(VariableTypeVisitor):
 
     def leave_parameter(self, _: frog_ast.Parameter) -> None:
         self.in_parameter_type = False
+
+    def visit_game(self, game: frog_ast.Game) -> None:
+        super().visit_game(game)
+        # super() registered the game's name, then opened the body's scope.
+        self.game_types.append((self.variable_type_map_stack[-2][game.name], game))
+        self.enclosing_game = game
+
+    def leave_game(self, game: frog_ast.Game) -> None:
+        super().leave_game(game)
+        self.enclosing_game = None
+
+    def visit_reduction(self, reduction: frog_ast.Reduction) -> None:
+        super().visit_reduction(reduction)
+        self.game_types.append(
+            (self.variable_type_map_stack[-2][reduction.name], reduction)
+        )
+        self.enclosing_game = reduction
+
+    def leave_reduction(self, reduction: frog_ast.Reduction) -> None:
+        super().leave_reduction(reduction)
+        self.enclosing_game = None
+
+    def _denoted_game(self, node: frog_ast.Expression) -> Optional[str]:
+        """The kind of game ``node`` names ("game" or "reduction"), if any.
+
+        ``node`` names a game when it is the name of a game or reduction this
+        walk has entered (``G``, ``G(a)``; no inner binding shadowing it) or
+        a game pair (``P``, ``P(a)``, ``P(a).Left``).
+        """
+        name: Optional[str] = None
+        if isinstance(node, frog_ast.ConcreteGame):
+            return "game"
+        if isinstance(node, (frog_ast.Variable, frog_ast.ParameterizedGame)):
+            name = node.name
+        if name is None:
+            return None
+        the_type = self.get_type(name)
+        if isinstance(the_type, list):
+            return "game"
+        for game_type, game in self.game_types:
+            if the_type is game_type:
+                return "reduction" if isinstance(game, frog_ast.Reduction) else "game"
+        return None
+
+    def visit_func_call(self, func_call: frog_ast.FuncCall) -> None:
+        # A game or reduction may not call a game's methods: neither its own
+        # (`G.M()` inside G, or a reduction's own oracle) nor another game's.
+        # The engine resolves no such call, so it treated one as a
+        # side-effect-free opaque call and dropped it.
+        if self.enclosing_game is None:
+            return
+        func = func_call.func
+        target: frog_ast.Expression
+        if isinstance(func, frog_ast.FieldAccess):
+            target, method_name = func.the_object, func.name
+        elif isinstance(func, frog_ast.ConcreteGame):
+            target, method_name = func.game, func.which
+        else:
+            return
+        base = target
+        while isinstance(base, frog_ast.FieldAccess):
+            base = base.the_object
+        target_kind = self._denoted_game(base)
+        if target_kind is None:
+            return
+        enclosing = self.enclosing_game
+        kind = "Reduction" if isinstance(enclosing, frog_ast.Reduction) else "Game"
+        target_name = (
+            target.name
+            if isinstance(target, (frog_ast.Variable, frog_ast.ParameterizedGame))
+            else str(target)
+        )
+        hint = (
+            "a game or reduction may call the methods of primitives and "
+            "schemes (and a reduction those of its challenger), not the "
+            "methods of a game; write the method's body inline instead"
+        )
+        if target is base and target_name == enclosing.name:
+            print_error(
+                func_call,
+                f"{kind} '{enclosing.name}' may not call its own method "
+                f"'{method_name}': a {kind.lower()} may not call its own methods",
+                self.file_name,
+                hint=hint,
+            )
+        print_error(
+            func_call,
+            f"{kind} '{enclosing.name}' may not call method '{method_name}' "
+            f"of {target_kind} '{target_name}'",
+            self.file_name,
+            hint=hint,
+        )
 
     def visit_assignment(self, assignment: frog_ast.Assignment) -> None:
         if assignment.the_type is not None:

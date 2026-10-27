@@ -1,0 +1,14 @@
+// SOUND -> the type checker rejects Calls.Inc() inside Calls.
+// UNSOUND -> prove drops the call as side-effect free and ACCEPTS the hop.
+
+import './SelfCall.game';
+
+proof:
+
+theorem:
+    SelfCall();
+
+games:
+    SelfCall().Calls against SelfCall().Adversary;
+
+    SelfCall().NoCalls against SelfCall().Adversary;

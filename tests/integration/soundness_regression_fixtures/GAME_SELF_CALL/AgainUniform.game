@@ -1,0 +1,18 @@
+// Again's output against a fresh uniform string.
+
+import './Twice.primitive';
+
+Game Real(Twice T) {
+    BitString<T.lambda> Get() {
+        return T.Again();
+    }
+}
+
+Game Random(Twice T) {
+    BitString<T.lambda> Get() {
+        BitString<T.lambda> r <- BitString<T.lambda>;
+        return r;
+    }
+}
+
+export as AgainUniform;

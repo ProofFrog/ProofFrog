@@ -1,0 +1,29 @@
+// Two copies of a counter whose Get does not change it.
+
+Game Left() {
+    Int c;
+    Void Initialize() {
+        c = 0;
+    }
+    Void Inc() {
+        c = c + 1;
+    }
+    Int Get() {
+        return c;
+    }
+}
+
+Game Right() {
+    Int c;
+    Void Initialize() {
+        c = 0;
+    }
+    Void Inc() {
+        c = c + 1;
+    }
+    Int Get() {
+        return c;
+    }
+}
+
+export as Counter;

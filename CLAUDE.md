@@ -94,7 +94,7 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - Python 3.11+, built with Flit (`pyproject.toml`)
 - `parsing/` directory is excluded from black, mypy, and pylint
 - Proof imports and lemma paths resolve relative to the importing file's directory (`resolve_import_path` in `proof_frog/frog_parser.py`)
-- Tests live in `tests/`, organized into `tests/integration/` (proof runs, CLI, AST checks, web server endpoints, wizard scaffolding) and `tests/unit/` (by area: engine, transforms, typechecking, visitors, parsing, other); `tests/integration/test_proofs.py` runs all `examples/**/*.proof` files as subprocesses; `tests/integration/test_web_server.py` covers `/api/file-metadata`; `tests/integration/test_scaffolding.py` covers wizard scaffold endpoints with smoke / parse-splice / type-check-splice levels; `tests/integration/test_soundness_regressions.py` runs end-to-end regression proofs for fixed soundness (and completeness) bugs, one fixture directory per finding under `soundness_regression_fixtures/`
+- Tests live in `tests/`, organized into `tests/integration/` (proof runs, CLI, AST checks, web server endpoints, wizard scaffolding) and `tests/unit/` (by area: engine, transforms, typechecking, visitors, parsing, other); `tests/integration/test_proofs.py` runs all `examples/**/*.proof` files as subprocesses; `tests/integration/test_web_server.py` covers `/api/file-metadata`; `tests/integration/test_scaffolding.py` covers wizard scaffold endpoints with smoke / parse-splice / type-check-splice levels; `tests/integration/test_soundness_regressions.py` runs end-to-end regression proofs for fixed soundness (and completeness) bugs, one fixture directory per finding under `soundness_regression_fixtures/` (verdict `reject` for a refused hop, `accept` for a proof that must verify, `type_error` for a construct the type checker now refuses, with the expected message in `TYPE_ERROR`)
 - **Every engine soundness fix lands with a public regression test**: the proof that demonstrated the false accept (plus a positive control where one exists), added as a fixture to `tests/integration/test_soundness_regressions.py`, or a dedicated test that fails without the fix. A test or reproduction that exists only outside this repository does not count, because CI cannot run it
 - Only use ASCII characters in primitive/scheme/game/proof files.
 - LSP server uses `pygls` and communicates over stdio; uses full document sync (`TextDocumentSyncKind.Full`)
@@ -162,6 +162,8 @@ The essentials for writing correct FrogLang:
 - `M[k] <- Type;` — sample into a map entry
 - `Function<D, R> H <- Function<D, R>;` — sample a random function (ROM)
 - A sampling domain must be finite: `Bool`, `BitString<n>`, `ModInt<q>`, `Set` members etc. are samplable, but `Int` (unbounded) and optional types `T?` (no weight for `None`) are rejected on both sampling forms
+
+**Calls:** a game or reduction may not call its own methods or any game's (only primitive/scheme methods, plus `challenger.` in a reduction; `this.` is scheme-only). The type checker rejects such a call.
 
 **Non-determinism default:** Scheme method calls (e.g., `F.evaluate(k, x)`) are **non-deterministic by default** — each invocation may return a different result even with the same arguments.
 

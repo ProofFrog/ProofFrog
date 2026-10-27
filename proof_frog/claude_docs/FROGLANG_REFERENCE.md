@@ -80,10 +80,11 @@ This makes `Key` (or `E.Key` when accessed through an instance `E`) usable as a 
 
 ### 3.3 Function Calls
 
-- **Method call**: `obj.method(arg1, arg2, ...)` — invokes a method on a scheme, primitive, or game instance
+- **Method call**: `obj.method(arg1, arg2, ...)` — invokes a method of a scheme or primitive instance
 - **Random function call**: `RF(x)` — evaluates a random function at input `x`
 - **`this.method(args)`**: Within a scheme body, calls another method of the same scheme. During proof verification, `this` is rewritten to the scheme's instance name.
 - **`challenger.method(args)`**: Within a reduction body, delegates to the composed security game's oracle.
+- **No calls of game methods**: A game or reduction may not call its own methods (`G.Inc()` inside `Game G`, `R.Query()` inside `Reduction R`, or `G().Inc()`), and may not call a method of any other game or reduction either: the other game of its pair, another intermediate game or reduction of the proof, or a game of an imported pair (`P(a).Left.M()`). The type checker rejects such a call. A game or reduction calls only primitive and scheme methods, plus `challenger` methods in a reduction; write a shared step inline instead. (`this.` is a scheme-only form.)
 
 ### 3.4 Operators
 
@@ -281,6 +282,7 @@ Games define:
 - **Methods**: Oracle procedures callable by the adversary.
   - **`Initialize`**: A distinguished method (when present) that is called exactly once before any other oracle. Typically has return type `Void`, though it may return a value in phased games.
   - **Other methods**: Oracles that the adversary may call in any order, any number of times.
+  - Only the adversary calls a game's methods: a game may not call its own methods (`Left.Eavesdrop(...)` inside `Left`) or those of another game (section 3.3). Its methods call primitive and scheme methods only.
 
 ### 5.4 Security Properties (Game Files)
 
@@ -353,7 +355,7 @@ Reduction R(PRG G, TriplingPRG T) compose Security(G)
 A reduction specifies:
 - **`compose SecurityGame(params)`**: The assumed security game whose oracles the reduction delegates to via `challenger`.
 - **`against TheoremGame(params).Adversary`**: The theorem game whose adversary the reduction must simulate oracles for.
-- **Body**: Methods that implement the theorem game's oracle interface, using `challenger.Method(args)` to call the assumed security game's oracles.
+- **Body**: Methods that implement the theorem game's oracle interface, using `challenger.Method(args)` to call the assumed security game's oracles. A reduction may not call its own methods (`R.Query()` inside `R`) or those of another game or reduction (section 3.3).
 - **State fields** (optional): The reduction may maintain its own state across oracle calls.
 - **Parameter rule**: The reduction's parameter list must include every parameter needed to instantiate the composed security game, even if some parameters are not referenced in the reduction body.
 

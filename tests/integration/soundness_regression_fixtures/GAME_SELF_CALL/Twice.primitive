@@ -1,0 +1,7 @@
+Primitive Twice(Int n) {
+    Int lambda = n;
+
+    BitString<lambda> Sample();
+
+    BitString<lambda> Again();
+}

@@ -107,7 +107,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | FlattenConcatChain | Left-associates `\|\|` chains; sound under both Boolean OR and BitString concatenation. |
 | ReflexiveComparison | Simplifies `x == x` to `true` and `x != x` to `false`. |
 | InjectiveEqualitySimplify | Rewrites `f(a1,...) == f(b1,...)` to `(a1==b1) && ...` when `f` is `deterministic injective`. An operand may be a local bound once to such a call, or a field assigned once in `Initialize`, outside the method being rewritten; it is resolved to its call only when every value the call reads, including one read only through a member access (`M` in `F.Enc(\|M.keys\|)`), is unchanged at the comparison. |
-| ConcatEqualityDecompose | Decomposes `(a \|\| b \|\| ...) op other` into pairwise slice equalities when concatenation-term lengths are derivable. |
+| ConcatEqualityDecompose | Decomposes `(a \|\| b \|\| ...) op other` into pairwise slice equalities when concatenation-term lengths are derivable. An operand may be a top-level local bound once to a concatenation; it is resolved to that concatenation only when every value the concatenation reads, including one read only through a member access (`M` in `F.Ev(\|M.keys\|) \|\| u`), is unchanged in the method. |
 | TupleEqualityDecompose | Rewrites `a != b` between tuple-typed expressions to the per-component disjunction of `!=`. `==` is intentionally NOT decomposed. |
 
 ### Control Flow (`control_flow.py`)

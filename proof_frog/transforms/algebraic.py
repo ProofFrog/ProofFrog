@@ -2460,6 +2460,7 @@ class ConcatEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
         # `a || b` read the mutated value, diverging from the frozen `v`).
         if self._scope_game is not None:
             stable_names = _stable_value_names(method, self._scope_game)
+            state_names = _method_state_names(method, self._scope_game)
             for name in list(bindings.keys()):
                 free = {
                     v.name
@@ -2467,7 +2468,11 @@ class ConcatEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
                         copy.deepcopy(bindings[name])
                     )
                 }
-                if not free.issubset(stable_names):
+                # Values read only through a member access (`M` in
+                # `F.Ev(|M.keys|) || u`) must be stable as well.
+                if not free.issubset(stable_names) or _reads_unstable_member(
+                    bindings[name], stable_names, state_names
+                ):
                     bindings.pop(name, None)
         old = self.local_concat_bindings
         self.local_concat_bindings = bindings

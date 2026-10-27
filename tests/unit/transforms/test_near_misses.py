@@ -42,7 +42,10 @@ from proof_frog.transforms.random_functions import (
     LazyMapPairToSampledFunction,
     LocalFunctionFieldToLet,
 )
-from proof_frog.transforms.structural import UniformBijectionElimination
+from proof_frog.transforms.structural import (
+    RemoveDuplicateFields,
+    UniformBijectionElimination,
+)
 from proof_frog.transforms.tuples import ExpandTuple, SplitBareTupleDeclarations
 from proof_frog.transforms.map_iteration import LazyMapScan
 from proof_frog.transforms.types import DeadNullGuardElimination
@@ -3378,3 +3381,104 @@ def test_symbolic_no_near_miss_on_bit_string_literal() -> None:
         """)
     SymbolicComputation().apply(game, ctx)
     assert not ctx.near_misses
+
+
+def _duplicate_fields_misses(source: str) -> list[NearMiss]:
+    ctx = _make_ctx()
+    RemoveDuplicateFields().apply(frog_parser.parse_game(source), ctx)
+    return [
+        nm for nm in ctx.near_misses if nm.transform_name == "Remove Duplicate Fields"
+    ]
+
+
+@pytest.mark.parametrize(
+    "fields, why",
+    [
+        (
+            "BitString<1> h = 0b0; BitString<1> n = 0b1;",
+            "they start from different initializers",
+        ),
+        ("BitString<1> h = 0b0; BitString<1> n;", "they start from different"),
+        (
+            "BitString<1> h = S.F(); BitString<1> n = S.F();",
+            "their initializers make calls",
+        ),
+    ],
+)
+def test_duplicate_fields_near_miss_on_initial_values(fields: str, why: str) -> None:
+    """Every write pairs, so only the initial values block the merge."""
+    misses = _duplicate_fields_misses(f"""
+        Game G() {{
+            {fields}
+            Void Flip() {{
+                h = h + 0b1;
+                n = n + 0b1;
+            }}
+            BitString<1> Get() {{
+                return n;
+            }}
+        }}
+        """)
+    assert len(misses) == 1
+    assert misses[0].variable is None
+    assert misses[0].method is None
+    assert "Fields 'h' and 'n' not merged: every write updates both alike" in (
+        misses[0].reason
+    )
+    assert why in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "fields, body",
+    [
+        # Merged.
+        ("Int A = 0; Int B = 0;", "A = A + k; B = B + k;"),
+        # A write to one field only.
+        ("Int A = 0; Int B = 1;", "A = k;"),
+    ],
+)
+def test_duplicate_fields_no_near_miss(fields: str, body: str) -> None:
+    assert not _duplicate_fields_misses(f"""
+        Game G() {{
+            {fields}
+            Void Put(Int k) {{
+                {body}
+            }}
+        }}
+        """)
+
+
+def test_duplicate_fields_no_near_miss_for_never_written_constants() -> None:
+    """No write pairs the fields: they are two different constants."""
+    assert not _duplicate_fields_misses("""
+        Game G() {
+            Int a = 1;
+            Int b = 2;
+            Int Get() {
+                return a + b;
+            }
+        }
+        """)
+
+
+def test_duplicate_fields_constants_do_not_hide_real_near_miss() -> None:
+    """Never-written constants `a`, `b` report nothing, so after dedupe the
+    surviving near miss is the one for `c`, `d`, which every write updates
+    alike."""
+    misses = deduplicate_near_misses(_duplicate_fields_misses("""
+        Game G() {
+            Int a = 1;
+            Int b = 2;
+            Int c = 0;
+            Int d = 5;
+            Void Flip() {
+                c = c + 1;
+                d = d + 1;
+            }
+            Int Get() {
+                return a + b + d;
+            }
+        }
+        """))
+    assert len(misses) == 1
+    assert "Fields 'c' and 'd' not merged" in misses[0].reason

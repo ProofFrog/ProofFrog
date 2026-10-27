@@ -3830,3 +3830,29 @@ def test_fresh_input_no_near_miss_on_recorded_value() -> None:
     assert not _fresh_input_misses(
         "BitString<2> u = 0b00; seen = seen union {u}; y = H(u);"
     )
+
+
+@pytest.mark.parametrize(
+    "oracle, inserted",
+    [
+        (
+            "BitString<2> Hash(BitString<2> x) "
+            "{ seen = seen union {S.f(x)}; return H(S.f(x)); }",
+            "S.f(x)",
+        ),
+        (
+            "BitString<2> Hash() { seen = seen union {S.G()}; return H(S.G()); }",
+            "S.G()",
+        ),
+    ],
+)
+def test_fresh_input_near_miss_on_nondeterministic_insertion(
+    oracle: str, inserted: str
+) -> None:
+    """Hash inserts one value of a non-deterministic call and queries H on
+    another evaluation, so Fresh keeps H(v)."""
+    misses = _fresh_input_misses("", oracle)
+    assert len(misses) == 1
+    assert misses[0].variable == "H"
+    assert f"'Hash' inserts '{inserted}' into 'seen'" in misses[0].reason
+    assert "not annotated deterministic" in misses[0].reason

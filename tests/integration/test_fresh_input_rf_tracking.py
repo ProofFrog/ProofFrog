@@ -1,6 +1,7 @@
 """End-to-end checks that FreshInputRFToUniform keeps ``H(v)`` for
-``v <-uniq[seen]`` when a method changes a value it inserted into ``seen``
-before querying ``H`` on it.
+``v <-uniq[seen]`` when a method may query ``H`` on a value other than the one
+it inserted into ``seen``: it changes the value in between, or the value calls
+a non-deterministic method and is evaluated twice.
 
 ``seen`` then misses a point ``H`` was queried on, and ``v`` may draw it.
 """
@@ -130,3 +131,69 @@ def test_rewritten_insertion_in_initialize_rejected(initialize: str) -> None:
 
 def test_recorded_value_accepted() -> None:
     assert _equal("BitString<2> u = 0b00; seen = seen union {u}; y = H(u);")
+
+
+_CALL_PRIMITIVE = """
+Primitive P() {
+    BitString<2> G();
+    BitString<2> f(BitString<2> x);
+    deterministic BitString<2> D(BitString<2> x);
+}
+"""
+
+
+def _call_side(name: str, hash_method: str, fresh: str) -> str:
+    return f"""
+Game {name}(P S) {{
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> seen;
+    Void Initialize() {{
+        H <- Function<BitString<2>, BitString<2>>;
+    }}
+    {hash_method}
+    BitString<2> Fresh() {{
+        {fresh}
+    }}
+}}
+"""
+
+
+def _prove_call_pair(tmp_path: Path, hash_method: str) -> tuple[int, str]:
+    (tmp_path / "P.primitive").write_text(_CALL_PRIMITIVE, encoding="utf-8")
+    (tmp_path / "Pair.game").write_text(
+        "import 'P.primitive';\n"
+        + _call_side(
+            "Left",
+            hash_method,
+            "BitString<2> v <-uniq[seen] BitString<2>; return H(v);",
+        )
+        + _call_side("Right", hash_method, "BitString<2> z <- BitString<2>; return z;")
+        + "\nexport as Pair;\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pair.proof").write_text(_PROOF, encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-m", "proof_frog", "prove", str(tmp_path / "pair.proof")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize(
+    "hash_method",
+    [
+        # seen records one S.f(x) while H is queried on another, independent
+        # one; Fresh may draw the queried point and return Hash's answer.
+        "BitString<2> Hash(BitString<2> x) "
+        "{ seen = seen union {S.f(x)}; return H(S.f(x)); }",
+        "BitString<2> Hash() { seen = seen union {S.G()}; return H(S.G()); }",
+    ],
+)
+def test_nondeterministic_insertion_pair_fails(
+    tmp_path: Path, hash_method: str
+) -> None:
+    returncode, output = _prove_call_pair(tmp_path, hash_method)
+    assert returncode != 0, output
+    assert "Proof Failed!" in output

@@ -530,3 +530,117 @@ def test_rewritten_insertion_in_initialize_not_simplified(initialize: str) -> No
 )
 def test_recorded_value_still_simplified(initialize: str) -> None:
     assert _fired(_initialize_game(initialize))
+
+
+# ---------------------------------------------------------------------------
+# Regime (B): an inserted element that calls a method may differ from the
+# queried one, since a method call returns a fresh value each time unless the
+# method is annotated deterministic.
+# ---------------------------------------------------------------------------
+
+_CALL_PRIMITIVE = """
+Primitive P() {
+    BitString<2> G();
+    BitString<2> f(BitString<2> x);
+    deterministic BitString<2> D(BitString<2> x);
+    deterministic BitString<2> DG();
+}
+"""
+
+
+def _fired_with_primitive(game_src: str) -> bool:
+    game = frog_parser.parse_game(game_src)
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"S": frog_parser.parse_primitive_file(_CALL_PRIMITIVE)},
+        subsets_pairs=[],
+    )
+    return "__fresh_rf_" in str(FreshInputRFToUniform().apply(game, ctx))
+
+
+def _call_game(hash_method: str = "", initialize: str = "") -> str:
+    return f"""
+    Game G(P S, BitString<2> k) {{
+        Function<BitString<2>, BitString<2>> H;
+        Set<BitString<2>> seen;
+        BitString<2> y;
+        Void Initialize() {{
+            H <- Function<BitString<2>, BitString<2>>;
+            {initialize}
+        }}
+        BitString<2> Reveal() {{
+            return y;
+        }}
+        {hash_method}
+        BitString<2> Fresh() {{
+            BitString<2> v <-uniq[seen] BitString<2>;
+            return H(v);
+        }}
+    }}
+    """
+
+
+@pytest.mark.parametrize(
+    "hash_method",
+    [
+        # Each S.f(x) / S.G() may return a different value, so seen records
+        # one value while H is queried on another.
+        "BitString<2> Hash(BitString<2> x) "
+        "{ seen = seen union {S.f(x)}; return H(S.f(x)); }",
+        "BitString<2> Hash() { seen = seen union {S.G()}; return H(S.G()); }",
+        "BitString<2> Hash(BitString<2> x) "
+        "{ seen = seen union {S.D(S.f(x))}; return H(S.D(S.f(x))); }",
+        "BitString<2> Hash(BitString<2> x) "
+        "{ seen = seen union {x + S.G()}; return H(x + S.G()); }",
+    ],
+)
+def test_inserted_nondeterministic_call_not_simplified(hash_method: str) -> None:
+    assert not _fired_with_primitive(_call_game(hash_method))
+    # Without the primitive in scope, no call is known to be deterministic.
+    assert not _fired(_call_game(hash_method))
+
+
+@pytest.mark.parametrize(
+    "initialize",
+    [
+        # As in Hash above, but in Initialize, the only other H caller.
+        "seen = seen union {S.f(k)}; y = H(S.f(k));",
+        "seen = seen union {S.G()}; y = H(S.G());",
+    ],
+)
+def test_inserted_nondeterministic_call_in_initialize_not_simplified(
+    initialize: str,
+) -> None:
+    assert not _fired_with_primitive(_call_game(initialize=initialize))
+
+
+# Only Initialize and Fresh query H below, so a later query never meets v.
+@pytest.mark.parametrize(
+    "initialize",
+    [
+        "seen = seen union {S.D(k)}; y = H(S.D(k));",
+        "seen = seen union {S.DG()}; y = H(S.DG());",
+        "seen = seen union {S.D(k + S.DG())}; y = H(S.D(k + S.DG()));",
+        # One evaluation of a non-deterministic call, inserted and queried.
+        "BitString<2> u = S.f(k); seen = seen union {u}; y = H(u);",
+    ],
+)
+def test_inserted_deterministic_call_still_simplified(initialize: str) -> None:
+    assert _fired_with_primitive(_call_game(initialize=initialize))
+
+
+def test_inserted_deterministic_call_rewritten_argument_not_simplified() -> None:
+    assert not _fired_with_primitive(
+        _call_game(
+            initialize="BitString<2> u = k; seen = seen union {S.D(u)}; "
+            "u = 0b00; y = H(S.D(u));"
+        )
+    )
+
+
+def test_inserted_deterministic_call_unknown_primitive_not_simplified() -> None:
+    # With an empty namespace S.D cannot be resolved, so it is not trusted.
+    assert not _fired(
+        _call_game(initialize="seen = seen union {S.D(k)}; y = H(S.D(k));")
+    )

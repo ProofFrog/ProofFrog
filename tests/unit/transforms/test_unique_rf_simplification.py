@@ -415,3 +415,231 @@ def test_f023_sampled_function_field_in_initialize_still_simplified() -> None:
         """)
     result = UniqueRFSimplification().apply(game, _make_ctx())
     assert result != game, "sampled random function should still be simplified"
+
+
+_DRAW_THEN_CALL = """
+    Game G() {{
+        Set<BitString<8>> S;
+        Set<BitString<8>> S2;
+        Function<BitString<8>, BitString<16>> RF;
+        Void Initialize() {{
+            RF <- Function<BitString<8>, BitString<16>>;
+        }}
+        BitString<16> Query(BitString<8> c, Bool b, Set<BitString<8>> E) {{
+            BitString<8> r <-uniq[S] BitString<8>;
+            {write}
+            BitString<16> z = RF(r);
+            return z;
+        }}
+    }}
+    """
+
+
+def _simplifies(write: str) -> bool:
+    game = frog_parser.parse_game(_DRAW_THEN_CALL.format(write=write))
+    return UniqueRFSimplification().apply(game, _make_ctx()) != game
+
+
+class TestGuardedDrawWrites:
+    """`RF(r)` is a fresh query only if nothing writes `r` between its
+    `<-uniq[S]` draw and the call."""
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            "if (b) { r = c; }",
+            "if (b) { } else { r = c; }",
+            "if (b) { if (b) { r = c; } }",
+            "if (b) { } else if (c == 0^8) { r = c; }",
+            "for (Int i = 0 to 2) { r = c; }",
+            "for (BitString<8> e in E) { r = e; }",
+            "if (b) { for (Int i = 0 to 2) { r = c; } }",
+            "if (b) { r <- BitString<8>; }",
+            "if (b) { r <- BitString<8> \\ S; }",
+            "if (b) { r[0] = 0b1; }",
+            # A local set resets on each call, so the redraw may repeat.
+            "Set<BitString<8>> L; r <-uniq[L] BitString<8>;",
+        ],
+    )
+    def test_write_keeps_call(self, write: str) -> None:
+        assert not _simplifies(write)
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            "r = c;",
+            "r <- BitString<8>;",
+            "r[0] = 0b1;",
+        ],
+    )
+    def test_top_level_write_keeps_call(self, write: str) -> None:
+        assert not _simplifies(write)
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            "for (BitString<8> r in E) { c = r; }",
+            "if (b) { for (Int r = 0 to 2) { b = true; } }",
+            "BitString<8> r;",
+            "if (b) { BitString<8> r = c; }",
+        ],
+    )
+    def test_rebinding_keeps_call(self, write: str) -> None:
+        """A loop binder or redeclaration named r counts as a write.
+        AlphaRename renames such binders in the pipeline; the pass must not
+        depend on it."""
+        assert not _simplifies(write)
+
+    def test_nested_write_in_nested_block_keeps_call(self) -> None:
+        """The check also runs on a draw and call inside one `if` body."""
+        game = frog_parser.parse_game("""
+            Game G() {
+                Set<BitString<8>> S;
+                Function<BitString<8>, BitString<16>> RF;
+                Void Initialize() {
+                    RF <- Function<BitString<8>, BitString<16>>;
+                }
+                BitString<16> Query(BitString<8> c, Bool b) {
+                    if (b) {
+                        BitString<8> r <-uniq[S] BitString<8>;
+                        if (c == 0^8) { r = c; }
+                        BitString<16> z = RF(r);
+                        return z;
+                    }
+                    return 0^16;
+                }
+            }
+            """)
+        assert UniqueRFSimplification().apply(game, _make_ctx()) == game
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            "",
+            "if (b) { c = r; }",
+            "for (Int i = 0 to 2) { c = r; }",
+            "for (BitString<8> e in E) { c = e; }",
+            "BitString<8> w <-uniq[S] BitString<8>;",
+            "if (b) { BitString<8> w <-uniq[S] BitString<8>; w = c; }",
+            # A top-level redraw from a field set re-seeds the guard.
+            "r <-uniq[S] BitString<8>;",
+            "r <-uniq[S2] BitString<8>;",
+        ],
+    )
+    def test_no_write_still_simplified(self, write: str) -> None:
+        assert _simplifies(write)
+
+    def test_write_after_call_still_simplified(self) -> None:
+        game = frog_parser.parse_game("""
+            Game G() {
+                Set<BitString<8>> S;
+                Function<BitString<8>, BitString<16>> RF;
+                Void Initialize() {
+                    RF <- Function<BitString<8>, BitString<16>>;
+                }
+                BitString<16> Query(BitString<8> c, Bool b) {
+                    BitString<8> r <-uniq[S] BitString<8>;
+                    BitString<16> z = RF(r);
+                    if (b) { r = c; }
+                    return z;
+                }
+            }
+            """)
+        assert UniqueRFSimplification().apply(game, _make_ctx()) != game
+
+    def test_nested_block_without_write_still_simplified(self) -> None:
+        game = frog_parser.parse_game("""
+            Game G() {
+                Set<BitString<8>> S;
+                Function<BitString<8>, BitString<16>> RF;
+                Void Initialize() {
+                    RF <- Function<BitString<8>, BitString<16>>;
+                }
+                BitString<16> Query(BitString<8> c, Bool b) {
+                    if (b) {
+                        BitString<8> r <-uniq[S] BitString<8>;
+                        if (c == 0^8) { c = r; }
+                        BitString<16> z = RF(r);
+                        return z;
+                    }
+                    return 0^16;
+                }
+            }
+            """)
+        assert UniqueRFSimplification().apply(game, _make_ctx()) != game
+
+
+_SELF_ASSIGN = """
+    Game G() {{
+        Set<BitString<8>> S;
+        Function<BitString<8>, BitString<8>> RF;
+        Function<BitString<8>, BitString<8>> RF2;
+        {fields}
+        Void Initialize() {{
+            RF <- Function<BitString<8>, BitString<8>>;
+            RF2 <- Function<BitString<8>, BitString<8>>;
+        }}
+        BitString<8> Query() {{
+            BitString<8> r <-uniq[S] BitString<8>;
+            {body}
+        }}
+    }}
+    """
+
+
+def _query_after(body: str, fields: str = "") -> list[frog_ast.Statement]:
+    game = frog_parser.parse_game(_SELF_ASSIGN.format(body=body, fields=fields))
+    out = UniqueRFSimplification().apply(game, _make_ctx())
+    query = next(m for m in out.methods if m.signature.name == "Query")
+    return list(query.block.statements)
+
+
+def _calls(stmts: list[frog_ast.Statement], rf_name: str) -> int:
+    return sum(
+        1
+        for stmt in stmts
+        if isinstance(stmt, frog_ast.Assignment)
+        and isinstance(stmt.value, frog_ast.FuncCall)
+        and isinstance(stmt.value.func, frog_ast.Variable)
+        and stmt.value.func.name == rf_name
+    )
+
+
+class TestSelfAssignment:
+    """`r = RF(r)` evaluates `RF(r)` on the drawn `r` before writing `r`."""
+
+    def test_self_assignment_simplified(self) -> None:
+        stmts = _query_after("r = RF(r); return r;")
+        assert _calls(stmts, "RF") == 0
+        # The fresh value gets its own variable, then is copied into `r`.
+        sample, copy_back = stmts[1], stmts[2]
+        assert isinstance(sample, frog_ast.Sample)
+        assert sample.the_type == frog_ast.BitStringType(frog_ast.Integer(8))
+        assert isinstance(sample.var, frog_ast.Variable)
+        assert isinstance(copy_back, frog_ast.Assignment)
+        assert copy_back.var == frog_ast.Variable("r")
+        assert copy_back.value == sample.var
+
+    def test_minted_name_avoids_existing_name(self) -> None:
+        stmts = _query_after(
+            "r = RF(r); return r + __rf_sample_0__;",
+            fields="BitString<8> __rf_sample_0__;",
+        )
+        sample = stmts[1]
+        assert isinstance(sample, frog_ast.Sample)
+        assert sample.var != frog_ast.Variable("__rf_sample_0__")
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # After `r = RF(r)`, `r` holds an RF output, not a `<-uniq` draw.
+            "r = RF(r); BitString<8> z = RF2(r); return z;",
+            "r = RF(r); BitString<8> z = RF(r); return z;",
+        ],
+    )
+    def test_call_after_self_assignment_kept(self, body: str) -> None:
+        stmts = _query_after(body)
+        assert _calls(stmts, "RF2") + _calls(stmts, "RF") >= 1
+        last_call = stmts[-2]
+        assert isinstance(last_call, frog_ast.Assignment)
+        assert isinstance(last_call.value, frog_ast.FuncCall)

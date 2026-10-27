@@ -51,12 +51,23 @@ class _RFCallSite:
 
 
 @dataclass
+class _OverwrittenDraw:
+    """A call ``RF(r)`` refused because ``r`` may be written after its
+    ``<-uniq[S]`` draw."""
+
+    unique_set_name: str
+    method: str | None
+    origin: frog_ast.SourceOrigin | None
+
+
+@dataclass
 class _RFAnalysis:
     """Per-RF analysis result."""
 
     eligible: bool = True
     call_sites: list[_RFCallSite] = field(default_factory=list)
     unique_set_name: str | None = None
+    overwritten_draws: list[_OverwrittenDraw] = field(default_factory=list)
 
 
 def _get_unique_set_name(expr: frog_ast.Expression) -> str:
@@ -185,7 +196,9 @@ def _analyze_rf_eligibility(
     field_names = {f.name for f in game.fields}
 
     for method in game.methods:
-        _analyze_block(method.block, analysis, rf_types, field_names)
+        _analyze_block(
+            method.block, analysis, rf_types, field_names, method.signature.name
+        )
 
     # Post-analysis: reject any RF whose function value escapes to a position
     # the call-site walk cannot see (a copy/alias/argument), which could carry
@@ -227,28 +240,25 @@ def _analyze_block(
     analysis: dict[str, _RFAnalysis],
     rf_types: dict[str, frog_ast.FunctionType],
     field_names: set[str] | None = None,
+    method: str | None = None,
 ) -> None:
     """Analyze a block for RF calls and their <-uniq guards."""
     # Build map: variable name -> unique set name (from <-uniq in this block)
     uniq_guards: dict[str, str] = {}
+    # Guards dropped by a write, for the near-miss report.
+    overwritten: dict[str, str] = {}
 
     for statement in block.statements:
-        # F-022: any write to a guarded variable other than a fresh
-        # `<-uniq[S]` draw destroys the freshness that draw established -- after
-        # `r <-uniq[S]; r = c;` the variable holds an arbitrary, possibly
-        # previously-queried value, so `RF(r)` is no longer a distinct input.
-        # Invalidate the guard before this statement's RF-call check below.
-        if isinstance(
-            statement,
-            (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
-        ):
-            written_base = lvalue_base_name(statement.var)
-            is_fresh_uniq = (
-                isinstance(statement, frog_ast.UniqueSample)
-                and statement.surface_form == "uniq"
-            )
-            if written_base in uniq_guards and not is_fresh_uniq:
-                del uniq_guards[written_base]
+        # F-022: after `r <-uniq[S]; r = c;`, `r` may hold an earlier query, so
+        # `RF(r)` is no longer fresh.  Any write of `r` counts, at any depth,
+        # including element writes, loop binders and redeclarations.  A
+        # top-level `<-uniq[S]` redraw from a field set re-seeds the guard below.
+        # An assignment `x = RF(r)` evaluates its call, reading `r`, before it
+        # writes `x`, so the call is checked against the guards held as the
+        # statement starts: `r = RF(r)` straight after the draw is fresh.
+        guards_at_call = dict(uniq_guards)
+        for name in [n for n in uniq_guards if reassigns_or_rebinds({n}, statement)]:
+            overwritten[name] = uniq_guards.pop(name)
 
         # Track <-uniq bindings. Only the stateful `<-uniq[S]` form
         # accumulates draws into S (S = S union {x}); the pure `x <- T \ E`
@@ -271,6 +281,7 @@ def _analyze_block(
                     # (handled below by not adding to uniq_guards).
                     continue
             uniq_guards[statement.var.name] = set_name
+            overwritten.pop(statement.var.name, None)
 
         # Check RF calls in assignments
         if (
@@ -288,11 +299,17 @@ def _analyze_block(
                 rf_analysis.eligible = False
                 continue
 
-            if arg.name not in uniq_guards:
+            if arg.name not in guards_at_call:
                 rf_analysis.eligible = False
+                if arg.name in overwritten:
+                    rf_analysis.overwritten_draws.append(
+                        _OverwrittenDraw(
+                            overwritten[arg.name], method, statement.origin
+                        )
+                    )
                 continue
 
-            set_name = uniq_guards[arg.name]
+            set_name = guards_at_call[arg.name]
 
             # If RF.domain is the set, verify it matches this RF
             if "." in set_name:
@@ -319,9 +336,9 @@ def _analyze_block(
         # Recurse into nested blocks
         if isinstance(statement, frog_ast.IfStatement):
             for nested_block in statement.blocks:
-                _analyze_block(nested_block, analysis, rf_types, field_names)
+                _analyze_block(nested_block, analysis, rf_types, field_names, method)
         elif isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
-            _analyze_block(statement.block, analysis, rf_types, field_names)
+            _analyze_block(statement.block, analysis, rf_types, field_names, method)
 
 
 def _collect_names_in_scope(node: frog_ast.ASTNode) -> set[str]:
@@ -347,6 +364,64 @@ def _collect_names_in_scope(node: frog_ast.ASTNode) -> set[str]:
     return names
 
 
+def _is_rf_call(rf_names: set[str], node: frog_ast.ASTNode) -> bool:
+    return (
+        isinstance(node, frog_ast.FuncCall)
+        and isinstance(node.func, frog_ast.Variable)
+        and node.func.name in rf_names
+    )
+
+
+def _hoistable_rf_call(
+    statement: frog_ast.Statement, rf_names: set[str]
+) -> frog_ast.FuncCall | None:
+    """The first call to one of *rf_names* that may be hoisted to just before
+    *statement*, or ``None``.
+
+    Hoisting is exact only for a call evaluated when *statement* starts, before
+    anything in it runs: the expressions of a simple statement and the first
+    condition of an ``if``.  A call in a branch or loop body may follow a write
+    to its argument (``if (b) { r = 0b00; return RF(r); }`` would query ``RF``
+    on the old ``r``) and is not evaluated on every path, and a call in a later
+    ``else if`` condition is not evaluated when an earlier branch is taken.  A
+    loop header is left alone too.  Such calls are extracted inside their own
+    block instead, where the statements before them run first.
+    """
+    search = functools.partial(_is_rf_call, rf_names)
+    target: frog_ast.ASTNode
+    if isinstance(statement, frog_ast.IfStatement):
+        target = statement.conditions[0]
+    elif isinstance(
+        statement, (frog_ast.NumericFor, frog_ast.GenericFor, frog_ast.Block)
+    ):
+        return None
+    else:
+        target = statement
+    found = SearchVisitor[frog_ast.FuncCall](search).visit(target)
+    return found
+
+
+def _unhoisted_rf_call(
+    statement: frog_ast.Statement, rf_names: set[str]
+) -> frog_ast.FuncCall | None:
+    """A call to one of *rf_names* in *statement* that ``_hoistable_rf_call``
+    never reaches: one in a nested block, a later ``else if`` condition or a
+    loop header."""
+    search = functools.partial(_is_rf_call, rf_names)
+    parts: list[frog_ast.ASTNode]
+    if isinstance(statement, frog_ast.IfStatement):
+        parts = [*statement.conditions[1:], *statement.blocks]
+    elif isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
+        parts = [statement]
+    else:
+        return None
+    for part in parts:
+        found = SearchVisitor[frog_ast.FuncCall](search).visit(part)
+        if found is not None:
+            return found
+    return None
+
+
 class _RFCallExtractor(BlockTransformer):
     """Extract RF calls embedded in expressions into separate assignments.
 
@@ -356,6 +431,10 @@ class _RFCallExtractor(BlockTransformer):
         return [v1, m + __rf_extract_0];
 
     This enables ``_RFCallReplacer`` to detect and simplify the call.
+
+    Only a call evaluated at the start of its statement is hoisted (see
+    :func:`_hoistable_rf_call`); a call inside a branch or loop body is
+    extracted within that body when the transformer reaches it.
 
     The minted temporary name is freshened against *avoid* (every
     identifier in scope) so it cannot capture an existing parameter,
@@ -395,14 +474,7 @@ class _RFCallExtractor(BlockTransformer):
             ):
                 continue
 
-            def is_rf_call(node: frog_ast.ASTNode) -> bool:
-                return (
-                    isinstance(node, frog_ast.FuncCall)
-                    and isinstance(node.func, frog_ast.Variable)
-                    and node.func.name in self.rf_names
-                )
-
-            found = SearchVisitor(is_rf_call).visit(statement)
+            found = _hoistable_rf_call(statement, self.rf_names)
             if found is None:
                 continue
 
@@ -434,13 +506,30 @@ class _RFCallExtractor(BlockTransformer):
 
 
 class _RFCallReplacer(BlockTransformer):
-    """Replace ``z = RF(r)`` with ``z <- R`` for eligible RF fields."""
+    """Replace ``z = RF(r)`` with ``z <- R`` for eligible RF fields.
+
+    Given *avoid* (every identifier in scope), a call that overwrites its own
+    argument, ``r = RF(r)``, becomes ``R __rf_sample_0__ <- R; r =
+    __rf_sample_0__;`` instead, so the fresh value has a variable of its own
+    that later passes can propagate, as they do for ``z = RF(r)``.
+    """
 
     def __init__(
         self,
         eligible_rfs: dict[str, frog_ast.FunctionType],
+        avoid: set[str] | None = None,
     ) -> None:
         self.eligible_rfs = eligible_rfs
+        self.avoid = avoid
+        self.counter = 0
+
+    def _fresh_name(self, avoid: set[str]) -> str:
+        while True:
+            name = f"__rf_sample_{self.counter}__"
+            self.counter += 1
+            if name not in avoid:
+                avoid.add(name)
+                return name
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -455,16 +544,37 @@ class _RFCallReplacer(BlockTransformer):
             rf_name = statement.value.func.name
             range_type = self.eligible_rfs[rf_name].range_type
 
-            # Type is used as Expression in sampling (DSL convention)
-            new_sample = frog_ast.Sample(
-                statement.the_type,
-                copy.deepcopy(statement.var),
-                copy.deepcopy(range_type),  # type: ignore[arg-type]
-            )
+            replacement: list[frog_ast.Statement]
+            if (
+                self.avoid is not None
+                and statement.the_type is None
+                and lvalue_base_name(statement.var)
+                in referenced_variable_names(statement.value)
+            ):
+                fresh = self._fresh_name(self.avoid)
+                replacement = [
+                    frog_ast.Sample(
+                        copy.deepcopy(range_type),
+                        frog_ast.Variable(fresh),
+                        copy.deepcopy(range_type),  # type: ignore[arg-type]
+                    ),
+                    frog_ast.Assignment(
+                        None, copy.deepcopy(statement.var), frog_ast.Variable(fresh)
+                    ),
+                ]
+            else:
+                # Type is used as Expression in sampling (DSL convention)
+                replacement = [
+                    frog_ast.Sample(
+                        statement.the_type,
+                        copy.deepcopy(statement.var),
+                        copy.deepcopy(range_type),  # type: ignore[arg-type]
+                    )
+                ]
 
             new_stmts = (
                 list(block.statements[:index])
-                + [new_sample]
+                + replacement
                 + list(block.statements[index + 1 :])
             )
             return self.transform_block(frog_ast.Block(new_stmts))
@@ -556,11 +666,34 @@ class UniqueRFSimplification(TransformPass):
                             method=None,
                         )
                     )
+            for rf_name, result in analysis.items():
+                for draw in result.overwritten_draws:
+                    ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Unique RF Simplification",
+                            reason=(
+                                f"Random function '{rf_name}' not simplified: "
+                                f"its argument, drawn by '<-uniq["
+                                f"{draw.unique_set_name}]', may be written "
+                                "between the draw and the call, so the call "
+                                "may repeat an earlier query"
+                            ),
+                            location=draw.origin,
+                            suggestion=(
+                                "Call the random function before writing the "
+                                "drawn variable, or write a different variable"
+                            ),
+                            # Canonical diffs rename fields, so a variable
+                            # filter would hide this near miss.
+                            variable=None,
+                            method=draw.method,
+                        )
+                    )
 
         if not eligible:
             return game
 
-        return _RFCallReplacer(eligible).transform(game)
+        return _RFCallReplacer(eligible, _collect_names_in_scope(game)).transform(game)
 
 
 class ExtractRFCalls(TransformPass):
@@ -577,8 +710,66 @@ class ExtractRFCalls(TransformPass):
         if not rf_types:
             return game
 
+        rf_names = set(rf_types.keys())
+        if ctx is not None:
+            for method in game.methods:
+                _report_unhoisted_rf_calls(method, rf_names, ctx)
+
         avoid = _collect_names_in_scope(game)
-        return _RFCallExtractor(set(rf_types.keys()), rf_types, avoid).transform(game)
+        return _RFCallExtractor(rf_names, rf_types, avoid).transform(game)
+
+
+def _report_unhoisted_rf_calls(
+    method: frog_ast.Method, rf_names: set[str], ctx: PipelineContext
+) -> None:
+    """Near miss for each RF call ``ExtractRFCalls`` keeps inside an ``if`` or
+    ``for`` although its argument is drawn by ``<-uniq`` in the method:
+    ``UniqueRFSimplification`` only treats a call in the draw's own block as
+    a fresh query."""
+    drawn: set[str] = set()
+    compounds: list[frog_ast.Statement] = []
+
+    def collect(node: frog_ast.ASTNode) -> bool:
+        if (
+            isinstance(node, frog_ast.UniqueSample)
+            and node.surface_form == "uniq"
+            and isinstance(node.var, frog_ast.Variable)
+        ):
+            drawn.add(node.var.name)
+        elif isinstance(
+            node, (frog_ast.IfStatement, frog_ast.NumericFor, frog_ast.GenericFor)
+        ):
+            compounds.append(node)
+        return False
+
+    SearchVisitor(collect).visit(method.block)
+    for statement in compounds:
+        call = _unhoisted_rf_call(statement, rf_names)
+        if call is None or not referenced_variable_names(call) & drawn:
+            continue
+        assert isinstance(call.func, frog_ast.Variable)
+        ctx.near_misses.append(
+            NearMiss(
+                transform_name="Extract RF Calls",
+                reason=(
+                    f"Call to random function '{call.func.name}' not hoisted "
+                    "out of its enclosing if/for: it may follow a write to "
+                    "its argument or not run on every path, so a call on a "
+                    "'<-uniq' draw made outside that block is not recognised "
+                    "as a fresh query"
+                ),
+                location=statement.origin,
+                suggestion=(
+                    "If the call runs on every path and its argument is not "
+                    "written before it, compute it before the if/for"
+                ),
+                # Canonical diffs rename fields and locals, so a variable
+                # filter would hide this near miss.
+                variable=None,
+                method=method.signature.name,
+            )
+        )
+        return
 
 
 # ---------------------------------------------------------------------------

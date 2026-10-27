@@ -42,8 +42,8 @@ The core pipeline runs in a fixed-point loop until convergence.
 
 | Pass | Description |
 |---|---|
-| ExtractRFCalls | Extracts RF calls embedded in expressions into separate assignments. |
-| UniqueRFSimplification | Replaces `z = RF(r)` with `z <- R` when all RF inputs are uniquely sampled. |
+| ExtractRFCalls | Extracts RF calls embedded in expressions into separate assignments, hoisting only a call evaluated as its statement starts (the statement's own expression, or an `if`'s first condition); a call in a branch or loop body is extracted inside that block. |
+| UniqueRFSimplification | Replaces `z = RF(r)` with `z <- R` when every RF input is drawn by `<-uniq` and not written before the call. |
 | ChallengeExclusionRFToUniform | Replaces Initialize RF calls with uniform samples when oracle guards exclude the input. |
 | LocalRFToUniform | Replaces locally-sampled RFs called exactly once with uniform samples. |
 | DistinctConstRFToUniform | Replaces locally-sampled RFs called on pairwise-distinct literal constants with independent uniform samples. |

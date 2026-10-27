@@ -590,6 +590,99 @@ def test_distinct_const_rf_symbolic_length_not_uniform() -> None:
     assert not _engine_with().check_equivalent(real, random).valid
 
 
+def _unique_rf_pair(write: str) -> tuple[object, object]:
+    template = """
+        Game G() {{
+            Function<BitString<2>, BitString<2>> H;
+            Set<BitString<2>> T;
+            Void Initialize() {{
+                H <- Function<BitString<2>, BitString<2>>;
+            }}
+            BitString<2> Q(Bool b, Int k) {{
+                BitString<2> r <-uniq[T] BitString<2>;
+                {write}
+                {query}
+                return z;
+            }}
+        }}
+        """
+    real = template.format(write=write, query="BitString<2> z = H(r);")
+    rand = template.format(write=write, query="BitString<2> z <- BitString<2>;")
+    return frog_parser.parse_game(real), frog_parser.parse_game(rand)
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        "if (b) { r = 0b00; }",
+        "for (Int i = 0 to k) { r = 0b00; }",
+        "Set<BitString<2>> L; r <-uniq[L] BitString<2>;",
+    ],
+)
+def test_unique_rf_written_draw_multicall(write: str) -> None:
+    """`UniqueRFSimplification`: after `r <-uniq[T]`, a write may set `r` to a
+    value an earlier call queried.  Two calls then repeat an `H` query with
+    probability 1/4 and match more often than two uniform draws."""
+    real, rand = _unique_rf_pair(write)
+    assert not _engine_with().check_equivalent(real, rand).valid
+
+
+def test_unique_rf_fresh_draw_control() -> None:
+    real, rand = _unique_rf_pair("if (b) { k = 0; }")
+    result = _engine_with().check_equivalent(real, rand)
+    assert result.valid, result.failure_detail
+
+
+def test_unique_rf_call_inside_writing_branch_multicall() -> None:
+    """`ExtractRFCalls` must not hoist `H(r)` above a branch that writes `r`
+    first: the hoisted call queries the drawn `r`, which
+    `UniqueRFSimplification` then rightly samples.  In the real game two
+    `Q(true)` calls both return `H(0b00)`, so they always match."""
+    template = """
+        Game G() {{
+            Function<BitString<2>, BitString<2>> H;
+            Set<BitString<2>> T;
+            Void Initialize() {{
+                H <- Function<BitString<2>, BitString<2>>;
+            }}
+            BitString<2> Q(Bool b) {{
+                BitString<2> r <-uniq[T] BitString<2>;
+                if (b) {{
+                    r = 0b00;
+                    {query}
+                }}
+                return 0b11;
+            }}
+        }}
+        """
+    real = frog_parser.parse_game(template.format(query="return H(r);"))
+    rand = frog_parser.parse_game(
+        template.format(query="BitString<2> z <- BitString<2>; return z;")
+    )
+    assert not _engine_with().check_equivalent(real, rand).valid
+
+
+def test_unique_rf_self_assignment_control() -> None:
+    """`r = H(r)` queries `H` on the drawn `r` before writing `r`."""
+    _, rand = _unique_rf_pair("")
+    real = frog_parser.parse_game("""
+        Game G() {
+            Function<BitString<2>, BitString<2>> H;
+            Set<BitString<2>> T;
+            Void Initialize() {
+                H <- Function<BitString<2>, BitString<2>>;
+            }
+            BitString<2> Q(Bool b, Int k) {
+                BitString<2> r <-uniq[T] BitString<2>;
+                r = H(r);
+                return r;
+            }
+        }
+        """)
+    result = _engine_with().check_equivalent(real, rand)
+    assert result.valid, result.failure_detail
+
+
 def test_lazy_map_to_sampled_function_multicall() -> None:
     """``LazyMapToSampledFunction``: the standard lazy-sampled hash idiom
     (``if x in T: return T[x]; else: sample, store, return``) is

@@ -179,12 +179,15 @@ class SymbolicComputationTransformer(Transformer):
                 transform_name="Symbolic Computation",
                 reason=(
                     f"'{binary_operation}' not folded: operand '{unknown[0]}' "
-                    "is a negation, which the pass does not evaluate"
+                    "is a negation, which the pass does not evaluate (it may "
+                    "be written in the game or left by an earlier fold, e.g. "
+                    "'3 - 5' becoming '-2')"
                 ),
                 location=binary_operation.origin,
                 suggestion=(
-                    "Write the folded value, or the same expression in both "
-                    "games, so both canonicalize alike"
+                    "Make both games reach the same arithmetic here: compare "
+                    "with the other game's canonical form, and write the "
+                    "subtraction or folded value it has"
                 ),
                 variable=None,
                 method=self._method_name,

@@ -3179,6 +3179,38 @@ def test_symbolic_near_miss_on_negated_operand(expression: str, operand: str) ->
     assert misses[0].method == "Test"
     assert f"'{expression}' not folded" in misses[0].reason
     assert f"operand '{operand}' is a negation" in misses[0].reason
+    # The negation may not be the author's, so the wording must not assume it.
+    assert "written in the game or left by an earlier fold" in misses[0].reason
+    assert misses[0].suggestion is not None
+    assert "Make both games reach the same arithmetic" in misses[0].suggestion
+
+
+def test_symbolic_near_miss_on_negation_from_earlier_fold() -> None:
+    """``3 - 5`` folds to ``-2``; once inlined, ``-2 + 2`` is blocked by a
+    negation the author never wrote, and the near miss still reports it."""
+    ctx = _make_ctx()
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int Test() {
+                Int y = 3 - 5;
+                return y + 2;
+            }
+        }
+        """)
+    game = SymbolicComputation().apply(game, ctx)
+    assert not ctx.near_misses
+    game = InlineSingleUseVariable().apply(game, ctx)
+    SymbolicComputation().apply(game, ctx)
+    misses = [
+        nm for nm in ctx.near_misses if nm.transform_name == "Symbolic Computation"
+    ]
+    assert len(misses) == 1
+    assert misses[0].method == "Test"
+    assert "'-2 + 2' not folded" in misses[0].reason
+    assert "operand '-2' is a negation" in misses[0].reason
+    assert "left by an earlier fold" in misses[0].reason
+    assert misses[0].suggestion is not None
+    assert "Make both games reach the same arithmetic" in misses[0].suggestion
 
 
 @pytest.mark.parametrize(

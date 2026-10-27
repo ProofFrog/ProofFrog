@@ -1,0 +1,22 @@
+// The residual Z3 check read G.generator == G.identity as G == G.
+// Step 1 is a true equivalence (the operands swap); step 2 must fail.
+import 'GroupEquality.game';
+
+Game Swapped(Group G) {
+    Bool O() {
+        return G.identity == G.generator;
+    }
+}
+
+proof:
+
+let:
+    Group G;
+
+theorem:
+    GroupEquality(G);
+
+games:
+    GroupEquality(G).Left against GroupEquality(G).Adversary;
+    Swapped(G) against GroupEquality(G).Adversary;
+    GroupEquality(G).Right against GroupEquality(G).Adversary;

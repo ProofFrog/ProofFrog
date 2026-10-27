@@ -8,7 +8,10 @@ that the engine used to reject, crash on, or loop on, and must now verify.
 
 Each finding's proof and the files it imports live in
 ``soundness_regression_fixtures/F_<nnn>/``, copied from the audit's attack
-artifacts. Findings whose fix already came with a targeted unit or
+artifacts. A bug found outside the audit has a descriptive ID instead, with
+its fixtures in the matching directory (``Z3-FIELD-ACCESS`` in
+``Z3_FIELD_ACCESS/``). A reject case listed in ``FAILED_STEP`` must fail at
+that step, so an earlier, true hop cannot fail in its place. Findings whose fix already came with a targeted unit or
 integration test are not repeated here; this module covers the ones that
 had no public test. Every future soundness fix should add its attack proof
 (and a positive control where one exists) to this table or pin a
@@ -25,6 +28,7 @@ import pytest
 
 FIXTURES = Path(__file__).parent / "soundness_regression_fixtures"
 
+# fmt: off
 # (finding, proof file, expected verdict, pass, defect fixed)
 CASES = [
     ("F-062", "a2_probe.proof", "reject", "MergeProductSamples",
@@ -79,7 +83,28 @@ CASES = [
      "a reserved-prefix shadow let element writes reach shadowed field components"),
     ("F-323", "attack_c2_control.proof", "accept", "ExpandTuple",
      "positive control for the attack above"),
+    ("Z3-FIELD-ACCESS", "group_equality.proof", "reject", "Z3 residual check",
+     "G.generator == G.identity encoded as G == G"),
+    ("Z3-FIELD-ACCESS", "group_branch.proof", "reject", "RemoveUnreachable",
+     "G.generator == G.identity encoded as G == G; the final return was deleted"),
+    ("Z3-FIELD-ACCESS", "map_branch.proof", "reject", "RemoveUnreachable",
+     "M.keys == M.values encoded as M == M; the final return was deleted"),
 ]
+# fmt: on
+
+# (finding, proof file) -> the hop a reject case must fail at. In these
+# proofs step 1 is a true equivalence that must still pass.
+FAILED_STEP = {
+    ("Z3-FIELD-ACCESS", "group_equality.proof"): (
+        "Step 2 failed: Swapped(G) -> GroupEquality(G).Right"
+    ),
+    ("Z3-FIELD-ACCESS", "group_branch.proof"): (
+        "Step 2 failed: Swapped(G) -> GroupBranch(G).Right"
+    ),
+    ("Z3-FIELD-ACCESS", "map_branch.proof"): (
+        "Step 1 failed: MapBranch().Left -> MapBranch().Right"
+    ),
+}
 
 
 @pytest.mark.parametrize(
@@ -107,10 +132,14 @@ def test_regression_proof(
         assert "Proof Failed!" in output, context
         # A crash also exits non-zero; only a refused hop counts.
         assert "Traceback" not in output, context
+        failed_step = FAILED_STEP.get((finding, proof))
+        if failed_step is not None:
+            assert failed_step in output, context
+            assert "(1 step(s) failed:" in output, context
 
 
 def test_every_fixture_directory_is_exercised() -> None:
     """A fixture directory with no table entry would silently test nothing."""
     listed = {finding.replace("-", "_") for finding, *_ in CASES}
-    on_disk = {p.name for p in FIXTURES.glob("F_*") if p.is_dir()}
+    on_disk = {p.name for p in FIXTURES.iterdir() if p.is_dir()}
     assert on_disk == listed

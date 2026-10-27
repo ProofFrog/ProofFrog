@@ -11,6 +11,7 @@ proofs — so a failure points directly at one engine path.
 
 from __future__ import annotations
 
+import pytest
 from sympy import Symbol
 
 from proof_frog import frog_parser, visitors
@@ -374,11 +375,12 @@ def test_lazy_map_scan_multicall() -> None:
 
 
 def test_map_key_reindex_multicall() -> None:
-    """``MapKeyReindex``: when every read of ``M`` goes through an
-    injective deterministic call ``TT.Eval(.)``, re-keying ``M`` on the
-    Eval'd value (and rewriting writes accordingly) preserves cross-call
-    observation. Store and Lookup are separate oracles so any mismatch
-    between the rewritten write site and the read site would surface."""
+    """``MapKeyReindex``: when the stored keys are read only through an
+    injective deterministic call ``TT.Eval(e[0])`` in an ``M.entries``
+    scan, re-keying ``M`` on the Eval'd value (and rewriting writes
+    accordingly) preserves cross-call observation. Store and Lookup are
+    separate oracles so any mismatch between the rewritten write site and
+    the read site would surface."""
     prim = frog_parser.parse_primitive_file("""
         Primitive T(Set I, Set Y) {
             Set Input = I;
@@ -393,8 +395,10 @@ def test_map_key_reindex_multicall() -> None:
                 M[a] = s;
             }
             BitString<16>? Lookup(TT.Input a2) {
-                if (TT.Eval(a2) in M) {
-                    return M[TT.Eval(a2)];
+                for ([TT.Input, BitString<16>] e in M.entries) {
+                    if (TT.Eval(e[0]) == TT.Eval(a2)) {
+                        return e[1];
+                    }
                 }
                 return None;
             }
@@ -417,6 +421,144 @@ def test_map_key_reindex_multicall() -> None:
     engine = _engine_with(T=prim, TT=prim)
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
+
+
+def test_map_key_reindex_keeps_wrapped_read() -> None:
+    """``MapKeyReindex`` must not wrap a raw-key write while a read already
+    applies the wrapper. After ``Put(0b00)``, ``Get(0b00)`` returns true in
+    Right but in Left only if ``Tag(0b00) = 0b00``."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive P() {
+            deterministic injective BitString<2> Tag(BitString<2> x0);
+        }
+        """)
+    left = frog_parser.parse_game("""
+        Game Left(P S) {
+            Map<BitString<2>, Bool> e;
+            Bool Initialize() {
+                return false;
+            }
+            Void Put(BitString<2> pk) {
+                e[pk] = true;
+            }
+            Bool Get(BitString<2> pk) {
+                if ((S.Tag(0^2) in e)) {
+                    return e[S.Tag(0^2)];
+                }
+                return false;
+            }
+        }
+        """)
+    right = frog_parser.parse_game("""
+        Game Right(P S) {
+            Map<BitString<2>, Bool> e;
+            Bool Initialize() {
+                return false;
+            }
+            Void Put(BitString<2> pk) {
+                e[S.Tag(pk)] = true;
+            }
+            Bool Get(BitString<2> pk) {
+                if (S.Tag(0^2) in e) {
+                    return e[S.Tag(0^2)];
+                }
+                return false;
+            }
+        }
+        """)
+    engine = _engine_with(P=prim, S=prim)
+    assert not engine.check_equivalent(left, right).valid
+
+
+_MAP_REINDEX_WHOLE_USE_PRIMITIVE = """
+    Primitive T() {
+        deterministic injective BitString<8> Eval(BitString<8> x);
+    }
+    """
+
+
+_MAP_REINDEX_WHOLE_USE_SCANS = {
+    "Left": "TT.Eval(e[0]) == y",
+    "Right": "e[0] == y",
+}
+
+
+def _map_reindex_whole_use_game(side: str, extra: str) -> str:
+    key = "a" if side == "Left" else "TT.Eval(a)"
+    return f"""
+        Game {side}(T TT) {{
+            Map<BitString<8>, Int> M;
+            Map<BitString<8>, Int> N;
+            Void Store(BitString<8> a) {{ M[{key}] = 0; }}
+            {extra}
+            Bool Scan(BitString<8> y) {{
+                for ([BitString<8>, Int] e in M.entries) {{
+                    if ({_MAP_REINDEX_WHOLE_USE_SCANS[side]}) {{ return true; }}
+                }}
+                return false;
+            }}
+        }}
+        """
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "Map<BitString<8>, Int> Dump() { return M; }",
+        "Bool Has(BitString<8> b) { N = M; return b in N; }",
+        "Void Put(BitString<8> a) { N[a] = 0; }\n            Void Load() { M = N; }",
+    ],
+    ids=["return-map", "copy-out-then-member", "load-from-other-map"],
+)
+def test_map_key_reindex_keeps_keys_used_whole(extra: str) -> None:
+    """``MapKeyReindex`` must not re-key ``M`` when the map is also used
+    whole. Left stores raw keys and Right stores ``TT.Eval`` of them, so
+    ``Dump`` returns different maps, ``Has`` answers differently, and keys
+    loaded by ``Load`` are found by Left's scan only through ``Eval`` but by
+    Right's scan raw."""
+    prim = frog_parser.parse_primitive_file(_MAP_REINDEX_WHOLE_USE_PRIMITIVE)
+    left = frog_parser.parse_game(_map_reindex_whole_use_game("Left", extra))
+    right = frog_parser.parse_game(_map_reindex_whole_use_game("Right", extra))
+    engine = _engine_with(T=prim, TT=prim)
+    assert not engine.check_equivalent(left, right).valid
+
+
+def _map_reindex_keyed_init_game(side: str) -> str:
+    key = "z" if side == "Left" else "TT.Eval(k, z)"
+    cond = "TT.Eval(k, e[0]) == y" if side == "Left" else "e[0] == y"
+    return f"""
+        Game {side}(T TT) {{
+            BitString<8> k;
+            Map<BitString<8>, Int> M;
+            Void Initialize() {{
+                BitString<8> z = 0^8;
+                M[{key}] = 0;
+                k <- BitString<8>;
+            }}
+            Bool Scan(BitString<8> y) {{
+                for ([BitString<8>, Int] e in M.entries) {{
+                    if ({cond}) {{ return true; }}
+                }}
+                return false;
+            }}
+        }}
+        """
+
+
+def test_map_key_reindex_keeps_initialize_write_before_context_arg() -> None:
+    """``MapKeyReindex`` must not wrap a write in ``Initialize`` that runs
+    before the wrapper's context argument ``k`` is sampled. Left's scan finds
+    ``Eval(k, 0^8)`` for the final ``k``; Right stored ``Eval`` of the
+    unset ``k``."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive T() {
+            deterministic injective BitString<8> Eval(BitString<8> k, BitString<8> x);
+        }
+        """)
+    left = frog_parser.parse_game(_map_reindex_keyed_init_game("Left"))
+    right = frog_parser.parse_game(_map_reindex_keyed_init_game("Right"))
+    engine = _engine_with(T=prim, TT=prim)
+    assert not engine.check_equivalent(left, right).valid
 
 
 def test_distinct_const_rf_symbolic_length_not_uniform() -> None:

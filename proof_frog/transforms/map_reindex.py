@@ -17,17 +17,38 @@ Soundness argument: see design spec §3.3.  Per-recognizer preconditions
 for group exponentiation) are enforced by
 :meth:`WrapperShape.precondition_misses` and
 :meth:`WrapperShape.context_args_readonly_check`.
+
+Re-keying moves the entry at key ``k`` to ``w(k)``.  The pass wraps raw-key
+writes and strips ``w(e[0])`` in ``M.entries`` loops, but leaves every other
+key access unchanged, so it declines to re-key a map with such an access.
+With nothing to re-key, only the key type changes.  Any reference to the map
+or to an ``M.entries`` loop tuple outside the forms the pass analyses (``M[k]``,
+``k in M``, ``|M|``, ``M.values``, an entries loop reading ``e[<int>]``) also
+blocks it: such a use (``return M;``, ``N = M;``, ``M = N;``, ``M == N``)
+would observe the re-keyed map unrewritten.
+
+A wrapped write evaluates ``w``'s context values (call context args, the
+exponent) at the write rather than at the scan, so the pass also declines
+when a method it rewrites binds one of those names locally, or when a write
+in ``Initialize`` does not follow the single top-level assignment of each
+such field (see :func:`_wrapper_context_problem`).
 """
 
 from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Sequence
 
 from .. import frog_ast
-from ..visitors import SearchVisitor, Transformer
+from ..visitors import (
+    SearchVisitor,
+    Transformer,
+    reassigns_or_rebinds,
+    referenced_variable_names,
+)
 from ._base import NearMiss, PipelineContext, TransformPass
+from ._definedness import method_binder_counts
 from ._wrappers import (
     Recognizer,
     WrapperShape,
@@ -417,6 +438,257 @@ def _collect_writes(
     return plans if ok else None
 
 
+def _kept_key_access(
+    game: frog_ast.Game,
+    map_name: str,
+    shape: WrapperShape,
+) -> Optional[tuple[str, str]]:
+    """If the rewrite re-keys ``M`` and leaves some key access unchanged,
+    return the methods of a re-keyed access and of the unchanged one."""
+    wrapped_ids: set[int] = set()
+    rekeyed: Optional[str] = None
+    for method in game.methods:
+        plans = _collect_writes(method, map_name, shape)
+        assert plans is not None
+        for plan in plans:
+            if plan.needs_wrapping:
+                assert isinstance(
+                    plan.write_node,
+                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+                )
+                wrapped_ids.add(id(plan.write_node.var))
+                rekeyed = rekeyed or method.signature.name
+        for loop in _find_entries_loops(method, map_name):
+            if _collect_all_e0_occurrences(loop.block, loop.var_name):
+                rekeyed = rekeyed or method.signature.name
+    if rekeyed is None:
+        return None
+    for method in game.methods:
+        for hit in _all_accesses_of_map(method, map_name):
+            if _extract_read_key(hit) is not None and id(hit) not in wrapped_ids:
+                return rekeyed, method.signature.name
+    return None
+
+
+def _allowed_map_uses(
+    tree: frog_ast.ASTNode,
+    map_name: str,
+    entries_loop_over_ids: set[int],
+) -> set[int]:
+    """Ids of the ``Variable(M)`` nodes in *tree* that sit in an access form
+    the pass analyses: ``M[k]``, ``k in M``, ``|M|``, ``M.values`` and the
+    ``M.entries`` driving an entries loop."""
+    allowed: set[int] = set()
+
+    def _is_map(n: frog_ast.ASTNode) -> bool:
+        return isinstance(n, frog_ast.Variable) and n.name == map_name
+
+    def _visit(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.ArrayAccess) and _is_map(n.the_array):
+            allowed.add(id(n.the_array))
+        elif (
+            isinstance(n, frog_ast.FieldAccess)
+            and _is_map(n.the_object)
+            and (
+                n.name == "values"
+                or (n.name == "entries" and id(n) in entries_loop_over_ids)
+            )
+        ):
+            allowed.add(id(n.the_object))
+        elif (
+            isinstance(n, frog_ast.BinaryOperation)
+            and n.operator == frog_ast.BinaryOperators.IN
+            and _is_map(n.right_expression)
+        ):
+            allowed.add(id(n.right_expression))
+        elif (
+            isinstance(n, frog_ast.UnaryOperation)
+            and n.operator == frog_ast.UnaryOperators.SIZE
+            and _is_map(n.expression)
+        ):
+            allowed.add(id(n.expression))
+        return False
+
+    SearchVisitor(_visit).visit(tree)
+    return allowed
+
+
+def _variables_named(tree: frog_ast.ASTNode, name: str) -> list[frog_ast.Variable]:
+    found: list[frog_ast.Variable] = []
+
+    def _visit(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.Variable) and n.name == name:
+            found.append(n)
+        return False
+
+    SearchVisitor(_visit).visit(tree)
+    return found
+
+
+def _loop_tuple_escapes(loop: frog_ast.GenericFor) -> bool:
+    """True if *loop*'s body uses its tuple variable other than as
+    ``e[<integer literal>]``."""
+    element_uses: set[int] = set()
+
+    def _visit(n: frog_ast.ASTNode) -> bool:
+        if (
+            isinstance(n, frog_ast.ArrayAccess)
+            and isinstance(n.the_array, frog_ast.Variable)
+            and n.the_array.name == loop.var_name
+            and isinstance(n.index, frog_ast.Integer)
+        ):
+            element_uses.add(id(n.the_array))
+        return False
+
+    SearchVisitor(_visit).visit(loop.block)
+    return any(
+        id(v) not in element_uses for v in _variables_named(loop.block, loop.var_name)
+    )
+
+
+def _unrecognized_use(
+    game: frog_ast.Game, map_name: str
+) -> Optional[tuple[Optional[str], str]]:
+    """Fail-closed allowlist over every reference to ``M`` and to the tuple
+    variable of each ``M.entries`` loop.
+
+    The rewrite only knows how to re-key the access forms
+    :func:`_all_accesses_of_map` reports (and ``e[i]`` on an entries-loop
+    tuple). Any other occurrence -- ``return M;``, ``N = M;``, ``M = N;``,
+    ``M == N``, a loop tuple used whole, a reference outside a method, or a
+    form added to the language later -- would observe the re-keyed map
+    without being rewritten, so it blocks the reindex.
+
+    Returns ``(method_name, description)`` for the first such use, else
+    ``None``.
+    """
+    for fld in game.fields:
+        if fld.value is not None and _variables_named(fld.value, map_name):
+            return None, "the map is referenced in a field initializer"
+    for method in game.methods:
+        mname = method.signature.name
+        if map_name in method_binder_counts(method):
+            return mname, f"the method binds a local named '{map_name}'"
+        loops = _find_entries_loops(method, map_name)
+        allowed = _allowed_map_uses(method, map_name, {id(lp.over) for lp in loops})
+        if any(id(v) not in allowed for v in _variables_named(method, map_name)):
+            return mname, (
+                "the map is used other than through M[k], k in M, |M|, "
+                "M.values or an M.entries loop, so re-keying it would change "
+                "what that use observes"
+            )
+        for loop in loops:
+            if _loop_tuple_escapes(loop):
+                return mname, (
+                    f"the M.entries loop tuple '{loop.var_name}' is used other "
+                    f"than through {loop.var_name}[<integer>], so its key "
+                    "would escape the re-keying"
+                )
+    return None
+
+
+def _top_level_index(
+    statements: Sequence[frog_ast.Statement], node: frog_ast.ASTNode
+) -> Optional[int]:
+    """Index of the top-level statement of *statements* containing *node*."""
+    for index, stmt in enumerate(statements):
+        if SearchVisitor(lambda n: n is node).visit(stmt) is not None:
+            return index
+    return None
+
+
+def _single_top_level_definition(
+    initialize: frog_ast.Method, name: str
+) -> Optional[int]:
+    """Index of the one statement of *initialize* defining *name*, if that is
+    a plain top-level ``name = e;`` / ``name <- D;`` and no other statement
+    (at any depth) writes, inserts into, or rebinds *name*."""
+    statements = initialize.block.statements
+    definitions = [
+        index
+        for index, stmt in enumerate(statements)
+        if isinstance(
+            stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        )
+        and isinstance(stmt.var, frog_ast.Variable)
+        and stmt.var.name == name
+    ]
+    if len(definitions) != 1:
+        return None
+    definition = definitions[0]
+    if any(
+        reassigns_or_rebinds({name}, stmt)
+        for index, stmt in enumerate(statements)
+        if index != definition
+    ):
+        return None
+    return definition
+
+
+def _wrapper_context_problem(
+    game: frog_ast.Game, map_name: str, shape: WrapperShape
+) -> Optional[tuple[Optional[str], str]]:
+    """Fail-closed check that every wrapper the rewrite introduces or removes
+    reads the same context values as the code it replaces.
+
+    The wrapper ``w`` reads names besides the key (the context args of a
+    primitive call, the exponent of ``x^k``). Re-keying evaluates ``w`` at
+    each raw-key write instead of at each ``M.entries`` scan, so:
+
+    * in a method where the rewrite wraps a write or strips ``w`` in an
+      entries loop, none of those names may be bound as a parameter or
+      local -- else ``w`` would read the local at one site and the game field
+      at another; and
+    * a wrapped write in ``Initialize`` must come after the field's value is
+      fixed: every game field ``w`` reads must have exactly one write in
+      ``Initialize``, a plain top-level statement, and each wrapped write must
+      lie in a later top-level statement. (Outside ``Initialize`` the
+      wrapper-specific checks already keep those fields fixed.)
+
+    Returns ``(method_name, description)`` for the first violation, else
+    ``None``.
+    """
+    read_names = referenced_variable_names(shape.build(frog_ast.Integer(0)))
+    for method in game.methods:
+        plans = _collect_writes(method, map_name, shape)
+        assert plans is not None
+        if not any(plan.needs_wrapping for plan in plans) and not (
+            _find_entries_loops(method, map_name)
+        ):
+            continue
+        bound = read_names & set(method_binder_counts(method))
+        if bound:
+            name = sorted(bound)[0]
+            return method.signature.name, (
+                f"the method binds a local named '{name}', which the wrapper "
+                "also reads, so the wrapper would read a different value there"
+            )
+
+    initialize = next(
+        (m for m in game.methods if m.signature.name == "Initialize"), None
+    )
+    if initialize is None:
+        return None
+    plans = _collect_writes(initialize, map_name, shape)
+    assert plans is not None
+    wrapped = [plan.write_node for plan in plans if plan.needs_wrapping]
+    if not wrapped:
+        return None
+    statements = initialize.block.statements
+    field_names = {f.name for f in game.fields}
+    for name in sorted(read_names & field_names):
+        definition = _single_top_level_definition(initialize, name)
+        for write in wrapped:
+            index = _top_level_index(statements, write)
+            if definition is None or index is None or index <= definition:
+                return "Initialize", (
+                    f"a write to be wrapped is not after the single top-level "
+                    f"assignment of '{name}' in Initialize, so the wrapper "
+                    f"would read '{name}' before it is set"
+                )
+    return None
+
+
 class _WrapKeyTransformer(Transformer):
     """Rewrite occurrences of ``wrapper(..., e[0], ...)`` inside a loop body to
     just ``e[0]`` when the wrapper matches the discovered shape.
@@ -464,12 +736,13 @@ class MapKeyReindex(TransformPass):
                 return rewritten
         return game
 
-    def _emit_near_miss(
+    def _emit_near_miss(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         ctx: PipelineContext,
         reason: str,
         map_name: str,
         method_name: Optional[str],
+        suggestion: Optional[str] = None,
     ) -> None:
         ctx.near_misses.append(
             NearMiss(
@@ -480,7 +753,8 @@ class MapKeyReindex(TransformPass):
                     + f": {reason}"
                 ),
                 location=None,
-                suggestion=(
+                suggestion=suggestion
+                or (
                     "MapKeyReindex fires only when every use of the map's "
                     "keys is wrapped in a single recognized injective form "
                     "(deterministic injective primitive call, or x^k on "
@@ -535,6 +809,56 @@ class MapKeyReindex(TransformPass):
                     method.signature.name,
                 )
                 return None
+
+        unrecognized = _unrecognized_use(game, map_name)
+        if unrecognized is not None:
+            use_method, reason = unrecognized
+            self._emit_near_miss(
+                ctx,
+                reason,
+                map_name,
+                use_method,
+                suggestion=(
+                    "MapKeyReindex re-keys a map only when it is accessed "
+                    "solely through M[k], k in M, |M|, M.values and M.entries "
+                    "loops reading e[0] / e[1]; pass the map whole nowhere."
+                ),
+            )
+            return None
+
+        kept = _kept_key_access(game, map_name, shape)
+        if kept is not None:
+            rekeyed, kept_method = kept
+            self._emit_near_miss(
+                ctx,
+                f"a key access in '{kept_method}' already applies the wrapper, "
+                "so re-keying the other accesses would make them address "
+                "different keys",
+                map_name,
+                rekeyed,
+                suggestion=(
+                    "Key the map the same way at every access: either apply "
+                    "the wrapper at every key access, or write raw keys and "
+                    "read them only through the wrapper in an M.entries loop."
+                ),
+            )
+            return None
+
+        context = _wrapper_context_problem(game, map_name, shape)
+        if context is not None:
+            context_method, reason = context
+            self._emit_near_miss(
+                ctx,
+                reason,
+                map_name,
+                context_method,
+                suggestion=(
+                    "Set every value the wrapper reads once, at the top of "
+                    "Initialize, before any write to the map, and do not "
+                    "reuse its name for a parameter or local."
+                ),
+            )
+            return None
 
         new_game = copy.deepcopy(game)
         self._execute_rewrite(new_game, map_name, shape, ctx)

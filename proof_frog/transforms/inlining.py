@@ -36,7 +36,11 @@ from ._base import (
     _lookup_primitive_method,
     may_return_before,
 )
-from ._definedness import initialize_assigned_fields, method_binder_counts
+from ._definedness import (
+    calls_game_method,
+    initialize_assigned_fields,
+    method_binder_counts,
+)
 
 
 def _contains_potential_undefined_read(node: frog_ast.ASTNode) -> bool:
@@ -1703,11 +1707,12 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
     read is defined and returns the value every later read in the block
     returns, so a field is used only when (a) it is definitely assigned
     before any oracle runs (a declared initializer, or a top-level
-    ``Initialize`` assignment no earlier ``return`` can skip:
-    ``initialize_assigned_fields``), since reading an unassigned variable is
-    observable; (b) the method binds no local of the same name; (c) the
-    block writes or rebinds the field nowhere (element writes included); and
-    (d) the block calls no method of the game, which could write the field
+    ``Initialize`` assignment that no earlier ``return`` can skip and no
+    call to a method of the game precedes: ``initialize_assigned_fields``),
+    since reading an unassigned variable is observable; (b) the method binds
+    no local of the same name; (c) the block writes or rebinds the field
+    nowhere (element writes included); and (d) the block calls no method of
+    the game (``M(...)`` or ``G.M(...)``), which could write the field
     between two reads.
 
     **Slice phase.** When a ``v[A:B]`` slice expression (variable base,
@@ -1757,13 +1762,13 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
         # oracle runs (eligible bases) and the rest (reported, never used).
         self._eligible_fields: dict[str, frog_ast.Type] = {}
         self._unassigned_fields: set[str] = set()
-        self._game_methods: set[str] = set()
+        self._game: Optional[frog_ast.Game] = None
         # Fields usable as bases in the current method, and the method name.
         self._field_scope: set[str] = set()
         self._method_name: Optional[str] = None
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
-        saved = (self._eligible_fields, self._unassigned_fields, self._game_methods)
+        saved = (self._eligible_fields, self._unassigned_fields, self._game)
         assigned = initialize_assigned_fields(game)
         self._eligible_fields = {
             field.name: field.type
@@ -1776,14 +1781,14 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
             if isinstance(field.type, frog_ast.ProductType)
             and field.name not in assigned
         }
-        self._game_methods = {method.signature.name for method in game.methods}
+        self._game = game
         try:
             return self._transform_children(game)
         finally:
             (
                 self._eligible_fields,
                 self._unassigned_fields,
-                self._game_methods,
+                self._game,
             ) = saved
 
     def _field_near_miss(self, field: str, idx_val: int, reason: str) -> None:
@@ -1803,15 +1808,7 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
 
     def _calls_game_method(self, block: frog_ast.Block) -> bool:
         """True if *block* calls a method of the game being transformed."""
-
-        def is_own_call(node: frog_ast.ASTNode) -> bool:
-            return (
-                isinstance(node, frog_ast.FuncCall)
-                and isinstance(node.func, frog_ast.Variable)
-                and node.func.name in self._game_methods
-            )
-
-        return SearchVisitor(is_own_call).visit(block) is not None
+        return self._game is not None and calls_game_method(self._game, block)
 
     def _record_unreachable_occurrences(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,

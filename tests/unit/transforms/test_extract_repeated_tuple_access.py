@@ -467,6 +467,30 @@ def test_field_repeated_access_is_extracted() -> None:
     )
 
 
+def test_field_assigned_before_a_game_method_call_is_extracted() -> None:
+    """Initialize may run an oracle once the field is assigned: that run, and
+    every later one, finds the field defined."""
+    _transform_and_compare(
+        _field_game(
+            """
+    Int Q(Bool c) {
+        if (c) { return 0; }
+        return f[1] + f[1];
+    }""",
+            init="f = K.Get(); Int r = Test.Q(true);",
+        ),
+        _field_game(
+            """
+    Int Q(Bool c) {
+        Int __cse_f_1__ = f[1];
+        if (c) { return 0; }
+        return __cse_f_1__ + __cse_f_1__;
+    }""",
+            init="f = K.Get(); Int r = Test.Q(true);",
+        ),
+    )
+
+
 def test_field_with_initializer_is_extracted() -> None:
     """A declared initializer makes the field defined before any oracle."""
     source = """
@@ -516,6 +540,26 @@ def test_field_with_initializer_is_extracted() -> None:
             init="if (K.Flag()) { return 0; } f = K.Get(); return 1;",
             init_ret="Int",
         ),
+        # Initialize runs Q before it assigns f, so that run reads f while it
+        # is unassigned on any path that reaches a read; extracting at the
+        # top of Q's block adds a read on the c = true path, which made none.
+        # The call may be written bare or through the game's name.
+        _field_game(
+            """
+    Int Q(Bool c) {
+        if (c) { return 0; }
+        return f[1] + f[1];
+    }""",
+            init="Int r = Q(true); f = K.Get();",
+        ),
+        _field_game(
+            """
+    Int Q(Bool c) {
+        if (c) { return 0; }
+        return f[1] + f[1];
+    }""",
+            init="Int r = Test.Q(true); f = K.Get();",
+        ),
         # The block writes f between the two reads: the second read sees the
         # new value, so one shared local would return the stale component.
         _field_game("""
@@ -531,12 +575,20 @@ def test_field_with_initializer_is_extracted() -> None:
         f[1] = v;
         return x + f[1];
     }"""),
-        # A call to another method of the game may write f between the reads.
+        # A call to another method of the game may write f between the reads,
+        # whether written bare or through the game's name.
         _field_game("""
     Void Reset() { f = K.Get(); }
     Int Q() {
         Int x = f[1];
         Reset();
+        return x + f[1];
+    }"""),
+        _field_game("""
+    Void Reset() { f = K.Get(); }
+    Int Q() {
+        Int x = f[1];
+        Test.Reset();
         return x + f[1];
     }"""),
         # A branch declares a local named f. The reads after the branch are of

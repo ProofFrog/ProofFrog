@@ -86,6 +86,24 @@ def test_membership_in_literal_keeps_conjunct(fallback: bool) -> None:
     assert not _satisfiable(formula, z3.Bool("c"))
 
 
+@pytest.mark.parametrize("fallback", [False, True])
+def test_set_literal_atom_tracks_ssa_version(fallback: bool) -> None:
+    # `{t}` before and after `t = t + 1` are different sets. One visitor
+    # instance (as RemoveUnreachable uses it) must not reuse the atom across
+    # SSA versions, or `{t} == S` then `{t} != S` reads as a tautology.
+    type_map = _type_map(t=frog_ast.IntType(), S=frog_ast.SetType(frog_ast.IntType()))
+    visitor = visitors.Z3FormulaVisitor(
+        type_map,
+        variable_version_map={"t": 0, "S": 0},
+        opaque_func_call_fallback=fallback,
+    )
+    before = visitor.visit(frog_parser.parse_expression("{t} == S"))
+    visitor.set_variable_version_map({"t": 1, "S": 0})
+    after = visitor.visit(frog_parser.parse_expression("{t} != S"))
+    assert before is not None and after is not None
+    assert not _valid(z3.Or(before, after))
+
+
 def test_set_minus_refuses() -> None:
     assert _encode("({3} \\ 3) == {t, t}", _ints("t")) is None
 

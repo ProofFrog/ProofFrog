@@ -1243,6 +1243,9 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         if any(item is None for item in items):
             self.stack.append(None)
         else:
+            # Deliberately not gated on `opaque_func_call_fallback`, unlike
+            # `leave_slice` / `leave_bit_string_literal`: `in` / `subsets`
+            # atoms and Set-typed variables are encoded ungated too.
             self.stack.append(self._intern_opaque(node))
 
     def leave_array_access(self, _node: frog_ast.ArrayAccess) -> None:

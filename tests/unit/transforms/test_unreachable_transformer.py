@@ -925,6 +925,22 @@ def test_remove_unreachable_membership_in_literal_keeps_conjunct() -> None:
     assert _count_returns(transformed) == 4, transformed
 
 
+def test_remove_unreachable_set_literal_atom_tracks_reassignment() -> None:
+    """`{t}` before and after `t = t + 1` are different sets. Sharing one
+    atom across SSA versions made the two guards cover every execution and
+    deleted `return 3`, which t = 0, S = {1} reaches."""
+    method = frog_parser.parse_method("""
+        Int O(Int t, Set<Int> S) {
+            if ({t} == S) { return 1; }
+            t = t + 1;
+            if ({t} != S) { return 2; }
+            return 3;
+        }
+        """)
+    transformed = RemoveUnreachableTransformer(method).transform(method)
+    assert _count_returns(transformed) == 3, transformed
+
+
 @pytest.mark.parametrize(
     "method,returns",
     [

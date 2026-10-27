@@ -1,0 +1,35 @@
+// Positive control for StaleLocal.game and StaleField.game: M is never
+// written, so x and f equal F.Enc(|M.keys|) at each comparison, and
+// injectivity of F.Enc makes each comparison |M.keys| == y.
+import 'InjEnc.primitive';
+
+Game Left(InjEnc F) {
+    Map<Int, Bool> M;
+    F.Block f;
+    Void Initialize() {
+        f = F.Enc(|M.keys|);
+    }
+    Bool OLocal(Int y) {
+        F.Block x = F.Enc(|M.keys|);
+        return x == F.Enc(y);
+    }
+    Bool OField(Int y) {
+        return f == F.Enc(y);
+    }
+}
+
+Game Right(InjEnc F) {
+    Map<Int, Bool> M;
+    F.Block f;
+    Void Initialize() {
+        f = F.Enc(|M.keys|);
+    }
+    Bool OLocal(Int y) {
+        return |M.keys| == y;
+    }
+    Bool OField(Int y) {
+        return |M.keys| == y;
+    }
+}
+
+export as StableReads;

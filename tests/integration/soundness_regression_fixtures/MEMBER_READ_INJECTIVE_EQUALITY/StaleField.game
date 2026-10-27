@@ -1,0 +1,34 @@
+// Injective Equality Simplify resolved the field f to its Initialize
+// definition F.Enc(|M.keys|) in O and rewrote f == F.Enc(y) to
+// |M.keys| == y. The definition reads M only through the member access
+// M.keys, so the check that every field it reads is never written after it
+// missed the write M[y] = true in O.
+// First call O(0): Left returns F.Enc(0) == F.Enc(0), true; Right returns
+// 1 == 0, false.
+import 'InjEnc.primitive';
+
+Game Left(InjEnc F) {
+    Map<Int, Bool> M;
+    F.Block f;
+    Void Initialize() {
+        f = F.Enc(|M.keys|);
+    }
+    Bool O(Int y) {
+        M[y] = true;
+        return f == F.Enc(y);
+    }
+}
+
+Game Right(InjEnc F) {
+    Map<Int, Bool> M;
+    F.Block f;
+    Void Initialize() {
+        f = F.Enc(|M.keys|);
+    }
+    Bool O(Int y) {
+        M[y] = true;
+        return |M.keys| == y;
+    }
+}
+
+export as StaleField;

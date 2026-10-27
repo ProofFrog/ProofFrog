@@ -1,0 +1,7 @@
+// A primitive with one deterministic injective method, so Injective
+// Equality Simplify may rewrite F.Enc(a) == F.Enc(b) to a == b.
+Primitive InjEnc(Set S) {
+    Set Block = S;
+
+    deterministic injective Block Enc(Int c);
+}

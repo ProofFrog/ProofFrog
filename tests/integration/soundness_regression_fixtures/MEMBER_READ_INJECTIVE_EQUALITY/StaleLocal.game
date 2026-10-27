@@ -1,0 +1,27 @@
+// Injective Equality Simplify resolved the local x to its call
+// F.Enc(|M.keys|) at the comparison and rewrote x == F.Enc(y) to
+// |M.keys| == y. The call reads M only through the member access M.keys, so
+// the check that its arguments are unchanged since the binding never saw
+// the write M[y] = true in between.
+// First call O(0): Left returns F.Enc(0) == F.Enc(0), true; Right returns
+// 1 == 0, false.
+import 'InjEnc.primitive';
+
+Game Left(InjEnc F) {
+    Map<Int, Bool> M;
+    Bool O(Int y) {
+        F.Block x = F.Enc(|M.keys|);
+        M[y] = true;
+        return x == F.Enc(y);
+    }
+}
+
+Game Right(InjEnc F) {
+    Map<Int, Bool> M;
+    Bool O(Int y) {
+        M[y] = true;
+        return |M.keys| == y;
+    }
+}
+
+export as StaleLocal;

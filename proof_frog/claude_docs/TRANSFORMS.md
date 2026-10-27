@@ -106,7 +106,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | NormalizeCommutativeChains | Sorts operands of commutative chains by structural key; also normalizes `==`/`!=` operand order. |
 | FlattenConcatChain | Left-associates `\|\|` chains; sound under both Boolean OR and BitString concatenation. |
 | ReflexiveComparison | Simplifies `x == x` to `true` and `x != x` to `false`. |
-| InjectiveEqualitySimplify | Rewrites `f(a1,...) == f(b1,...)` to `(a1==b1) && ...` when `f` is `deterministic injective`. |
+| InjectiveEqualitySimplify | Rewrites `f(a1,...) == f(b1,...)` to `(a1==b1) && ...` when `f` is `deterministic injective`. An operand may be a local bound once to such a call, or a field assigned once in `Initialize`, outside the method being rewritten; it is resolved to its call only when every value the call reads, including one read only through a member access (`M` in `F.Enc(\|M.keys\|)`), is unchanged at the comparison. |
 | ConcatEqualityDecompose | Decomposes `(a \|\| b \|\| ...) op other` into pairwise slice equalities when concatenation-term lengths are derivable. |
 | TupleEqualityDecompose | Rewrites `a != b` between tuple-typed expressions to the per-component disjunction of `!=`. `==` is intentionally NOT decomposed. |
 

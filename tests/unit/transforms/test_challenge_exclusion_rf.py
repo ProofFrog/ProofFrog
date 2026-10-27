@@ -541,3 +541,171 @@ def test_f015_joint_guard_full_tuple_input_still_fires() -> None:
     game = frog_parser.parse_game(source)
     result = ChallengeExclusionRFToUniformTransformer().transform(game)
     assert "field <- BitString<16>" in str(result)  # fired
+
+
+# --------------------------------------------------------------------------
+# The Initialize argument must denote the challenge point for the whole game.
+# --------------------------------------------------------------------------
+
+
+def _reassign_game(
+    initialize: str, oracle: str = "", domain: str = "BitString<2>", guard: str = "U"
+) -> str:
+    return f"""
+    Game G(Bool c) {{
+        Function<{domain}, BitString<2>> e;
+        BitString<2> U;
+        Array<BitString<2>, 2> A;
+        BitString<2> p;
+        Void Initialize() {{
+            e <- Function<{domain}, BitString<2>>;
+            U = 0b00;
+            {initialize}
+        }}
+        {oracle}
+        BitString<2> Hash({domain} pm) {{
+            if (pm == {guard}) {{
+                return 0^2;
+            }}
+            return e(pm);
+        }}
+    }}
+    """
+
+
+@pytest.mark.parametrize(
+    "initialize",
+    [
+        # Hash excludes the new U, not the 0b00 that e was queried on.
+        "p = e(U); U <- BitString<2>;",
+        "p = e(U); U = 0b11;",
+        "p = e(U); if (c) { U = 0b11; }",
+        "p = e(U); for (Int i = 0 to 2) { U = 0b11; }",
+        # The call writes the point it reads.
+        "U = e(U);",
+        # The resolver reads the last assignment of x, made after the call.
+        "BitString<2> x = 0b11; p = e(x); x = U;",
+        # x holds the old U.
+        "BitString<2> x = U; U <- BitString<2>; p = e(x);",
+        "BitString<2> x = U; if (c) { x = 0b11; } p = e(x);",
+        # x holds the old y.
+        "BitString<2> y = 0b11; BitString<2> x = y; y = U; p = e(x);",
+        # x is overwritten by a sample before the call.
+        "BitString<2> x = U; x <- BitString<2>; p = e(x);",
+        # Hash compares against A after the element write, not the A that e
+        # was queried on.
+        pytest.param(
+            (
+                "A[0] = 0b00; A[1] = 0b00; p = e(A); A[0] = 0b11;",
+                {"domain": "Array<BitString<2>, 2>", "guard": "A"},
+            ),
+            id="A[0] = 0b00; A[1] = 0b00; p = e(A); A[0] = 0b11;",
+        ),
+    ],
+)
+def test_reassigned_challenge_argument_not_simplified(
+    initialize: str | tuple[str, dict[str, str]],
+) -> None:
+    if isinstance(initialize, tuple):
+        initialize, shape = initialize
+        assert not _fired(_reassign_game(initialize, **shape))
+    else:
+        assert not _fired(_reassign_game(initialize))
+
+
+def test_challenge_field_written_by_oracle_through_alias_not_simplified() -> None:
+    oracle = "Void Write(BitString<2> v) { if (c) { U = v; } }"
+    assert not _fired(_reassign_game("BitString<2> x = U; p = e(x);", oracle))
+
+
+@pytest.mark.parametrize(
+    "initialize",
+    [
+        "p = e(U);",
+        "U <- BitString<2>; p = e(U);",
+        "if (c) { U = 0b11; } p = e(U);",
+        "BitString<2> x = U; p = e(x);",
+        "U <- BitString<2>; BitString<2> x = U; p = e(x);",
+        "BitString<2> y = U; BitString<2> x = y; p = e(x);",
+        # Writes to names the argument does not read.
+        "p = e(U); p = 0b11;",
+        "BitString<2> x = U; p = e(x); BitString<2> z = x;",
+    ],
+)
+def test_stable_challenge_argument_still_simplified(initialize: str) -> None:
+    assert _fired(_reassign_game(initialize))
+
+
+def test_reassigned_challenge_array_control_still_simplified() -> None:
+    """Without the element write the array guard excludes the queried point."""
+    initialize = "A[0] = 0b00; A[1] = 0b00; p = e(A);"
+    assert _fired(
+        _reassign_game(initialize, domain="Array<BitString<2>, 2>", guard="A")
+    )
+
+
+# --------------------------------------------------------------------------
+# The oracle guard must compare the value the oracle's RF call queries.
+# --------------------------------------------------------------------------
+
+
+def _oracle_game(hash_body: str) -> str:
+    return f"""
+    Game G(Bool c) {{
+        Function<BitString<2>, BitString<2>> e;
+        BitString<2> U;
+        BitString<2> p;
+        Void Initialize() {{
+            e <- Function<BitString<2>, BitString<2>>;
+            U = 0b00;
+            p = e(U);
+        }}
+        BitString<2> Chal() {{
+            return p;
+        }}
+        BitString<2> Hash(BitString<2> pm) {{
+            {hash_body}
+        }}
+    }}
+    """
+
+
+_GUARD = "if (pm == U) { return 0^2; }"
+
+
+@pytest.mark.parametrize(
+    "hash_body",
+    [
+        # q holds the original pm; the guard checks the overwritten pm.
+        f"BitString<2> q = pm; pm = 0b11; {_GUARD} return e(q);",
+        f"BitString<2> q = pm; pm <- BitString<2>; {_GUARD} return e(q);",
+        f"BitString<2> q = pm; if (c) {{ pm = 0b11; }} {_GUARD} return e(q);",
+        f"BitString<2> q = pm; for (Int i = 0 to 2) {{ pm = 0b11; }} {_GUARD} "
+        "return e(q);",
+        # The same through a chain of copies.
+        f"BitString<2> q = pm; BitString<2> r = q; pm = 0b11; {_GUARD} return e(r);",
+        # The queried value is written in the guard's else branch.
+        "if (pm == U) { return 0^2; } else { pm = U; return e(pm); }",
+        # The copy is written after the guard, inside a branch.
+        f"BitString<2> q = pm; {_GUARD} if (c) {{ q = U; }} return e(q);",
+        # The resolver reads the last assignment of q, made after the call.
+        f"{_GUARD} BitString<2> q = U; BitString<2> r = e(q); q = pm; return r;",
+    ],
+)
+def test_oracle_guard_on_rewritten_value_not_simplified(hash_body: str) -> None:
+    assert not _fired(_oracle_game(hash_body))
+
+
+@pytest.mark.parametrize(
+    "hash_body",
+    [
+        f"{_GUARD} return e(pm);",
+        f"BitString<2> q = pm; {_GUARD} return e(q);",
+        f"BitString<2> q = pm; BitString<2> r = q; {_GUARD} return e(r);",
+        # Writes to names neither the guard nor the call reads.
+        f"BitString<2> z = 0b11; z = 0b01; {_GUARD} return e(pm);",
+        f"{_GUARD} BitString<2> r = e(pm); r = 0b11; return r;",
+    ],
+)
+def test_oracle_guard_on_stable_value_still_simplified(hash_body: str) -> None:
+    assert _fired(_oracle_game(hash_body))

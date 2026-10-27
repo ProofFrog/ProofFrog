@@ -26,16 +26,27 @@ or to an ``M.entries`` loop tuple outside the forms the pass analyses (``M[k]``,
 ``k in M``, ``|M|``, ``M.values``, an entries loop reading ``e[<int>]``) also
 blocks it: such a use (``return M;``, ``N = M;``, ``M = N;``, ``M == N``)
 would observe the re-keyed map unrewritten.
+
+A wrapped write evaluates ``w``'s context values (call context args, the
+exponent) at the write rather than at the scan, so the pass also declines
+when a method it rewrites binds one of those names locally, or when a write
+in ``Initialize`` does not follow the single top-level assignment of each
+such field (see :func:`_wrapper_context_problem`).
 """
 
 from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
-from typing import Iterator, Optional
+from typing import Iterator, Optional, Sequence
 
 from .. import frog_ast
-from ..visitors import SearchVisitor, Transformer
+from ..visitors import (
+    SearchVisitor,
+    Transformer,
+    reassigns_or_rebinds,
+    referenced_variable_names,
+)
 from ._base import NearMiss, PipelineContext, TransformPass
 from ._definedness import method_binder_counts
 from ._wrappers import (
@@ -576,6 +587,108 @@ def _unrecognized_use(
     return None
 
 
+def _top_level_index(
+    statements: Sequence[frog_ast.Statement], node: frog_ast.ASTNode
+) -> Optional[int]:
+    """Index of the top-level statement of *statements* containing *node*."""
+    for index, stmt in enumerate(statements):
+        if SearchVisitor(lambda n: n is node).visit(stmt) is not None:
+            return index
+    return None
+
+
+def _single_top_level_definition(
+    initialize: frog_ast.Method, name: str
+) -> Optional[int]:
+    """Index of the one statement of *initialize* defining *name*, if that is
+    a plain top-level ``name = e;`` / ``name <- D;`` and no other statement
+    (at any depth) writes, inserts into, or rebinds *name*."""
+    statements = initialize.block.statements
+    definitions = [
+        index
+        for index, stmt in enumerate(statements)
+        if isinstance(
+            stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        )
+        and isinstance(stmt.var, frog_ast.Variable)
+        and stmt.var.name == name
+    ]
+    if len(definitions) != 1:
+        return None
+    definition = definitions[0]
+    if any(
+        reassigns_or_rebinds({name}, stmt)
+        for index, stmt in enumerate(statements)
+        if index != definition
+    ):
+        return None
+    return definition
+
+
+def _wrapper_context_problem(
+    game: frog_ast.Game, map_name: str, shape: WrapperShape
+) -> Optional[tuple[Optional[str], str]]:
+    """Fail-closed check that every wrapper the rewrite introduces or removes
+    reads the same context values as the code it replaces.
+
+    The wrapper ``w`` reads names besides the key (the context args of a
+    primitive call, the exponent of ``x^k``). Re-keying evaluates ``w`` at
+    each raw-key write instead of at each ``M.entries`` scan, so:
+
+    * in a method where the rewrite wraps a write or strips ``w`` in an
+      entries loop, none of those names may be bound as a parameter or
+      local -- else ``w`` would read the local at one site and the game field
+      at another; and
+    * a wrapped write in ``Initialize`` must come after the field's value is
+      fixed: every game field ``w`` reads must have exactly one write in
+      ``Initialize``, a plain top-level statement, and each wrapped write must
+      lie in a later top-level statement. (Outside ``Initialize`` the
+      wrapper-specific checks already keep those fields fixed.)
+
+    Returns ``(method_name, description)`` for the first violation, else
+    ``None``.
+    """
+    read_names = referenced_variable_names(shape.build(frog_ast.Integer(0)))
+    for method in game.methods:
+        plans = _collect_writes(method, map_name, shape)
+        assert plans is not None
+        if not any(plan.needs_wrapping for plan in plans) and not (
+            _find_entries_loops(method, map_name)
+        ):
+            continue
+        bound = read_names & set(method_binder_counts(method))
+        if bound:
+            name = sorted(bound)[0]
+            return method.signature.name, (
+                f"the method binds a local named '{name}', which the wrapper "
+                "also reads, so the wrapper would read a different value there"
+            )
+
+    initialize = next(
+        (m for m in game.methods if m.signature.name == "Initialize"), None
+    )
+    if initialize is None:
+        return None
+    plans = _collect_writes(initialize, map_name, shape)
+    assert plans is not None
+    wrapped = [plan.write_node for plan in plans if plan.needs_wrapping]
+    if not wrapped:
+        return None
+    statements = initialize.block.statements
+    field_names = {f.name for f in game.fields}
+    for name in sorted(read_names & field_names):
+        definition = _single_top_level_definition(initialize, name)
+        for write in wrapped:
+            index = _top_level_index(statements, write)
+            if definition is None or index is None or index <= definition:
+                return "Initialize", (
+                    f"a write to be wrapped is not after the single top-level "
+                    f"assignment of '{name}' in Initialize, so the wrapper "
+                    f"would read '{name}' before it is set"
+                )
+    return None
+
+
 class _WrapKeyTransformer(Transformer):
     """Rewrite occurrences of ``wrapper(..., e[0], ...)`` inside a loop body to
     just ``e[0]`` when the wrapper matches the discovered shape.
@@ -727,6 +840,22 @@ class MapKeyReindex(TransformPass):
                     "Key the map the same way at every access: either apply "
                     "the wrapper at every key access, or write raw keys and "
                     "read them only through the wrapper in an M.entries loop."
+                ),
+            )
+            return None
+
+        context = _wrapper_context_problem(game, map_name, shape)
+        if context is not None:
+            context_method, reason = context
+            self._emit_near_miss(
+                ctx,
+                reason,
+                map_name,
+                context_method,
+                suggestion=(
+                    "Set every value the wrapper reads once, at the top of "
+                    "Initialize, before any write to the map, and do not "
+                    "reuse its name for a parameter or local."
                 ),
             )
             return None

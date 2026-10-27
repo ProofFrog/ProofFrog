@@ -572,3 +572,150 @@ def test_reindexes_with_values_view() -> None:
         ),
         _ctx_with_primitive(_SAME_TYPE_PRIMITIVE),
     )
+
+
+# ---------------------------------------------------------------------------
+# The wrapper must read its context argument where the rewrite moves it
+# ---------------------------------------------------------------------------
+
+
+_KEYED_PRIMITIVE = """
+Primitive T() {
+    deterministic injective BitString<8> Eval(BitString<8> k, BitString<8> x);
+}
+"""
+
+
+_KEYED_SCAN = """
+    Bool Scan(BitString<8> y) {
+        for ([BitString<8>, Int] e in M.entries) {
+            if (TT.Eval(k, e[0]) == y) {
+                return true;
+            }
+        }
+        return false;
+    }
+"""
+
+
+def _keyed_game(initialize_body: str, *methods: str) -> str:
+    body = "\n".join(methods)
+    return f"""
+        Game G(T TT) {{
+            BitString<8> k;
+            Map<BitString<8>, Int> M;
+            Void Initialize() {{
+                {initialize_body}
+            }}
+            {body}
+        }}
+        """
+
+
+_KEYED_INITIALIZE_DECLINES = {
+    "write-before-sample": """
+        BitString<8> z = 0^8;
+        M[z] = 0;
+        k <- BitString<8>;
+    """,
+    "resampled-after-write": """
+        k <- BitString<8>;
+        BitString<8> z = 0^8;
+        M[z] = 0;
+        k <- BitString<8>;
+    """,
+    "write-in-branch-before-sample": """
+        BitString<8> z = 0^8;
+        if (z == 0^8) {
+            M[z] = 0;
+        }
+        k <- BitString<8>;
+    """,
+    "sample-in-branch": """
+        BitString<8> z = 0^8;
+        if (z == 0^8) {
+            k <- BitString<8>;
+        }
+        M[z] = 0;
+    """,
+    "never-assigned": """
+        BitString<8> z = 0^8;
+        M[z] = 0;
+    """,
+}
+
+
+@pytest.mark.parametrize(
+    "initialize_body",
+    list(_KEYED_INITIALIZE_DECLINES.values()),
+    ids=list(_KEYED_INITIALIZE_DECLINES.keys()),
+)
+def test_declines_initialize_write_before_context_arg_is_set(
+    initialize_body: str,
+) -> None:
+    """Wrapping ``M[z] = 0`` as ``M[TT.Eval(k, z)] = 0`` evaluates ``Eval``
+    with the value ``k`` has at the write, whereas the scan uses the final
+    ``k``. Unless the write follows the one top-level assignment of ``k``,
+    those can differ."""
+    _apply_and_expect_unchanged(
+        _keyed_game(initialize_body, _KEYED_SCAN),
+        _ctx_with_primitive(_KEYED_PRIMITIVE),
+    )
+
+
+def test_reindexes_initialize_write_after_context_arg_is_set() -> None:
+    _apply_and_expect(
+        _keyed_game(
+            """
+            k <- BitString<8>;
+            BitString<8> z = 0^8;
+            if (z == 0^8) {
+                M[z] = 0;
+            }
+            """,
+            _KEYED_SCAN,
+        ),
+        _keyed_game(
+            """
+            k <- BitString<8>;
+            BitString<8> z = 0^8;
+            if (z == 0^8) {
+                M[TT.Eval(k, z)] = 0;
+            }
+            """,
+            """
+            Bool Scan(BitString<8> y) {
+                for ([BitString<8>, Int] e in M.entries) {
+                    if (e[0] == y) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            """,
+        ),
+        _ctx_with_primitive(_KEYED_PRIMITIVE),
+    )
+
+
+def test_declines_when_scan_binds_context_arg_name() -> None:
+    """In ``Scan`` the wrapper reads the parameter ``k``, not the field, so
+    stripping it there and wrapping the write with the field changes what
+    ``Scan`` matches."""
+    _apply_and_expect_unchanged(
+        _keyed_game(
+            "k <- BitString<8>;",
+            "Void Store(BitString<8> a) { M[a] = 0; }",
+            """
+            Bool Scan(BitString<8> y, BitString<8> k) {
+                for ([BitString<8>, Int] e in M.entries) {
+                    if (TT.Eval(k, e[0]) == y) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            """,
+        ),
+        _ctx_with_primitive(_KEYED_PRIMITIVE),
+    )

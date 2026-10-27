@@ -62,7 +62,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 
 | Pass | Description |
 |---|---|
-| MapKeyReindex | Re-indexes a lazy map whose key is a consistent injective wrapper `w(x)` to use the inner value `x` directly. |
+| MapKeyReindex | Re-keys a map field `M` by an injective wrapper `w` (a `deterministic injective` primitive call, or `x^k` on `GroupElem<G>` under `requires G.order is prime;` with `k` known-nonzero): entry `k` moves to `w(k)`. It wraps each raw-variable-key write (`M[a] = v` / `M[a] <- T` becomes `M[w(a)] = ...`) and strips `w(e[0])` to `e[0]` in `M.entries` scans, so it fires when the stored keys are read back only through `w(e[0])` in an entries scan. If every key access already applies `w`, only the key type changes. It declines (with a near miss) when: a key access it would leave unchanged already applies `w` (`M[w(b)]`, `w(b) in M`), or a write key is neither `w(...)` nor a variable; the map is used other than through `M[k]`, `k in M`, `|M|`, `M.values` or an `M.entries` loop, or a loop tuple other than as `e[<int>]` (e.g. `return M;`, `N = M;`, `M = N;`, `M == N`, `t = e;`); `M.keys` or a loose `M.entries` is read; `w`'s context argument is not a game field set only in `Initialize`, or a method it rewrites binds a local of that name; a wrapped write in `Initialize` is not in a later top-level statement than the single top-level assignment of every field `w` reads; or the wrapper's own preconditions fail (prime order, nonzero exponent). |
 
 ### Inlining (`inlining.py`)
 

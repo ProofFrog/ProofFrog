@@ -523,6 +523,44 @@ def test_map_key_reindex_keeps_keys_used_whole(extra: str) -> None:
     assert not engine.check_equivalent(left, right).valid
 
 
+def _map_reindex_keyed_init_game(side: str) -> str:
+    key = "z" if side == "Left" else "TT.Eval(k, z)"
+    cond = "TT.Eval(k, e[0]) == y" if side == "Left" else "e[0] == y"
+    return f"""
+        Game {side}(T TT) {{
+            BitString<8> k;
+            Map<BitString<8>, Int> M;
+            Void Initialize() {{
+                BitString<8> z = 0^8;
+                M[{key}] = 0;
+                k <- BitString<8>;
+            }}
+            Bool Scan(BitString<8> y) {{
+                for ([BitString<8>, Int] e in M.entries) {{
+                    if ({cond}) {{ return true; }}
+                }}
+                return false;
+            }}
+        }}
+        """
+
+
+def test_map_key_reindex_keeps_initialize_write_before_context_arg() -> None:
+    """``MapKeyReindex`` must not wrap a write in ``Initialize`` that runs
+    before the wrapper's context argument ``k`` is sampled. Left's scan finds
+    ``Eval(k, 0^8)`` for the final ``k``; Right stored ``Eval`` of the
+    unset ``k``."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive T() {
+            deterministic injective BitString<8> Eval(BitString<8> k, BitString<8> x);
+        }
+        """)
+    left = frog_parser.parse_game(_map_reindex_keyed_init_game("Left"))
+    right = frog_parser.parse_game(_map_reindex_keyed_init_game("Right"))
+    engine = _engine_with(T=prim, TT=prim)
+    assert not engine.check_equivalent(left, right).valid
+
+
 def test_distinct_const_rf_symbolic_length_not_uniform() -> None:
     """RC7 / F-017: a freshly-sampled RF evaluated at ``0^n`` and ``1^n`` for a
     SYMBOLIC length ``n`` must NOT canonicalize to two independent uniforms.

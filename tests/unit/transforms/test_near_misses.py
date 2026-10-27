@@ -1177,6 +1177,53 @@ def test_map_key_reindex_near_miss_loop_tuple_used_whole():
     assert "loop tuple 'e'" in misses[0].reason
 
 
+_MAP_REINDEX_KEYED_PRIMITIVE = """
+Primitive T() {
+    deterministic injective BitString<8> Eval(BitString<8> k, BitString<8> x);
+}
+"""
+
+
+def _map_reindex_keyed_misses(*methods: str) -> list[NearMiss]:
+    body = "\n".join(methods)
+    game = frog_parser.parse_game(f"""
+        Game G(T TT) {{
+            BitString<8> k;
+            Map<BitString<8>, Int> M;
+            {body}
+            Bool Scan(BitString<8> y) {{
+                for ([BitString<8>, Int] e in M.entries) {{
+                    if (TT.Eval(k, e[0]) == y) {{ return true; }}
+                }}
+                return false;
+            }}
+        }}
+        """)
+    ctx = _ctx_for_map_reindex(_MAP_REINDEX_KEYED_PRIMITIVE)
+    assert MapKeyReindex().apply(game, ctx) == game
+    return [nm for nm in ctx.near_misses if nm.transform_name == "Map Key Reindex"]
+
+
+def test_map_key_reindex_near_miss_initialize_write_before_context_arg():
+    misses = _map_reindex_keyed_misses(
+        "Void Initialize() { BitString<8> z = 0^8; M[z] = 0; k <- BitString<8>; }"
+    )
+    assert len(misses) == 1
+    assert misses[0].method == "Initialize"
+    assert "'k'" in misses[0].reason
+    assert "before it is set" in misses[0].reason
+
+
+def test_map_key_reindex_near_miss_context_arg_shadowed():
+    misses = _map_reindex_keyed_misses(
+        "Void Initialize() { k <- BitString<8>; }",
+        "Void Store(BitString<8> a, BitString<8> k) { M[a] = 0; }",
+    )
+    assert len(misses) == 1
+    assert misses[0].method == "Store"
+    assert "binds a local named 'k'" in misses[0].reason
+
+
 def test_map_key_reindex_no_near_miss_when_reindexed():
     game = frog_parser.parse_game(f"""
         Game G(T TT) {{

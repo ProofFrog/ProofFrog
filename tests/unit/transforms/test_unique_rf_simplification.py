@@ -567,3 +567,79 @@ class TestGuardedDrawWrites:
             }
             """)
         assert UniqueRFSimplification().apply(game, _make_ctx()) != game
+
+
+_SELF_ASSIGN = """
+    Game G() {{
+        Set<BitString<8>> S;
+        Function<BitString<8>, BitString<8>> RF;
+        Function<BitString<8>, BitString<8>> RF2;
+        {fields}
+        Void Initialize() {{
+            RF <- Function<BitString<8>, BitString<8>>;
+            RF2 <- Function<BitString<8>, BitString<8>>;
+        }}
+        BitString<8> Query() {{
+            BitString<8> r <-uniq[S] BitString<8>;
+            {body}
+        }}
+    }}
+    """
+
+
+def _query_after(body: str, fields: str = "") -> list[frog_ast.Statement]:
+    game = frog_parser.parse_game(_SELF_ASSIGN.format(body=body, fields=fields))
+    out = UniqueRFSimplification().apply(game, _make_ctx())
+    query = next(m for m in out.methods if m.signature.name == "Query")
+    return list(query.block.statements)
+
+
+def _calls(stmts: list[frog_ast.Statement], rf_name: str) -> int:
+    return sum(
+        1
+        for stmt in stmts
+        if isinstance(stmt, frog_ast.Assignment)
+        and isinstance(stmt.value, frog_ast.FuncCall)
+        and isinstance(stmt.value.func, frog_ast.Variable)
+        and stmt.value.func.name == rf_name
+    )
+
+
+class TestSelfAssignment:
+    """`r = RF(r)` evaluates `RF(r)` on the drawn `r` before writing `r`."""
+
+    def test_self_assignment_simplified(self) -> None:
+        stmts = _query_after("r = RF(r); return r;")
+        assert _calls(stmts, "RF") == 0
+        # The fresh value gets its own variable, then is copied into `r`.
+        sample, copy_back = stmts[1], stmts[2]
+        assert isinstance(sample, frog_ast.Sample)
+        assert sample.the_type == frog_ast.BitStringType(frog_ast.Integer(8))
+        assert isinstance(sample.var, frog_ast.Variable)
+        assert isinstance(copy_back, frog_ast.Assignment)
+        assert copy_back.var == frog_ast.Variable("r")
+        assert copy_back.value == sample.var
+
+    def test_minted_name_avoids_existing_name(self) -> None:
+        stmts = _query_after(
+            "r = RF(r); return r + __rf_sample_0__;",
+            fields="BitString<8> __rf_sample_0__;",
+        )
+        sample = stmts[1]
+        assert isinstance(sample, frog_ast.Sample)
+        assert sample.var != frog_ast.Variable("__rf_sample_0__")
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # After `r = RF(r)`, `r` holds an RF output, not a `<-uniq` draw.
+            "r = RF(r); BitString<8> z = RF2(r); return z;",
+            "r = RF(r); BitString<8> z = RF(r); return z;",
+        ],
+    )
+    def test_call_after_self_assignment_kept(self, body: str) -> None:
+        stmts = _query_after(body)
+        assert _calls(stmts, "RF2") + _calls(stmts, "RF") >= 1
+        last_call = stmts[-2]
+        assert isinstance(last_call, frog_ast.Assignment)
+        assert isinstance(last_call.value, frog_ast.FuncCall)

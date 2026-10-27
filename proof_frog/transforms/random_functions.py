@@ -252,6 +252,10 @@ def _analyze_block(
         # `RF(r)` is no longer fresh.  Any write of `r` counts, at any depth,
         # including element writes, loop binders and redeclarations.  A
         # top-level `<-uniq[S]` redraw from a field set re-seeds the guard below.
+        # An assignment `x = RF(r)` evaluates its call, reading `r`, before it
+        # writes `x`, so the call is checked against the guards held as the
+        # statement starts: `r = RF(r)` straight after the draw is fresh.
+        guards_at_call = dict(uniq_guards)
         for name in [n for n in uniq_guards if reassigns_or_rebinds({n}, statement)]:
             overwritten[name] = uniq_guards.pop(name)
 
@@ -294,7 +298,7 @@ def _analyze_block(
                 rf_analysis.eligible = False
                 continue
 
-            if arg.name not in uniq_guards:
+            if arg.name not in guards_at_call:
                 rf_analysis.eligible = False
                 if arg.name in overwritten:
                     rf_analysis.overwritten_draws.append(
@@ -304,7 +308,7 @@ def _analyze_block(
                     )
                 continue
 
-            set_name = uniq_guards[arg.name]
+            set_name = guards_at_call[arg.name]
 
             # If RF.domain is the set, verify it matches this RF
             if "." in set_name:
@@ -501,13 +505,30 @@ class _RFCallExtractor(BlockTransformer):
 
 
 class _RFCallReplacer(BlockTransformer):
-    """Replace ``z = RF(r)`` with ``z <- R`` for eligible RF fields."""
+    """Replace ``z = RF(r)`` with ``z <- R`` for eligible RF fields.
+
+    Given *avoid* (every identifier in scope), a call that overwrites its own
+    argument, ``r = RF(r)``, becomes ``R __rf_sample_0__ <- R; r =
+    __rf_sample_0__;`` instead, so the fresh value has a variable of its own
+    that later passes can propagate, as they do for ``z = RF(r)``.
+    """
 
     def __init__(
         self,
         eligible_rfs: dict[str, frog_ast.FunctionType],
+        avoid: set[str] | None = None,
     ) -> None:
         self.eligible_rfs = eligible_rfs
+        self.avoid = avoid
+        self.counter = 0
+
+    def _fresh_name(self, avoid: set[str]) -> str:
+        while True:
+            name = f"__rf_sample_{self.counter}__"
+            self.counter += 1
+            if name not in avoid:
+                avoid.add(name)
+                return name
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -522,16 +543,37 @@ class _RFCallReplacer(BlockTransformer):
             rf_name = statement.value.func.name
             range_type = self.eligible_rfs[rf_name].range_type
 
-            # Type is used as Expression in sampling (DSL convention)
-            new_sample = frog_ast.Sample(
-                statement.the_type,
-                copy.deepcopy(statement.var),
-                copy.deepcopy(range_type),  # type: ignore[arg-type]
-            )
+            replacement: list[frog_ast.Statement]
+            if (
+                self.avoid is not None
+                and statement.the_type is None
+                and lvalue_base_name(statement.var)
+                in referenced_variable_names(statement.value)
+            ):
+                fresh = self._fresh_name(self.avoid)
+                replacement = [
+                    frog_ast.Sample(
+                        copy.deepcopy(range_type),
+                        frog_ast.Variable(fresh),
+                        copy.deepcopy(range_type),  # type: ignore[arg-type]
+                    ),
+                    frog_ast.Assignment(
+                        None, copy.deepcopy(statement.var), frog_ast.Variable(fresh)
+                    ),
+                ]
+            else:
+                # Type is used as Expression in sampling (DSL convention)
+                replacement = [
+                    frog_ast.Sample(
+                        statement.the_type,
+                        copy.deepcopy(statement.var),
+                        copy.deepcopy(range_type),  # type: ignore[arg-type]
+                    )
+                ]
 
             new_stmts = (
                 list(block.statements[:index])
-                + [new_sample]
+                + replacement
                 + list(block.statements[index + 1 :])
             )
             return self.transform_block(frog_ast.Block(new_stmts))
@@ -650,7 +692,7 @@ class UniqueRFSimplification(TransformPass):
         if not eligible:
             return game
 
-        return _RFCallReplacer(eligible).transform(game)
+        return _RFCallReplacer(eligible, _collect_names_in_scope(game)).transform(game)
 
 
 class ExtractRFCalls(TransformPass):

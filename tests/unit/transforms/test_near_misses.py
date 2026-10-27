@@ -578,6 +578,30 @@ def test_unique_rf_no_near_miss_without_draw() -> None:
     assert not _unique_rf_misses(game, _make_ctx())
 
 
+def test_unique_rf_no_near_miss_on_self_assignment() -> None:
+    """`r = RF(r)` reads the drawn `r` before it writes `r`, so the call is a
+    fresh query: the pass fires and reports no write."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Set<BitString<8>> S;
+            Function<BitString<8>, BitString<8>> RF;
+            Void Initialize() {
+                RF <- Function<BitString<8>, BitString<8>>;
+            }
+            BitString<8> Query() {
+                BitString<8> r <-uniq[S] BitString<8>;
+                r = RF(r);
+                return r;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    assert UniqueRFSimplification().apply(game, ctx) != game
+    assert not [
+        nm for nm in ctx.near_misses if nm.transform_name == "Unique RF Simplification"
+    ]
+
+
 # ---------------------------------------------------------------------------
 # ExtractRFCalls near-miss tests
 # ---------------------------------------------------------------------------

@@ -521,6 +521,27 @@ def test_unique_rf_call_inside_writing_branch_multicall() -> None:
     assert not _engine_with().check_equivalent(real, rand).valid
 
 
+def test_unique_rf_self_assignment_control() -> None:
+    """`r = H(r)` queries `H` on the drawn `r` before writing `r`."""
+    _, rand = _unique_rf_pair("")
+    real = frog_parser.parse_game("""
+        Game G() {
+            Function<BitString<2>, BitString<2>> H;
+            Set<BitString<2>> T;
+            Void Initialize() {
+                H <- Function<BitString<2>, BitString<2>>;
+            }
+            BitString<2> Q(Bool b, Int k) {
+                BitString<2> r <-uniq[T] BitString<2>;
+                r = H(r);
+                return r;
+            }
+        }
+        """)
+    result = _engine_with().check_equivalent(real, rand)
+    assert result.valid, result.failure_detail
+
+
 def test_lazy_map_to_sampled_function_multicall() -> None:
     """``LazyMapToSampledFunction``: the standard lazy-sampled hash idiom
     (``if x in T: return T[x]; else: sample, store, return``) is

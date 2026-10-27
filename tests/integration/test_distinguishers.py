@@ -492,6 +492,35 @@ def test_unique_rf_fresh_draw_control() -> None:
     assert result.valid, result.failure_detail
 
 
+def test_unique_rf_call_inside_writing_branch_multicall() -> None:
+    """`ExtractRFCalls` must not hoist `H(r)` above a branch that writes `r`
+    first: the hoisted call queries the drawn `r`, which
+    `UniqueRFSimplification` then rightly samples.  In the real game two
+    `Q(true)` calls both return `H(0b00)`, so they always match."""
+    template = """
+        Game G() {{
+            Function<BitString<2>, BitString<2>> H;
+            Set<BitString<2>> T;
+            Void Initialize() {{
+                H <- Function<BitString<2>, BitString<2>>;
+            }}
+            BitString<2> Q(Bool b) {{
+                BitString<2> r <-uniq[T] BitString<2>;
+                if (b) {{
+                    r = 0b00;
+                    {query}
+                }}
+                return 0b11;
+            }}
+        }}
+        """
+    real = frog_parser.parse_game(template.format(query="return H(r);"))
+    rand = frog_parser.parse_game(
+        template.format(query="BitString<2> z <- BitString<2>; return z;")
+    )
+    assert not _engine_with().check_equivalent(real, rand).valid
+
+
 def test_lazy_map_to_sampled_function_multicall() -> None:
     """``LazyMapToSampledFunction``: the standard lazy-sampled hash idiom
     (``if x in T: return T[x]; else: sample, store, return``) is

@@ -359,6 +359,64 @@ def _collect_names_in_scope(node: frog_ast.ASTNode) -> set[str]:
     return names
 
 
+def _is_rf_call(rf_names: set[str], node: frog_ast.ASTNode) -> bool:
+    return (
+        isinstance(node, frog_ast.FuncCall)
+        and isinstance(node.func, frog_ast.Variable)
+        and node.func.name in rf_names
+    )
+
+
+def _hoistable_rf_call(
+    statement: frog_ast.Statement, rf_names: set[str]
+) -> frog_ast.FuncCall | None:
+    """The first call to one of *rf_names* that may be hoisted to just before
+    *statement*, or ``None``.
+
+    Hoisting is exact only for a call evaluated when *statement* starts, before
+    anything in it runs: the expressions of a simple statement and the first
+    condition of an ``if``.  A call in a branch or loop body may follow a write
+    to its argument (``if (b) { r = 0b00; return RF(r); }`` would query ``RF``
+    on the old ``r``) and is not evaluated on every path, and a call in a later
+    ``else if`` condition is not evaluated when an earlier branch is taken.  A
+    loop header is left alone too.  Such calls are extracted inside their own
+    block instead, where the statements before them run first.
+    """
+    search = functools.partial(_is_rf_call, rf_names)
+    target: frog_ast.ASTNode
+    if isinstance(statement, frog_ast.IfStatement):
+        target = statement.conditions[0]
+    elif isinstance(
+        statement, (frog_ast.NumericFor, frog_ast.GenericFor, frog_ast.Block)
+    ):
+        return None
+    else:
+        target = statement
+    found = SearchVisitor[frog_ast.FuncCall](search).visit(target)
+    return found
+
+
+def _unhoisted_rf_call(
+    statement: frog_ast.Statement, rf_names: set[str]
+) -> frog_ast.FuncCall | None:
+    """A call to one of *rf_names* in *statement* that ``_hoistable_rf_call``
+    never reaches: one in a nested block, a later ``else if`` condition or a
+    loop header."""
+    search = functools.partial(_is_rf_call, rf_names)
+    parts: list[frog_ast.ASTNode]
+    if isinstance(statement, frog_ast.IfStatement):
+        parts = [*statement.conditions[1:], *statement.blocks]
+    elif isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
+        parts = [statement]
+    else:
+        return None
+    for part in parts:
+        found = SearchVisitor[frog_ast.FuncCall](search).visit(part)
+        if found is not None:
+            return found
+    return None
+
+
 class _RFCallExtractor(BlockTransformer):
     """Extract RF calls embedded in expressions into separate assignments.
 
@@ -368,6 +426,10 @@ class _RFCallExtractor(BlockTransformer):
         return [v1, m + __rf_extract_0];
 
     This enables ``_RFCallReplacer`` to detect and simplify the call.
+
+    Only a call evaluated at the start of its statement is hoisted (see
+    :func:`_hoistable_rf_call`); a call inside a branch or loop body is
+    extracted within that body when the transformer reaches it.
 
     The minted temporary name is freshened against *avoid* (every
     identifier in scope) so it cannot capture an existing parameter,
@@ -407,14 +469,7 @@ class _RFCallExtractor(BlockTransformer):
             ):
                 continue
 
-            def is_rf_call(node: frog_ast.ASTNode) -> bool:
-                return (
-                    isinstance(node, frog_ast.FuncCall)
-                    and isinstance(node.func, frog_ast.Variable)
-                    and node.func.name in self.rf_names
-                )
-
-            found = SearchVisitor(is_rf_call).visit(statement)
+            found = _hoistable_rf_call(statement, self.rf_names)
             if found is None:
                 continue
 
@@ -612,8 +667,66 @@ class ExtractRFCalls(TransformPass):
         if not rf_types:
             return game
 
+        rf_names = set(rf_types.keys())
+        if ctx is not None:
+            for method in game.methods:
+                _report_unhoisted_rf_calls(method, rf_names, ctx)
+
         avoid = _collect_names_in_scope(game)
-        return _RFCallExtractor(set(rf_types.keys()), rf_types, avoid).transform(game)
+        return _RFCallExtractor(rf_names, rf_types, avoid).transform(game)
+
+
+def _report_unhoisted_rf_calls(
+    method: frog_ast.Method, rf_names: set[str], ctx: PipelineContext
+) -> None:
+    """Near miss for each RF call ``ExtractRFCalls`` keeps inside an ``if`` or
+    ``for`` although its argument is drawn by ``<-uniq`` in the method:
+    ``UniqueRFSimplification`` only treats a call in the draw's own block as
+    a fresh query."""
+    drawn: set[str] = set()
+    compounds: list[frog_ast.Statement] = []
+
+    def collect(node: frog_ast.ASTNode) -> bool:
+        if (
+            isinstance(node, frog_ast.UniqueSample)
+            and node.surface_form == "uniq"
+            and isinstance(node.var, frog_ast.Variable)
+        ):
+            drawn.add(node.var.name)
+        elif isinstance(
+            node, (frog_ast.IfStatement, frog_ast.NumericFor, frog_ast.GenericFor)
+        ):
+            compounds.append(node)
+        return False
+
+    SearchVisitor(collect).visit(method.block)
+    for statement in compounds:
+        call = _unhoisted_rf_call(statement, rf_names)
+        if call is None or not referenced_variable_names(call) & drawn:
+            continue
+        assert isinstance(call.func, frog_ast.Variable)
+        ctx.near_misses.append(
+            NearMiss(
+                transform_name="Extract RF Calls",
+                reason=(
+                    f"Call to random function '{call.func.name}' not hoisted "
+                    "out of its enclosing if/for: it may follow a write to "
+                    "its argument or not run on every path, so a call on a "
+                    "'<-uniq' draw made outside that block is not recognised "
+                    "as a fresh query"
+                ),
+                location=statement.origin,
+                suggestion=(
+                    "If the call runs on every path and its argument is not "
+                    "written before it, compute it before the if/for"
+                ),
+                # Canonical diffs rename fields and locals, so a variable
+                # filter would hide this near miss.
+                variable=None,
+                method=method.signature.name,
+            )
+        )
+        return
 
 
 # ---------------------------------------------------------------------------

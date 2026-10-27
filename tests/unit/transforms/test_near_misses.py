@@ -37,6 +37,7 @@ from proof_frog.transforms.sampling import (
     SingleCallFieldToLocal,
 )
 from proof_frog.transforms.random_functions import (
+    ExtractRFCalls,
     LocalRFToUniform,
     DistinctConstRFToUniform,
     LazyMapPairToSampledFunction,
@@ -575,6 +576,63 @@ def test_unique_rf_no_near_miss_without_draw() -> None:
     """A call on a plain sample was never a fresh query."""
     game = _unique_rf_game("BitString<8> r <- BitString<8>; if (b) { r = c; }")
     assert not _unique_rf_misses(game, _make_ctx())
+
+
+# ---------------------------------------------------------------------------
+# ExtractRFCalls near-miss tests
+# ---------------------------------------------------------------------------
+
+
+def _extract_rf_misses(body: str) -> list[NearMiss]:
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Set<BitString<8>> S;
+            Function<BitString<8>, BitString<8>> RF;
+            Void Initialize() {{
+                RF <- Function<BitString<8>, BitString<8>>;
+            }}
+            BitString<8> Query(BitString<8> c, Bool b) {{
+                {body}
+            }}
+        }}
+        """)
+    ctx = _make_ctx()
+    ExtractRFCalls().apply(game, ctx)
+    return [nm for nm in ctx.near_misses if nm.transform_name == "Extract RF Calls"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "BitString<8> r <-uniq[S] BitString<8>; "
+        "if (b) { r = c; return c + RF(r); } return c;",
+        "BitString<8> r <-uniq[S] BitString<8>; "
+        "if (b) { return c + RF(r); } return c;",
+        "BitString<8> r <-uniq[S] BitString<8>; "
+        "for (Int i = 0 to 2) { c = c + RF(r); } return c;",
+    ],
+)
+def test_extract_rf_near_miss_on_unhoisted_call(body: str) -> None:
+    misses = _extract_rf_misses(body)
+    assert len(misses) == 1
+    assert misses[0].method == "Query"
+    assert misses[0].variable is None
+    assert "'RF'" in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # The call is in the statement itself and is hoisted.
+        "BitString<8> r <-uniq[S] BitString<8>; return c + RF(r);",
+        "BitString<8> r <-uniq[S] BitString<8>; "
+        "if (RF(r) == c) { return c; } return r;",
+        # No `<-uniq` draw for UniqueRFSimplification to pair the call with.
+        "if (b) { return c + RF(c); } return c;",
+    ],
+)
+def test_extract_rf_no_near_miss(body: str) -> None:
+    assert not _extract_rf_misses(body)
 
 
 # ---------------------------------------------------------------------------

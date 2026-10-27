@@ -147,11 +147,13 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
     pass runs; the check is there so the pass does not depend on it.
 
     Removing a guard removes the evaluation of the expression it tests, and
-    lets the declaration of a local it tests be removed as unused.  Reading
-    an unassigned variable is observable, so a guard that can never fire is
-    kept when the tested expression, or the initialiser of the tested local,
-    reads a variable that may be unassigned at that point (a field only
-    another oracle assigns, a local declared without a value).
+    lets the declaration of a local it tests be removed as unused.  A guard
+    that can never fire is kept when the tested expression, or the
+    initialiser of the tested local, reads a variable that may be unassigned
+    at that point (a field only another oracle assigns, a local declared
+    without a value).  Such a read yields the type's default and cannot fail
+    (FROGLANG_REFERENCE.md section 6.9), so this is more cautious than
+    soundness requires; it costs completeness only.
     """
 
     def __init__(
@@ -261,10 +263,9 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
 
         Removing a guard removes the evaluation of the expression it tests,
         and lets the declaration of a local it tests be removed as unused.
-        Reading an unassigned variable is observable, so a guard that can
-        never fire is still removable only when everything those
+        A guard that can never fire is removed only when everything those
         expressions read is definitely assigned: `if ([x, f] == None)`
-        reads `f`.
+        reads `f`. (More cautious than needed: such a read cannot fail.)
         """
         if self._method is None:
             return self._facts.for_method(None).unassigned_reads(expression)

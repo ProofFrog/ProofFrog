@@ -46,13 +46,12 @@ from ._definedness import (
 def _contains_potential_undefined_read(node: frog_ast.ASTNode) -> bool:
     """True if *node* contains a map/array index access ``M[k]``.
 
-    Reading an absent map key or an out-of-bounds array index is an observable
-    undefined-read abort (SEMANTICS 6.7). Relocating an evaluation that can
-    perform such a read to a position with BROADER reachability -- hoisting it
-    before a branch it only ran inside, forcing it onto a never-taken branch,
-    or making it unconditional -- changes the set of traces on which the abort
-    occurs, so a pass that hoists or duplicates an expression across control
-    flow must decline when it contains one (ruling 7.A.1).
+    Reading an absent map key or an out-of-bounds array index returns an
+    unspecified value and cannot fail (FROGLANG_REFERENCE.md section 6.9), so
+    relocating such a read across control flow is sound. The passes that
+    consult this helper (HoistDuplicateBranchCall, InlineLocalTupleLiteral)
+    still decline to hoist, drop or move one, a caution from before that rule
+    was stated that costs only completeness.
     """
     return (
         SearchVisitor(lambda n: isinstance(n, frog_ast.ArrayAccess)).visit(node)
@@ -68,7 +67,7 @@ def _projected_in_next_statement(
 
     An expression substituted for such a use is evaluated on exactly the
     traces that reach the statement before it, so moving it there from the
-    preceding statement keeps an undefined read where it was.
+    preceding statement keeps a map or array read where it was.
     """
     if not remaining.statements:
         return False
@@ -1321,10 +1320,11 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
        never used, ``e_i`` must also be deterministic (so dropping it is
        safe). When ``v[i]`` is used exactly once, ``e_i`` may have any
        side effects (single substitution preserves the evaluation count).
-    5. No ``e_i`` that indexes a map or array (a potential undefined read,
-       F-157) is dropped or moved: it must be projected by the statement
-       right after the declaration, and that statement must not be a
-       branch or a loop.
+    5. No ``e_i`` that indexes a map or array (F-157) is dropped or moved:
+       it must be projected by the statement right after the declaration,
+       and that statement must not be a branch or a loop. Such a read
+       cannot fail (FROGLANG_REFERENCE.md section 6.9), so this is more
+       cautious than soundness requires.
     6. No ``e_i`` mentions ``v``. Such an element reads a same-named outer
        binding that the declaration shadows; substituting it would put a
        new ``v[...]`` access into the block for the substitution to find
@@ -1546,12 +1546,13 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
             if purity_blocked:
                 continue
 
-            # F-157: an element that indexes a map or array may perform an
-            # observable undefined read. Inlining drops an element that is
-            # never projected, and moves a projected one from the
-            # declaration to its uses. Either changes the traces on which
-            # the read happens, unless a use sits in the statement right
-            # after the declaration, outside any branch or loop.
+            # F-157: an element that indexes a map or array is kept where it
+            # is evaluated (more cautious than needed: such a read cannot
+            # fail, FROGLANG_REFERENCE.md section 6.9). Inlining drops an
+            # element that is never projected, and moves a projected one
+            # from the declaration to its uses. Either changes the traces on
+            # which the read happens, unless a use sits in the statement
+            # right after the declaration, outside any branch or loop.
             undefined_read_index = next(
                 (
                     i
@@ -1703,13 +1704,14 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
     Game fields of product type are eligible too, in methods other than
     ``Initialize``, so a game that re-derives a tuple an oracle reads at one
     index (``v = f[1]`` after inlining) matches one that reads ``f[1]``
-    inline. Moving a field read to the top of the block is sound only if the
-    read is defined and returns the value every later read in the block
-    returns, so a field is used only when (a) it is definitely assigned
-    before any oracle runs (a declared initializer, or a top-level
-    ``Initialize`` assignment that no earlier ``return`` can skip and no
-    call to a method of the game precedes: ``initialize_unassigned_fields``),
-    since reading an unassigned variable is observable; (b) the method binds
+    inline. Moving a field read to the top of the block is sound if the read
+    returns the value every later read in the block returns; a field is used
+    only when (a) it is definitely assigned before any oracle runs (a
+    declared initializer, or a top-level ``Initialize`` assignment that no
+    earlier ``return`` can skip and no call to a method of the game
+    precedes: ``initialize_unassigned_fields``), a caution that soundness
+    does not need, since an unassigned read yields the type's default and
+    cannot fail (FROGLANG_REFERENCE.md section 6.9); (b) the method binds
     no parameter, local or loop binder of the same name; (c) the block
     writes or rebinds the field nowhere (element writes included); and (d)
     the block calls no method of the game, which could write the field
@@ -3902,9 +3904,10 @@ class RefactorGroupElemFieldExpTransformer:
         # F-224: if Initialize has an early return (nested in if/for), the
         # field assignments this pass reasons over may run on only some
         # traces, and moving f2 across the early return changes which traces
-        # define it -- turning a guarded/undefined read into an always-defined
-        # one (attack A5). Three sibling Initialize-targeting passes carry this
-        # guard; refuse to refactor when Initialize can return early.
+        # define it -- turning a read of the default into a read of the
+        # assigned value (attack A5). Three sibling Initialize-targeting
+        # passes carry this guard; refuse to refactor when Initialize can
+        # return early.
         if _has_early_return_in_init(init_stmts):
             return None
         gen_field_assigns: dict[
@@ -4029,9 +4032,9 @@ class RefactorGroupElemFieldExpTransformer:
                     # F-225: moving f2's assignment up past an intervening
                     # statement that READS f2 changes that read's value -- it
                     # would see f2's new (assigned) value instead of the
-                    # prior/undefined one. Attack A6: `A=g^(x*3); C=B; B=g^x;`
-                    # -- `C=B` reads an unassigned B; hoisting B above it turns
-                    # an observable undefined read into a defined value.
+                    # prior one. Attack A6: `A=g^(x*3); C=B; B=g^x;` -- `C=B`
+                    # reads an unassigned B (its unspecified default); hoisting
+                    # B above it makes C read g^x instead.
                     if any(
                         f2_name in referenced_variable_names(init_stmts[k])
                         for k in range(f1_idx, f2_idx)
@@ -5969,11 +5972,12 @@ class SplitOpaqueTupleFieldTransformer:
                 return None
 
         # F-189: an INITIALIZED tuple field must not silently become an
-        # undefined read. A tuple-literal initializer (`[1, 2]`) is decomposed
+        # unassigned one. A tuple-literal initializer (`[1, 2]`) is decomposed
         # into per-component initializers below; a non-decomposable initializer
         # (an opaque call) cannot be split into components without duplicating
-        # it, so decline rather than drop the initializer (which would turn a
-        # readable initialized field into an undefined read -- attack init_drop).
+        # it, so decline rather than drop the initializer (which would replace
+        # the initial value by the type's unspecified default -- attack
+        # init_drop).
         if field.value is not None and not isinstance(field.value, frog_ast.Tuple):
             if self._ctx is not None:
                 self._ctx.near_misses.append(

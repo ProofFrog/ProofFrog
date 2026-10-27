@@ -1,8 +1,8 @@
 // Audit artifact: MergeProductSamples ATTACK-2 (str-named binder blind spot), proof-level.
-// Real re-declares `a` (BitString<4> a;) between its sample and the return, so per
-// SEMANTICS.md sec 4.1 the returned first component is an UNDEFINED read.
-// Random returns a uniform first component.
-// SOUND engine: must not equate an undefined read with a fresh uniform draw.
+// Real re-declares `a` (BitString<4> a;) between its sample and the return, so
+// the returned first component is unassigned: a fixed unspecified value
+// (FROGLANG_REFERENCE.md section 6.9). Random returns a uniform first component.
+// SOUND engine: must not equate an unassigned read with a fresh uniform draw.
 // UNSOUND (as prosecuted): the single-use scan cannot see VariableDeclaration.name
 // (a plain str), the merge fires in Real, and prove accepts.
 import 'drift.primitive';

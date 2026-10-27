@@ -12,8 +12,7 @@
 //   Random: __hoist_0__ is computed from the OLD value M[0] = w before the
 //           overwrite, and O returns eval(w) = w, with probability 1.
 // Advantage 1. (Variant with no Store call: O(false, 0, v) returns eval(v)
-// in Real but performs an adversary-observable undefined read of M[0] in
-// Random -- abort vs. defined, also advantage 1, per SEMANTICS S4.1/S6.7.)
+// in Real but eval of the unspecified value of the absent M[0] in Random.)
 // If the engine is SOUND it must REJECT the interchangeability hop; if the
 // prosecution is right, the pass hoists Real's call above the element write
 // and the engine ACCEPTS.

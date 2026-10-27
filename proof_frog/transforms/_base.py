@@ -127,11 +127,10 @@ def has_nondeterministic_call(
     *shadowed_names* (F-267): names that are locally bound (declared) in the
     method whose expression this is. A proof-level ``let: Function<D,R> H;`` is
     a known deterministic function, but a same-named METHOD-LOCAL declaration
-    ``Function<D,R> H;`` shadows it -- and an unassigned local Function is an
-    uninitialized value, so calling it is an observable undefined read, not the
-    deterministic let-function. When a callee name is in *shadowed_names* the
-    let-``Function`` classification is NOT applied (the call is treated as
-    potentially non-deterministic).
+    ``Function<D,R> H;`` shadows it -- and an unassigned local Function holds
+    its type's unspecified default, not the let-function. When a callee name
+    is in *shadowed_names* the let-``Function`` classification is NOT applied
+    (the call is treated as potentially non-deterministic).
     """
 
     def _is_nondeterministic_call(node: frog_ast.ASTNode) -> bool:

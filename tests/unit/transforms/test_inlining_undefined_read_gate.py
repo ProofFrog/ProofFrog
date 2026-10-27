@@ -1,8 +1,9 @@
-"""Regression tests: don't relocate a call whose argument is an undefined read.
+"""Regression tests: don't relocate a call whose argument reads a map key.
 
-Reading an absent map key `M[k]` is an observable undefined-read abort. A pass
-that hoists or deduplicates such a call to a position with broader reachability
-changes the set of traces on which the abort occurs.
+These gates date from when reading an absent map key `M[k]` was treated as an
+observable abort. FROGLANG_REFERENCE.md section 6.9 now makes such a read
+return an unspecified value, so relocating it is sound and these declines are
+more cautious than needed; the tests pin the current behaviour.
 
   - F-206 HoistDuplicateBranchCall: `F.eval(M[c])` in two branch returns must
     not hoist before the branches (would force the read on the fall-through).

@@ -35,13 +35,13 @@ The fundamental semantic unit is the **game**: a stateful interactive system tha
 
 - **`Array<T, n>`**: Fixed-size arrays of `n` elements of type `T`, indexed from `0` to `n-1`.
 
-- **`Map<K, V>`**: Finite partial functions from keys of type `K` to values of type `V`. A map is initially empty (no keys are mapped). Map access on a key not in the domain is undefined behavior.
+- **`Map<K, V>`**: Finite partial functions from keys of type `K` to values of type `V`. A map is initially empty (no keys are mapped). Looking up a key not in the domain returns an unspecified value of type `V` (section 6.9).
 
-- **`Set<T>`**: Finite sets of elements of type `T`. An unparameterized `Set` in a primitive signature is an abstract type placeholder.
+- **`Set<T>`**: Finite sets of elements of type `T`. A set variable declared without a value starts empty. An unparameterized `Set` in a primitive signature is an abstract type placeholder.
 
 - **`Function<D, R>`**: The type of truly random functions from domain `D` to range `R`. A value of this type represents a lazily-evaluated random function: each distinct input independently maps to a uniformly random output, and repeated queries on the same input return the same result. This models the idealized random oracle / random function abstraction.
 
-- **`T?`** (Optional): Either a value of type `T` or `None`. Used for operations that may fail (e.g., decryption may return `Message?`).
+- **`T?`** (Optional): Either a value of type `T` or `None`. Used for operations that may fail (e.g., decryption may return `Message?`). An optional variable declared without a value starts as `None`.
 
 ### 2.3 Product Types (Tuples)
 
@@ -149,7 +149,7 @@ The arithmetic levels match C, Java and Python. The comparison and set levels do
 
 ### 4.1 Variable Declaration and Assignment
 
-- **Declaration only**: `Type x;` — declares an uninitialized variable. The value is undefined until assigned.
+- **Declaration only**: `Type x;` — declares a variable without a value. Until assigned it holds its type's default (section 6.9): empty for `Map` and `Set`, `None` for `T?`, and an unspecified value otherwise.
 - **Declaration with assignment**: `Type x = expr;` — declares and initializes.
 - **Assignment**: `x = expr;` or `a[i] = expr;` — assigns to an existing variable or updates an array/map element.
 
@@ -277,7 +277,7 @@ Game Left(SymEnc E) {
 
 Games define:
 - **Parameters**: Values provided upon instantiation.
-- **State fields**: Mutable variables that persist across oracle calls. May be declared with or without initializers. Uninitialized fields have undefined values until assigned.
+- **State fields**: Mutable variables that persist across oracle calls. May be declared with or without initializers. A field declared without one holds its type's default until assigned (section 6.9).
 - **Methods**: Oracle procedures callable by the adversary.
   - **`Initialize`**: A distinguished method (when present) that is called exactly once before any other oracle. Typically has return type `Void`, though it may return a value in phased games.
   - **Other methods**: Oracles that the adversary may call in any order, any number of times.
@@ -376,7 +376,7 @@ The adversary has no direct access to the game's internal state (fields). It can
 
 The execution of a game `G` with an adversary `A` proceeds as follows:
 
-1. **Field initialization**: All state fields are initialized according to their declarations. Fields with explicit initializers (`Type x = expr;`) are set to the value of `expr`. Fields without initializers (`Type x;`) are left in an undefined state.
+1. **Field initialization**: All state fields are initialized according to their declarations. Fields with explicit initializers (`Type x = expr;`) are set to the value of `expr`. Fields without initializers (`Type x;`) start at their type's default (section 6.9).
 
 2. **Initialize phase**: If the game has an `Initialize` method, it is called exactly once. This typically performs setup operations like sampling cryptographic keys.
 
@@ -453,7 +453,7 @@ This is used in contexts where freshness is important, such as ensuring nonces a
 Maps (`Map<K, V>`) are finite partial functions:
 
 - **Empty on creation**: A newly declared map has an empty domain.
-- **Lookup**: `M[k]` returns the value associated with key `k`. Accessing a key not in the domain is undefined.
+- **Lookup**: `M[k]` returns the value associated with key `k`. For a key not in the domain it returns an unspecified value of the value type (section 6.9); test `k in M` first when the difference matters.
 - **Update**: `M[k] = v;` associates key `k` with value `v`, extending or modifying the map.
 - **Sampling into map**: `M[k] <- Type;` samples a uniform value from `Type` and stores it at key `k`.
 - **Membership**: `k in M` tests whether `k` is in the map's domain.
@@ -466,6 +466,18 @@ Values of type `T?` are either a value of type `T` or `None`:
 - **Construction**: Any expression of type `T` implicitly converts to `T?`. The literal `None` has type `T?` for any `T`.
 - **Comparison**: `x == None` tests whether an optional value is null.
 - **Usage**: Typically used for operations that may fail, such as decryption returning `Message?` (where `None` indicates decryption failure).
+- **Default**: An optional variable declared without a value (`E.Ciphertext? ctStar;`) is `None` until assigned, the usual "not yet set" convention for a challenge value.
+
+### 6.9 Default Values and Total Expressions
+
+Evaluating an expression never fails: every read yields a value, and no expression has an "undefined" outcome, an abort or an error state.
+
+- **Variables declared without a value** (fields and locals, `Type x;`) hold their type's default until assigned: the empty map for `Map<K, V>`, the empty set for `Set<T>`, `None` for `T?`, and for every other type one fixed but unspecified value of that type. The unspecified value is the same every time it is read, in every game, but nothing else is known about it: an adversary may know it, so a proof may not assume it differs from, or equals, any particular value.
+- **Partial operations** return an unspecified value of their result type, determined by their operands: looking up a key not in a map's domain, indexing an array outside `0` to `n-1`, and division by zero (or by a `ModInt` with no inverse).
+- Every type is taken to be non-empty, so these values exist.
+- This section is about expressions. A sampling statement is different: a draw from a domain that may be empty (`x <- S` with `S` an empty set, or an exclusion that covers the whole type) produces no value, and the adversary can observe that it did not complete. A pass may not move such a draw to traces it did not run on, or off traces it ran on.
+
+This follows proof assistants such as Isabelle/HOL (`undefined`, an unspecified value of each type), Lean and Rocq (`x / 0 = 0`), which make every function total rather than partial. Because evaluation cannot fail, the engine may drop an unused read, or move a read above a `return`, without checking that what it reads has been assigned. A read that may see a default is usually a modelling slip worth fixing in the game, for instance by declaring a "not yet set" field as `T?` so that it starts as `None`.
 
 ## 7. Composition Semantics
 

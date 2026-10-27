@@ -25,9 +25,9 @@ The day-to-day essentials. Full semantics in [FROGLANG_REFERENCE.md](FROGLANG_RE
 **Types:**
 - `Int`, `Bool`, `Void`
 - `BitString<n>` (cardinality `2^n`), `ModInt<q>`
-- `Array<T, n>`, `Map<K, V>` (initially empty; absent-key access undefined),
-  `Set<T>`, `Function<D, R>`
-- `T?` (optional), `[T1, ..., Tn]` (tuple; constant-index access)
+- `Array<T, n>`, `Map<K, V>` (initially empty; an absent key reads an
+  unspecified value), `Set<T>` (initially empty), `Function<D, R>`
+- `T?` (optional; initially `None`), `[T1, ..., Tn]` (tuple; constant-index access)
 
 **Operators (gotchas):**
 - `+` on `BitString<n>` is **XOR**, not addition.

@@ -1248,6 +1248,31 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             # atoms and Set-typed variables are encoded ungated too.
             self.stack.append(self._intern_opaque(node))
 
+    def _leave_member_access(
+        self,
+        node: frog_ast.FieldAccess | frog_ast.GroupGenerator | frog_ast.GroupOrder,
+    ) -> None:
+        # Member accesses are not modeled. Without a handler the receiver's
+        # item stood for the whole access, so `G.generator == G.identity`
+        # encoded as `G == G` and Z3 proved it. Pop the receiver and intern
+        # the whole access as one opaque atom: distinct members get distinct
+        # atoms, and the key's SSA versions give `M.keys` a new atom after
+        # a write to `M`. An untranslatable receiver (e.g. a call) refuses.
+        receiver = self.stack.pop() if self.stack else None
+        if receiver is None:
+            self.stack.append(None)
+        else:
+            self.stack.append(self._intern_opaque(node))
+
+    def leave_field_access(self, node: frog_ast.FieldAccess) -> None:
+        self._leave_member_access(node)
+
+    def leave_group_generator(self, node: frog_ast.GroupGenerator) -> None:
+        self._leave_member_access(node)
+
+    def leave_group_order(self, node: frog_ast.GroupOrder) -> None:
+        self._leave_member_access(node)
+
     def leave_array_access(self, _node: frog_ast.ArrayAccess) -> None:
         index = self.stack.pop() if self.stack else None
         array = self.stack.pop() if self.stack else None

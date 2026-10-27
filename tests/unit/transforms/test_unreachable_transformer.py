@@ -1023,3 +1023,91 @@ def test_remove_unreachable_still_removes_dead_code(method: str, returns: int) -
     method_ast = frog_parser.parse_method(method)
     transformed = RemoveUnreachableTransformer(method_ast).transform(method_ast)
     assert _count_returns(transformed) == returns, transformed
+
+
+# ---------------------------------------------------------------------------
+# Member accesses: the Z3 encoding read `X.a` as its receiver `X`, so a
+# comparison of two members read as `X == X` and the code after it was
+# deleted.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "G.generator == G.identity",
+        "G.order == G.generator",
+        "S.n == S.m",
+        "M.keys == M.values",
+    ],
+)
+def test_remove_unreachable_keeps_return_after_member_comparison(
+    condition: str,
+) -> None:
+    method = frog_parser.parse_method(f"""
+        Int O(Map<Int, Int> M) {{
+            if ({condition}) {{
+                return 1;
+            }}
+            return 2;
+        }}
+        """)
+    transformed = RemoveUnreachableTransformer(method).transform(method)
+    assert _count_returns(transformed) == 2, transformed
+
+
+def test_remove_unreachable_member_read_after_write_is_fresh() -> None:
+    """`M.keys` can change between the two guards, so O(0, 1) with
+    M.keys == {} returns 3."""
+    method = frog_parser.parse_method("""
+        Int O(Map<Int, Int> M, Set<Int> T, Int k, Int v) {
+            if (M.keys == T) { return 1; }
+            M[k] = v;
+            if (M.keys != T) { return 2; }
+            return 3;
+        }
+        """)
+    transformed = RemoveUnreachableTransformer(method).transform(method)
+    assert _count_returns(transformed) == 3, transformed
+
+
+@pytest.mark.parametrize(
+    "method,returns",
+    [
+        (
+            """
+            Int O() {
+                if (G.generator == G.generator) { return 1; }
+                return 2;
+            }
+            """,
+            1,
+        ),
+        (
+            """
+            Int O() {
+                if (G.generator == G.identity) { return 1; }
+                if (G.generator != G.identity) { return 2; }
+                return 3;
+            }
+            """,
+            2,
+        ),
+        (
+            """
+            Int O(Map<Int, Int> M, Set<Int> T) {
+                if (M.keys == T) { return 1; }
+                if (M.keys != T) { return 2; }
+                return 3;
+            }
+            """,
+            2,
+        ),
+    ],
+)
+def test_remove_unreachable_still_removes_code_after_member_tests(
+    method: str, returns: int
+) -> None:
+    method_ast = frog_parser.parse_method(method)
+    transformed = RemoveUnreachableTransformer(method_ast).transform(method_ast)
+    assert _count_returns(transformed) == returns, transformed

@@ -1,0 +1,21 @@
+// Both sides return 1 when G.generator == G.identity, which is false in
+// any nontrivial group. Otherwise O() returns 2 in Left and 3 in Right.
+Game Left(Group G) {
+    Int O() {
+        if (G.generator == G.identity) {
+            return 1;
+        }
+        return 2;
+    }
+}
+
+Game Right(Group G) {
+    Int O() {
+        if (G.generator == G.identity) {
+            return 1;
+        }
+        return 3;
+    }
+}
+
+export as GroupBranch;

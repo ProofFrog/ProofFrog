@@ -1,0 +1,14 @@
+// Remove unreachable blocks of code read M.keys == M.values as M == M
+// and deleted the final return on both sides.
+import 'MapBranch.game';
+
+proof:
+
+let:
+
+theorem:
+    MapBranch();
+
+games:
+    MapBranch().Left against MapBranch().Adversary;
+    MapBranch().Right against MapBranch().Adversary;

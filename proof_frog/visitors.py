@@ -2054,7 +2054,13 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
                 return isinstance(node, frog_ast.Variable) and node.name == pair_name
 
             assert isinstance(statement, frog_ast.Assignment)
-            used_variables = VariableCollectionVisitor().visit(statement.value)
+            # Not VariableCollectionVisitor, which skips the receiver of a
+            # member access: a write to `M` between `g = A[|M.keys|]` and
+            # `f = A[|M.keys|]` went unseen and the fields were merged.
+            used_variables = [
+                frog_ast.Variable(name)
+                for name in sorted(referenced_variable_names(statement.value))
+            ]
 
             assigns_variable_partial = functools.partial(
                 assigns_variable, used_variables

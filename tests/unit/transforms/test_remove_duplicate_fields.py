@@ -547,6 +547,69 @@ class TestUnpairedWrites:
             """)
 
 
+class TestWritesBetweenPairedWrites:
+    """`g = e; ...; f = e;` pairs only if nothing in between writes a
+    variable that `e` reads, the receiver of a member access included."""
+
+    @staticmethod
+    def _game(value: str, write: str) -> str:
+        return f"""
+            Game G() {{
+                Map<Int, Bool> M;
+                Map<Int, Bool> N;
+                Map<Int, Int> A;
+                Int f;
+                Int g;
+                Void O() {{
+                    g = {value};
+                    {write}
+                    f = {value};
+                }}
+                Int Get() {{
+                    return f + g;
+                }}
+            }}
+            """
+
+    @staticmethod
+    def _merges_f_and_g(source: str) -> bool:
+        # Run to a fixed point: the pass merges one pair per call, and `M`
+        # and `N` merge first when neither is written.
+        game = frog_parser.parse_game(source)
+        while True:
+            merged = remove_duplicate_fields(game)
+            if len(merged.fields) == len(game.fields):
+                break
+            game = merged
+        names = {field.name for field in game.fields}
+        return "f" not in names or "g" not in names
+
+    @pytest.mark.parametrize(
+        "value, write",
+        [
+            ("A[|M.keys|]", "M[7] = true;"),
+            ("|M.keys|", "M[7] = true;"),
+            ("|M.values| + 1", "M = N;"),
+            ("A[|M.keys|]", "if (|N| == 0) { M[7] = true; }"),
+            # The rest of the read set is still checked.
+            ("A[|M.keys|]", "A[7] = 1;"),
+        ],
+    )
+    def test_write_to_read_variable_not_merged(self, value: str, write: str) -> None:
+        assert not self._merges_f_and_g(self._game(value, write))
+
+    @pytest.mark.parametrize(
+        "value, write",
+        [
+            ("A[|M.keys|]", ""),
+            ("A[|M.keys|]", "N[7] = true;"),
+            ("|M.keys|", "A[7] = 1;"),
+        ],
+    )
+    def test_write_to_unread_variable_merged(self, value: str, write: str) -> None:
+        assert self._merges_f_and_g(self._game(value, write))
+
+
 class TestEndToEnd:
     def test_rejects_merge_of_fields_with_different_initializers(self) -> None:
         """After `Flip()`, `Both()` returns [0b0, 0b0] in Left and

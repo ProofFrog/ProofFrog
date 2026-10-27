@@ -1,0 +1,50 @@
+// Positive control for MemberRead.game: with no write to M between them,
+// `g = A[|M.keys|]` and `f = A[|M.keys|]` do hold the same value, so f
+// merges into g and Left equals Right.
+
+Game Left() {
+    Map<Int, Bool> M;
+    Map<Int, Int> A;
+    Int f;
+    Int g;
+
+    Void Initialize() {
+        A[0] = 10;
+        A[1] = 20;
+    }
+
+    Int O1() {
+        g = A[|M.keys|];
+        f = A[|M.keys|];
+        M[7] = true;
+        return g;
+    }
+
+    Int O2() {
+        return f;
+    }
+}
+
+Game Right() {
+    Map<Int, Bool> M;
+    Map<Int, Int> A;
+    Int f;
+    Int g;
+
+    Void Initialize() {
+        A[0] = 10;
+        A[1] = 20;
+    }
+
+    Int O1() {
+        g = A[|M.keys|];
+        M[7] = true;
+        return g;
+    }
+
+    Int O2() {
+        return g;
+    }
+}
+
+export as MemberReadControl;

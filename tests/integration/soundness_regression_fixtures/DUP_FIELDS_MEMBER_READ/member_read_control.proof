@@ -1,0 +1,13 @@
+// A true equivalence: prove must ACCEPT it.
+
+import './MemberReadControl.game';
+
+proof:
+
+theorem:
+    MemberReadControl();
+
+games:
+    MemberReadControl().Left against MemberReadControl().Adversary;
+
+    MemberReadControl().Right against MemberReadControl().Adversary;

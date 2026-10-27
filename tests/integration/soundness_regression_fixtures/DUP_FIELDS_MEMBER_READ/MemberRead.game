@@ -1,0 +1,53 @@
+// RemoveDuplicateFields paired `g = A[|M.keys|]` with a later
+// `f = A[|M.keys|]` although `M[7] = true` runs between them: the check for
+// intervening writes skipped the receiver of a member access (M in M.keys).
+// Merging f into g makes Left equal Right.
+// Distinguisher: O1() then O2(). Left returns 10 then 20; Right returns 10
+// then 10.
+
+Game Left() {
+    Map<Int, Bool> M;
+    Map<Int, Int> A;
+    Int f;
+    Int g;
+
+    Void Initialize() {
+        A[0] = 10;
+        A[1] = 20;
+    }
+
+    Int O1() {
+        g = A[|M.keys|];
+        M[7] = true;
+        f = A[|M.keys|];
+        return g;
+    }
+
+    Int O2() {
+        return f;
+    }
+}
+
+Game Right() {
+    Map<Int, Bool> M;
+    Map<Int, Int> A;
+    Int f;
+    Int g;
+
+    Void Initialize() {
+        A[0] = 10;
+        A[1] = 20;
+    }
+
+    Int O1() {
+        g = A[|M.keys|];
+        M[7] = true;
+        return g;
+    }
+
+    Int O2() {
+        return g;
+    }
+}
+
+export as MemberRead;

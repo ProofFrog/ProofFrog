@@ -319,13 +319,28 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#inExp.
-    def visitInExp(self, ctx:ProofParser.InExpContext):
+    # Visit a parse tree produced by ProofParser#sizeExp.
+    def visitSizeExp(self, ctx:ProofParser.SizeExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#minusExp.
+    def visitMinusExp(self, ctx:ProofParser.MinusExpContext):
         return self.visitChildren(ctx)
 
 
     # Visit a parse tree produced by ProofParser#andExp.
     def visitAndExp(self, ctx:ProofParser.AndExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#typeExp.
+    def visitTypeExp(self, ctx:ProofParser.TypeExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#equalityExp.
+    def visitEqualityExp(self, ctx:ProofParser.EqualityExpContext):
         return self.visitChildren(ctx)
 
 
@@ -344,88 +359,8 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#notEqualsExp.
-    def visitNotEqualsExp(self, ctx:ProofParser.NotEqualsExpContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by ProofParser#addSubtractExp.
     def visitAddSubtractExp(self, ctx:ProofParser.AddSubtractExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#geqExp.
-    def visitGeqExp(self, ctx:ProofParser.GeqExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#notExp.
-    def visitNotExp(self, ctx:ProofParser.NotExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#noneExp.
-    def visitNoneExp(self, ctx:ProofParser.NoneExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#gtExp.
-    def visitGtExp(self, ctx:ProofParser.GtExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#ltExp.
-    def visitLtExp(self, ctx:ProofParser.LtExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#equalsExp.
-    def visitEqualsExp(self, ctx:ProofParser.EqualsExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#subsetsExp.
-    def visitSubsetsExp(self, ctx:ProofParser.SubsetsExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#multiplyDivideExp.
-    def visitMultiplyDivideExp(self, ctx:ProofParser.MultiplyDivideExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#onesExp.
-    def visitOnesExp(self, ctx:ProofParser.OnesExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#unionExp.
-    def visitUnionExp(self, ctx:ProofParser.UnionExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#intExp.
-    def visitIntExp(self, ctx:ProofParser.IntExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#sizeExp.
-    def visitSizeExp(self, ctx:ProofParser.SizeExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#minusExp.
-    def visitMinusExp(self, ctx:ProofParser.MinusExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#typeExp.
-    def visitTypeExp(self, ctx:ProofParser.TypeExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#leqExp.
-    def visitLeqExp(self, ctx:ProofParser.LeqExpContext):
         return self.visitChildren(ctx)
 
 
@@ -439,6 +374,11 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#notExp.
+    def visitNotExp(self, ctx:ProofParser.NotExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#exponentiationExp.
     def visitExponentiationExp(self, ctx:ProofParser.ExponentiationExpContext):
         return self.visitChildren(ctx)
@@ -449,8 +389,13 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#setMinusExp.
-    def visitSetMinusExp(self, ctx:ProofParser.SetMinusExpContext):
+    # Visit a parse tree produced by ProofParser#noneExp.
+    def visitNoneExp(self, ctx:ProofParser.NoneExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#unionSetMinusExp.
+    def visitUnionSetMinusExp(self, ctx:ProofParser.UnionSetMinusExpContext):
         return self.visitChildren(ctx)
 
 
@@ -464,8 +409,28 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by ProofParser#multiplyDivideExp.
+    def visitMultiplyDivideExp(self, ctx:ProofParser.MultiplyDivideExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#relationalExp.
+    def visitRelationalExp(self, ctx:ProofParser.RelationalExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by ProofParser#sliceExp.
     def visitSliceExp(self, ctx:ProofParser.SliceExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#onesExp.
+    def visitOnesExp(self, ctx:ProofParser.OnesExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#intExp.
+    def visitIntExp(self, ctx:ProofParser.IntExpContext):
         return self.visitChildren(ctx)
 
 

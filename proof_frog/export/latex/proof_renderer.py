@@ -304,7 +304,9 @@ def _render_claimed_bound(
                 rf"\left|{_render_claimed_bound(expr.expression, renderer, 0)}\right|"
             )
         if expr.operator == frog_ast.UnaryOperators.MINUS:
-            return f"-{_render_claimed_bound(expr.expression, renderer, 5)}"
+            # The operand of a negation is parenthesized unless it is a `^`.
+            operand_prec = frog_ast.BinaryOperators.EXPONENTIATE.precedence()
+            return f"-{_render_claimed_bound(expr.expression, renderer, operand_prec)}"
     if isinstance(expr, frog_ast.Variable) and expr.name.startswith("count_"):
         oracle = expr.name[len("count_") :]
         return rf"q_{{\mathsf{{{oracle}}}}}"

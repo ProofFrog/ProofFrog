@@ -159,13 +159,28 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by PrimitiveParser#inExp.
-    def visitInExp(self, ctx:PrimitiveParser.InExpContext):
+    # Visit a parse tree produced by PrimitiveParser#sizeExp.
+    def visitSizeExp(self, ctx:PrimitiveParser.SizeExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#minusExp.
+    def visitMinusExp(self, ctx:PrimitiveParser.MinusExpContext):
         return self.visitChildren(ctx)
 
 
     # Visit a parse tree produced by PrimitiveParser#andExp.
     def visitAndExp(self, ctx:PrimitiveParser.AndExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#typeExp.
+    def visitTypeExp(self, ctx:PrimitiveParser.TypeExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#equalityExp.
+    def visitEqualityExp(self, ctx:PrimitiveParser.EqualityExpContext):
         return self.visitChildren(ctx)
 
 
@@ -184,88 +199,8 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by PrimitiveParser#notEqualsExp.
-    def visitNotEqualsExp(self, ctx:PrimitiveParser.NotEqualsExpContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by PrimitiveParser#addSubtractExp.
     def visitAddSubtractExp(self, ctx:PrimitiveParser.AddSubtractExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#geqExp.
-    def visitGeqExp(self, ctx:PrimitiveParser.GeqExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#notExp.
-    def visitNotExp(self, ctx:PrimitiveParser.NotExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#noneExp.
-    def visitNoneExp(self, ctx:PrimitiveParser.NoneExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#gtExp.
-    def visitGtExp(self, ctx:PrimitiveParser.GtExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#ltExp.
-    def visitLtExp(self, ctx:PrimitiveParser.LtExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#equalsExp.
-    def visitEqualsExp(self, ctx:PrimitiveParser.EqualsExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#subsetsExp.
-    def visitSubsetsExp(self, ctx:PrimitiveParser.SubsetsExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#multiplyDivideExp.
-    def visitMultiplyDivideExp(self, ctx:PrimitiveParser.MultiplyDivideExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#onesExp.
-    def visitOnesExp(self, ctx:PrimitiveParser.OnesExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#unionExp.
-    def visitUnionExp(self, ctx:PrimitiveParser.UnionExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#intExp.
-    def visitIntExp(self, ctx:PrimitiveParser.IntExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#sizeExp.
-    def visitSizeExp(self, ctx:PrimitiveParser.SizeExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#minusExp.
-    def visitMinusExp(self, ctx:PrimitiveParser.MinusExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#typeExp.
-    def visitTypeExp(self, ctx:PrimitiveParser.TypeExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by PrimitiveParser#leqExp.
-    def visitLeqExp(self, ctx:PrimitiveParser.LeqExpContext):
         return self.visitChildren(ctx)
 
 
@@ -279,6 +214,11 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#notExp.
+    def visitNotExp(self, ctx:PrimitiveParser.NotExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#exponentiationExp.
     def visitExponentiationExp(self, ctx:PrimitiveParser.ExponentiationExpContext):
         return self.visitChildren(ctx)
@@ -289,8 +229,13 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by PrimitiveParser#setMinusExp.
-    def visitSetMinusExp(self, ctx:PrimitiveParser.SetMinusExpContext):
+    # Visit a parse tree produced by PrimitiveParser#noneExp.
+    def visitNoneExp(self, ctx:PrimitiveParser.NoneExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#unionSetMinusExp.
+    def visitUnionSetMinusExp(self, ctx:PrimitiveParser.UnionSetMinusExpContext):
         return self.visitChildren(ctx)
 
 
@@ -304,8 +249,28 @@ class PrimitiveVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by PrimitiveParser#multiplyDivideExp.
+    def visitMultiplyDivideExp(self, ctx:PrimitiveParser.MultiplyDivideExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#relationalExp.
+    def visitRelationalExp(self, ctx:PrimitiveParser.RelationalExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by PrimitiveParser#sliceExp.
     def visitSliceExp(self, ctx:PrimitiveParser.SliceExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#onesExp.
+    def visitOnesExp(self, ctx:PrimitiveParser.OnesExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by PrimitiveParser#intExp.
+    def visitIntExp(self, ctx:PrimitiveParser.IntExpContext):
         return self.visitChildren(ctx)
 
 

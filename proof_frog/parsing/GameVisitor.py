@@ -164,13 +164,28 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#inExp.
-    def visitInExp(self, ctx:GameParser.InExpContext):
+    # Visit a parse tree produced by GameParser#sizeExp.
+    def visitSizeExp(self, ctx:GameParser.SizeExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#minusExp.
+    def visitMinusExp(self, ctx:GameParser.MinusExpContext):
         return self.visitChildren(ctx)
 
 
     # Visit a parse tree produced by GameParser#andExp.
     def visitAndExp(self, ctx:GameParser.AndExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#typeExp.
+    def visitTypeExp(self, ctx:GameParser.TypeExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#equalityExp.
+    def visitEqualityExp(self, ctx:GameParser.EqualityExpContext):
         return self.visitChildren(ctx)
 
 
@@ -189,88 +204,8 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#notEqualsExp.
-    def visitNotEqualsExp(self, ctx:GameParser.NotEqualsExpContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by GameParser#addSubtractExp.
     def visitAddSubtractExp(self, ctx:GameParser.AddSubtractExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#geqExp.
-    def visitGeqExp(self, ctx:GameParser.GeqExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#notExp.
-    def visitNotExp(self, ctx:GameParser.NotExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#noneExp.
-    def visitNoneExp(self, ctx:GameParser.NoneExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#gtExp.
-    def visitGtExp(self, ctx:GameParser.GtExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#ltExp.
-    def visitLtExp(self, ctx:GameParser.LtExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#equalsExp.
-    def visitEqualsExp(self, ctx:GameParser.EqualsExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#subsetsExp.
-    def visitSubsetsExp(self, ctx:GameParser.SubsetsExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#multiplyDivideExp.
-    def visitMultiplyDivideExp(self, ctx:GameParser.MultiplyDivideExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#onesExp.
-    def visitOnesExp(self, ctx:GameParser.OnesExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#unionExp.
-    def visitUnionExp(self, ctx:GameParser.UnionExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#intExp.
-    def visitIntExp(self, ctx:GameParser.IntExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#sizeExp.
-    def visitSizeExp(self, ctx:GameParser.SizeExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#minusExp.
-    def visitMinusExp(self, ctx:GameParser.MinusExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#typeExp.
-    def visitTypeExp(self, ctx:GameParser.TypeExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by GameParser#leqExp.
-    def visitLeqExp(self, ctx:GameParser.LeqExpContext):
         return self.visitChildren(ctx)
 
 
@@ -284,6 +219,11 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#notExp.
+    def visitNotExp(self, ctx:GameParser.NotExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#exponentiationExp.
     def visitExponentiationExp(self, ctx:GameParser.ExponentiationExpContext):
         return self.visitChildren(ctx)
@@ -294,8 +234,13 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by GameParser#setMinusExp.
-    def visitSetMinusExp(self, ctx:GameParser.SetMinusExpContext):
+    # Visit a parse tree produced by GameParser#noneExp.
+    def visitNoneExp(self, ctx:GameParser.NoneExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#unionSetMinusExp.
+    def visitUnionSetMinusExp(self, ctx:GameParser.UnionSetMinusExpContext):
         return self.visitChildren(ctx)
 
 
@@ -309,8 +254,28 @@ class GameVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
+    # Visit a parse tree produced by GameParser#multiplyDivideExp.
+    def visitMultiplyDivideExp(self, ctx:GameParser.MultiplyDivideExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#relationalExp.
+    def visitRelationalExp(self, ctx:GameParser.RelationalExpContext):
+        return self.visitChildren(ctx)
+
+
     # Visit a parse tree produced by GameParser#sliceExp.
     def visitSliceExp(self, ctx:GameParser.SliceExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#onesExp.
+    def visitOnesExp(self, ctx:GameParser.OnesExpContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by GameParser#intExp.
+    def visitIntExp(self, ctx:GameParser.IntExpContext):
         return self.visitChildren(ctx)
 
 

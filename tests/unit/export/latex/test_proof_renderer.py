@@ -100,6 +100,13 @@ def test_claimed_bound_exponent():
     assert out == r"2^{1 - \lambda}"
 
 
+def test_claimed_bound_negation_keeps_operand_parentheses():
+    _b, _m, mr = _renderer()
+    assert pr._render_claimed_bound(_claim("-(a + b)"), mr) == "-(a + b)"
+    assert pr._render_claimed_bound(_claim("-(a * b)"), mr) == r"-(a \cdot b)"
+    assert pr._render_claimed_bound(_claim("-a ^ 2"), mr) == "-a^{2}"
+
+
 def test_claimed_bound_multi_term_breaks_into_align():
     _b, _m, mr = _renderer()
     terms = pr._claimed_bound_terms(

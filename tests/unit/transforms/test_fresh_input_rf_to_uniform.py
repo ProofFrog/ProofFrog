@@ -6,20 +6,28 @@ exclusion set ``S`` provably covers the RF's queried domain (in the relevant
 projection).  Two regimes are accepted:
 
   (A) ``S`` is the called RF's own ``RF.domain``; or
-  (B) ``S`` is a persistent, never-reset game field into which every RF call
-      site inserts its argument's matching component (projection-tracking),
-      before the call and with the value the call queries.
+  (B) ``S`` is a persistent, never-reset game field, and every RF call
+      site's matching component is recorded in ``S`` before the call, with
+      the value the call queries: either it is itself a ``<-uniq[S]`` draw,
+      or an ``S = S union {..}`` insertion records it and the call is in
+      Initialize, before the draw (an oracle may run after any draw).
 
 The transform must NOT fire when neither holds -- in particular when ``S`` is
 an own-outputs-only set that ignores an adversary oracle's queries to the same
-RF (which would make ``RF(v)`` not actually fresh).
+RF, or when an oracle records its query in ``S`` but may make it after ``v``
+is drawn (either would make ``RF(v)`` not actually fresh).
 """
+
+import copy
 
 import pytest
 
 from proof_frog import frog_ast, frog_parser
 from proof_frog.transforms._base import PipelineContext
-from proof_frog.transforms.random_functions import FreshInputRFToUniform
+from proof_frog.transforms.random_functions import (
+    FreshInputRFToUniform,
+    _exclusion_adequate,
+)
 from proof_frog.visitors import NameTypeMap
 
 
@@ -129,12 +137,55 @@ def test_fires_rf_domain_even_with_adversary_oracle() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fires_projection_tracking_tuple() -> None:
-    # Challenge samples c <-uniq[seen] and queries H([c, x]); the Eval oracle
-    # inserts y[0] into seen before its own H(y) -- so every H query's first
-    # component is in seen, and H([c, x]) is fresh.
+def test_fires_projection_tracking_tuple_in_initialize() -> None:
+    # Challenge samples c <-uniq[seen] and queries H([c, x]); Initialize
+    # inserts k into seen before its own H([k, k]), and runs before every
+    # Challenge, so every H query's first component is in seen when c is
+    # drawn, and H([c, x]) is fresh.
     _assert_game(
         """
+        Game G(BitString<8> k) {
+            Function<[BitString<8>, BitString<8>], BitString<16>> H;
+            Set<BitString<8>> seen;
+            BitString<16> y;
+            Void Initialize() {
+                H <- Function<[BitString<8>, BitString<8>], BitString<16>>;
+                seen = seen union {k};
+                y = H([k, k]);
+            }
+            BitString<16> Challenge(BitString<8> x) {
+                BitString<8> c <-uniq[seen] BitString<8>;
+                BitString<16> z = H([c, x]);
+                return z;
+            }
+        }
+        """,
+        """
+        Game G(BitString<8> k) {
+            Function<[BitString<8>, BitString<8>], BitString<16>> H;
+            Set<BitString<8>> seen;
+            BitString<16> y;
+            Void Initialize() {
+                H <- Function<[BitString<8>, BitString<8>], BitString<16>>;
+                seen = seen union {k};
+                y = H([k, k]);
+            }
+            BitString<16> Challenge(BitString<8> x) {
+                BitString<16> __fresh_rf_c__ <- BitString<16>;
+                BitString<16> z = __fresh_rf_c__;
+                return z;
+            }
+        }
+        """,
+    )
+
+
+def test_does_not_fire_projection_tracking_tuple_in_oracle() -> None:
+    # The Eval oracle inserts y[0] into seen before its own H(y), but the
+    # adversary may call Eval after Challenge drew c: Eval([c', x]) for every
+    # c' hits H([c, x]), so H([c, x]) is not fresh.  (This test used to
+    # assert the rewrite.)
+    _assert_unchanged("""
         Game G() {
             Function<[BitString<8>, BitString<8>], BitString<16>> H;
             Set<BitString<8>> seen;
@@ -151,26 +202,7 @@ def test_fires_projection_tracking_tuple() -> None:
                 return H(y);
             }
         }
-        """,
-        """
-        Game G() {
-            Function<[BitString<8>, BitString<8>], BitString<16>> H;
-            Set<BitString<8>> seen;
-            Void Initialize() {
-                H <- Function<[BitString<8>, BitString<8>], BitString<16>>;
-            }
-            BitString<16> Challenge(BitString<8> x) {
-                BitString<16> __fresh_rf_c__ <- BitString<16>;
-                BitString<16> z = __fresh_rf_c__;
-                return z;
-            }
-            BitString<16> Eval([BitString<8>, BitString<8>] y) {
-                seen = seen union {y[0]};
-                return H(y);
-            }
-        }
-        """,
-    )
+        """)
 
 
 # ---------------------------------------------------------------------------
@@ -366,10 +398,12 @@ def test_f001_tracking_add_after_early_return_not_fresh() -> None:
     )
 
 
-def test_f001_unconditional_tracking_add_still_fires() -> None:
-    """Positive control: an unconditional top-level `seen = seen union {x}`
-    records every RF query, so the fresh-input rewrite still fires."""
-    transformed, _ = _apply(
+def test_f001_unconditional_tracking_add_in_oracle_not_fresh() -> None:
+    """An unconditional top-level `seen = seen union {x}` records every RF
+    query, but Probe is an oracle the adversary may call after Fresh drew v:
+    Probe(v) queries RF(v) again, so RF(v) is not fresh.  Decline.  (This test
+    used to assert the rewrite.)"""
+    _assert_unchanged(
         """
         Game G(Int n, Int m) {
             Function<BitString<n>, BitString<m>> RF;
@@ -389,8 +423,6 @@ def test_f001_unconditional_tracking_add_still_fires() -> None:
         }
         """
     )
-    src = str(transformed)
-    assert "<- BitString<m>" in src and "RF(v)" not in src
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +454,9 @@ def _hash_game(body: str) -> str:
     """
 
 
+# Hash is an oracle, so the insertions below no longer count in any case (a
+# Hash call may follow the draw); the Initialize variants further down keep
+# exercising the rewrite checks on insertions that do count.
 @pytest.mark.parametrize(
     "body",
     [
@@ -644,3 +679,183 @@ def test_inserted_deterministic_call_unknown_primitive_not_simplified() -> None:
     assert not _fired(
         _call_game(initialize="seen = seen union {S.D(k)}; y = H(S.D(k));")
     )
+
+
+# ---------------------------------------------------------------------------
+# Regime (B): an insertion keeps the queried point away from the draw only
+# when the query runs before the draw.  Any oracle may run after any draw, so
+# only a query in Initialize, before the draw, counts.
+# ---------------------------------------------------------------------------
+
+
+def _timing_game(initialize: str = "", oracles: str = "", fresh: bool = True) -> str:
+    fresh_method = (
+        """
+        BitString<2> Fresh() {
+            BitString<2> v <-uniq[seen] BitString<2>;
+            return H(v);
+        }
+        """
+        if fresh
+        else ""
+    )
+    return f"""
+    Game G(Bool c) {{
+        Function<BitString<2>, BitString<2>> H;
+        Set<BitString<2>> seen;
+        BitString<2> y;
+        Void Initialize() {{
+            H <- Function<BitString<2>, BitString<2>>;
+            {initialize}
+        }}
+        BitString<2> Reveal() {{
+            return y;
+        }}
+        {oracles}
+        {fresh_method}
+    }}
+    """
+
+
+_HASH = "BitString<2> Hash(BitString<2> x) { seen = seen union {x}; return H(x); }"
+
+
+@pytest.mark.parametrize(
+    "initialize, oracles, fresh",
+    [
+        # An oracle query on a recorded point: a later Hash(v) hits v.
+        ("", _HASH, True),
+        # ... on a recorded constant: v may be 0b00.
+        (
+            "",
+            "BitString<2> Hash() { seen = seen union {0b00}; return H(0b00); }",
+            True,
+        ),
+        # ... guarded by a membership test: sound (v is in seen once drawn),
+        # but the gate does not read the guard, so it is refused too.
+        (
+            "",
+            "BitString<2> Hash(BitString<2> x) { if (x in seen) { return 0b00; } "
+            "seen = seen union {x}; return H(x); }",
+            True,
+        ),
+        # The recorded query precedes the draw in the same oracle, but a
+        # later call of that oracle may query v.
+        (
+            "",
+            "BitString<2> Twice(BitString<2> x) { seen = seen union {x}; "
+            "BitString<2> a = H(x); BitString<2> v <-uniq[seen] BitString<2>; "
+            "return a + H(v); }",
+            False,
+        ),
+        # The recorded query follows the draw in the same call.
+        (
+            "",
+            "BitString<2> Twice(BitString<2> x) { "
+            "BitString<2> v <-uniq[seen] BitString<2>; seen = seen union {x}; "
+            "BitString<2> a = H(x); return a + H(v); }",
+            False,
+        ),
+        # The draw is in Initialize; every oracle runs after it.
+        ("BitString<2> v <-uniq[seen] BitString<2>; y = H(v);", _HASH, False),
+        # The draw is in Initialize, the recorded query later in Initialize.
+        (
+            "BitString<2> v <-uniq[seen] BitString<2>; y = H(v); "
+            "BitString<2> u = 0b00; seen = seen union {u}; y = y + H(u);",
+            "",
+            False,
+        ),
+        (
+            "BitString<2> v <-uniq[seen] BitString<2>; seen = seen union {0b00}; "
+            "y = H(v) + H(0b00);",
+            "",
+            False,
+        ),
+        # ... or after the branch holding the draw.
+        (
+            "if (c) { BitString<2> v <-uniq[seen] BitString<2>; y = H(v); } "
+            "seen = seen union {0b00}; y = y + H(0b00);",
+            "",
+            False,
+        ),
+        # A recorded query in Initialize is fine, but Hash is still an oracle.
+        ("seen = seen union {0b00}; y = H(0b00);", _HASH, True),
+    ],
+)
+def test_recorded_query_after_draw_not_simplified(
+    initialize: str, oracles: str, fresh: bool
+) -> None:
+    assert not _fired(_timing_game(initialize, oracles, fresh))
+
+
+@pytest.mark.parametrize(
+    "initialize, oracles, fresh",
+    [
+        # Every recorded query is in Initialize; the draw is in an oracle.
+        ("seen = seen union {0b00}; y = H(0b00);", "", True),
+        (
+            "if (c) { seen = seen union {0b00}; y = H(0b00); } "
+            "else { seen = seen union {0b01}; y = H(0b01); }",
+            "",
+            True,
+        ),
+        (
+            "for (Int i = 0 to 2) { BitString<2> u = y; seen = seen union {u}; "
+            "y = H(u); }",
+            "",
+            True,
+        ),
+        # The draw is in Initialize, after the recorded query.
+        (
+            "seen = seen union {0b00}; BitString<2> a = H(0b00); "
+            "BitString<2> v <-uniq[seen] BitString<2>; y = a + H(v);",
+            "",
+            False,
+        ),
+        (
+            "seen = seen union {0b00}; BitString<2> a = H(0b00); "
+            "if (c) { BitString<2> v <-uniq[seen] BitString<2>; y = a + H(v); }",
+            "",
+            False,
+        ),
+        # ... in the condition of the if holding the draw.
+        (
+            "seen = seen union {0b00}; "
+            "if (H(0b00) == 0b00) { BitString<2> v <-uniq[seen] BitString<2>; "
+            "y = H(v); }",
+            "",
+            False,
+        ),
+        # Every other query is itself a <-uniq[seen] draw, wherever it is.
+        (
+            "",
+            "BitString<2> Samp() { BitString<2> x <-uniq[seen] BitString<2>; "
+            "return H(x); }",
+            True,
+        ),
+        (
+            "BitString<2> v <-uniq[seen] BitString<2>; y = H(v);",
+            "BitString<2> Samp() { BitString<2> x <-uniq[seen] BitString<2>; "
+            "return H(x); }",
+            False,
+        ),
+    ],
+)
+def test_recorded_query_before_draw_still_simplified(
+    initialize: str, oracles: str, fresh: bool
+) -> None:
+    assert _fired(_timing_game(initialize, oracles, fresh))
+
+
+def test_draw_not_found_in_game_not_adequate() -> None:
+    """The gate locates the draw by identity to tell which Initialize queries
+    precede it; a draw it cannot find there (or finds twice) is refused."""
+    game = frog_parser.parse_game(
+        _timing_game("seen = seen union {0b00}; y = H(0b00);")
+    )
+    fresh = next(m for m in game.methods if m.signature.name == "Fresh")
+    draw = fresh.block.statements[0]
+    assert isinstance(draw, frog_ast.UniqueSample)
+    args = (game, "H", "seen", None, {f.name for f in game.fields}, {})
+    assert _exclusion_adequate(*args, draw)
+    assert not _exclusion_adequate(*args, copy.deepcopy(draw))

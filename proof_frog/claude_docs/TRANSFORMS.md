@@ -47,7 +47,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | ChallengeExclusionRFToUniform | Replaces Initialize RF calls with uniform samples when oracle guards exclude the input. |
 | LocalRFToUniform | Replaces locally-sampled RFs called exactly once with uniform samples. |
 | DistinctConstRFToUniform | Replaces locally-sampled RFs called on pairwise-distinct literal constants with independent uniform samples. |
-| FreshInputRFToUniform | Replaces `RF(v)`, `RF([v, ...])`, or `RF(v \|\| ...)` with uniform sample when `v` is a fresh single-use `<-uniq` local. |
+| FreshInputRFToUniform | Replaces `RF(v)`, `RF([v, ...])`, or `RF(v \|\| ...)` with uniform sample when `v` is a fresh single-use `<-uniq[S]` local and no other `RF` query can be on `v`: `S` is `RF.domain` (whole argument only), or `S` is a never-reset field and every `RF` call's component at `v`'s position is either itself a `<-uniq[S]` draw or inserted into `S` by `S = S union {..}` in Initialize before the draw. An oracle's insertion does not count, even behind an `x in S` guard, because the oracle may run after the draw. |
 | LocalFunctionFieldToLet | Unifies a game-local sampled `Function<K,V>` field with a let-bound sampled `H` of identical type when `H` is otherwise unused in the game. |
 | LazyMapToSampledFunction | Rewrites a `Map<K,V>` field used exclusively as a lazy random oracle into a sampled `Function<K,V>` field. |
 | LazyMapPairToSampledFunction | Generalizes LazyMapToSampledFunction to a pair of maps used jointly via the guarded-pair idiom. |

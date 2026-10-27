@@ -1380,19 +1380,34 @@ def _find_rf_call_of_var(
 #       case only): RF.domain by construction holds every prior query, and the
 #       RF's semantics keep it in sync (including adversary oracle queries).
 #
-#   (B) ``S`` is a persistent game field, never reset, into which EVERY RF
-#       call site inserts its argument's k-th projection (either the projection
-#       is itself ``<-uniq[S]`` sampled, or the call's method does
-#       ``S = S union {proj}``).  This is the projection-tracking idiom (e.g.
-#       an ``Eval``/``Hash`` oracle doing ``seen = seen union {x[0]}`` before
-#       ``KDF(x)``).  The insertion must precede the call on every path, and
-#       nothing ``proj`` reads may be written in between, so the call queries
-#       the value ``S`` holds.  An inserted element may call only methods
+#   (B) ``S`` is a persistent game field, never reset, and every RF call
+#       site's k-th projection is recorded in ``S`` before the call, in a way
+#       that keeps it away from ``v``:
+#
+#       - draw-recorded: the projection is itself a ``<-uniq[S]`` draw.  If
+#         that draw runs after ``v``'s, ``v`` is already in ``S`` and the draw
+#         avoids it; if before, ``v`` avoids the draw.  Such a site counts
+#         wherever it is.
+#       - union-recorded: an earlier ``S = S union {proj}`` in the call's
+#         method.  This only says the queried point is in ``S``; the point can
+#         be anything, so it is kept away from ``v`` only if the call runs
+#         before ``v`` is drawn.  Every method other than Initialize is an
+#         oracle the adversary may call after any draw, so such a site counts
+#         only when it is in Initialize and, if ``v`` is drawn in Initialize
+#         too, comes before the draw in program order (``v`` is never drawn
+#         in a loop).
+#
+#       The recording must precede the call on every path, and nothing
+#       ``proj`` reads may be written in between, so the call queries the
+#       value ``S`` holds.  An inserted element may call only methods
 #       annotated ``deterministic``: any other call can return a different
 #       value at the insertion and at the RF call.
 #
 # The previously-missing check is what made an own-outputs-only exclusion set
 # (which does NOT track an adversary Hash oracle's queries) wrongly eligible.
+# An oracle that records an adversary-chosen point before querying it
+# (``Hash(x) { seen = seen union {x}; return H(x); }``) is refused as well:
+# a Hash query made after the draw can land on ``v``.
 
 
 def _all_rf_call_args(
@@ -1545,7 +1560,8 @@ def _statement_parts(
 
 @dataclass
 class _UnrecordedQuery:
-    """An RF call whose queried projection the exclusion set may not hold."""
+    """An RF call whose queried projection the exclusion set may not hold,
+    or may hold only after the draw the rewrite relies on."""
 
     proj: frog_ast.Expression
     # The method inserted ``proj`` earlier but may change it before the call.
@@ -1553,6 +1569,10 @@ class _UnrecordedQuery:
     # The method inserted ``proj``, but ``proj`` calls a method that is not
     # annotated ``deterministic``, so the call may query another value.
     unstable: bool = False
+    # The method inserted ``proj`` with ``S = S union {proj}`` before the
+    # call, but the call may run after the draw, so it may query the drawn
+    # point.
+    late: bool = False
 
 
 @dataclass
@@ -1560,10 +1580,25 @@ class _InsertionScan:
     """Insertions into the exclusion set seen while walking a method."""
 
     proof_namespace: frog_ast.Namespace
+    # The ``<-uniq`` draw the rewrite relies on.
+    draw: frog_ast.Statement | None = None
+    # Whether a call recorded by ``S = S union {..}`` counts at the current
+    # point of the walk: only in Initialize, and only before ``draw``.
+    union_counts: bool = False
     # Inserted, then possibly changed by a write.
     dropped: list[frog_ast.Expression] = field(default_factory=list)
     # Inserted, but a re-evaluation may differ (a non-deterministic call).
     unstable: list[frog_ast.Expression] = field(default_factory=list)
+
+
+@dataclass
+class _Recorded:
+    """Projections recorded in the exclusion set before a point of a method."""
+
+    # Values drawn by ``<-uniq[S]``.
+    drawn: list[frog_ast.Expression] = field(default_factory=list)
+    # Elements inserted by ``S = S union {..}``.
+    inserted: list[frog_ast.Expression] = field(default_factory=list)
 
 
 def _unrecorded_rf_query(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -1571,76 +1606,145 @@ def _unrecorded_rf_query(  # pylint: disable=too-many-arguments,too-many-positio
     rf_name: str,
     set_name: str,
     proj_index: int | None,
-    recorded: list[frog_ast.Expression],
+    recorded: _Recorded,
     scan: _InsertionScan,
 ) -> _UnrecordedQuery | None:
     """The first ``rf_name`` call in *block* whose projection *set_name* may
-    not hold, or ``None`` (audit F-001).
+    not hold, or may hold only by an insertion that does not keep it away
+    from the draw, or ``None`` (audit F-001).
 
-    A call counts only when an insertion of the same expression runs before
+    A call counts only when a recording of the same expression runs before
     it on every path, and nothing that expression reads is written in
-    between.  *recorded* holds the insertions made before *block*.  A
+    between.  *recorded* holds the recordings made before *block*.  A
     statement's writes, at any depth, count before its own calls.  An
     inserted element that calls a method not annotated ``deterministic``
     never counts: the insertion and the call each evaluate it, and the two
-    values may differ.
+    values may differ.  A ``<-uniq[set_name]`` draw of the projection always
+    counts; an ``S = S union {..}`` insertion counts only while
+    ``scan.union_counts`` holds, which the walk clears on reaching
+    ``scan.draw``.
     """
     dropped = scan.dropped
-    recorded = list(recorded)
+    drawn = list(recorded.drawn)
+    inserted = list(recorded.inserted)
     for stmt in block.statements:
-        kept = [
-            proj
-            for proj in recorded
-            if not reassigns_or_rebinds(referenced_variable_names(proj), stmt)
-        ]
-        dropped += [proj for proj in recorded if proj not in kept]
-        recorded = kept
+        if stmt is scan.draw:
+            scan.union_counts = False
+        for kept_list in (drawn, inserted):
+            kept = [
+                proj
+                for proj in kept_list
+                if not reassigns_or_rebinds(referenced_variable_names(proj), stmt)
+            ]
+            dropped += [proj for proj in kept_list if proj not in kept]
+            kept_list[:] = kept
         header, nested = _statement_parts(stmt)
         for node in header:
             for arg in _all_rf_call_args(node, rf_name):
                 proj = _projection_expr(arg, proj_index)
                 if proj is None:
                     return _UnrecordedQuery(arg, False)
-                if proj not in recorded:
-                    return _UnrecordedQuery(
-                        proj, proj in dropped, proj in scan.unstable
-                    )
+                if proj in drawn or (proj in inserted and scan.union_counts):
+                    continue
+                if proj in inserted:
+                    return _UnrecordedQuery(proj, False, late=True)
+                return _UnrecordedQuery(proj, proj in dropped, proj in scan.unstable)
         for inner in nested:
             query = _unrecorded_rf_query(
-                inner, rf_name, set_name, proj_index, recorded, scan
+                inner,
+                rf_name,
+                set_name,
+                proj_index,
+                _Recorded(list(drawn), list(inserted)),
+                scan,
             )
             if query is not None:
                 return query
+        is_draw = isinstance(stmt, frog_ast.UniqueSample)
         for proj in _inserted_projections(stmt, set_name):
-            if _calls_only_deterministic(proj, scan.proof_namespace):
-                recorded.append(proj)
+            if is_draw:
+                drawn.append(proj)
+            elif _calls_only_deterministic(proj, scan.proof_namespace):
+                inserted.append(proj)
             else:
                 scan.unstable.append(proj)
     return None
 
 
-def _explained_unrecorded_query(
+def _method_queries(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     game: frog_ast.Game,
     rf_name: str,
     set_name: str,
     proj_index: int | None,
     proof_namespace: frog_ast.Namespace,
-) -> tuple[str, _UnrecordedQuery] | None:
-    """A method and an *rf_name* call in it on a projection the method
-    inserts into *set_name*, but which may differ from the inserted value
-    (rewritten, or calling a non-deterministic method), or ``None``."""
+    draw: frog_ast.UniqueSample,
+) -> list[tuple[str, _UnrecordedQuery | None]]:
+    """For each method, the first *rf_name* call the gate does not count
+    (see :func:`_unrecorded_rf_query`), or ``None``.
+
+    Initialize runs once, before any oracle, so a call it records with
+    ``S = S union {..}`` precedes a draw made in an oracle, and precedes a
+    draw made in Initialize if it comes first in program order.  A draw is
+    never in a loop (the pass skips loop bodies), so a call written before
+    it cannot also run after it.
+    """
+    result: list[tuple[str, _UnrecordedQuery | None]] = []
     for method in game.methods:
         query = _unrecorded_rf_query(
             method.block,
             rf_name,
             set_name,
             proj_index,
-            [],
-            _InsertionScan(proof_namespace),
+            _Recorded(),
+            _InsertionScan(
+                proof_namespace,
+                draw=draw,
+                union_counts=method.signature.name == "Initialize",
+            ),
         )
-        if query is not None and (query.rewritten or query.unstable):
-            return method.signature.name, query
+        result.append((method.signature.name, query))
+    return result
+
+
+def _explained_unrecorded_query(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    game: frog_ast.Game,
+    rf_name: str,
+    set_name: str,
+    proj_index: int | None,
+    proof_namespace: frog_ast.Namespace,
+    draw: frog_ast.UniqueSample,
+) -> tuple[str, _UnrecordedQuery] | None:
+    """A method and an *rf_name* call in it on a projection the method
+    inserts into *set_name*, but which may differ from the inserted value
+    (rewritten, or calling a non-deterministic method), or else which may
+    run after *draw*; ``None`` if there is neither."""
+    queries = [
+        (name, query)
+        for name, query in _method_queries(
+            game, rf_name, set_name, proj_index, proof_namespace, draw
+        )
+        if query is not None
+    ]
+    for name, query in queries:
+        if query.rewritten or query.unstable:
+            return name, query
+    for name, query in queries:
+        if query.late:
+            return name, query
     return None
+
+
+def _occurrences(node: frog_ast.ASTNode, target: frog_ast.ASTNode) -> int:
+    """How many times the object *target* itself appears in *node*."""
+    count = [0]
+
+    def same(child: frog_ast.ASTNode) -> bool:
+        if child is target:
+            count[0] += 1
+        return False
+
+    SearchVisitor(same).visit(node)
+    return count[0]
 
 
 def _set_only_monotone(game: frog_ast.Game, set_name: str) -> bool:
@@ -1701,10 +1805,11 @@ def _exclusion_adequate(  # pylint: disable=too-many-arguments,too-many-position
     proj_index: int | None,
     field_names: set[str],
     proof_namespace: frog_ast.Namespace,
+    draw: frog_ast.UniqueSample,
 ) -> bool:
-    """Whether ``v <-uniq[set_name]`` at projection *proj_index* of an
-    ``rf_name(arg)`` call guarantees the queried point is fresh for ``rf_name``.
-    See the regime (A)/(B) discussion above."""
+    """Whether the draw *draw* (``v <-uniq[set_name]``), at projection
+    *proj_index* of an ``rf_name(arg)`` call, guarantees the queried point is
+    fresh for ``rf_name``.  See the regime (A)/(B) discussion above."""
     # Regime (A): the exclusion set is the called RF's own domain.  Whether
     # `RF.domain` tracks plain `RF(x)` evaluations (standard ROM table) or only
     # `<-uniq[RF.domain]` draws (USER-ATTENTION sec 1.b) is a CONTESTED semantics
@@ -1721,17 +1826,15 @@ def _exclusion_adequate(  # pylint: disable=too-many-arguments,too-many-position
         return False
     if not _set_only_monotone(game, set_name):
         return False
+    # The walk finds the draw by identity to tell which Initialize calls
+    # precede it; anything but one occurrence leaves that unknown.
+    if _occurrences(game, draw) != 1:
+        return False
     return all(
-        _unrecorded_rf_query(
-            method.block,
-            rf_name,
-            set_name,
-            proj_index,
-            [],
-            _InsertionScan(proof_namespace),
+        query is None
+        for _, query in _method_queries(
+            game, rf_name, set_name, proj_index, proof_namespace, draw
         )
-        is None
-        for method in game.methods
     )
 
 
@@ -1800,7 +1903,29 @@ class _FreshInputRFTransformer(BlockTransformer):
         """Record why ``rf_name`` on the ``stmt`` draw was kept."""
         if self.ctx is None:
             return
-        if explained is not None and explained[1].unstable:
+        if explained is not None and explained[1].late:
+            method_name, query = explained
+            drawn = str(stmt.var)
+            when = (
+                f"Initialize calls it after drawing '{drawn}'"
+                if method_name == "Initialize"
+                else f"the adversary may call '{method_name}' after '{drawn}' "
+                "is drawn"
+            )
+            reason = (
+                f"'{method_name}' inserts '{query.proj}' into '{set_name}' "
+                f"before calling '{rf_name}' on it, but {when}, so "
+                f"'{query.proj}' may equal '{drawn}' and '{rf_name}' need not "
+                f"be fresh at '{drawn}'; only a query made in Initialize "
+                "before the draw is kept away from it by an insertion"
+            )
+            suggestion = (
+                "Make the query in Initialize before the draw, or draw the "
+                f"queried point itself with <-uniq[{set_name}]; otherwise "
+                "account for the collision explicitly, e.g. with a "
+                "ROFreshSampling helper game or an identical-until-bad hop"
+            )
+        elif explained is not None and explained[1].unstable:
             method_name, query = explained
             reason = (
                 f"'{method_name}' inserts '{query.proj}' into '{set_name}' "
@@ -1904,6 +2029,7 @@ class _FreshInputRFTransformer(BlockTransformer):
                     proj_index,  # type: ignore[arg-type]
                     self.field_names,
                     proof_namespace,
+                    stmt,
                 )
             if not _adequate:
                 explained = None
@@ -1914,6 +2040,7 @@ class _FreshInputRFTransformer(BlockTransformer):
                         set_name,
                         proj_index,  # type: ignore[arg-type]
                         proof_namespace,
+                        stmt,
                     )
                 self._record_near_miss(stmt, rf_name, set_name, explained)
                 continue

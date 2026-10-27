@@ -181,7 +181,7 @@ The essentials for writing correct FrogLang:
 - Sample merge: independent `BitString<n>` and `BitString<m>` used only via concatenation → single `BitString<n+m>`
 - Sample split: `BitString<n>` accessed only via non-overlapping slices → independent samples per slice
 - Random function on distinct inputs (via `<-uniq` sampling) → independent uniform samples
-- Random function on fresh `<-uniq` input used only in that call → independent uniform sample (`FreshInputRFToUniform`)
+- Random function on fresh `<-uniq[S]` input used only in that call → independent uniform sample, when no other query can be on that input: `S` is `RF.domain`, or every other query is itself a `<-uniq[S]` draw or is inserted into `S` in Initialize before the draw (`FreshInputRFToUniform`)
 - Dead code elimination, constant folding, single-use variable inlining, branch elimination, tuple index folding
 - An `if` whose branches are all empty, when its conditions make no call and index no map/array (`RemoveEmptyIf`)
 - A flag raise after a known-false flag: `x = false; S; if (C) { x = true; }` → `x = false; S; x = C;` when S does not mention `x` (`FlagSetToAssignment`)

@@ -4016,3 +4016,51 @@ def test_extract_field_no_near_miss_when_another_rule_declines(
     """A field condition is reported only when it is what blocks the
     extraction."""
     assert not _extract_field_misses(methods, init)
+@pytest.mark.parametrize(
+    "oracle, inserted",
+    [
+        (
+            "BitString<2> Hash(BitString<2> x) "
+            "{ seen = seen union {x}; return H(x); }",
+            "x",
+        ),
+        (
+            "BitString<2> Hash() { seen = seen union {0b00}; return H(0b00); }",
+            "0b00",
+        ),
+        # Sound because of the guard, but the gate does not read it.
+        (
+            "BitString<2> Hash(BitString<2> x) { if (x in seen) { return 0b00; } "
+            "seen = seen union {x}; return H(x); }",
+            "x",
+        ),
+    ],
+)
+def test_fresh_input_near_miss_on_oracle_recorded_query(
+    oracle: str, inserted: str
+) -> None:
+    """Hash records its query in seen, but the adversary may call Hash after
+    Fresh draws v, so Fresh keeps H(v) and the near miss names the site."""
+    misses = _fresh_input_misses("", oracle)
+    assert len(misses) == 1
+    assert misses[0].variable == "H"
+    assert (
+        f"'Hash' inserts '{inserted}' into 'seen' before calling 'H' on it, "
+        "but the adversary may call 'Hash' after 'v' is drawn"
+    ) in misses[0].reason
+    assert misses[0].suggestion is not None
+    assert "in Initialize before the draw" in misses[0].suggestion
+
+
+def test_fresh_input_near_miss_on_initialize_query_after_draw() -> None:
+    """Initialize draws w and then records and queries 0b00, which w may
+    equal.  Fresh's draw comes after all of Initialize and still fires."""
+    misses = _fresh_input_misses(
+        "BitString<2> w <-uniq[seen] BitString<2>; y = H(w); "
+        "seen = seen union {0b00}; y = y + H(0b00);"
+    )
+    assert len(misses) == 1
+    assert (
+        "'Initialize' inserts '0b00' into 'seen' before calling 'H' on it, "
+        "but Initialize calls it after drawing 'w'"
+    ) in misses[0].reason

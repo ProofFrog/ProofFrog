@@ -1,0 +1,34 @@
+// The insertion and the query on x follow the draw in the same call. On the
+// first call v = x with probability 1/4 in Left, and the answer is then 0b00:
+// Left returns 0b00 with probability 7/16, Right with probability 1/4.
+import 'P.primitive';
+
+Game Left(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> seen;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+    }
+    BitString<2> Fresh(BitString<2> x) {
+        BitString<2> v <-uniq[seen] BitString<2>;
+        seen = seen union {x};
+        BitString<2> a = H(x);
+        return a + H(v);
+    }
+}
+
+Game Right(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> seen;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+    }
+    BitString<2> Fresh(BitString<2> x) {
+        BitString<2> z <- BitString<2>;
+        seen = seen union {x};
+        BitString<2> a = H(x);
+        return a + z;
+    }
+}
+
+export as SameCall;

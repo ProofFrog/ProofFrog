@@ -1,0 +1,38 @@
+// Call Fresh, then Hash on all four points. In Left Fresh returned H(v) for
+// one of those points, so one Hash answer equals Fresh's output. In Right
+// Fresh's output is independent of H.
+import 'P.primitive';
+
+Game Left(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> seen;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+    }
+    BitString<2> Hash(BitString<2> x) {
+        seen = seen union {x};
+        return H(x);
+    }
+    BitString<2> Fresh() {
+        BitString<2> v <-uniq[seen] BitString<2>;
+        return H(v);
+    }
+}
+
+Game Right(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> seen;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+    }
+    BitString<2> Hash(BitString<2> x) {
+        seen = seen union {x};
+        return H(x);
+    }
+    BitString<2> Fresh() {
+        BitString<2> z <- BitString<2>;
+        return z;
+    }
+}
+
+export as LaterQuery;

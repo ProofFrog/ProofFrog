@@ -459,3 +459,41 @@ def test_f338_cross_method_alias_generator_alias_still_fires() -> None:
         _det2_ns(),
     )
     assert "return c + z;" in out
+
+
+def test_f177_cross_method_alias_not_applied_before_local_write() -> None:
+    """`Int t; r = E.f(t); t = k;` reads `t` while it holds its default, so
+    CrossMethodFieldAlias must not expand that `t` to `k` and replace
+    `E.f(t)` by the field `c = E.f(k)` cached in Initialize."""
+    out = _apply_pass(
+        CrossMethodFieldAlias(),
+        """
+        Game G() {
+            Int k;
+            Int c;
+            Void Initialize() { k = 1; c = E.f(k); }
+            Int B() { Int t; Int r = E.f(t); t = k; return r + t; }
+        }
+        """,
+        _det_ns(),
+    )
+    assert "Int r = E.f(t);" in out
+    assert "Int r = c;" not in out
+
+
+def test_f177_cross_method_alias_applied_after_local_write() -> None:
+    """Positive control: with `t = k;` before `E.f(t)`, the call is `E.f(k)`
+    and is replaced by the cached field `c`."""
+    out = _apply_pass(
+        CrossMethodFieldAlias(),
+        """
+        Game G() {
+            Int k;
+            Int c;
+            Void Initialize() { k = 1; c = E.f(k); }
+            Int B() { Int t; t = k; Int r = E.f(t); return r + t; }
+        }
+        """,
+        _det_ns(),
+    )
+    assert "Int r = c;" in out

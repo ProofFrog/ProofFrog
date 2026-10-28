@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'InitChallenge.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    InitChallenge(S);
+
+games:
+    InitChallenge(S).Left against InitChallenge(S).Adversary;
+    InitChallenge(S).Right against InitChallenge(S).Adversary;

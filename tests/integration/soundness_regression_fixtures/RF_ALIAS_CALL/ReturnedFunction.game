@@ -1,0 +1,36 @@
+// Reveal hands the adversary H itself, so it can evaluate H at every point.
+// Call Fresh, then evaluate the revealed function on all four points.
+import 'P.primitive';
+
+Game Left(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> seen;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+    }
+    Function<BitString<2>, BitString<2>> Reveal() {
+        return H;
+    }
+    BitString<2> Fresh() {
+        BitString<2> v <-uniq[seen] BitString<2>;
+        return H(v);
+    }
+}
+
+Game Right(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> seen;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+    }
+    Function<BitString<2>, BitString<2>> Reveal() {
+        return H;
+    }
+    BitString<2> Fresh() {
+        BitString<2> v <-uniq[seen] BitString<2>;
+        BitString<2> z <- BitString<2>;
+        return z;
+    }
+}
+
+export as ReturnedFunction;

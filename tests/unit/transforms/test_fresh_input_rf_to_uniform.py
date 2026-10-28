@@ -906,3 +906,159 @@ def test_rewrite_keeps_the_draw(exclusion: str, oracles: str) -> None:
         }}
         """,
     )
+
+
+# ---------------------------------------------------------------------------
+# Eligibility: H is one sampled function, queried only by direct calls.
+# ---------------------------------------------------------------------------
+
+
+def _eligibility_game(oracles: str, fields: str = "", initialize: str = "") -> str:
+    """Fresh draws v <-uniq[seen], which no other H query is recorded in, so
+    the rewrite is sound exactly when no other query reaches H."""
+    return f"""
+    Game G() {{
+        Function<BitString<2>, BitString<2>> H;
+        Set<BitString<2>> seen;
+        {fields}
+        Void Initialize() {{
+            H <- Function<BitString<2>, BitString<2>>;
+            {initialize}
+        }}
+        {oracles}
+        BitString<2> Fresh() {{
+            BitString<2> v <-uniq[seen] BitString<2>;
+            return H(v);
+        }}
+    }}
+    """
+
+
+_FN = "Function<BitString<2>, BitString<2>>"
+
+
+@pytest.mark.parametrize(
+    "oracles, fields, initialize",
+    [
+        # A local copy queried on an adversary-chosen point.
+        (
+            f"BitString<2> Hash(BitString<2> x) {{ {_FN} K = H; return K(x); }}",
+            "",
+            "",
+        ),
+        # A field copy made in Initialize.
+        (
+            "BitString<2> Hash(BitString<2> x) { return K(x); }",
+            f"{_FN} K;",
+            "K = H;",
+        ),
+        # The function itself handed to the adversary.
+        (f"{_FN} Reveal() {{ return H; }}", "", ""),
+        # Stored in a tuple.
+        (
+            f"[{_FN}, Bool] Reveal() {{ return [H, true]; }}",
+            "",
+            "",
+        ),
+    ],
+)
+def test_escaping_rf_not_simplified(oracles: str, fields: str, initialize: str) -> None:
+    """A copy of H answers queries the call-site analysis never sees, so
+    H(v) may already be known."""
+    assert not _fired(_eligibility_game(oracles, fields, initialize))
+
+
+@pytest.mark.parametrize(
+    "oracles, fields, initialize",
+    [
+        # Replaced by an adversary-chosen function.
+        (f"Void Reset({_FN} F) {{ H = F; }}", "", ""),
+        # Replaced by another random function the adversary can query.
+        (
+            "Void Reset() { H = K; } BitString<2> HashK(BitString<2> x) "
+            "{ return K(x); }",
+            f"{_FN} K;",
+            f"K <- {_FN};",
+        ),
+        # Overwritten in Initialize after its sample.
+        (
+            "BitString<2> HashK(BitString<2> x) { return K(x); }",
+            f"{_FN} K;",
+            f"K <- {_FN}; H = K;",
+        ),
+        # Written under a branch.
+        (f"Void Reset(Bool b, {_FN} F) {{ if (b) {{ H = F; }} }}", "", ""),
+        # Re-sampled by an oracle.
+        (f"Void Reset() {{ H <- {_FN}; }}", "", ""),
+    ],
+)
+def test_reassigned_rf_not_simplified(
+    oracles: str, fields: str, initialize: str
+) -> None:
+    """After any write besides its one sample, H need not be the sampled
+    random function the rewrite assumes."""
+    assert not _fired(_eligibility_game(oracles, fields, initialize))
+
+
+@pytest.mark.parametrize(
+    "oracles, fields",
+    [
+        # Draw-recorded queries, called directly.
+        (
+            "BitString<2> Hash() { BitString<2> u <-uniq[seen] BitString<2>; "
+            "return H(u); }",
+            "",
+        ),
+        # Writes to another Function field leave H alone.
+        (f"Void Reset({_FN} F) {{ G = F; }}", f"{_FN} G;"),
+    ],
+)
+def test_directly_called_rf_still_simplified(oracles: str, fields: str) -> None:
+    assert _fired(_eligibility_game(oracles, fields))
+
+
+def _let_ctx() -> PipelineContext:
+    types = NameTypeMap()
+    types.set(
+        "H",
+        frog_ast.FunctionType(
+            frog_ast.BitStringType(frog_ast.Integer(2)),
+            frog_ast.BitStringType(frog_ast.Integer(2)),
+        ),
+    )
+    return PipelineContext(
+        variables={},
+        proof_let_types=types,
+        proof_namespace={},
+        subsets_pairs=[],
+        sampled_let_names={"H"},
+    )
+
+
+def _let_game(oracles: str) -> str:
+    return f"""
+    Game G() {{
+        Set<BitString<2>> seen;
+        {oracles}
+        BitString<2> Fresh() {{
+            BitString<2> v <-uniq[seen] BitString<2>;
+            return H(v);
+        }}
+    }}
+    """
+
+
+@pytest.mark.parametrize(
+    "oracles, fires",
+    [
+        ("", True),
+        (f"BitString<2> Hash(BitString<2> x) {{ {_FN} K = H; return K(x); }}", False),
+        (f"Void Reset({_FN} F) {{ H = F; }}", False),
+    ],
+)
+def test_sampled_let_function_eligibility(oracles: str, fires: bool) -> None:
+    """A sampled let: function is sampled outside the game, so the game may
+    neither write it nor copy it."""
+    game = frog_parser.parse_game(_let_game(oracles))
+    transformed = FreshInputRFToUniform().apply(game, _let_ctx())
+    assert ("__fresh_rf_" in str(transformed)) == fires

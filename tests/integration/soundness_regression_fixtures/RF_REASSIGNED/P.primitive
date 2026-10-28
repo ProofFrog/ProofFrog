@@ -1,0 +1,3 @@
+Primitive P() {
+    BitString<2> G();
+}

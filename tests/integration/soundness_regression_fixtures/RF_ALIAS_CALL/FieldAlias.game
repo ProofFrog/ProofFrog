@@ -1,0 +1,40 @@
+// Initialize copies H into the field K and Hash queries K. Call Fresh, then
+// Hash on all four points: in Left one answer equals Fresh's output.
+import 'P.primitive';
+
+Game Left(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Function<BitString<2>, BitString<2>> K;
+    Set<BitString<2>> seen;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+        K = H;
+    }
+    BitString<2> Hash(BitString<2> x) {
+        return K(x);
+    }
+    BitString<2> Fresh() {
+        BitString<2> v <-uniq[seen] BitString<2>;
+        return H(v);
+    }
+}
+
+Game Right(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Function<BitString<2>, BitString<2>> K;
+    Set<BitString<2>> seen;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+        K = H;
+    }
+    BitString<2> Hash(BitString<2> x) {
+        return K(x);
+    }
+    BitString<2> Fresh() {
+        BitString<2> v <-uniq[seen] BitString<2>;
+        BitString<2> z <- BitString<2>;
+        return z;
+    }
+}
+
+export as FieldAlias;

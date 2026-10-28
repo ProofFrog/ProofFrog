@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'ResetField.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    ResetField(S);
+
+games:
+    ResetField(S).Left against ResetField(S).Adversary;
+    ResetField(S).Right against ResetField(S).Adversary;

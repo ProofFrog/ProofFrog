@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'ElseIfCall.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    ElseIfCall(S);
+
+games:
+    ElseIfCall(S).Left against ElseIfCall(S).Adversary;
+    ElseIfCall(S).Right against ElseIfCall(S).Adversary;

@@ -1,0 +1,43 @@
+// Initialize samples H, then overwrites it with K, which HashK exposes.
+// Call Q, then HashK on all four points: in Left one answer equals Q's.
+import 'P.primitive';
+
+Game Left(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Function<BitString<2>, BitString<2>> K;
+    Set<BitString<2>> T;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+        K <- Function<BitString<2>, BitString<2>>;
+        H = K;
+    }
+    BitString<2> HashK(BitString<2> x) {
+        return K(x);
+    }
+    BitString<2> Q() {
+        BitString<2> r <-uniq[T] BitString<2>;
+        BitString<2> z = H(r);
+        return z;
+    }
+}
+
+Game Right(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Function<BitString<2>, BitString<2>> K;
+    Set<BitString<2>> T;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+        K <- Function<BitString<2>, BitString<2>>;
+        H = K;
+    }
+    BitString<2> HashK(BitString<2> x) {
+        return K(x);
+    }
+    BitString<2> Q() {
+        BitString<2> r <-uniq[T] BitString<2>;
+        BitString<2> z <- BitString<2>;
+        return z;
+    }
+}
+
+export as InitReassign;

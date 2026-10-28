@@ -3903,3 +3903,116 @@ def test_fresh_input_near_miss_on_nondeterministic_insertion(
     assert misses[0].variable == "H"
     assert f"'Hash' inserts '{inserted}' into 'seen'" in misses[0].reason
     assert "not annotated deterministic" in misses[0].reason
+
+
+# ---------------------------------------------------------------------------
+# ExtractRepeatedTupleAccess: tuple-typed field bases
+# ---------------------------------------------------------------------------
+
+
+def _extract_field_misses(methods: str, init: str) -> list[NearMiss]:
+    game = frog_parser.parse_game(
+        f"""
+        Game TestGame() {{
+            [Int, Int] f;
+            Void Initialize() {{ {init} }}
+            {methods}
+        }}
+        """
+    )
+    ctx = _make_ctx()
+    result = ExtractRepeatedTupleAccess().apply(game, ctx)
+    assert result == game  # transform should NOT have fired
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Extract Repeated Tuple Access"
+    ]
+
+
+@pytest.mark.parametrize(
+    "methods, init, reason",
+    [
+        (
+            "Void Store() { f = K.Get(); } Int Q() { return f[1] + f[1]; }",
+            "",
+            "may be unassigned when the oracle runs, because Initialize does"
+            " not assign it",
+        ),
+        (
+            "Int Q() { Int x = f[1]; f = K.Get(); return x + f[1]; }",
+            "f = K.Get();",
+            "writes or rebinds the field",
+        ),
+        (
+            "Void Reset() { f = K.Get(); }"
+            " Int Q() { Int x = f[1]; Reset(); return x + f[1]; }",
+            "f = K.Get();",
+            "calls a method of the game",
+        ),
+        # Initialize runs Q before it assigns f.
+        (
+            "Int Q(Bool c) { if (c) { return 0; } return f[1] + f[1]; }",
+            "Int r = TestGame.Q(true); f = K.Get();",
+            "because Initialize calls a method of the game before assigning it",
+        ),
+        # Initialize does assign f at top level, but a local of the same name
+        # may be what the assignment targets.
+        (
+            "Int Q() { return f[1] + f[1]; }",
+            "[Int, Int] f = K.Get(); f = K.Get();",
+            "because Initialize also binds a local named 'f'",
+        ),
+        # Q binds a local named f in a branch, so the pass leaves the field
+        # alone in the whole method, though the reads after the branch are of
+        # the field.
+        (
+            "Int Q(Bool c) { if (c) { [Int, Int] f = K.Get(); return f[0]; }"
+            " return f[1] + f[1]; }",
+            "f = K.Get();",
+            "the method also binds a local or loop binder named 'f'",
+        ),
+        (
+            "Int Q(Set<[Int, Int]> S) { for ([Int, Int] f in S) { }"
+            " return f[1] + f[1]; }",
+            "f = K.Get();",
+            "the method also binds a local or loop binder named 'f'",
+        ),
+    ],
+)
+def test_extract_field_near_miss(methods: str, init: str, reason: str) -> None:
+    """A repeated read of a tuple field that the pass declines to extract is
+    reported, naming the field, the oracle and the unmet condition."""
+    misses = _extract_field_misses(methods, init)
+    assert len(misses) == 1
+    assert misses[0].variable == "f"
+    assert misses[0].method == "Q"
+    assert "f[1]" in misses[0].reason
+    assert reason in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "methods, init",
+    [
+        # A parameter named f: every read of f in Q is of the parameter.
+        ("Int Q(Array<Int, 2> f) { return f[1] + f[1]; }", ""),
+        # The full reconstruction [f[0], f[1]] declines the extraction for
+        # any base, so the unassigned field is not what blocks it.
+        (
+            "Void Store() { f = K.Get(); }"
+            " [Int, Int] Q() { Int x = f[1] + f[1]; return [f[0], f[1]]; }",
+            "",
+        ),
+        # An index outside the tuple declines for any base as well.
+        (
+            "Void Store() { f = K.Get(); } Int Q() { return f[2] + f[2]; }",
+            "",
+        ),
+    ],
+)
+def test_extract_field_no_near_miss_when_another_rule_declines(
+    methods: str, init: str
+) -> None:
+    """A field condition is reported only when it is what blocks the
+    extraction."""
+    assert not _extract_field_misses(methods, init)

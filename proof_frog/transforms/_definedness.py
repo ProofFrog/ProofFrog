@@ -13,8 +13,9 @@ A name is definitely assigned at a read inside a method when it is
 - a local in lexical scope bound by an initialized declaration
   (``T x = e;``, ``T x <- D;``, ``T x <-uniq[S] D;``) or a loop binder;
 - a game field with a declared initializer, or one ``Initialize`` assigns in
-  a top-level statement that no earlier ``return`` can skip (F-349), read
-  from a method other than ``Initialize``;
+  a top-level statement that no earlier ``return`` can skip (F-349) and that
+  no call to a method of the game precedes, read from a method other than
+  ``Initialize``;
 - a game parameter or a proof ``let:`` name.
 
 Everything else is declined, in particular a name whose binding is
@@ -106,35 +107,99 @@ def method_binder_counts(method: frog_ast.Method) -> dict[str, int]:
     return {name: names.count(name) for name in names}
 
 
-def initialize_assigned_fields(game: frog_ast.Game) -> set[str]:
-    """Fields every oracle call may read: those ``Initialize`` assigns in a
-    top-level statement no earlier ``return`` can skip (F-349), plus fields
-    with a declared initializer.
+def calls_game_method(game: frog_ast.Game, node: frog_ast.ASTNode) -> bool:
+    """True if *node* calls a method of *game*, written ``M(...)`` or
+    ``G.M(...)`` with ``G`` the game's own name."""
+    methods = {method.signature.name for method in game.methods}
+    for child in _walk_nodes(node):
+        if not isinstance(child, frog_ast.FuncCall):
+            continue
+        func = child.func
+        if isinstance(func, frog_ast.Variable) and func.name in methods:
+            return True
+        if (
+            isinstance(func, frog_ast.FieldAccess)
+            and isinstance(func.the_object, frog_ast.Variable)
+            and func.the_object.name == game.name
+            and func.name in methods
+        ):
+            return True
+    return False
 
-    A name that ``Initialize`` also binds as a local is left out: an
-    assignment to that name may target the local.
+
+def initialize_unassigned_fields(game: frog_ast.Game) -> dict[str, str]:
+    """The fields an oracle call may find unassigned, each with the reason.
+
+    A field is assigned before any oracle runs when it has a declared
+    initializer, or when ``Initialize`` assigns it in a top-level statement
+    that no earlier ``return`` can skip (F-349) and that no call to a method
+    of the game precedes or contains: such a call runs that method while the
+    field may still be unassigned. A name that ``Initialize`` also binds as a
+    local is not assigned that way either: an assignment to that name may
+    target the local.
+
+    Each reason completes the sentence "the field may be unassigned
+    because ...".
     """
-    assigned = {field.name for field in game.fields if field.value is not None}
+    candidates = [field.name for field in game.fields if field.value is None]
     initialize = next(
         (m for m in game.methods if m.signature.name == "Initialize"), None
     )
-    if initialize is None:
-        return assigned
-    shadowed = method_binder_counts(initialize)
-    statements = initialize.block.statements
-    for index, statement in enumerate(statements):
-        if (
-            isinstance(
-                statement,
-                (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+    assigned: set[str] = set()
+    shadowed_names: set[str] = set()
+    after_call: set[str] = set()
+    if initialize is not None:
+        shadowed = method_binder_counts(initialize)
+        statements = initialize.block.statements
+        called = False
+        for index, statement in enumerate(statements):
+            # A call in the assignment's own right-hand side runs before it.
+            called = called or calls_game_method(game, statement)
+            if not (
+                isinstance(
+                    statement,
+                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+                )
+                and statement.the_type is None
+                and isinstance(statement.var, frog_ast.Variable)
+                and not may_return_before(statements, index)
+            ):
+                continue
+            name = statement.var.name
+            if name in shadowed:
+                shadowed_names.add(name)
+            elif called:
+                after_call.add(name)
+            else:
+                assigned.add(name)
+    reasons: dict[str, str] = {}
+    for name in candidates:
+        if name in assigned:
+            continue
+        if name in shadowed_names:
+            reasons[name] = (
+                f"Initialize also binds a local named '{name}', so its"
+                " assignment to that name may target the local"
             )
-            and statement.the_type is None
-            and isinstance(statement.var, frog_ast.Variable)
-            and statement.var.name not in shadowed
-            and not may_return_before(statements, index)
-        ):
-            assigned.add(statement.var.name)
-    return assigned
+        elif name in after_call:
+            reasons[name] = (
+                "Initialize calls a method of the game before assigning it,"
+                " and that method may read it"
+            )
+        else:
+            reasons[name] = (
+                "Initialize does not assign it in a top-level statement before"
+                " any return"
+            )
+    return reasons
+
+
+def initialize_assigned_fields(game: frog_ast.Game) -> set[str]:
+    """Fields every oracle call may read: those with a declared initializer
+    and those ``Initialize`` assigns before any oracle can run (see
+    :func:`initialize_unassigned_fields`)."""
+    unassigned = initialize_unassigned_fields(game)
+    return {field.name for field in game.fields if field.name not in unassigned}
 
 
 class GameDefinedness:
@@ -155,10 +220,14 @@ class GameDefinedness:
         self.fields: set[str] = set()
         self.parameters: set[str] = set()
         self.initialize_assigned: set[str] = set()
+        # The other fields, each with the reason an oracle may find it
+        # unassigned.
+        self.initialize_unassigned: dict[str, str] = {}
         if game is not None:
             self.fields = {field.name for field in game.fields}
             self.parameters = {parameter.name for parameter in game.parameters}
-            self.initialize_assigned = initialize_assigned_fields(game)
+            self.initialize_unassigned = initialize_unassigned_fields(game)
+            self.initialize_assigned = self.fields - set(self.initialize_unassigned)
 
     def is_let_name(self, name: str) -> bool:
         """True if *name* is a proof ``let:`` name."""
@@ -292,11 +361,9 @@ class MethodDefinedness:
                 return "it names both a game field and a game parameter"
             if self.method.signature.name == "Initialize":
                 return "it is a field read inside Initialize"
-            if name not in self.game.initialize_assigned:
-                return (
-                    "it is a field that Initialize does not assign in a "
-                    "top-level statement before any return"
-                )
+            gap = self.game.initialize_unassigned.get(name)
+            if gap is not None:
+                return f"it is a field and {gap}"
             return None
         if name in params:
             return None

@@ -140,6 +140,12 @@ _ACCEPTS = {
         "Game G() { Bool f = false; Int Query(Int x) { Bool y = f; return 0; } }",
         "Bool y",
     ),
+    # A call to a method of the game after the assignment finds f assigned.
+    "field_assigned_before_a_game_method_call": (
+        "Game G() { Bool f; Int r; Void Initialize() { f = false;"
+        " r = G.Query(0); } Int Query(Int x) { Bool y = f; return 0; } }",
+        "Bool y",
+    ),
 }
 
 
@@ -221,7 +227,36 @@ _DECLINES = {
         "Bool y",
         "Query",
         "f",
-        "Initialize does not assign",
+        "Initialize also binds a local named 'f'",
+    ),
+    # Initialize runs Query, which reads f, before it assigns f: the call is
+    # an oracle run that finds f unassigned. Both call forms count, and so
+    # does a call in the assignment's own right-hand side.
+    "field_assigned_after_a_game_method_call": (
+        "Game G() { Bool f; Int r; Void Initialize() { r = G.Query(0);"
+        " f = false; } Int Query(Int x) { Bool y = f; return 0; } }",
+        "Bool y",
+        "Query",
+        "f",
+        "calls a method of the game before assigning it",
+    ),
+    "field_assigned_after_a_bare_game_method_call": (
+        "Game G() { Bool f; Int r; Void Initialize() { if (true) {"
+        " r = Query(0); } f = false; }"
+        " Int Query(Int x) { Bool y = f; return 0; } }",
+        "Bool y",
+        "Query",
+        "f",
+        "calls a method of the game before assigning it",
+    ),
+    "field_assigned_from_a_game_method_call": (
+        "Game G() { Bool f; Void Initialize() { f = G.Flag(); }"
+        " Bool Flag() { return true; }"
+        " Int Query(Int x) { Bool y = f; return 0; } }",
+        "Bool y",
+        "Query",
+        "f",
+        "calls a method of the game before assigning it",
     ),
     "field_read_inside_initialize": (
         "Game G() { Bool f; Bool g; Void Initialize() { f = false; g = f; }"

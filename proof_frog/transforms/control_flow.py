@@ -110,7 +110,8 @@ class FoldLiteralConditionsTransformer(Transformer):
         binder;
       * a game field with a declared initializer, or one ``Initialize``
         assigns in a top-level statement that no earlier ``return`` can
-        skip (F-349), read from a method other than ``Initialize``;
+        skip (F-349) and no call to a method of the game precedes, read
+        from a method other than ``Initialize``;
       * a game parameter or a proof ``let:`` name.
 
       A name is declined when its binding is ambiguous: the method binds it
@@ -216,7 +217,7 @@ class FoldLiteralConditionsTransformer(Transformer):
                             f"Make '{name}' definitely assigned: declare "
                             "a local with a value, or assign a field in a "
                             "top-level statement of Initialize before any "
-                            "return"
+                            "return or call to a method of the game"
                         ),
                         variable=name,
                         method=self._scope.method_name,

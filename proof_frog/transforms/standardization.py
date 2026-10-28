@@ -766,9 +766,14 @@ class _StabilizeIndependentStatementsTransformer(BlockTransformer):
 
     def __init__(self) -> None:
         self.fields: list[str] = []
+        # Names bound to runtime values anywhere in the game, so the
+        # dependency graph can tell a draw that may not complete (from a set
+        # value, or `T \ E`) from a draw from a type.
+        self.value_names: set[str] | None = None
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.fields = [f.name for f in game.fields]
+        self.value_names = dependencies.game_value_names(game)
         new_game = copy.deepcopy(game)
         new_game.methods = [self.transform(m) for m in new_game.methods]
         return new_game
@@ -959,8 +964,14 @@ class _StabilizeIndependentStatementsTransformer(BlockTransformer):
         sortable_indices = [i for i, s in enumerate(stmts) if self._is_typed_decl(s)]
         if len(sortable_indices) < 2:
             return block
+        # The graph pins a draw whose domain may be empty relative to every
+        # statement containing a return, so the reordering below never moves
+        # it across an `if` that returns (F-327).
         graph = dependencies.generate_dependency_graph(
-            block, [frog_ast.Field(frog_ast.Void(), f, None) for f in self.fields], {}
+            block,
+            [frog_ast.Field(frog_ast.Void(), f, None) for f in self.fields],
+            {},
+            self.value_names,
         )
 
         # Build dependency edges among sortable statements

@@ -1,0 +1,14 @@
+// F-327: claims UsedDraw.Real and UsedDraw.Ideal are interchangeable. They
+// are not: after Add(0b0); Add(0b1); SetGuard(), Real's Draw does not
+// complete and Ideal's returns 0b0 (see used_draw.game).
+
+import 'used_draw.game';
+
+proof:
+
+theorem:
+    UsedDraw();
+
+games:
+    UsedDraw().Real against UsedDraw().Adversary;
+    UsedDraw().Ideal against UsedDraw().Adversary;

@@ -1,0 +1,29 @@
+// F-305 (TopologicalSort): a draw that never completes pruned as dead code.
+//
+// Drawing from an empty domain does not complete, so the oracle call never
+// returns, which the adversary observes. Real's Draw fills a LOCAL set E with
+// both elements of BitString<1> and then samples from BitString<1> \ E,
+// which is empty. The sort kept only statements a return or a field
+// reference depends on; the draw is neither, so it was dropped together with
+// the writes to E, leaving Ideal's Draw.
+//
+// Distinguisher: call Draw(). In Real it never returns; in Ideal it returns
+// 0. The hop must be refused.
+
+Game Real() {
+    Int Draw() {
+        Set<BitString<1>> E;
+        E = E union {0b0};
+        E = E union {0b1};
+        BitString<1> junk <- BitString<1> \ E;
+        return 0;
+    }
+}
+
+Game Ideal() {
+    Int Draw() {
+        return 0;
+    }
+}
+
+export as Attack3;

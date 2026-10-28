@@ -55,7 +55,15 @@ class PipelineContext:
     proof_namespace: frog_ast.Namespace
     subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]]
     equality_pairs: set[tuple[str, str]] = dataclasses.field(default_factory=set)
-    sort_game_fn: Optional[Callable[[frog_ast.Game], frog_ast.Game]] = None
+    # The engine's ``sort_game``: sorts and prunes each method of a game,
+    # appending ``(method name, draw)`` for every draw it keeps only because
+    # its domain may be empty to the list it is given.
+    sort_game_fn: Optional[
+        Callable[
+            [frog_ast.Game, Optional[list[tuple[str, frog_ast.Statement]]]],
+            frog_ast.Game,
+        ]
+    ] = None
     max_calls: Optional[int] = None
     sampled_let_names: set[str] = dataclasses.field(default_factory=set)
     near_misses: list[NearMiss] = dataclasses.field(default_factory=list)

@@ -4193,3 +4193,104 @@ def test_challenge_exclusion_near_miss_on_rf_written_before_call() -> None:
     assert len(written) == 1
     assert "'Initialize' writes or rebinds 'H'" in written[0].reason
     assert written[0].method == "Initialize"
+# ---------------------------------------------------------------------------
+# Draws whose domain may be empty (F-303, F-305, F-318, F-327)
+# ---------------------------------------------------------------------------
+
+
+def _possibly_empty_draw_game(probe_body: str) -> frog_ast.Game:
+    return frog_parser.parse_game(f"""
+        Game G() {{
+            Set<BitString<1>> E;
+            Void Add(BitString<1> x) {{
+                E = E union {{x}};
+            }}
+            Int Size() {{
+                return |E|;
+            }}
+            Void Probe() {{
+                {probe_body}
+            }}
+        }}
+        """)
+
+
+def _structural_pass_misses(pass_name: str, probe_body: str) -> list[NearMiss]:
+    from proof_frog.proof_engine import ProofEngine
+    from proof_frog.transforms.structural import (
+        RemoveUnnecessaryFields,
+        TopologicalSort,
+    )
+
+    ctx = _make_ctx()
+    ctx.sort_game_fn = ProofEngine().sort_game
+    transform = {
+        "Topological Sorting": TopologicalSort(),
+        "Remove unnecessary statements and fields": RemoveUnnecessaryFields(),
+    }[pass_name]
+    transform.apply(_possibly_empty_draw_game(probe_body), ctx)
+    return [nm for nm in ctx.near_misses if nm.transform_name == pass_name]
+
+
+@pytest.mark.parametrize(
+    "pass_name",
+    ["Topological Sorting", "Remove unnecessary statements and fields"],
+)
+def test_dead_possibly_empty_draw_kept_near_miss(pass_name: str) -> None:
+    """A draw whose result is unused but whose domain may be empty is kept,
+    and the pass says why, naming the draw, its target and its oracle."""
+    misses = _structural_pass_misses(
+        pass_name,
+        "Set<BitString<1>> L; L = L union {0b0};"
+        " BitString<1> junk <- BitString<1> \\ L;",
+    )
+    assert len(misses) == 1
+    assert misses[0].variable == "junk"
+    assert misses[0].method == "Probe"
+    assert "may be empty" in misses[0].reason
+    assert "BitString<1> \\ L" in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "pass_name",
+    ["Topological Sorting", "Remove unnecessary statements and fields"],
+)
+@pytest.mark.parametrize(
+    "probe_body",
+    [
+        # A draw from a type is dropped, not kept.
+        "BitString<1> junk <- BitString<1>;",
+        # So is a draw from a type minus a literal it cannot cover.
+        "BitString<1> junk <- BitString<1> \\ {0b0};",
+    ],
+)
+def test_dead_draw_from_non_empty_domain_no_near_miss(
+    pass_name: str, probe_body: str
+) -> None:
+    assert not _structural_pass_misses(pass_name, probe_body)
+
+
+def test_sink_uniform_sample_near_miss_possibly_empty_domain() -> None:
+    """SinkUniformSample declines to move a draw from a runtime set into the
+    branch that uses it, and reports it."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Set<BitString<1>> S;
+            Int O(Bool b) {
+                Set<BitString<1>> x <- S;
+                if (b) {
+                    return |x|;
+                }
+                return 0;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = SinkUniformSample().apply(game, ctx)
+    assert result == game
+    misses = [
+        nm for nm in ctx.near_misses if nm.transform_name == "Sink Uniform Sample"
+    ]
+    assert len(misses) == 1
+    assert misses[0].variable == "x"
+    assert "may be empty" in misses[0].reason

@@ -323,3 +323,40 @@ def test_write_not_moved_above_shadowing_declaration() -> None:
     declaration = statements.index("Int f;")
     assert statements.index("f = p;") > declaration
     assert statements.index("Int a = f + 1;") > declaration
+
+
+_DRAW_ACROSS_RETURN = """
+    Game G() {{
+        Set<BitString<1>> E;
+        Bool guard;
+        Int Draw(BitString<1> w) {{
+            BitString<1> junk <- {domain};
+            if (guard) {{
+                return 1;
+            }}
+            BitString<1> other = w;
+            return 0;
+        }}
+    }}
+    """
+
+
+def test_stabilize_keeps_possibly_empty_draw_above_early_return() -> None:
+    """F-327: the draw may not complete (E may cover BitString<1>), so moving
+    it below `if (guard) { return 1; }` would remove the traces on which it
+    fails to complete. It stays above the if."""
+    game = frog_parser.parse_game(
+        _DRAW_ACROSS_RETURN.format(domain="BitString<1> \\ E")
+    )
+    result = _StabilizeIndependentStatementsTransformer().transform_game(game)
+    assert result == game
+
+
+def test_stabilize_still_moves_type_draw_across_early_return() -> None:
+    """A draw from a type always completes and is independent of the guard,
+    so the pass still orders it after the independent assignment."""
+    game = frog_parser.parse_game(_DRAW_ACROSS_RETURN.format(domain="BitString<1>"))
+    result = _StabilizeIndependentStatementsTransformer().transform_game(game)
+    statements = [str(s) for s in result.get_method("Draw").block.statements]
+    assert statements[0] == "BitString<1> other = w;"
+    assert statements[2] == "BitString<1> junk <- BitString<1>;"

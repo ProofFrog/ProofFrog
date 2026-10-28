@@ -1,0 +1,12 @@
+// Positive control for F-305: these games are interchangeable.
+
+import 'type_draw_control.game';
+
+proof:
+
+theorem:
+    TypeDrawControl();
+
+games:
+    TypeDrawControl().Real against TypeDrawControl().Adversary;
+    TypeDrawControl().Ideal against TypeDrawControl().Adversary;

@@ -347,6 +347,29 @@ def detect_unfolded_negation_diff(hunk: DiffHunk) -> bool:
     return bool(sympy.expand(current_value - next_value) == 0)
 
 
+# `x <- T \ E;` or `x <-uniq[E] T;`: a draw whose domain may be empty.
+_EXCLUSION_DRAW = re.compile(r"<-uniq\[|<-[^;]*\\")
+
+
+def detect_possibly_empty_draw_diff(hunk: DiffHunk) -> bool:
+    """Check if the sides differ only in draws ``x <- T \\ E;`` /
+    ``x <-uniq[E] T;`` present on one side and not the other.
+
+    Such a draw is kept even when its result is unused, because when ``E``
+    covers ``T`` it does not complete (the engine cannot tell that ``E``
+    never does, e.g. for ``ModInt<q> \\ {0}`` with ``q`` prime).
+    """
+    current = [_strip_diff_prefix(line) for line in hunk.current_lines]
+    next_lines = [_strip_diff_prefix(line) for line in hunk.next_lines]
+    current_rest = [line for line in current if not _EXCLUSION_DRAW.search(line)]
+    next_rest = [line for line in next_lines if not _EXCLUSION_DRAW.search(line)]
+    if current_rest != next_rest:
+        return False
+    current_draws = sorted(set(current) - set(current_rest))
+    next_draws = sorted(set(next_lines) - set(next_rest))
+    return current_draws != next_draws
+
+
 _DETECTORS: list[tuple[Callable[[DiffHunk], bool], str, str]] = []
 
 
@@ -389,6 +412,16 @@ _register(
     + " '3 - 5' becoming '-2') stays unfolded",
     "Make both games reach the same arithmetic here, for example by writing"
     + " the subtraction or folded value the other game has",
+)
+
+_register(
+    detect_possibly_empty_draw_diff,
+    "The engine keeps a draw 'x <- T \\ E;' or 'x <-uniq[E] T;' even when x is"
+    + " unused, and does not move it across a return: when E covers T the"
+    + " draw does not complete, which the adversary observes",
+    "Keep the same draw at the same place in both games; if its domain is"
+    + " never empty, draw from a type or exclude a set literal smaller than"
+    + " the type instead",
 )
 
 ENGINE_LIMITATION_DETECTORS = _DETECTORS

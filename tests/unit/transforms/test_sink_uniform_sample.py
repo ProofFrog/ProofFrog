@@ -313,3 +313,53 @@ def test_f042_still_fires_with_legitimate_shadowing() -> None:
     # The first block's `x` is sunk into its `if (c)` sub-branch; the sibling
     # `x` (a distinct declaration) is untouched.
     assert transformed != method
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        # Used only in one branch: sinking would skip the draw when b is false.
+        """
+        Int O(Bool b, Set<BitString<1>> S) {
+            Set<BitString<1>> x <- S;
+            if (b) {
+                return |x|;
+            }
+            return 0;
+        }
+        """,
+        # Used only after an if that may return: sinking past it would skip
+        # the draw on the returning traces.
+        """
+        Int O(Bool b, Set<BitString<1>> S) {
+            Set<BitString<1>> x <- S;
+            if (b) {
+                return 1;
+            }
+            return |x|;
+        }
+        """,
+    ],
+)
+def test_sink_declines_draw_from_runtime_set(method: str) -> None:
+    """The domain S is a runtime value that may be empty, so the draw may not
+    complete; moving it would change the traces on which it fails to."""
+    method_ast = frog_parser.parse_method(method)
+    assert SinkUniformSampleTransformer().transform(method_ast) == method_ast
+
+
+def test_sink_declines_draw_from_field_set_in_game() -> None:
+    """Inside a game, a field used as the domain is a runtime value too."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Set<BitString<1>> S;
+            Int O(Bool b) {
+                Set<BitString<1>> x <- S;
+                if (b) {
+                    return |x|;
+                }
+                return 0;
+            }
+        }
+        """)
+    assert SinkUniformSampleTransformer().transform(game) == game

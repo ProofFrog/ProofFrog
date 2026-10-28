@@ -1,0 +1,61 @@
+// F-327 (StabilizeIndependentStatements): a draw that may not complete moved
+// across an `if` that returns.
+//
+// Drawing from an empty domain does not complete, so the oracle call never
+// returns, which the adversary observes. Real's Draw samples from
+// BitString<1> \ E BEFORE checking `guard`; Ideal's samples only AFTER the
+// `if (guard) { return 1; }`. The shared dependency graph gave the draw no
+// edge to the `if`, so the reordering passes (StabilizeIndependentStatements,
+// and TopologicalSort in the full pipeline) could move it across the early
+// return.
+//
+// Distinguisher: Add(0b0); Add(0b1); SetGuard(); Draw(0b0). Now E covers
+// BitString<1> and guard is true: in Real the draw comes first and does not
+// complete, so Draw never returns; in Ideal Draw returns 1 before reaching
+// the draw. The hop must be refused.
+
+Game Real() {
+    Set<BitString<1>> E;
+    Bool guard = false;
+
+    Void Add(BitString<1> x) {
+        E = E union {x};
+    }
+
+    Void SetGuard() {
+        guard = true;
+    }
+
+    Int Draw(BitString<1> w) {
+        BitString<1> junk <- BitString<1> \ E;
+        if (guard) {
+            return 1;
+        }
+        BitString<1> other = w;
+        return 0;
+    }
+}
+
+Game Ideal() {
+    Set<BitString<1>> E;
+    Bool guard = false;
+
+    Void Add(BitString<1> x) {
+        E = E union {x};
+    }
+
+    Void SetGuard() {
+        guard = true;
+    }
+
+    Int Draw(BitString<1> w) {
+        BitString<1> other = w;
+        if (guard) {
+            return 1;
+        }
+        BitString<1> junk <- BitString<1> \ E;
+        return 0;
+    }
+}
+
+export as Attack1;

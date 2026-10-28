@@ -1,0 +1,33 @@
+// Positive control for F-303: the same shape with draws whose domain is
+// known to be non-empty. A draw from a type (BitString<1>), or from a type
+// minus a set literal with fewer elements than the type has (BitString<1>
+// minus {0b0} still holds 0b1), always completes, so when its result is
+// unused it is dead code and is still dropped.
+
+Game Real() {
+    Set<BitString<1>> E;
+
+    Void Add(BitString<1> x) {
+        E = E union {x};
+    }
+
+    Int Draw() {
+        BitString<1> junk <- BitString<1>;
+        BitString<1> other <- BitString<1> \ {0b0};
+        return 0;
+    }
+}
+
+Game Ideal() {
+    Set<BitString<1>> E;
+
+    Void Add(BitString<1> x) {
+        E = E union {x};
+    }
+
+    Int Draw() {
+        return 0;
+    }
+}
+
+export as TypeDrawControl;

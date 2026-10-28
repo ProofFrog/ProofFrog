@@ -142,10 +142,11 @@ The essentials for writing correct FrogLang:
 - `BitString<n>` — bit strings of length `n` (cardinality `2^n`)
 - `ModInt<q>` — integers mod `q` with modular arithmetic
 - `Array<T, n>` — fixed-size arrays indexed `0` to `n-1`
-- `Map<K, V>` — finite partial functions (initially empty; accessing an absent key is undefined)
-- `Set<T>` — finite sets
+- `Map<K, V>` — finite partial functions (initially empty; looking up an absent key returns an unspecified value)
+- `Set<T>` — finite sets (initially empty)
 - `Function<D, R>` — deterministic function from D to R; when sampled (`<-`), produces a random function (consistent on repeated inputs, independent across distinct inputs)
-- `T?` — optional type (value of `T` or `None`)
+- `T?` — optional type (value of `T` or `None`; initially `None`)
+- **No undefined values:** a variable declared without a value holds its type's default (empty `Map`/`Set`, `None` for `T?`, otherwise one fixed unspecified value), and a partial operation (absent map key, array index out of range, division by zero) returns an unspecified value. Evaluation never fails, so dropping or moving a read is sound; never assume anything about an unspecified value beyond its being the same each time. Full rule: `FROGLANG_REFERENCE.md` section 6.9
 - `[T1, T2, ..., Tn]` — tuples; access by constant index `t[0]`, `t[1]`
 
 **Operators (key gotchas):**

@@ -95,9 +95,10 @@ class FoldLiteralConditionsTransformer(Transformer):
     The folds above the last have only literal operands, so they drop no
     evaluation. (``1 == 1`` and ``true == true`` are also
     ``ReflexiveComparison``'s; either pass may fold them.) The last fold
-    drops the evaluation of ``L``, and reading an unassigned variable is an
-    event the adversary observes. It therefore fires only when evaluating
-    ``L`` cannot fail:
+    drops the evaluation of ``L``. Evaluation never fails in FrogLang
+    (FROGLANG_REFERENCE.md section 6.9), but the fold is more cautious and
+    fires only when ``L`` is built from the nodes below and reads only
+    variables that are definitely assigned:
 
     - ``L`` contains only literals, variables, field accesses and unary or
       binary operations other than division. A call, an index, a slice or

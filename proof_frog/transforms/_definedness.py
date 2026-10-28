@@ -1,11 +1,16 @@
 """Definite-assignment analysis for variable reads.
 
-Reading an unassigned variable is an event the adversary observes, so a pass
-that drops the evaluation of an expression (folding a comparison to a
-constant, deleting an unused declaration) is sound only if every variable
-the expression reads is definitely assigned where it is evaluated. This
-module decides that, conservatively: a name it cannot prove assigned is
-reported as possibly unassigned.
+Decides, conservatively, whether every variable an expression reads is
+definitely assigned where it is evaluated: a name it cannot prove assigned
+is reported as possibly unassigned.
+
+FrogLang has no undefined values (FROGLANG_REFERENCE.md section 6.9): a
+variable read before it is assigned holds its type's default, so evaluating
+an expression never fails and dropping or moving a read is sound without
+this check. FoldLiteralConditions and DeadNullGuardElimination still
+consult it before dropping an evaluation, and ExtractRepeatedTupleAccess
+before hoisting a field read, a caution from before that rule was stated
+that costs only completeness.
 
 A name is definitely assigned at a read inside a method when it is
 

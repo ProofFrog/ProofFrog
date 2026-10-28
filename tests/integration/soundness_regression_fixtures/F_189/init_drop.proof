@@ -2,8 +2,8 @@
 // proof-level. Claims InitDropProp(S).Real == InitDropProp(S).Random in a
 // single interchangeability hop. The theorem is FALSE: the distinguisher
 // calls Peek() once before Refresh(); Real returns 1 w.p. 1 (field
-// initializer [1, 2]), Random reads an unassigned field (observable
-// undefined-read event, SEMANTICS.md sec 4.1 / 7.A.1). Advantage 1.
+// initializer [1, 2]), Random reads an unassigned field, which holds an
+// unspecified Int (FROGLANG_REFERENCE.md section 6.9). Advantage 1.
 //
 // SOUND engine: prove must REJECT this hop.
 // UNSOUND (as prosecuted): SplitOpaqueTupleField drops Real's field

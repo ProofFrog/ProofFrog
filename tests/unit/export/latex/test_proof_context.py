@@ -194,12 +194,11 @@ def test_step_assumption_outside_induction_keeps_hop_kind():
 def test_lemma_side_flip_is_lemma_hop():
     ctx = ProofContext(HASHED_ELGAMAL)
     hops = ctx.hop_kinds()
-    assert [h.kind for h in hops] == [
-        "interchangeable",
-        "assumption",
-        "interchangeable",
-        "lemma",
-        "interchangeable",
-    ]
-    assert hops[3].lemma_path == "../Group/GapCDH_implies_GapCDH_NZ.proof"
-    assert hops[1].lemma_path is None
+    # The example's other hops change as it evolves; only the lemma hop is
+    # pinned here.
+    kinds = [h.kind for h in hops]
+    assert kinds.count("lemma") == 1
+    assert "assumption" in kinds
+    lemma = hops[kinds.index("lemma")]
+    assert lemma.lemma_path == "../Group/GapCDH_implies_GapCDH_NZ.proof"
+    assert all(h.lemma_path is None for h in hops if h.kind != "lemma")

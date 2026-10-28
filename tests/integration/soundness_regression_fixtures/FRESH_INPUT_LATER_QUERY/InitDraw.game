@@ -1,0 +1,41 @@
+// The draw is in Initialize and every oracle runs after it. Reveal y, then
+// Hash on all four points: in Left one answer equals y.
+import 'P.primitive';
+
+Game Left(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> seen;
+    BitString<2> y;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+        BitString<2> v <-uniq[seen] BitString<2>;
+        y = H(v);
+    }
+    BitString<2> Reveal() {
+        return y;
+    }
+    BitString<2> Hash(BitString<2> x) {
+        seen = seen union {x};
+        return H(x);
+    }
+}
+
+Game Right(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> seen;
+    BitString<2> y;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+        BitString<2> z <- BitString<2>;
+        y = z;
+    }
+    BitString<2> Reveal() {
+        return y;
+    }
+    BitString<2> Hash(BitString<2> x) {
+        seen = seen union {x};
+        return H(x);
+    }
+}
+
+export as InitDraw;

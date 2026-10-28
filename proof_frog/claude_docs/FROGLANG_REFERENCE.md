@@ -447,6 +447,7 @@ The statement `Type x <-uniq[S] Type;` has the following semantics:
 
 1. Sample `x` uniformly from `Type \ S` (the elements of `Type` not in `S`).
 2. The resulting `x` is guaranteed to be distinct from all elements currently in `S`.
+   The draw then adds `x` to `S` (as if followed by `S = S union {x}`), so later reads of `S` and later `<-uniq[S]` draws see it; the set-difference form `x <- T \ S` samples the same way but does not change `S`.
 3. Semantically, this is equivalent to rejection sampling: sample from `Type`, if the result is in `S` then resample, repeat until a fresh value is obtained.
 4. The probability of needing to resample (collision probability) is `|S| / |Type|` per trial.
 

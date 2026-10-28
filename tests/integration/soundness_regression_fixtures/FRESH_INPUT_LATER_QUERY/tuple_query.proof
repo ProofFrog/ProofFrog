@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'TupleQuery.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    TupleQuery(S);
+
+games:
+    TupleQuery(S).Left against TupleQuery(S).Adversary;
+    TupleQuery(S).Right against TupleQuery(S).Adversary;

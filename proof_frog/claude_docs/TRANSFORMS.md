@@ -106,15 +106,15 @@ The core pipeline runs in a fixed-point loop until convergence.
 | NormalizeCommutativeChains | Sorts operands of commutative chains by structural key; also normalizes `==`/`!=` operand order. |
 | FlattenConcatChain | Left-associates `\|\|` chains; sound under both Boolean OR and BitString concatenation. |
 | ReflexiveComparison | Simplifies `x == x` to `true` and `x != x` to `false`. |
-| InjectiveEqualitySimplify | Rewrites `f(a1,...) == f(b1,...)` to `(a1==b1) && ...` when `f` is `deterministic injective`. |
-| ConcatEqualityDecompose | Decomposes `(a \|\| b \|\| ...) op other` into pairwise slice equalities when concatenation-term lengths are derivable. |
+| InjectiveEqualitySimplify | Rewrites `f(a1,...) == f(b1,...)` to `(a1==b1) && ...` when `f` is `deterministic injective`. An operand may be a local bound once to such a call, or a field assigned once in `Initialize`, outside the method being rewritten; it is resolved to its call only when every value the call reads, including one read only through a member access (`M` in `F.Enc(\|M.keys\|)`), is unchanged at the comparison. |
+| ConcatEqualityDecompose | Decomposes `(a \|\| b \|\| ...) op other` into pairwise slice equalities when concatenation-term lengths are derivable. An operand may be a top-level local bound once to a concatenation; it is resolved to that concatenation only when every value the concatenation reads, including one read only through a member access (`M` in `F.Ev(\|M.keys\|) \|\| u`), is unchanged in the method. |
 | TupleEqualityDecompose | Rewrites `a != b` between tuple-typed expressions to the per-component disjunction of `!=`. `==` is intentionally NOT decomposed. |
 
 ### Control Flow (`control_flow.py`)
 
 | Pass | Description |
 |---|---|
-| IfConditionAliasSubstitution | Substitutes field references with local aliases inside equality-guarded if-branches. |
+| IfConditionAliasSubstitution | Substitutes field references with local aliases inside equality-guarded if-branches. Before that, a field whose definition mentions the compared field is replaced in the branch by that definition when the field is assigned once, at the top level of `Initialize` with no earlier `return`, and every field the definition reads, including one read only through a member access (`M` in `\|M.keys\|`), is likewise assigned once, in `Initialize`. The definition may not read a parameter or local of `Initialize`. |
 | RedundantConditionalReturn | Removes `if (c) { return X; } return X;` patterns. |
 | AbsorbRedundantEarlyReturn | Absorbs `if (P) { return X; } ... if (Q) { ... } return X;` into `if (!P && Q) { ... } return X;` (outermost-block-only). |
 | IfFalseReturnToConjunction | Absorbs `if (P) { return false; } ...; return Q;` into `...; return Q && !P;`. |

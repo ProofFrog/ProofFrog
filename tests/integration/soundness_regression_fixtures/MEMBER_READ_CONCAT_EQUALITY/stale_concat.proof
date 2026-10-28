@@ -1,0 +1,17 @@
+// Claims the distinguishable games of StaleConcat.game are
+// interchangeable; the engine must refuse the hop.
+import 'DetEv.primitive';
+import 'StaleConcat.game';
+
+proof:
+
+let:
+    Int n;
+    DetEv F = DetEv(n);
+
+theorem:
+    StaleConcat(F);
+
+games:
+    StaleConcat(F).Left against StaleConcat(F).Adversary;
+    StaleConcat(F).Right against StaleConcat(F).Adversary;

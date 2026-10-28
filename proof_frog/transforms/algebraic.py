@@ -26,6 +26,7 @@ from ..visitors import (
     build_method_type_map,
     MethodScopedTypeMapMixin,
     reassigns_or_rebinds,
+    referenced_variable_names,
 )
 from ._base import (
     TransformPass,
@@ -36,6 +37,7 @@ from ._base import (
     may_return_before,
     method_bound_names,
 )
+from ._definedness import method_binder_counts
 from ._ordering import node_sort_key
 from ._wrappers import GroupExponentWrapper, WrapperShape, _GroupExpShape
 
@@ -1744,12 +1746,19 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         # the method (params, fields unwritten in this method, write-once
         # typed-locals -- nested-aware). See _stable_value_names.
         stable_names = _stable_value_names(method, self.game)
+        state_names = _method_state_names(method, self.game)
         for name in list(funccall_bindings.keys()):
             call = funccall_bindings[name]
             free = {
                 v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(call))
             }
-            if not free.issubset(stable_names):
+            # A value read only through a member access (`M` in
+            # `F.Enc(|M.keys|)`) must be stable too: a write to `M` between
+            # the binding and the comparison changes what the substituted
+            # call computes.
+            if not free.issubset(stable_names) or _reads_unstable_member(
+                call, stable_names, state_names
+            ):
                 funccall_bindings.pop(name, None)
         old = self.local_funccall_bindings
         self.local_funccall_bindings = funccall_bindings
@@ -2070,10 +2079,18 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         free = {v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(rhs))}
         if not free.issubset(visible):
             return expr
+        # A name read only through a member access (`M` in `|M.keys|`, `F` in
+        # `F.Enc(x)`) escapes the collector above. A field read that way must
+        # pass the same checks as any other read field, and a parameter or
+        # local of Initialize read that way is out of scope here.
+        member_only = _member_only_names(rhs)
+        if member_only & set(method_binder_counts(init)):
+            return expr
+        read_names = free | member_only
         # F-347: at the comparison site the resolved RHS is read in the
         # current method, where a parameter or local named like one of its
         # free variables (or the field itself) would capture it.
-        captured = sorted((free | {name}) & self._bound_names)
+        captured = sorted((read_names | {name}) & self._bound_names)
         if captured:
             self.ctx.near_misses.append(
                 NearMiss(
@@ -2098,17 +2115,33 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         # AFTER the field's defining assignment -- neither later in Init nor
         # in any non-Init method. Otherwise `F == E.Enc(t)` would collapse to
         # `t == t` even though `F` holds the stale Init-time `E.Enc(t)`.
-        for t in free & field_names:
+        for t in read_names & field_names:
             if any(
                 reassigns_or_rebinds({t}, s)
                 for s in init.block.statements[def_idx + 1 :]
-            ):
-                return expr
-            if any(
+            ) or any(
                 _count_field_assigns(m.block, t) > 0
                 for m in self.game.methods
                 if m is not init
             ):
+                if t in member_only:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Injective Equality Simplify",
+                            reason=(
+                                f"Field '{name}' was not resolved to its"
+                                f" Initialize definition: the definition reads"
+                                f" '{t}' through a member access, and '{t}' is"
+                                " written after the definition"
+                            ),
+                            location=None,
+                            suggestion=(
+                                f"write '{t}' only in Initialize, before '{name}'"
+                            ),
+                            variable=name,
+                            method=None,
+                        )
+                    )
                 return expr
         return rhs
 
@@ -2258,6 +2291,43 @@ def _stable_value_names(method: frog_ast.Method, game: frog_ast.Game) -> set[str
     return param_names | stable_field_names | single_write_locals
 
 
+def _member_only_names(expr: frog_ast.Expression) -> set[str]:
+    """Names *expr* reads only through a member access: ``M`` in
+    ``|M.keys|``, ``F`` in ``F.Enc(x)``. ``VariableCollectionVisitor`` skips
+    them; ``referenced_variable_names`` does not."""
+    direct = {v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(expr))}
+    return referenced_variable_names(expr) - direct
+
+
+def _method_state_names(method: frog_ast.Method, game: frog_ast.Game) -> set[str]:
+    """Names that can denote a value *method* may change: the game's fields,
+    the method's parameters and locals, and every name it writes. Any other
+    name (a scheme or primitive instance, a ``let:`` constant, a game
+    parameter) is fixed for the whole game."""
+    names = {f.name for f in game.fields} | set(method_binder_counts(method))
+
+    def _collect(node: frog_ast.ASTNode) -> bool:
+        if isinstance(
+            node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            base = lvalue_base_name(node.var)
+            if base is not None:
+                names.add(base)
+        return False
+
+    SearchVisitor(_collect).visit(method.block)
+    return names
+
+
+def _reads_unstable_member(
+    expr: frog_ast.Expression, stable: set[str], state: set[str]
+) -> bool:
+    """True if *expr* reads, only through a member access, a name of *state*
+    that is not in *stable* (``M`` in ``|M.keys|`` when the method writes
+    ``M``). Receivers outside *state* are fixed and never count."""
+    return bool((_member_only_names(expr) & state) - stable)
+
+
 def _flatten_concat(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
     """Flatten a left- or right-nested ``||`` (BitString concat) chain.
 
@@ -2390,6 +2460,7 @@ class ConcatEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
         # `a || b` read the mutated value, diverging from the frozen `v`).
         if self._scope_game is not None:
             stable_names = _stable_value_names(method, self._scope_game)
+            state_names = _method_state_names(method, self._scope_game)
             for name in list(bindings.keys()):
                 free = {
                     v.name
@@ -2397,7 +2468,11 @@ class ConcatEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
                         copy.deepcopy(bindings[name])
                     )
                 }
-                if not free.issubset(stable_names):
+                # Values read only through a member access (`M` in
+                # `F.Ev(|M.keys|) || u`) must be stable as well.
+                if not free.issubset(stable_names) or _reads_unstable_member(
+                    bindings[name], stable_names, state_names
+                ):
                     bindings.pop(name, None)
         old = self.local_concat_bindings
         self.local_concat_bindings = bindings

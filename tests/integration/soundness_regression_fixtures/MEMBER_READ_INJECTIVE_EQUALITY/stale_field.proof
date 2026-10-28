@@ -1,0 +1,17 @@
+// Claims the distinguishable games of StaleField.game are
+// interchangeable; the engine must refuse the hop.
+import 'InjEnc.primitive';
+import 'StaleField.game';
+
+proof:
+
+let:
+    Int n;
+    InjEnc F = InjEnc(BitString<n>);
+
+theorem:
+    StaleField(F);
+
+games:
+    StaleField(F).Left against StaleField(F).Adversary;
+    StaleField(F).Right against StaleField(F).Adversary;

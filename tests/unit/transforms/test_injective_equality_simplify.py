@@ -611,3 +611,118 @@ def test_f348_modint_arguments_still_simplify() -> None:
         """
     )
     assert "a == b" in out, out
+
+
+# ---------------------------------------------------------------------------
+# MEMBER-READ-INJECTIVE-EQUALITY: values read only through a member access
+# ---------------------------------------------------------------------------
+
+NS_INT_ENC = """
+Primitive T(Int n) {
+    deterministic injective BitString<n> Enc(Int c);
+}
+"""
+
+
+def _simplify_int_enc(source: str, method: str) -> tuple[str, PipelineContext]:
+    game = frog_parser.parse_game(source)
+    prim = frog_parser.parse_primitive_file(NS_INT_ENC)
+    ctx = _ctx({"F": prim})
+    result = InjectiveEqualitySimplify().apply(game, ctx)
+    return str(result.get_method(method)), ctx
+
+
+def test_member_read_local_binding_not_resolved_across_map_write() -> None:
+    """``x = F.Enc(|M.keys|); M[y] = true;`` -- x encodes the old size of M,
+    so ``x == F.Enc(y)`` must not become ``|M.keys| == y``."""
+    out, _ = _simplify_int_enc(
+        """
+        Game G(T F, Int n) {
+            Map<Int, Bool> M;
+            Bool O(Int y) {
+                BitString<n> x = F.Enc(|M.keys|);
+                M[y] = true;
+                return x == F.Enc(y);
+            }
+        }
+        """,
+        "O",
+    )
+    assert "x == F.Enc(y)" in out, out
+
+
+def test_member_read_local_binding_resolved_when_map_unwritten() -> None:
+    """Control: with no write to M in the method the binding is stable, and
+    the receiver F of the call does not block it."""
+    out, _ = _simplify_int_enc(
+        """
+        Game G(T F, Int n) {
+            Map<Int, Bool> M;
+            Bool O(Int y) {
+                BitString<n> x = F.Enc(|M.keys|);
+                return x == F.Enc(y);
+            }
+        }
+        """,
+        "O",
+    )
+    assert "|M.keys| == y" in out, out
+
+
+def test_member_read_field_image_not_resolved_across_map_write() -> None:
+    """``f = F.Enc(|M.keys|)`` in Initialize; the oracle writes M first, so f
+    no longer encodes the current size of M. A near-miss names M."""
+    out, ctx = _simplify_int_enc(
+        """
+        Game G(T F, Int n) {
+            Map<Int, Bool> M;
+            BitString<n> f;
+            Void Initialize() { f = F.Enc(|M.keys|); }
+            Bool O(Int y) {
+                M[y] = true;
+                return f == F.Enc(y);
+            }
+        }
+        """,
+        "O",
+    )
+    assert "f == F.Enc(y)" in out, out
+    assert any(
+        nm.transform_name == "Injective Equality Simplify"
+        and nm.variable == "f"
+        and "'M' through a member access" in nm.reason
+        for nm in ctx.near_misses
+    ), ctx.near_misses
+
+
+def test_member_read_field_image_resolved_when_map_unwritten() -> None:
+    """Control: M is never written, so f always equals F.Enc(|M.keys|)."""
+    out, ctx = _simplify_int_enc(
+        """
+        Game G(T F, Int n) {
+            Map<Int, Bool> M;
+            BitString<n> f;
+            Void Initialize() { f = F.Enc(|M.keys|); }
+            Bool O(Int y) { return f == F.Enc(y); }
+        }
+        """,
+        "O",
+    )
+    assert "|M.keys| == y" in out, out
+    assert not any("member access" in nm.reason for nm in ctx.near_misses)
+
+
+def test_member_read_field_image_of_initialize_local_not_resolved() -> None:
+    """``f = F.Enc(|m.keys|)`` reads Initialize's parameter m, which is out of
+    scope in the oracle, so f is not resolved there."""
+    out, _ = _simplify_int_enc(
+        """
+        Game G(T F, Int n) {
+            BitString<n> f;
+            Void Initialize(Map<Int, Bool> m) { f = F.Enc(|m.keys|); }
+            Bool O(Int y) { return f == F.Enc(y); }
+        }
+        """,
+        "O",
+    )
+    assert "f == F.Enc(y)" in out, out

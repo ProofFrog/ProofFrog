@@ -1,0 +1,16 @@
+// Positive control: the games of StableReads.game are interchangeable.
+import 'InjEnc.primitive';
+import 'StableReads.game';
+
+proof:
+
+let:
+    Int n;
+    InjEnc F = InjEnc(BitString<n>);
+
+theorem:
+    StableReads(F);
+
+games:
+    StableReads(F).Left against StableReads(F).Adversary;
+    StableReads(F).Right against StableReads(F).Adversary;

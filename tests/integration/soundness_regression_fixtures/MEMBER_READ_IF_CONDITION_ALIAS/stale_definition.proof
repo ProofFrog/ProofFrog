@@ -1,0 +1,14 @@
+// Claims the distinguishable games of StaleDefinition.game are
+// interchangeable; the engine must refuse the hop.
+import 'StaleDefinition.game';
+
+proof:
+
+let:
+
+theorem:
+    StaleDefinition();
+
+games:
+    StaleDefinition().Left against StaleDefinition().Adversary;
+    StaleDefinition().Right against StaleDefinition().Adversary;

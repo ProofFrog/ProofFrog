@@ -1,0 +1,7 @@
+// A primitive with one deterministic method returning BitString<n>, so the
+// length of each concatenation term below is known.
+Primitive DetEv(Int len) {
+    Int n = len;
+
+    deterministic BitString<n> Ev(Int c);
+}

@@ -1,0 +1,13 @@
+// F-305: claims VoidProbe.Real and VoidProbe.Ideal are interchangeable. They
+// are not: Real's Probe never completes, Ideal's does (see void_probe.game).
+
+import 'void_probe.game';
+
+proof:
+
+theorem:
+    VoidProbe();
+
+games:
+    VoidProbe().Real against VoidProbe().Adversary;
+    VoidProbe().Ideal against VoidProbe().Adversary;

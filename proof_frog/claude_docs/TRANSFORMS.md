@@ -19,7 +19,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | MergeUniformSamples | Merges independent uniform BitString samples used only via concatenation. |
 | MergeProductSamples | Merges independent uniform samples combined into a returned tuple. |
 | SplitUniformSamples | Splits a uniform BitString sample accessed only via non-overlapping slices. |
-| SinkUniformSample | Moves a uniform sample into the single if-branch that uses it. |
+| SinkUniformSample | Moves a uniform sample into the single if-branch that uses it, or past an `if` when it is used only after it. Declines (with a near miss) for a draw from a runtime set value (a field, parameter or local), whose domain may be empty: such a draw may not complete, and moving it would change the traces on which that happens (see the draws-that-may-not-complete note below). |
 | LocalizeInitOnlyFieldSample | Converts field samples to local samples when the field is only used in Initialize. |
 | SliceOfInlineConcat | Rewrites slice-of-concat expressions when bounds line up with the underlying concat components. |
 
@@ -33,9 +33,9 @@ The core pipeline runs in a fixed-point loop until convergence.
 
 | Pass | Description |
 |---|---|
-| TopologicalSort | Reorders statements by dependency graph and drops the ones that neither a return nor a statement mentioning a field depends on. Ordering rule (F-354): a statement that writes a name stays below every earlier statement that mentions that name, not only the nearest one, and a statement that reads a name stays below the nearest earlier writer of it. A bare declaration counts as a write of its name, so it stays below earlier mentions of the name (which refer to an outer binding) and above its later uses, and it is kept while a later use is. Names are compared textually; a name shared with a proof-level `let` is ordered like any other. |
+| TopologicalSort | Reorders statements by dependency graph and drops the ones that neither a return nor a statement mentioning a field depends on. Ordering rule (F-354): a statement that writes a name stays below every earlier statement that mentions that name, not only the nearest one, and a statement that reads a name stays below the nearest earlier writer of it. A bare declaration counts as a write of its name, so it stays below earlier mentions of the name (which refer to an outer binding) and above its later uses, and it is kept while a later use is. Names are compared textually; a name shared with a proof-level `let` is ordered like any other. A statement that may not complete (it contains a draw whose domain may be empty, see the note below) is ordered relative to every statement containing a `return`, like a field write, and is never dropped: it is kept, with what it depends on, even when nothing reads its result (near miss when that is the only reason it is kept). |
 | RemoveDuplicateFields | Removes fields with same type that always hold the same value. Two fields qualify only if they have no initializer, or equal initializers that make no call, and every write to either is a whole-field assignment or sample paired with the same write to the other, with nothing in between writing a variable the value reads (`M` in `|M.keys|` included). An element write, an exclusion sample, an insertion into a `<-uniq` set, or a local, loop binder or parameter of either name blocks the merge. |
-| RemoveUnnecessaryFields | Removes unused fields and dead statements via liveness analysis. |
+| RemoveUnnecessaryFields | Removes unused fields and dead statements via liveness analysis. A statement is live when it is a return, writes a necessary variable, is a `<-uniq` draw (its insertion is a write), or is a draw whose domain may be empty (see the note below), which is kept even when its result is unused (near miss), together with the fields it reads. |
 | UniformBijectionElimination | Replaces `f(x)` with `x` when x is uniform and f is a deterministic injective bijection. |
 
 ### Random Functions (`random_functions.py`)
@@ -159,7 +159,7 @@ The standardization pipeline runs once after the core pipeline converges.
 | StandardizeFieldNames | Normalizes field names to canonical ordering. Two-phase: rename by oracle first-read order, then regroup by type. |
 | NormalizeCommutativeChains | Re-sorts commutative chains after field/variable renaming. |
 | BubbleSortFieldAssignments | Sorts field assignments into canonical dependency order. |
-| StabilizeIndependentStatements | Sorts independent statements by value expression for deterministic ordering. |
+| StabilizeIndependentStatements | Sorts independent statements by value expression for deterministic ordering. Uses the TopologicalSort dependency graph, so a draw whose domain may be empty is never moved across an `if` that returns. |
 | FieldLexMinByRHS | Within each same-type field group, picks the lex-smallest slot index for the field whose Initialize-RHS sort key is smallest. |
 
 ## Inlining Infrastructure (`visitors.py`)
@@ -187,3 +187,7 @@ Live in `proof_frog/proof_engine.py`.
 | Hook | Description |
 |---|---|
 | `_z3_residual_equivalence` (+ `Z3FormulaVisitor.opaque_func_call_fallback`) | If two games differ only in if-conditions and/or final return expressions, neutralize both classes and re-check structural equality; otherwise assert `Not(f1 == f2)` is `unsat` via Z3 with opaque-call fallback for shapes Z3 can't mix. Refuses if either differing expression contains a non-deterministic call (Gap-F guard). |
+
+## Draws that may not complete
+
+Expressions are total, but a sampling statement whose domain is empty does not complete: the oracle call never returns, and the adversary sees that. `dependencies.is_possibly_empty_draw` decides when a draw may be such a statement: `x <- T \ E;` and `x <-uniq[E] T;` (empty when `E` covers `T`), unless `E` is a set literal with fewer elements than `T` certainly has (every length and modulus is at least 1, so `BitString<n> \ {s}` and `T \ {}` are non-empty, while `ModInt<q> \ {0}` may be empty); and `x <- D;` when `D` is a runtime value (a field, parameter or local of the game, a view such as `M.keys`, or any other expression) rather than a type. A draw from a type (`BitString<n>`, `E.Key`, a `let:` set) is non-empty. `dependencies.may_not_complete` asks whether a statement contains such a draw at any depth. A pass may not delete such a draw as dead code, or move it onto or off traces (across a `return`). TopologicalSort, RemoveUnnecessaryFields, StabilizeIndependentStatements and SinkUniformSample consult the predicate; of the other passes that delete or move statements, CollapseAssignment never deletes a sample, IfFalseReturnToConjunction moves only assignments, and the field-to-local sampling passes skip set-typed fields and expression domains.

@@ -232,13 +232,45 @@ def remove_duplicate_fields(
     return game
 
 
+def _note_kept_empty_domain_draws(
+    transform_name: str,
+    kept_draws: list[tuple[str, frog_ast.Statement]],
+    ctx: PipelineContext,
+) -> None:
+    """Record a near miss for each draw a pass kept although nothing reads
+    its result, because its domain may be empty
+    (``dependencies.is_possibly_empty_draw``)."""
+    for method_name, draw in kept_draws:
+        assert isinstance(draw, (frog_ast.Sample, frog_ast.UniqueSample))
+        ctx.near_misses.append(
+            NearMiss(
+                transform_name=transform_name,
+                reason=(
+                    f"Draw '{draw}' kept although its result is unused: its "
+                    f"domain may be empty, so the draw may not complete, "
+                    f"which the adversary observes"
+                ),
+                location=draw.origin,
+                suggestion=(
+                    "if the domain is never empty, draw from a type or exclude "
+                    "a set literal smaller than the type"
+                ),
+                variable=visitors.lvalue_base_name(draw.var),
+                method=method_name,
+            )
+        )
+
+
 class TopologicalSort(TransformPass):
     name = "Topological Sorting"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         if ctx.sort_game_fn is None:
             return game
-        return ctx.sort_game_fn(game)
+        kept_draws: list[tuple[str, frog_ast.Statement]] = []
+        result = ctx.sort_game_fn(game, kept_draws)
+        _note_kept_empty_domain_draws(self.name, kept_draws, ctx)
+        return result
 
 
 class RemoveDuplicateFields(TransformPass):
@@ -252,7 +284,10 @@ class RemoveUnnecessaryFields(TransformPass):
     name = "Remove unnecessary statements and fields"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return dependencies.remove_unnecessary_fields(game)
+        kept_draws: list[tuple[str, frog_ast.Statement]] = []
+        result = dependencies.remove_unnecessary_fields(game, kept_draws)
+        _note_kept_empty_domain_draws(self.name, kept_draws, ctx)
+        return result
 
 
 class UniformBijectionElimination(TransformPass):

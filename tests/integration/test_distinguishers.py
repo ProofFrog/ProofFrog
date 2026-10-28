@@ -1185,12 +1185,16 @@ def test_uniq_sample_is_not_dead_code() -> None:
     assert not _engine_with().check_equivalent(with_sample, without_sample).valid
 
 
-def test_minus_sample_with_unused_target_is_dead_code() -> None:
-    """Control: the pure `x <- T \\ E` form has no side effect, so an unused
-    draw IS dead code -- the game with it equals the game without it."""
+def test_minus_sample_with_unused_target_is_not_dead_code() -> None:
+    """F-318: the `x <- T \\ E` form inserts nothing, but when E covers T its
+    domain is empty and the draw does not complete, which the adversary
+    observes. Here Add can fill S with every element of BitString<8>, after
+    which Query never returns in the game with the draw. So an unused draw is
+    NOT dead code."""
     with_sample = frog_parser.parse_game("""
         Game WithSample() {
             Set<BitString<8>> S;
+            Void Add(BitString<8> s) { S = S union {s}; }
             Int Query() {
                 BitString<8> x <- BitString<8> \\ S;
                 return 0;
@@ -1201,10 +1205,32 @@ def test_minus_sample_with_unused_target_is_dead_code() -> None:
     without_sample = frog_parser.parse_game("""
         Game WithoutSample() {
             Set<BitString<8>> S;
+            Void Add(BitString<8> s) { S = S union {s}; }
             Int Query() {
                 return 0;
             }
             Int Size() { return |S|; }
+        }
+        """)
+    assert not _engine_with().check_equivalent(with_sample, without_sample).valid
+
+
+def test_minus_sample_from_non_empty_domain_is_dead_code() -> None:
+    """Control: excluding a single value from BitString<8> leaves a non-empty
+    domain, so the draw always completes and an unused one IS dead code."""
+    with_sample = frog_parser.parse_game("""
+        Game WithSample() {
+            Int Query(BitString<8> y) {
+                BitString<8> x <- BitString<8> \\ {y};
+                return 0;
+            }
+        }
+        """)
+    without_sample = frog_parser.parse_game("""
+        Game WithoutSample() {
+            Int Query(BitString<8> y) {
+                return 0;
+            }
         }
         """)
     assert _engine_with().check_equivalent(with_sample, without_sample).valid

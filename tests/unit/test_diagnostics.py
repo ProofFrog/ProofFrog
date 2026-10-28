@@ -10,6 +10,7 @@ from proof_frog.diagnostics import (
     detect_extra_temporary_diff,
     detect_if_condition_reorder_diff,
     detect_unfolded_negation_diff,
+    detect_possibly_empty_draw_diff,
     DiffHunk,
 )
 from proof_frog.transforms._base import NearMiss
@@ -326,3 +327,51 @@ def test_diagnose_failure_reports_unfolded_negation() -> None:
     assert len(diagnosis.engine_limitations) == 1
     assert "does not evaluate a negation" in diagnosis.engine_limitations[0]
     assert diagnosis.explanations[0].engine_limitation is True
+
+
+@pytest.mark.parametrize(
+    "current_lines, next_lines",
+    [
+        # A dead exclusion draw kept on one side.
+        (
+            ["-    BitString<1> v1 <- BitString<1> \\ field1;", "-    return 0;"],
+            ["+    return 0;"],
+        ),
+        (
+            ["-    return 0;"],
+            ["+    BitString<n> v1 <-uniq[field1] BitString<n>;", "+    return 0;"],
+        ),
+    ],
+)
+def test_detect_possibly_empty_draw(
+    current_lines: list[str], next_lines: list[str]
+) -> None:
+    hunk = DiffHunk(method="Draw", current_lines=current_lines, next_lines=next_lines)
+    assert detect_possibly_empty_draw_diff(hunk) is True
+
+
+@pytest.mark.parametrize(
+    "current_lines, next_lines",
+    [
+        # A draw from a type is not the reason.
+        (
+            ["-    BitString<1> v1 <- BitString<1>;", "-    return 0;"],
+            ["+    return 0;"],
+        ),
+        # The other lines differ too.
+        (
+            ["-    BitString<1> v1 <- BitString<1> \\ field1;", "-    return 1;"],
+            ["+    return 0;"],
+        ),
+        # The same draw on both sides, in the same place.
+        (
+            ["-    BitString<1> v1 <- BitString<1> \\ field1;", "-    return 1;"],
+            ["+    BitString<1> v1 <- BitString<1> \\ field1;", "+    return 0;"],
+        ),
+    ],
+)
+def test_detect_possibly_empty_draw_false(
+    current_lines: list[str], next_lines: list[str]
+) -> None:
+    hunk = DiffHunk(method="Draw", current_lines=current_lines, next_lines=next_lines)
+    assert detect_possibly_empty_draw_diff(hunk) is False

@@ -13,6 +13,7 @@ from typing import Optional, cast
 
 from sympy import Symbol, simplify as sympy_simplify
 
+from .. import dependencies
 from .. import frog_ast
 from .. import frog_parser
 from ..visitors import (
@@ -2406,6 +2407,15 @@ class SinkUniformSampleTransformer(BlockTransformer):
     def __init__(self, ctx: PipelineContext | None = None) -> None:
         self.ctx = ctx
         self._current_method: frog_ast.Method | None = None
+        # Names bound to runtime values in the game (fields, parameters,
+        # locals): a draw from one of them may have an empty domain.
+        self._value_names: set[str] | None = None
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        self._value_names = dependencies.game_value_names(game)
+        result = self._transform_children(game)
+        assert isinstance(result, frog_ast.Game)
+        return result
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
         # Capture the enclosing method so the sink guard can tell whether a
@@ -2415,6 +2425,34 @@ class SinkUniformSampleTransformer(BlockTransformer):
         result = self._transform_children(method)
         assert isinstance(result, frog_ast.Method)
         return result
+
+    def _method_value_names(self) -> set[str]:
+        if self._value_names is not None:
+            return self._value_names
+        method = self._current_method
+        if method is None:
+            return set()
+        return {
+            param.name for param in method.signature.parameters
+        } | dependencies.bound_value_names(method.block)
+
+    def _decline_empty_domain_near_miss(self, var_name: str) -> None:
+        if self.ctx is not None:
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Sink Uniform Sample",
+                    reason=(
+                        f"Sample '{var_name}' not sunk: its domain is a runtime "
+                        f"value that may be empty, so the draw may not complete, "
+                        f"and moving it would change the traces on which it "
+                        f"fails to"
+                    ),
+                    location=None,
+                    suggestion=None,
+                    variable=var_name,
+                    method=None,
+                )
+            )
 
     def _variable_escapes_block(self, block: frog_ast.Block, var_name: str) -> bool:
         """Defense-in-depth scope guard (F-042).
@@ -2526,6 +2564,19 @@ class SinkUniformSampleTransformer(BlockTransformer):
             # RC5 domain-invariance: names in the moved sample's sampled type
             # parameterization. Determine the region the sample is moved across.
             sample_stmt = stmt
+
+            if (len(using_branches) == 1 and not after_uses) or (
+                not using_branches and after_uses
+            ):
+                # A draw from a runtime set value may have an empty domain and
+                # then does not complete, which is observable: sinking it into
+                # a branch, or past an `if` that may return, changes the traces
+                # on which that happens. Draws from types are unaffected.
+                if dependencies.is_possibly_empty_draw(
+                    sample_stmt, self._method_value_names()
+                ):
+                    self._decline_empty_domain_near_miss(var_name)
+                    continue
 
             if len(using_branches) == 1 and not after_uses:
                 # F-042 scope guard: never sink a variable that escapes this

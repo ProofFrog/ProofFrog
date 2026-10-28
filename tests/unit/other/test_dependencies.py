@@ -439,3 +439,270 @@ def test_bubble_sort_still_sorts_independent_field_assignments() -> None:
     result = dependencies.BubbleSortFieldAssignment().transform_game(game)
     statements = [str(s) for s in result.methods[0].block.statements]
     assert statements == ["f = 1;", "y = p + 1;", "z = p;"]
+
+
+# ---------------------------------------------------------------------------
+# Draws that may not complete (F-303, F-305, F-318, F-327)
+# ---------------------------------------------------------------------------
+
+
+def _first_statement(statement: str) -> frog_ast.Statement:
+    method = frog_parser.parse_method(f"Void f() {{ {statement} }}")
+    return method.block.statements[0]
+
+
+@pytest.mark.parametrize(
+    "statement, expected",
+    [
+        # T minus a runtime set: empty when the set covers T.
+        ("BitString<1> x <- BitString<1> \\ E;", True),
+        ("BitString<n> x <-uniq[E] BitString<n>;", True),
+        # A set literal with at least as many elements as T may have.
+        ("BitString<1> x <- BitString<1> \\ {0b0, 0b1};", True),
+        ("Bool x <- Bool \\ {true, false};", True),
+        ("ModInt<q> x <- ModInt<q> \\ {0};", True),
+        ("ModInt<1> x <- ModInt<1> \\ {0};", True),
+        # Fewer excluded elements than T certainly has: never empty. Every
+        # length is at least 1, so BitString<n> has at least two elements.
+        ("BitString<n> x <- BitString<n> \\ {s};", False),
+        ("BitString<2> x <- BitString<2> \\ {0b00, 0b01, 0b10};", False),
+        ("Bool x <- Bool \\ {true};", False),
+        ("ModInt<5> x <- ModInt<5> \\ {0, 1};", False),
+        ("BitString<n> x <- BitString<n> \\ {};", False),
+        # Draws from types are never empty.
+        ("BitString<n> x <- BitString<n>;", False),
+        ("ModInt<q> x <- ModInt<q>;", False),
+        ("Key k <- Key;", False),
+        ("K.Key k <- K.Key;", False),
+        ("Function<D, R> H <- Function<D, R>;", False),
+        # A runtime set value as the domain may be empty.
+        ("Set<BitString<n>> x <- S;", True),
+        # Not a draw.
+        ("BitString<n> x = y;", False),
+    ],
+)
+def test_is_possibly_empty_draw(statement: str, expected: bool) -> None:
+    node = _first_statement(statement)
+    assert dependencies.is_possibly_empty_draw(node, {"S", "E"}) is expected
+
+
+def test_possibly_empty_draw_depends_on_value_names() -> None:
+    """A domain is a runtime value only if its name is bound to one; any
+    other name is a type."""
+    draw = _first_statement("Set<BitString<n>> x <- S;")
+    assert dependencies.is_possibly_empty_draw(draw, {"S"})
+    assert not dependencies.is_possibly_empty_draw(draw, set())
+    keys = frog_ast.Sample(
+        None,
+        frog_ast.Variable("x"),
+        frog_ast.FieldAccess(frog_ast.Variable("M"), "keys"),
+    )
+    assert dependencies.is_possibly_empty_draw(keys, {"M"})
+    assert not dependencies.is_possibly_empty_draw(keys, set())
+    # The pre-UniqueSample shape: a Sample whose domain is `T \ E`.
+    minus = frog_ast.Sample(
+        None,
+        frog_ast.Variable("x"),
+        frog_ast.BinaryOperation(
+            frog_ast.BinaryOperators.SETMINUS,
+            frog_ast.BitStringType(frog_ast.Integer(1)),
+            frog_ast.Variable("E"),
+        ),
+    )
+    assert dependencies.is_possibly_empty_draw(minus, set())
+
+
+def test_may_not_complete_looks_inside_nested_blocks() -> None:
+    nested = _first_statement(
+        "if (c) { for (Int i = 0 to 2) { BitString<1> x <- BitString<1> \\ E; } }"
+    )
+    assert dependencies.may_not_complete(nested, {"E"})
+    assert len(dependencies.possibly_empty_draws(nested, {"E"})) == 1
+    plain = _first_statement("if (c) { BitString<1> x <- BitString<1>; }")
+    assert not dependencies.may_not_complete(plain, {"E"})
+    assert not dependencies.possibly_empty_draws(plain, {"E"})
+
+
+def test_game_value_names() -> None:
+    game = frog_parser.parse_game("""
+        Game G() {
+            Set<Int> F;
+            Int O(Int p, Set<Int> S) {
+                Int a = p;
+                Bool b;
+                for (Int i = 0 to 2) { a = a + i; }
+                for (Int e in S) { a = a + e; }
+                return a;
+            }
+        }
+        """)
+    assert dependencies.game_value_names(game) == {"F", "p", "S", "a", "b", "i", "e"}
+
+
+def test_graph_pins_possibly_empty_draw_below_and_above_returns() -> None:
+    """A draw whose domain may be empty stays below an earlier statement
+    containing a return, and a later return stays below it (F-303, F-327)."""
+    code = """
+        Int f(Bool c) {
+            if (c) { return 1; }
+            BitString<1> x <- BitString<1> \\ E;
+            return 0;
+        }
+        """
+    edges = _edges(code, fields=("E",))
+    assert 0 in edges[1]
+    assert 1 in edges[2]
+
+
+def test_graph_leaves_type_draw_free_of_returns() -> None:
+    code = """
+        Int f(Bool c) {
+            if (c) { return 1; }
+            BitString<1> x <- BitString<1>;
+            return 0;
+        }
+        """
+    edges = _edges(code)
+    assert edges[1] == []
+    assert edges[2] == [0]
+
+
+def test_graph_value_names_override() -> None:
+    """A draw from a name the caller says is a value is pinned; the same
+    draw from a type name is not."""
+    method = frog_parser.parse_method("""
+        Int f() {
+            Set<Int> x <- S;
+            return 0;
+        }
+        """)
+    as_value = dependencies.generate_dependency_graph(method.block, [], {}, {"S"})
+    as_type = dependencies.generate_dependency_graph(method.block, [], {}, set())
+    assert as_value.nodes[1].in_neighbours == [as_value.nodes[0]]
+    assert not as_type.nodes[1].in_neighbours
+
+
+def _sorted_statements(game_code: str) -> list[str]:
+    game = frog_parser.parse_game(game_code)
+    engine = proof_engine.ProofEngine()
+    return [str(s) for s in engine.sort_game(game).methods[0].block.statements]
+
+
+def test_sort_keeps_return_below_possibly_empty_draw() -> None:
+    """F-303: the return is not hoisted above the draw, so the draw is not
+    pruned."""
+    statements = _sorted_statements("""
+        Game G() {
+            Set<BitString<1>> E;
+            Int Draw() {
+                BitString<1> junk <- BitString<1> \\ E;
+                return 0;
+            }
+        }
+        """)
+    assert statements == ["BitString<1> junk <- BitString<1> \\ E;", "return 0;"]
+
+
+def test_sort_keeps_possibly_empty_draw_over_local_set() -> None:
+    """F-305: a draw over a local exclusion set, with no return after it and
+    no field reference, is kept with the writes it depends on, and reported."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Void Probe() {
+                Set<BitString<1>> E;
+                E = E union {0b0};
+                BitString<1> junk <- BitString<1> \\ E;
+                BitString<1> dead <- BitString<1>;
+            }
+        }
+        """)
+    kept: list = []
+    result = proof_engine.ProofEngine().sort_game(game, kept)
+    statements = [str(s) for s in result.methods[0].block.statements]
+    assert statements == [
+        "Set<BitString<1>> E;",
+        "E = E union {0b0};",
+        "BitString<1> junk <- BitString<1> \\ E;",
+    ]
+    assert [(name, str(draw)) for name, draw in kept] == [
+        ("Probe", "BitString<1> junk <- BitString<1> \\ E;")
+    ]
+
+
+def test_sort_still_prunes_dead_type_draw() -> None:
+    statements = _sorted_statements("""
+        Game G() {
+            Int Draw() {
+                BitString<1> junk <- BitString<1>;
+                BitString<1> other <- BitString<1> \\ {0b0};
+                return 0;
+            }
+        }
+        """)
+    assert statements == ["return 0;"]
+
+
+def test_remove_unnecessary_fields_keeps_possibly_empty_draw() -> None:
+    """F-318: the dead draw is kept, so its oracle and the field it reads
+    survive; a dead draw from a type is still removed."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Set<BitString<1>> E;
+            Void Add(BitString<1> x) {
+                E = E union {x};
+            }
+            Void Probe() {
+                BitString<1> junk <- BitString<1> \\ E;
+                BitString<1> dead <- BitString<1>;
+            }
+        }
+        """)
+    kept: list = []
+    result = dependencies.remove_unnecessary_fields(game, kept)
+    assert [field.name for field in result.fields] == ["E"]
+    probe = result.get_method("Probe")
+    assert [str(s) for s in probe.block.statements] == [
+        "BitString<1> junk <- BitString<1> \\ E;"
+    ]
+    assert [str(s) for s in result.get_method("Add").block.statements] == [
+        "E = E union {x};"
+    ]
+    assert [(name, str(draw)) for name, draw in kept] == [
+        ("Probe", "BitString<1> junk <- BitString<1> \\ E;")
+    ]
+
+
+def test_remove_unnecessary_fields_drops_dead_type_draw_and_oracle() -> None:
+    game = frog_parser.parse_game("""
+        Game G() {
+            Set<BitString<1>> E;
+            Void Add(BitString<1> x) {
+                E = E union {x};
+            }
+            Void Probe() {
+                BitString<1> junk <- BitString<1>;
+            }
+        }
+        """)
+    kept: list = []
+    result = dependencies.remove_unnecessary_fields(game, kept)
+    assert not result.fields
+    assert [m.signature.name for m in result.methods] == []
+    assert not kept
+
+
+def test_remove_unnecessary_statements_reports_only_dead_draws() -> None:
+    """A possibly-empty draw whose result is used is live anyway and is not
+    reported as kept for its domain."""
+    method = frog_parser.parse_method("""
+        BitString<1> f() {
+            BitString<1> r <- BitString<1> \\ E;
+            return r;
+        }
+        """)
+    kept: list = []
+    block = dependencies.remove_unnecessary_statements(
+        ["E"], method.block, value_names={"E"}, kept_draws=kept
+    )
+    assert len(block.statements) == 2
+    assert not kept

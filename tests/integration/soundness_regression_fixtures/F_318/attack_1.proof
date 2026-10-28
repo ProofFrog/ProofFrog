@@ -1,0 +1,14 @@
+// F-318: claims Attack1.Real and Attack1.Ideal are interchangeable. They are
+// not: after Add(0b0); Add(0b1), Real's Probe does not complete and Ideal's
+// does (see attack_1.game).
+
+import 'attack_1.game';
+
+proof:
+
+theorem:
+    Attack1();
+
+games:
+    Attack1().Real against Attack1().Adversary;
+    Attack1().Ideal against Attack1().Adversary;

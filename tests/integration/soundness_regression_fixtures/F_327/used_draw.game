@@ -1,0 +1,51 @@
+// F-327, second form: the draw's result is used, so it is not dead code, but
+// it still may not be moved across the early return. Real draws r from
+// BitString<1> \ E before the `if (guard) { return 0b0; }`, Ideal after it.
+//
+// Distinguisher: Add(0b0); Add(0b1); SetGuard(); Draw(). In Real the draw
+// does not complete, so Draw never returns; in Ideal Draw returns 0b0. The
+// hop must be refused.
+
+Game Real() {
+    Set<BitString<1>> E;
+    Bool guard = false;
+
+    Void Add(BitString<1> x) {
+        E = E union {x};
+    }
+
+    Void SetGuard() {
+        guard = true;
+    }
+
+    BitString<1> Draw() {
+        BitString<1> r <- BitString<1> \ E;
+        if (guard) {
+            return 0b0;
+        }
+        return r;
+    }
+}
+
+Game Ideal() {
+    Set<BitString<1>> E;
+    Bool guard = false;
+
+    Void Add(BitString<1> x) {
+        E = E union {x};
+    }
+
+    Void SetGuard() {
+        guard = true;
+    }
+
+    BitString<1> Draw() {
+        if (guard) {
+            return 0b0;
+        }
+        BitString<1> r <- BitString<1> \ E;
+        return r;
+    }
+}
+
+export as UsedDraw;

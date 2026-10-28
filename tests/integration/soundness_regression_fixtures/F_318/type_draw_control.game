@@ -1,0 +1,36 @@
+// Positive control for F-318: the same games with Probe drawing from the type
+// BitString<1>, which is never empty. The dead draw is still deleted and the
+// emptied oracle removed, so the games are interchangeable.
+
+Game Real() {
+    Set<BitString<1>> E;
+
+    Void Add(BitString<1> x) {
+        E = E union {x};
+    }
+
+    Int Size() {
+        return |E|;
+    }
+
+    Void Probe() {
+        BitString<1> junk <- BitString<1>;
+    }
+}
+
+Game Ideal() {
+    Set<BitString<1>> E;
+
+    Void Add(BitString<1> x) {
+        E = E union {x};
+    }
+
+    Int Size() {
+        return |E|;
+    }
+
+    Void Probe() {
+    }
+}
+
+export as TypeDrawControl;

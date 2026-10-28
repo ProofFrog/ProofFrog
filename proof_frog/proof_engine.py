@@ -2289,19 +2289,37 @@ class ProofEngine:
             return current_step.challenger.game
         return None
 
-    def sort_game(self, game: frog_ast.Game) -> frog_ast.Game:
+    def sort_game(
+        self,
+        game: frog_ast.Game,
+        kept_draws: Optional[list[tuple[str, frog_ast.Statement]]] = None,
+    ) -> frog_ast.Game:
+        """Sort each method of *game* by its dependency graph and drop the
+        statements nothing observable depends on (:meth:`sort_block`).
+
+        A draw kept only because its domain may be empty is appended to
+        *kept_draws* as ``(method name, draw)`` when given.
+        """
         new_game = copy.deepcopy(game)
+        value_names = dependencies.game_value_names(game)
         for method in new_game.methods:
-            method.block = self.sort_block(game, method.block)
+            method_kept: list[frog_ast.Statement] = []
+            method.block = self.sort_block(game, method.block, value_names, method_kept)
+            if kept_draws is not None:
+                kept_draws.extend((method.signature.name, draw) for draw in method_kept)
         return new_game
 
     def sort_block(
         self,
         game: frog_ast.Game,
         block: frog_ast.Block,
+        value_names: Optional[set[str]] = None,
+        kept_draws: Optional[list[frog_ast.Statement]] = None,
     ) -> frog_ast.Block:
+        if value_names is None:
+            value_names = dependencies.game_value_names(game)
         graph = dependencies.generate_dependency_graph(
-            block, game.fields, self.proof_namespace
+            block, game.fields, self.proof_namespace, value_names
         )
 
         def is_return(node: frog_ast.ASTNode) -> bool:
@@ -2364,6 +2382,22 @@ class ProofEngine:
         # contain no return remain prunable as dead code.
         for statement in block.statements:
             if id(statement) not in dfs_visited_ids and contains_return(statement):
+                dfs_stack.append(graph.get_node(statement))
+                do_dfs()
+
+        # Keep every statement that may not complete: it holds a draw whose
+        # domain may be empty (`x <- T \ E` with E covering T), and whether
+        # the method completes is observable even when nothing reads the
+        # draw. Seeding only from returns and field references pruned such a
+        # draw over a local exclusion set as dead code (F-305).
+        for statement in block.statements:
+            if id(statement) not in dfs_visited_ids and dependencies.may_not_complete(
+                statement, value_names
+            ):
+                if kept_draws is not None:
+                    kept_draws.extend(
+                        dependencies.possibly_empty_draws(statement, value_names)
+                    )
                 dfs_stack.append(graph.get_node(statement))
                 do_dfs()
 

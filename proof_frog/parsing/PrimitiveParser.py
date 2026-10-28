@@ -10,7 +10,7 @@ else:
 
 def serializedATN():
     return [
-        4,1,69,567,2,0,7,0,2,1,7,1,2,2,7,2,2,3,7,3,2,4,7,4,2,5,7,5,2,6,7,
+        4,1,69,546,2,0,7,0,2,1,7,1,2,2,7,2,2,3,7,3,2,4,7,4,2,5,7,5,2,6,7,
         6,2,7,7,7,2,8,7,8,2,9,7,9,2,10,7,10,2,11,7,11,2,12,7,12,2,13,7,13,
         2,14,7,14,2,15,7,15,2,16,7,16,2,17,7,17,2,18,7,18,2,19,7,19,2,20,
         7,20,2,21,7,21,2,22,7,22,2,23,7,23,2,24,7,24,2,25,7,25,2,26,7,26,
@@ -39,79 +39,78 @@ def serializedATN():
         1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,
         3,13,367,8,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,
         1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,
-        1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,
-        1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,3,13,
-        417,8,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,1,13,5,13,427,8,13,10,
-        13,12,13,430,9,13,1,14,1,14,1,14,5,14,435,8,14,10,14,12,14,438,9,
-        14,1,15,1,15,1,15,1,16,1,16,1,16,3,16,446,8,16,1,16,1,16,1,17,1,
-        17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,
-        17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,
-        17,1,17,1,17,4,17,480,8,17,11,17,12,17,481,1,17,1,17,1,17,1,17,1,
-        17,1,17,1,17,3,17,491,8,17,1,17,1,17,5,17,495,8,17,10,17,12,17,498,
-        9,17,1,18,1,18,1,18,1,18,1,18,1,18,1,18,1,18,3,18,508,8,18,1,18,
-        1,18,1,18,1,18,1,18,1,18,5,18,516,8,18,10,18,12,18,519,9,18,1,19,
-        1,19,1,19,1,19,1,19,1,19,3,19,527,8,19,1,20,1,20,1,20,1,20,1,20,
-        1,20,3,20,535,8,20,1,21,1,21,1,21,1,21,1,21,1,22,1,22,1,22,1,22,
-        1,22,1,23,1,23,1,23,1,23,1,23,1,23,3,23,553,8,23,1,24,1,24,1,25,
-        1,25,1,25,1,25,3,25,561,8,25,1,25,1,25,1,26,1,26,1,26,0,3,26,34,
-        36,27,0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32,34,36,38,40,
-        42,44,46,48,50,52,0,5,1,0,57,58,2,0,13,13,17,17,1,0,15,16,1,0,59,
-        60,3,0,40,41,49,49,65,65,637,0,54,1,0,0,0,2,74,1,0,0,0,4,77,1,0,
-        0,0,6,93,1,0,0,0,8,101,1,0,0,0,10,106,1,0,0,0,12,110,1,0,0,0,14,
-        113,1,0,0,0,16,277,1,0,0,0,18,282,1,0,0,0,20,295,1,0,0,0,22,300,
-        1,0,0,0,24,311,1,0,0,0,26,366,1,0,0,0,28,431,1,0,0,0,30,439,1,0,
-        0,0,32,442,1,0,0,0,34,490,1,0,0,0,36,507,1,0,0,0,38,526,1,0,0,0,
-        40,534,1,0,0,0,42,536,1,0,0,0,44,541,1,0,0,0,46,552,1,0,0,0,48,554,
-        1,0,0,0,50,556,1,0,0,0,52,564,1,0,0,0,54,55,5,44,0,0,55,56,3,52,
-        26,0,56,58,5,5,0,0,57,59,3,24,12,0,58,57,1,0,0,0,58,59,1,0,0,0,59,
-        60,1,0,0,0,60,61,5,6,0,0,61,62,5,1,0,0,62,63,3,2,1,0,63,64,5,2,0,
-        0,64,65,5,0,0,1,65,1,1,0,0,0,66,69,3,10,5,0,67,69,3,22,11,0,68,66,
-        1,0,0,0,68,67,1,0,0,0,69,70,1,0,0,0,70,71,5,9,0,0,71,73,1,0,0,0,
-        72,68,1,0,0,0,73,76,1,0,0,0,74,72,1,0,0,0,74,75,1,0,0,0,75,3,1,0,
-        0,0,76,74,1,0,0,0,77,78,5,51,0,0,78,79,3,52,26,0,79,81,5,5,0,0,80,
-        82,3,24,12,0,81,80,1,0,0,0,81,82,1,0,0,0,82,83,1,0,0,0,83,84,5,6,
-        0,0,84,85,5,1,0,0,85,86,3,6,3,0,86,87,5,2,0,0,87,5,1,0,0,0,88,89,
-        3,8,4,0,89,90,5,9,0,0,90,92,1,0,0,0,91,88,1,0,0,0,92,95,1,0,0,0,
-        93,91,1,0,0,0,93,94,1,0,0,0,94,97,1,0,0,0,95,93,1,0,0,0,96,98,3,
-        12,6,0,97,96,1,0,0,0,98,99,1,0,0,0,99,97,1,0,0,0,99,100,1,0,0,0,
-        100,7,1,0,0,0,101,104,3,30,15,0,102,103,5,14,0,0,103,105,3,26,13,
-        0,104,102,1,0,0,0,104,105,1,0,0,0,105,9,1,0,0,0,106,107,3,30,15,
-        0,107,108,5,14,0,0,108,109,3,26,13,0,109,11,1,0,0,0,110,111,3,22,
-        11,0,111,112,3,14,7,0,112,13,1,0,0,0,113,117,5,1,0,0,114,116,3,16,
-        8,0,115,114,1,0,0,0,116,119,1,0,0,0,117,115,1,0,0,0,117,118,1,0,
-        0,0,118,120,1,0,0,0,119,117,1,0,0,0,120,121,5,2,0,0,121,15,1,0,0,
-        0,122,123,3,34,17,0,123,124,3,52,26,0,124,125,5,9,0,0,125,278,1,
-        0,0,0,126,127,3,34,17,0,127,128,3,18,9,0,128,129,5,14,0,0,129,130,
-        3,26,13,0,130,131,5,9,0,0,131,278,1,0,0,0,132,133,3,34,17,0,133,
-        134,3,18,9,0,134,135,5,25,0,0,135,136,3,26,13,0,136,137,5,27,0,0,
-        137,138,3,26,13,0,138,139,5,9,0,0,139,278,1,0,0,0,140,141,3,34,17,
-        0,141,142,3,18,9,0,142,143,5,25,0,0,143,144,3,26,13,0,144,145,5,
-        9,0,0,145,278,1,0,0,0,146,147,3,34,17,0,147,148,5,3,0,0,148,151,
-        3,52,26,0,149,150,5,11,0,0,150,152,3,52,26,0,151,149,1,0,0,0,152,
-        153,1,0,0,0,153,151,1,0,0,0,153,154,1,0,0,0,154,155,1,0,0,0,155,
-        156,5,4,0,0,156,157,5,14,0,0,157,158,3,26,13,0,158,159,5,9,0,0,159,
-        278,1,0,0,0,160,161,3,34,17,0,161,162,5,3,0,0,162,165,3,52,26,0,
-        163,164,5,11,0,0,164,166,3,52,26,0,165,163,1,0,0,0,166,167,1,0,0,
-        0,167,165,1,0,0,0,167,168,1,0,0,0,168,169,1,0,0,0,169,170,5,4,0,
-        0,170,171,5,25,0,0,171,172,3,26,13,0,172,173,5,27,0,0,173,174,3,
-        26,13,0,174,175,5,9,0,0,175,278,1,0,0,0,176,177,3,34,17,0,177,178,
-        5,3,0,0,178,181,3,52,26,0,179,180,5,11,0,0,180,182,3,52,26,0,181,
-        179,1,0,0,0,182,183,1,0,0,0,183,181,1,0,0,0,183,184,1,0,0,0,184,
-        185,1,0,0,0,185,186,5,4,0,0,186,187,5,25,0,0,187,188,3,26,13,0,188,
-        189,5,9,0,0,189,278,1,0,0,0,190,191,3,18,9,0,191,192,5,14,0,0,192,
-        193,3,26,13,0,193,194,5,9,0,0,194,278,1,0,0,0,195,196,3,18,9,0,196,
-        197,5,25,0,0,197,198,3,26,13,0,198,199,5,27,0,0,199,200,3,26,13,
-        0,200,201,5,9,0,0,201,278,1,0,0,0,202,203,3,18,9,0,203,204,5,25,
-        0,0,204,205,3,26,13,0,205,206,5,9,0,0,206,278,1,0,0,0,207,208,3,
-        34,17,0,208,209,3,18,9,0,209,210,5,24,0,0,210,211,5,3,0,0,211,212,
-        3,26,13,0,212,213,5,4,0,0,213,214,3,34,17,0,214,215,5,9,0,0,215,
-        278,1,0,0,0,216,217,3,18,9,0,217,218,5,24,0,0,218,219,5,3,0,0,219,
-        220,3,26,13,0,220,221,5,4,0,0,221,222,3,34,17,0,222,223,5,9,0,0,
-        223,278,1,0,0,0,224,225,3,26,13,0,225,227,5,5,0,0,226,228,3,28,14,
-        0,227,226,1,0,0,0,227,228,1,0,0,0,228,229,1,0,0,0,229,230,5,6,0,
-        0,230,231,5,9,0,0,231,278,1,0,0,0,232,233,5,36,0,0,233,234,3,26,
-        13,0,234,235,5,9,0,0,235,278,1,0,0,0,236,237,5,46,0,0,237,238,5,
-        5,0,0,238,239,3,26,13,0,239,240,5,6,0,0,240,250,3,14,7,0,241,242,
+        1,13,1,13,1,13,1,13,3,13,396,8,13,1,13,1,13,1,13,1,13,1,13,1,13,
+        1,13,1,13,5,13,406,8,13,10,13,12,13,409,9,13,1,14,1,14,1,14,5,14,
+        414,8,14,10,14,12,14,417,9,14,1,15,1,15,1,15,1,16,1,16,1,16,3,16,
+        425,8,16,1,16,1,16,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,
+        1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,
+        1,17,1,17,1,17,1,17,1,17,1,17,1,17,1,17,4,17,459,8,17,11,17,12,17,
+        460,1,17,1,17,1,17,1,17,1,17,1,17,1,17,3,17,470,8,17,1,17,1,17,5,
+        17,474,8,17,10,17,12,17,477,9,17,1,18,1,18,1,18,1,18,1,18,1,18,1,
+        18,1,18,3,18,487,8,18,1,18,1,18,1,18,1,18,1,18,1,18,5,18,495,8,18,
+        10,18,12,18,498,9,18,1,19,1,19,1,19,1,19,1,19,1,19,3,19,506,8,19,
+        1,20,1,20,1,20,1,20,1,20,1,20,3,20,514,8,20,1,21,1,21,1,21,1,21,
+        1,21,1,22,1,22,1,22,1,22,1,22,1,23,1,23,1,23,1,23,1,23,1,23,3,23,
+        532,8,23,1,24,1,24,1,25,1,25,1,25,1,25,3,25,540,8,25,1,25,1,25,1,
+        26,1,26,1,26,0,3,26,34,36,27,0,2,4,6,8,10,12,14,16,18,20,22,24,26,
+        28,30,32,34,36,38,40,42,44,46,48,50,52,0,8,1,0,57,58,2,0,13,13,17,
+        17,1,0,15,16,2,0,27,27,50,50,4,0,7,8,21,22,45,45,49,49,1,0,19,20,
+        1,0,59,60,3,0,40,41,49,49,65,65,609,0,54,1,0,0,0,2,74,1,0,0,0,4,
+        77,1,0,0,0,6,93,1,0,0,0,8,101,1,0,0,0,10,106,1,0,0,0,12,110,1,0,
+        0,0,14,113,1,0,0,0,16,277,1,0,0,0,18,282,1,0,0,0,20,295,1,0,0,0,
+        22,300,1,0,0,0,24,311,1,0,0,0,26,366,1,0,0,0,28,410,1,0,0,0,30,418,
+        1,0,0,0,32,421,1,0,0,0,34,469,1,0,0,0,36,486,1,0,0,0,38,505,1,0,
+        0,0,40,513,1,0,0,0,42,515,1,0,0,0,44,520,1,0,0,0,46,531,1,0,0,0,
+        48,533,1,0,0,0,50,535,1,0,0,0,52,543,1,0,0,0,54,55,5,44,0,0,55,56,
+        3,52,26,0,56,58,5,5,0,0,57,59,3,24,12,0,58,57,1,0,0,0,58,59,1,0,
+        0,0,59,60,1,0,0,0,60,61,5,6,0,0,61,62,5,1,0,0,62,63,3,2,1,0,63,64,
+        5,2,0,0,64,65,5,0,0,1,65,1,1,0,0,0,66,69,3,10,5,0,67,69,3,22,11,
+        0,68,66,1,0,0,0,68,67,1,0,0,0,69,70,1,0,0,0,70,71,5,9,0,0,71,73,
+        1,0,0,0,72,68,1,0,0,0,73,76,1,0,0,0,74,72,1,0,0,0,74,75,1,0,0,0,
+        75,3,1,0,0,0,76,74,1,0,0,0,77,78,5,51,0,0,78,79,3,52,26,0,79,81,
+        5,5,0,0,80,82,3,24,12,0,81,80,1,0,0,0,81,82,1,0,0,0,82,83,1,0,0,
+        0,83,84,5,6,0,0,84,85,5,1,0,0,85,86,3,6,3,0,86,87,5,2,0,0,87,5,1,
+        0,0,0,88,89,3,8,4,0,89,90,5,9,0,0,90,92,1,0,0,0,91,88,1,0,0,0,92,
+        95,1,0,0,0,93,91,1,0,0,0,93,94,1,0,0,0,94,97,1,0,0,0,95,93,1,0,0,
+        0,96,98,3,12,6,0,97,96,1,0,0,0,98,99,1,0,0,0,99,97,1,0,0,0,99,100,
+        1,0,0,0,100,7,1,0,0,0,101,104,3,30,15,0,102,103,5,14,0,0,103,105,
+        3,26,13,0,104,102,1,0,0,0,104,105,1,0,0,0,105,9,1,0,0,0,106,107,
+        3,30,15,0,107,108,5,14,0,0,108,109,3,26,13,0,109,11,1,0,0,0,110,
+        111,3,22,11,0,111,112,3,14,7,0,112,13,1,0,0,0,113,117,5,1,0,0,114,
+        116,3,16,8,0,115,114,1,0,0,0,116,119,1,0,0,0,117,115,1,0,0,0,117,
+        118,1,0,0,0,118,120,1,0,0,0,119,117,1,0,0,0,120,121,5,2,0,0,121,
+        15,1,0,0,0,122,123,3,34,17,0,123,124,3,52,26,0,124,125,5,9,0,0,125,
+        278,1,0,0,0,126,127,3,34,17,0,127,128,3,18,9,0,128,129,5,14,0,0,
+        129,130,3,26,13,0,130,131,5,9,0,0,131,278,1,0,0,0,132,133,3,34,17,
+        0,133,134,3,18,9,0,134,135,5,25,0,0,135,136,3,26,13,0,136,137,5,
+        27,0,0,137,138,3,26,13,0,138,139,5,9,0,0,139,278,1,0,0,0,140,141,
+        3,34,17,0,141,142,3,18,9,0,142,143,5,25,0,0,143,144,3,26,13,0,144,
+        145,5,9,0,0,145,278,1,0,0,0,146,147,3,34,17,0,147,148,5,3,0,0,148,
+        151,3,52,26,0,149,150,5,11,0,0,150,152,3,52,26,0,151,149,1,0,0,0,
+        152,153,1,0,0,0,153,151,1,0,0,0,153,154,1,0,0,0,154,155,1,0,0,0,
+        155,156,5,4,0,0,156,157,5,14,0,0,157,158,3,26,13,0,158,159,5,9,0,
+        0,159,278,1,0,0,0,160,161,3,34,17,0,161,162,5,3,0,0,162,165,3,52,
+        26,0,163,164,5,11,0,0,164,166,3,52,26,0,165,163,1,0,0,0,166,167,
+        1,0,0,0,167,165,1,0,0,0,167,168,1,0,0,0,168,169,1,0,0,0,169,170,
+        5,4,0,0,170,171,5,25,0,0,171,172,3,26,13,0,172,173,5,27,0,0,173,
+        174,3,26,13,0,174,175,5,9,0,0,175,278,1,0,0,0,176,177,3,34,17,0,
+        177,178,5,3,0,0,178,181,3,52,26,0,179,180,5,11,0,0,180,182,3,52,
+        26,0,181,179,1,0,0,0,182,183,1,0,0,0,183,181,1,0,0,0,183,184,1,0,
+        0,0,184,185,1,0,0,0,185,186,5,4,0,0,186,187,5,25,0,0,187,188,3,26,
+        13,0,188,189,5,9,0,0,189,278,1,0,0,0,190,191,3,18,9,0,191,192,5,
+        14,0,0,192,193,3,26,13,0,193,194,5,9,0,0,194,278,1,0,0,0,195,196,
+        3,18,9,0,196,197,5,25,0,0,197,198,3,26,13,0,198,199,5,27,0,0,199,
+        200,3,26,13,0,200,201,5,9,0,0,201,278,1,0,0,0,202,203,3,18,9,0,203,
+        204,5,25,0,0,204,205,3,26,13,0,205,206,5,9,0,0,206,278,1,0,0,0,207,
+        208,3,34,17,0,208,209,3,18,9,0,209,210,5,24,0,0,210,211,5,3,0,0,
+        211,212,3,26,13,0,212,213,5,4,0,0,213,214,3,34,17,0,214,215,5,9,
+        0,0,215,278,1,0,0,0,216,217,3,18,9,0,217,218,5,24,0,0,218,219,5,
+        3,0,0,219,220,3,26,13,0,220,221,5,4,0,0,221,222,3,34,17,0,222,223,
+        5,9,0,0,223,278,1,0,0,0,224,225,3,26,13,0,225,227,5,5,0,0,226,228,
+        3,28,14,0,227,226,1,0,0,0,227,228,1,0,0,0,228,229,1,0,0,0,229,230,
+        5,6,0,0,230,231,5,9,0,0,231,278,1,0,0,0,232,233,5,36,0,0,233,234,
+        3,26,13,0,234,235,5,9,0,0,235,278,1,0,0,0,236,237,5,46,0,0,237,238,
+        5,5,0,0,238,239,3,26,13,0,239,240,5,6,0,0,240,250,3,14,7,0,241,242,
         5,54,0,0,242,243,5,46,0,0,243,244,5,5,0,0,244,245,3,26,13,0,245,
         246,5,6,0,0,246,247,3,14,7,0,247,249,1,0,0,0,248,241,1,0,0,0,249,
         252,1,0,0,0,250,248,1,0,0,0,250,251,1,0,0,0,251,255,1,0,0,0,252,
@@ -138,9 +137,9 @@ def serializedATN():
         309,1,0,0,0,309,310,5,6,0,0,310,23,1,0,0,0,311,316,3,30,15,0,312,
         313,5,11,0,0,313,315,3,30,15,0,314,312,1,0,0,0,315,318,1,0,0,0,316,
         314,1,0,0,0,316,317,1,0,0,0,317,25,1,0,0,0,318,316,1,0,0,0,319,320,
-        6,13,-1,0,320,321,5,28,0,0,321,367,3,26,13,29,322,323,5,30,0,0,323,
+        6,13,-1,0,320,321,5,28,0,0,321,367,3,26,13,22,322,323,5,30,0,0,323,
         324,3,26,13,0,324,325,5,30,0,0,325,367,1,0,0,0,326,327,5,16,0,0,
-        327,367,3,26,13,25,328,367,3,18,9,0,329,338,5,3,0,0,330,335,3,26,
+        327,367,3,26,13,18,328,367,3,18,9,0,329,338,5,3,0,0,330,335,3,26,
         13,0,331,332,5,11,0,0,332,334,3,26,13,0,333,331,1,0,0,0,334,337,
         1,0,0,0,335,333,1,0,0,0,335,336,1,0,0,0,336,339,1,0,0,0,337,335,
         1,0,0,0,338,330,1,0,0,0,338,339,1,0,0,0,339,340,1,0,0,0,340,367,
@@ -154,72 +153,64 @@ def serializedATN():
         0,366,319,1,0,0,0,366,322,1,0,0,0,366,326,1,0,0,0,366,328,1,0,0,
         0,366,329,1,0,0,0,366,341,1,0,0,0,366,353,1,0,0,0,366,354,1,0,0,
         0,366,356,1,0,0,0,366,358,1,0,0,0,366,359,1,0,0,0,366,360,1,0,0,
-        0,366,361,1,0,0,0,366,362,1,0,0,0,367,428,1,0,0,0,368,369,10,27,
-        0,0,369,370,5,29,0,0,370,427,3,26,13,27,371,372,10,26,0,0,372,373,
-        7,1,0,0,373,427,3,26,13,27,374,375,10,24,0,0,375,376,7,2,0,0,376,
-        427,3,26,13,25,377,378,10,23,0,0,378,379,5,19,0,0,379,427,3,26,13,
-        24,380,381,10,22,0,0,381,382,5,20,0,0,382,427,3,26,13,23,383,384,
-        10,21,0,0,384,385,5,8,0,0,385,427,3,26,13,22,386,387,10,20,0,0,387,
-        388,5,7,0,0,388,427,3,26,13,21,389,390,10,19,0,0,390,391,5,21,0,
-        0,391,427,3,26,13,20,392,393,10,18,0,0,393,394,5,22,0,0,394,427,
-        3,26,13,19,395,396,10,17,0,0,396,397,5,49,0,0,397,427,3,26,13,18,
-        398,399,10,16,0,0,399,400,5,45,0,0,400,427,3,26,13,17,401,402,10,
-        15,0,0,402,403,5,26,0,0,403,427,3,26,13,16,404,405,10,14,0,0,405,
-        406,5,23,0,0,406,427,3,26,13,15,407,408,10,13,0,0,408,409,5,50,0,
-        0,409,427,3,26,13,14,410,411,10,12,0,0,411,412,5,27,0,0,412,427,
-        3,26,13,13,413,414,10,31,0,0,414,416,5,5,0,0,415,417,3,28,14,0,416,
-        415,1,0,0,0,416,417,1,0,0,0,417,418,1,0,0,0,418,427,5,6,0,0,419,
-        420,10,30,0,0,420,421,5,3,0,0,421,422,3,36,18,0,422,423,5,10,0,0,
-        423,424,3,36,18,0,424,425,5,4,0,0,425,427,1,0,0,0,426,368,1,0,0,
-        0,426,371,1,0,0,0,426,374,1,0,0,0,426,377,1,0,0,0,426,380,1,0,0,
-        0,426,383,1,0,0,0,426,386,1,0,0,0,426,389,1,0,0,0,426,392,1,0,0,
-        0,426,395,1,0,0,0,426,398,1,0,0,0,426,401,1,0,0,0,426,404,1,0,0,
-        0,426,407,1,0,0,0,426,410,1,0,0,0,426,413,1,0,0,0,426,419,1,0,0,
-        0,427,430,1,0,0,0,428,426,1,0,0,0,428,429,1,0,0,0,429,27,1,0,0,0,
-        430,428,1,0,0,0,431,436,3,26,13,0,432,433,5,11,0,0,433,435,3,26,
-        13,0,434,432,1,0,0,0,435,438,1,0,0,0,436,434,1,0,0,0,436,437,1,0,
-        0,0,437,29,1,0,0,0,438,436,1,0,0,0,439,440,3,34,17,0,440,441,3,52,
-        26,0,441,31,1,0,0,0,442,443,3,52,26,0,443,445,5,5,0,0,444,446,3,
-        28,14,0,445,444,1,0,0,0,445,446,1,0,0,0,446,447,1,0,0,0,447,448,
-        5,6,0,0,448,33,1,0,0,0,449,450,6,17,-1,0,450,491,3,46,23,0,451,491,
-        5,32,0,0,452,491,5,33,0,0,453,454,5,35,0,0,454,455,5,7,0,0,455,456,
-        3,34,17,0,456,457,5,11,0,0,457,458,3,34,17,0,458,459,5,8,0,0,459,
-        491,1,0,0,0,460,461,5,42,0,0,461,462,5,7,0,0,462,463,3,34,17,0,463,
-        464,5,11,0,0,464,465,3,36,18,0,465,466,5,8,0,0,466,491,1,0,0,0,467,
-        468,5,43,0,0,468,469,5,7,0,0,469,470,3,34,17,0,470,471,5,11,0,0,
-        471,472,3,34,17,0,472,473,5,8,0,0,473,491,1,0,0,0,474,491,5,34,0,
-        0,475,476,5,3,0,0,476,479,3,34,17,0,477,478,5,11,0,0,478,480,3,34,
-        17,0,479,477,1,0,0,0,480,481,1,0,0,0,481,479,1,0,0,0,481,482,1,0,
-        0,0,482,483,1,0,0,0,483,484,5,4,0,0,484,491,1,0,0,0,485,491,3,40,
-        20,0,486,491,3,42,21,0,487,491,3,44,22,0,488,491,5,40,0,0,489,491,
-        3,18,9,0,490,449,1,0,0,0,490,451,1,0,0,0,490,452,1,0,0,0,490,453,
-        1,0,0,0,490,460,1,0,0,0,490,467,1,0,0,0,490,474,1,0,0,0,490,475,
-        1,0,0,0,490,485,1,0,0,0,490,486,1,0,0,0,490,487,1,0,0,0,490,488,
-        1,0,0,0,490,489,1,0,0,0,491,496,1,0,0,0,492,493,10,14,0,0,493,495,
-        5,18,0,0,494,492,1,0,0,0,495,498,1,0,0,0,496,494,1,0,0,0,496,497,
-        1,0,0,0,497,35,1,0,0,0,498,496,1,0,0,0,499,500,6,18,-1,0,500,508,
-        3,18,9,0,501,508,5,64,0,0,502,508,5,61,0,0,503,504,5,5,0,0,504,505,
-        3,36,18,0,505,506,5,6,0,0,506,508,1,0,0,0,507,499,1,0,0,0,507,501,
-        1,0,0,0,507,502,1,0,0,0,507,503,1,0,0,0,508,517,1,0,0,0,509,510,
-        10,6,0,0,510,511,7,1,0,0,511,516,3,36,18,7,512,513,10,5,0,0,513,
-        514,7,2,0,0,514,516,3,36,18,6,515,509,1,0,0,0,515,512,1,0,0,0,516,
-        519,1,0,0,0,517,515,1,0,0,0,517,518,1,0,0,0,518,37,1,0,0,0,519,517,
-        1,0,0,0,520,527,3,18,9,0,521,527,5,64,0,0,522,523,5,5,0,0,523,524,
-        3,36,18,0,524,525,5,6,0,0,525,527,1,0,0,0,526,520,1,0,0,0,526,521,
-        1,0,0,0,526,522,1,0,0,0,527,39,1,0,0,0,528,529,5,38,0,0,529,530,
-        5,7,0,0,530,531,3,36,18,0,531,532,5,8,0,0,532,535,1,0,0,0,533,535,
-        5,38,0,0,534,528,1,0,0,0,534,533,1,0,0,0,535,41,1,0,0,0,536,537,
-        5,39,0,0,537,538,5,7,0,0,538,539,3,36,18,0,539,540,5,8,0,0,540,43,
-        1,0,0,0,541,542,5,41,0,0,542,543,5,7,0,0,543,544,3,18,9,0,544,545,
-        5,8,0,0,545,45,1,0,0,0,546,547,5,31,0,0,547,548,5,7,0,0,548,549,
-        3,34,17,0,549,550,5,8,0,0,550,553,1,0,0,0,551,553,5,31,0,0,552,546,
-        1,0,0,0,552,551,1,0,0,0,553,47,1,0,0,0,554,555,7,3,0,0,555,49,1,
-        0,0,0,556,557,5,37,0,0,557,560,5,69,0,0,558,559,5,53,0,0,559,561,
-        5,65,0,0,560,558,1,0,0,0,560,561,1,0,0,0,561,562,1,0,0,0,562,563,
-        5,9,0,0,563,51,1,0,0,0,564,565,7,4,0,0,565,53,1,0,0,0,41,58,68,74,
-        81,93,99,104,117,153,167,183,227,250,255,277,282,290,292,300,307,
-        316,335,338,347,350,366,416,426,428,436,445,481,490,496,507,515,
-        517,526,534,552,560
+        0,366,361,1,0,0,0,366,362,1,0,0,0,367,407,1,0,0,0,368,369,10,20,
+        0,0,369,370,5,29,0,0,370,406,3,26,13,20,371,372,10,19,0,0,372,373,
+        7,1,0,0,373,406,3,26,13,20,374,375,10,17,0,0,375,376,7,2,0,0,376,
+        406,3,26,13,18,377,378,10,16,0,0,378,379,7,3,0,0,379,406,3,26,13,
+        17,380,381,10,15,0,0,381,382,7,4,0,0,382,406,3,26,13,16,383,384,
+        10,14,0,0,384,385,7,5,0,0,385,406,3,26,13,15,386,387,10,13,0,0,387,
+        388,5,26,0,0,388,406,3,26,13,14,389,390,10,12,0,0,390,391,5,23,0,
+        0,391,406,3,26,13,13,392,393,10,24,0,0,393,395,5,5,0,0,394,396,3,
+        28,14,0,395,394,1,0,0,0,395,396,1,0,0,0,396,397,1,0,0,0,397,406,
+        5,6,0,0,398,399,10,23,0,0,399,400,5,3,0,0,400,401,3,36,18,0,401,
+        402,5,10,0,0,402,403,3,36,18,0,403,404,5,4,0,0,404,406,1,0,0,0,405,
+        368,1,0,0,0,405,371,1,0,0,0,405,374,1,0,0,0,405,377,1,0,0,0,405,
+        380,1,0,0,0,405,383,1,0,0,0,405,386,1,0,0,0,405,389,1,0,0,0,405,
+        392,1,0,0,0,405,398,1,0,0,0,406,409,1,0,0,0,407,405,1,0,0,0,407,
+        408,1,0,0,0,408,27,1,0,0,0,409,407,1,0,0,0,410,415,3,26,13,0,411,
+        412,5,11,0,0,412,414,3,26,13,0,413,411,1,0,0,0,414,417,1,0,0,0,415,
+        413,1,0,0,0,415,416,1,0,0,0,416,29,1,0,0,0,417,415,1,0,0,0,418,419,
+        3,34,17,0,419,420,3,52,26,0,420,31,1,0,0,0,421,422,3,52,26,0,422,
+        424,5,5,0,0,423,425,3,28,14,0,424,423,1,0,0,0,424,425,1,0,0,0,425,
+        426,1,0,0,0,426,427,5,6,0,0,427,33,1,0,0,0,428,429,6,17,-1,0,429,
+        470,3,46,23,0,430,470,5,32,0,0,431,470,5,33,0,0,432,433,5,35,0,0,
+        433,434,5,7,0,0,434,435,3,34,17,0,435,436,5,11,0,0,436,437,3,34,
+        17,0,437,438,5,8,0,0,438,470,1,0,0,0,439,440,5,42,0,0,440,441,5,
+        7,0,0,441,442,3,34,17,0,442,443,5,11,0,0,443,444,3,36,18,0,444,445,
+        5,8,0,0,445,470,1,0,0,0,446,447,5,43,0,0,447,448,5,7,0,0,448,449,
+        3,34,17,0,449,450,5,11,0,0,450,451,3,34,17,0,451,452,5,8,0,0,452,
+        470,1,0,0,0,453,470,5,34,0,0,454,455,5,3,0,0,455,458,3,34,17,0,456,
+        457,5,11,0,0,457,459,3,34,17,0,458,456,1,0,0,0,459,460,1,0,0,0,460,
+        458,1,0,0,0,460,461,1,0,0,0,461,462,1,0,0,0,462,463,5,4,0,0,463,
+        470,1,0,0,0,464,470,3,40,20,0,465,470,3,42,21,0,466,470,3,44,22,
+        0,467,470,5,40,0,0,468,470,3,18,9,0,469,428,1,0,0,0,469,430,1,0,
+        0,0,469,431,1,0,0,0,469,432,1,0,0,0,469,439,1,0,0,0,469,446,1,0,
+        0,0,469,453,1,0,0,0,469,454,1,0,0,0,469,464,1,0,0,0,469,465,1,0,
+        0,0,469,466,1,0,0,0,469,467,1,0,0,0,469,468,1,0,0,0,470,475,1,0,
+        0,0,471,472,10,14,0,0,472,474,5,18,0,0,473,471,1,0,0,0,474,477,1,
+        0,0,0,475,473,1,0,0,0,475,476,1,0,0,0,476,35,1,0,0,0,477,475,1,0,
+        0,0,478,479,6,18,-1,0,479,487,3,18,9,0,480,487,5,64,0,0,481,487,
+        5,61,0,0,482,483,5,5,0,0,483,484,3,36,18,0,484,485,5,6,0,0,485,487,
+        1,0,0,0,486,478,1,0,0,0,486,480,1,0,0,0,486,481,1,0,0,0,486,482,
+        1,0,0,0,487,496,1,0,0,0,488,489,10,6,0,0,489,490,7,1,0,0,490,495,
+        3,36,18,7,491,492,10,5,0,0,492,493,7,2,0,0,493,495,3,36,18,6,494,
+        488,1,0,0,0,494,491,1,0,0,0,495,498,1,0,0,0,496,494,1,0,0,0,496,
+        497,1,0,0,0,497,37,1,0,0,0,498,496,1,0,0,0,499,506,3,18,9,0,500,
+        506,5,64,0,0,501,502,5,5,0,0,502,503,3,36,18,0,503,504,5,6,0,0,504,
+        506,1,0,0,0,505,499,1,0,0,0,505,500,1,0,0,0,505,501,1,0,0,0,506,
+        39,1,0,0,0,507,508,5,38,0,0,508,509,5,7,0,0,509,510,3,36,18,0,510,
+        511,5,8,0,0,511,514,1,0,0,0,512,514,5,38,0,0,513,507,1,0,0,0,513,
+        512,1,0,0,0,514,41,1,0,0,0,515,516,5,39,0,0,516,517,5,7,0,0,517,
+        518,3,36,18,0,518,519,5,8,0,0,519,43,1,0,0,0,520,521,5,41,0,0,521,
+        522,5,7,0,0,522,523,3,18,9,0,523,524,5,8,0,0,524,45,1,0,0,0,525,
+        526,5,31,0,0,526,527,5,7,0,0,527,528,3,34,17,0,528,529,5,8,0,0,529,
+        532,1,0,0,0,530,532,5,31,0,0,531,525,1,0,0,0,531,530,1,0,0,0,532,
+        47,1,0,0,0,533,534,7,6,0,0,534,49,1,0,0,0,535,536,5,37,0,0,536,539,
+        5,69,0,0,537,538,5,53,0,0,538,540,5,65,0,0,539,537,1,0,0,0,539,540,
+        1,0,0,0,540,541,1,0,0,0,541,542,5,9,0,0,542,51,1,0,0,0,543,544,7,
+        7,0,0,544,53,1,0,0,0,41,58,68,74,81,93,99,104,117,153,167,183,227,
+        250,255,277,282,290,292,300,307,316,335,338,347,350,366,395,405,
+        407,415,424,460,469,475,486,494,496,505,513,531,539
     ]
 
 class PrimitiveParser ( Parser ):
@@ -2228,24 +2219,43 @@ class PrimitiveParser ( Parser ):
                 return visitor.visitChildren(self)
 
 
-    class InExpContext(ExpressionContext):
+    class SizeExpContext(ExpressionContext):
 
         def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
             super().__init__(parser)
             self.copyFrom(ctx)
 
-        def expression(self, i:int=None):
+        def VBAR(self, i:int=None):
             if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
+                return self.getTokens(PrimitiveParser.VBAR)
             else:
-                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
+                return self.getToken(PrimitiveParser.VBAR, i)
+        def expression(self):
+            return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,0)
 
-        def IN(self):
-            return self.getToken(PrimitiveParser.IN, 0)
 
         def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitInExp" ):
-                return visitor.visitInExp(self)
+            if hasattr( visitor, "visitSizeExp" ):
+                return visitor.visitSizeExp(self)
+            else:
+                return visitor.visitChildren(self)
+
+
+    class MinusExpContext(ExpressionContext):
+
+        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
+            super().__init__(parser)
+            self.copyFrom(ctx)
+
+        def SUBTRACT(self):
+            return self.getToken(PrimitiveParser.SUBTRACT, 0)
+        def expression(self):
+            return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,0)
+
+
+        def accept(self, visitor:ParseTreeVisitor):
+            if hasattr( visitor, "visitMinusExp" ):
+                return visitor.visitMinusExp(self)
             else:
                 return visitor.visitChildren(self)
 
@@ -2268,6 +2278,48 @@ class PrimitiveParser ( Parser ):
         def accept(self, visitor:ParseTreeVisitor):
             if hasattr( visitor, "visitAndExp" ):
                 return visitor.visitAndExp(self)
+            else:
+                return visitor.visitChildren(self)
+
+
+    class TypeExpContext(ExpressionContext):
+
+        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
+            super().__init__(parser)
+            self.copyFrom(ctx)
+
+        def type_(self):
+            return self.getTypedRuleContext(PrimitiveParser.TypeContext,0)
+
+
+        def accept(self, visitor:ParseTreeVisitor):
+            if hasattr( visitor, "visitTypeExp" ):
+                return visitor.visitTypeExp(self)
+            else:
+                return visitor.visitChildren(self)
+
+
+    class EqualityExpContext(ExpressionContext):
+
+        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
+            super().__init__(parser)
+            self.op = None # Token
+            self.copyFrom(ctx)
+
+        def expression(self, i:int=None):
+            if i is None:
+                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
+            else:
+                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
+
+        def EQUALSCOMPARE(self):
+            return self.getToken(PrimitiveParser.EQUALSCOMPARE, 0)
+        def NOTEQUALS(self):
+            return self.getToken(PrimitiveParser.NOTEQUALS, 0)
+
+        def accept(self, visitor:ParseTreeVisitor):
+            if hasattr( visitor, "visitEqualityExp" ):
+                return visitor.visitEqualityExp(self)
             else:
                 return visitor.visitChildren(self)
 
@@ -2330,28 +2382,6 @@ class PrimitiveParser ( Parser ):
                 return visitor.visitChildren(self)
 
 
-    class NotEqualsExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def expression(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
-            else:
-                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
-
-        def NOTEQUALS(self):
-            return self.getToken(PrimitiveParser.NOTEQUALS, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitNotEqualsExp" ):
-                return visitor.visitNotEqualsExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
     class AddSubtractExpContext(ExpressionContext):
 
         def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
@@ -2373,313 +2403,6 @@ class PrimitiveParser ( Parser ):
         def accept(self, visitor:ParseTreeVisitor):
             if hasattr( visitor, "visitAddSubtractExp" ):
                 return visitor.visitAddSubtractExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
-    class GeqExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def expression(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
-            else:
-                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
-
-        def GEQ(self):
-            return self.getToken(PrimitiveParser.GEQ, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitGeqExp" ):
-                return visitor.visitGeqExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
-    class NotExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def NOT(self):
-            return self.getToken(PrimitiveParser.NOT, 0)
-        def expression(self):
-            return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,0)
-
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitNotExp" ):
-                return visitor.visitNotExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
-    class NoneExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def NONE(self):
-            return self.getToken(PrimitiveParser.NONE, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitNoneExp" ):
-                return visitor.visitNoneExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
-    class GtExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def expression(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
-            else:
-                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
-
-        def R_ANGLE(self):
-            return self.getToken(PrimitiveParser.R_ANGLE, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitGtExp" ):
-                return visitor.visitGtExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
-    class LtExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def expression(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
-            else:
-                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
-
-        def L_ANGLE(self):
-            return self.getToken(PrimitiveParser.L_ANGLE, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitLtExp" ):
-                return visitor.visitLtExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
-    class EqualsExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def expression(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
-            else:
-                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
-
-        def EQUALSCOMPARE(self):
-            return self.getToken(PrimitiveParser.EQUALSCOMPARE, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitEqualsExp" ):
-                return visitor.visitEqualsExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
-    class SubsetsExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def expression(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
-            else:
-                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
-
-        def SUBSETS(self):
-            return self.getToken(PrimitiveParser.SUBSETS, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitSubsetsExp" ):
-                return visitor.visitSubsetsExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
-    class MultiplyDivideExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.op = None # Token
-            self.copyFrom(ctx)
-
-        def expression(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
-            else:
-                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
-
-        def TIMES(self):
-            return self.getToken(PrimitiveParser.TIMES, 0)
-        def DIVIDE(self):
-            return self.getToken(PrimitiveParser.DIVIDE, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitMultiplyDivideExp" ):
-                return visitor.visitMultiplyDivideExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
-    class OnesExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def ONES_CARET(self):
-            return self.getToken(PrimitiveParser.ONES_CARET, 0)
-        def integerAtom(self):
-            return self.getTypedRuleContext(PrimitiveParser.IntegerAtomContext,0)
-
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitOnesExp" ):
-                return visitor.visitOnesExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
-    class UnionExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def expression(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
-            else:
-                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
-
-        def UNION(self):
-            return self.getToken(PrimitiveParser.UNION, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitUnionExp" ):
-                return visitor.visitUnionExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
-    class IntExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def INT(self):
-            return self.getToken(PrimitiveParser.INT, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitIntExp" ):
-                return visitor.visitIntExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
-    class SizeExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def VBAR(self, i:int=None):
-            if i is None:
-                return self.getTokens(PrimitiveParser.VBAR)
-            else:
-                return self.getToken(PrimitiveParser.VBAR, i)
-        def expression(self):
-            return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,0)
-
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitSizeExp" ):
-                return visitor.visitSizeExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
-    class MinusExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def SUBTRACT(self):
-            return self.getToken(PrimitiveParser.SUBTRACT, 0)
-        def expression(self):
-            return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,0)
-
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitMinusExp" ):
-                return visitor.visitMinusExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
-    class TypeExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def type_(self):
-            return self.getTypedRuleContext(PrimitiveParser.TypeContext,0)
-
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitTypeExp" ):
-                return visitor.visitTypeExp(self)
-            else:
-                return visitor.visitChildren(self)
-
-
-    class LeqExpContext(ExpressionContext):
-
-        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
-            super().__init__(parser)
-            self.copyFrom(ctx)
-
-        def expression(self, i:int=None):
-            if i is None:
-                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
-            else:
-                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
-
-        def LEQ(self):
-            return self.getToken(PrimitiveParser.LEQ, 0)
-
-        def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitLeqExp" ):
-                return visitor.visitLeqExp(self)
             else:
                 return visitor.visitChildren(self)
 
@@ -2721,6 +2444,25 @@ class PrimitiveParser ( Parser ):
         def accept(self, visitor:ParseTreeVisitor):
             if hasattr( visitor, "visitZerosExp" ):
                 return visitor.visitZerosExp(self)
+            else:
+                return visitor.visitChildren(self)
+
+
+    class NotExpContext(ExpressionContext):
+
+        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
+            super().__init__(parser)
+            self.copyFrom(ctx)
+
+        def NOT(self):
+            return self.getToken(PrimitiveParser.NOT, 0)
+        def expression(self):
+            return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,0)
+
+
+        def accept(self, visitor:ParseTreeVisitor):
+            if hasattr( visitor, "visitNotExp" ):
+                return visitor.visitNotExp(self)
             else:
                 return visitor.visitChildren(self)
 
@@ -2776,10 +2518,27 @@ class PrimitiveParser ( Parser ):
                 return visitor.visitChildren(self)
 
 
-    class SetMinusExpContext(ExpressionContext):
+    class NoneExpContext(ExpressionContext):
 
         def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
             super().__init__(parser)
+            self.copyFrom(ctx)
+
+        def NONE(self):
+            return self.getToken(PrimitiveParser.NONE, 0)
+
+        def accept(self, visitor:ParseTreeVisitor):
+            if hasattr( visitor, "visitNoneExp" ):
+                return visitor.visitNoneExp(self)
+            else:
+                return visitor.visitChildren(self)
+
+
+    class UnionSetMinusExpContext(ExpressionContext):
+
+        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
+            super().__init__(parser)
+            self.op = None # Token
             self.copyFrom(ctx)
 
         def expression(self, i:int=None):
@@ -2788,12 +2547,14 @@ class PrimitiveParser ( Parser ):
             else:
                 return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
 
+        def UNION(self):
+            return self.getToken(PrimitiveParser.UNION, 0)
         def BACKSLASH(self):
             return self.getToken(PrimitiveParser.BACKSLASH, 0)
 
         def accept(self, visitor:ParseTreeVisitor):
-            if hasattr( visitor, "visitSetMinusExp" ):
-                return visitor.visitSetMinusExp(self)
+            if hasattr( visitor, "visitUnionSetMinusExp" ):
+                return visitor.visitUnionSetMinusExp(self)
             else:
                 return visitor.visitChildren(self)
 
@@ -2835,6 +2596,64 @@ class PrimitiveParser ( Parser ):
                 return visitor.visitChildren(self)
 
 
+    class MultiplyDivideExpContext(ExpressionContext):
+
+        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
+            super().__init__(parser)
+            self.op = None # Token
+            self.copyFrom(ctx)
+
+        def expression(self, i:int=None):
+            if i is None:
+                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
+            else:
+                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
+
+        def TIMES(self):
+            return self.getToken(PrimitiveParser.TIMES, 0)
+        def DIVIDE(self):
+            return self.getToken(PrimitiveParser.DIVIDE, 0)
+
+        def accept(self, visitor:ParseTreeVisitor):
+            if hasattr( visitor, "visitMultiplyDivideExp" ):
+                return visitor.visitMultiplyDivideExp(self)
+            else:
+                return visitor.visitChildren(self)
+
+
+    class RelationalExpContext(ExpressionContext):
+
+        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
+            super().__init__(parser)
+            self.op = None # Token
+            self.copyFrom(ctx)
+
+        def expression(self, i:int=None):
+            if i is None:
+                return self.getTypedRuleContexts(PrimitiveParser.ExpressionContext)
+            else:
+                return self.getTypedRuleContext(PrimitiveParser.ExpressionContext,i)
+
+        def L_ANGLE(self):
+            return self.getToken(PrimitiveParser.L_ANGLE, 0)
+        def LEQ(self):
+            return self.getToken(PrimitiveParser.LEQ, 0)
+        def R_ANGLE(self):
+            return self.getToken(PrimitiveParser.R_ANGLE, 0)
+        def GEQ(self):
+            return self.getToken(PrimitiveParser.GEQ, 0)
+        def IN(self):
+            return self.getToken(PrimitiveParser.IN, 0)
+        def SUBSETS(self):
+            return self.getToken(PrimitiveParser.SUBSETS, 0)
+
+        def accept(self, visitor:ParseTreeVisitor):
+            if hasattr( visitor, "visitRelationalExp" ):
+                return visitor.visitRelationalExp(self)
+            else:
+                return visitor.visitChildren(self)
+
+
     class SliceExpContext(ExpressionContext):
 
         def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
@@ -2864,6 +2683,41 @@ class PrimitiveParser ( Parser ):
                 return visitor.visitChildren(self)
 
 
+    class OnesExpContext(ExpressionContext):
+
+        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
+            super().__init__(parser)
+            self.copyFrom(ctx)
+
+        def ONES_CARET(self):
+            return self.getToken(PrimitiveParser.ONES_CARET, 0)
+        def integerAtom(self):
+            return self.getTypedRuleContext(PrimitiveParser.IntegerAtomContext,0)
+
+
+        def accept(self, visitor:ParseTreeVisitor):
+            if hasattr( visitor, "visitOnesExp" ):
+                return visitor.visitOnesExp(self)
+            else:
+                return visitor.visitChildren(self)
+
+
+    class IntExpContext(ExpressionContext):
+
+        def __init__(self, parser, ctx:ParserRuleContext): # actually a PrimitiveParser.ExpressionContext
+            super().__init__(parser)
+            self.copyFrom(ctx)
+
+        def INT(self):
+            return self.getToken(PrimitiveParser.INT, 0)
+
+        def accept(self, visitor:ParseTreeVisitor):
+            if hasattr( visitor, "visitIntExp" ):
+                return visitor.visitIntExp(self)
+            else:
+                return visitor.visitChildren(self)
+
+
 
     def expression(self, _p:int=0):
         _parentctx = self._ctx
@@ -2886,7 +2740,7 @@ class PrimitiveParser ( Parser ):
                 self.state = 320
                 self.match(PrimitiveParser.NOT)
                 self.state = 321
-                self.expression(29)
+                self.expression(22)
                 pass
 
             elif la_ == 2:
@@ -2908,7 +2762,7 @@ class PrimitiveParser ( Parser ):
                 self.state = 326
                 self.match(PrimitiveParser.SUBTRACT)
                 self.state = 327
-                self.expression(25)
+                self.expression(18)
                 pass
 
             elif la_ == 4:
@@ -3053,7 +2907,7 @@ class PrimitiveParser ( Parser ):
 
 
             self._ctx.stop = self._input.LT(-1)
-            self.state = 428
+            self.state = 407
             self._errHandler.sync(self)
             _alt = self._interp.adaptivePredict(self._input,28,self._ctx)
             while _alt!=2 and _alt!=ATN.INVALID_ALT_NUMBER:
@@ -3061,29 +2915,29 @@ class PrimitiveParser ( Parser ):
                     if self._parseListeners is not None:
                         self.triggerExitRuleEvent()
                     _prevctx = localctx
-                    self.state = 426
+                    self.state = 405
                     self._errHandler.sync(self)
                     la_ = self._interp.adaptivePredict(self._input,27,self._ctx)
                     if la_ == 1:
                         localctx = PrimitiveParser.ExponentiationExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 368
-                        if not self.precpred(self._ctx, 27):
+                        if not self.precpred(self._ctx, 20):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 27)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 20)")
                         self.state = 369
                         self.match(PrimitiveParser.CARET)
                         self.state = 370
-                        self.expression(27)
+                        self.expression(20)
                         pass
 
                     elif la_ == 2:
                         localctx = PrimitiveParser.MultiplyDivideExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 371
-                        if not self.precpred(self._ctx, 26):
+                        if not self.precpred(self._ctx, 19):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 26)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 19)")
                         self.state = 372
                         localctx.op = self._input.LT(1)
                         _la = self._input.LA(1)
@@ -3093,16 +2947,16 @@ class PrimitiveParser ( Parser ):
                             self._errHandler.reportMatch(self)
                             self.consume()
                         self.state = 373
-                        self.expression(27)
+                        self.expression(20)
                         pass
 
                     elif la_ == 3:
                         localctx = PrimitiveParser.AddSubtractExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
                         self.state = 374
-                        if not self.precpred(self._ctx, 24):
+                        if not self.precpred(self._ctx, 17):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 24)")
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 17)")
                         self.state = 375
                         localctx.op = self._input.LT(1)
                         _la = self._input.LA(1)
@@ -3112,207 +2966,134 @@ class PrimitiveParser ( Parser ):
                             self._errHandler.reportMatch(self)
                             self.consume()
                         self.state = 376
-                        self.expression(25)
-                        pass
-
-                    elif la_ == 4:
-                        localctx = PrimitiveParser.EqualsExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
-                        self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
-                        self.state = 377
-                        if not self.precpred(self._ctx, 23):
-                            from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 23)")
-                        self.state = 378
-                        self.match(PrimitiveParser.EQUALSCOMPARE)
-                        self.state = 379
-                        self.expression(24)
-                        pass
-
-                    elif la_ == 5:
-                        localctx = PrimitiveParser.NotEqualsExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
-                        self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
-                        self.state = 380
-                        if not self.precpred(self._ctx, 22):
-                            from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 22)")
-                        self.state = 381
-                        self.match(PrimitiveParser.NOTEQUALS)
-                        self.state = 382
-                        self.expression(23)
-                        pass
-
-                    elif la_ == 6:
-                        localctx = PrimitiveParser.GtExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
-                        self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
-                        self.state = 383
-                        if not self.precpred(self._ctx, 21):
-                            from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 21)")
-                        self.state = 384
-                        self.match(PrimitiveParser.R_ANGLE)
-                        self.state = 385
-                        self.expression(22)
-                        pass
-
-                    elif la_ == 7:
-                        localctx = PrimitiveParser.LtExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
-                        self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
-                        self.state = 386
-                        if not self.precpred(self._ctx, 20):
-                            from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 20)")
-                        self.state = 387
-                        self.match(PrimitiveParser.L_ANGLE)
-                        self.state = 388
-                        self.expression(21)
-                        pass
-
-                    elif la_ == 8:
-                        localctx = PrimitiveParser.GeqExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
-                        self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
-                        self.state = 389
-                        if not self.precpred(self._ctx, 19):
-                            from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 19)")
-                        self.state = 390
-                        self.match(PrimitiveParser.GEQ)
-                        self.state = 391
-                        self.expression(20)
-                        pass
-
-                    elif la_ == 9:
-                        localctx = PrimitiveParser.LeqExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
-                        self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
-                        self.state = 392
-                        if not self.precpred(self._ctx, 18):
-                            from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 18)")
-                        self.state = 393
-                        self.match(PrimitiveParser.LEQ)
-                        self.state = 394
-                        self.expression(19)
-                        pass
-
-                    elif la_ == 10:
-                        localctx = PrimitiveParser.InExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
-                        self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
-                        self.state = 395
-                        if not self.precpred(self._ctx, 17):
-                            from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 17)")
-                        self.state = 396
-                        self.match(PrimitiveParser.IN)
-                        self.state = 397
                         self.expression(18)
                         pass
 
-                    elif la_ == 11:
-                        localctx = PrimitiveParser.SubsetsExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                    elif la_ == 4:
+                        localctx = PrimitiveParser.UnionSetMinusExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
-                        self.state = 398
+                        self.state = 377
                         if not self.precpred(self._ctx, 16):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 16)")
-                        self.state = 399
-                        self.match(PrimitiveParser.SUBSETS)
-                        self.state = 400
+                        self.state = 378
+                        localctx.op = self._input.LT(1)
+                        _la = self._input.LA(1)
+                        if not(_la==27 or _la==50):
+                            localctx.op = self._errHandler.recoverInline(self)
+                        else:
+                            self._errHandler.reportMatch(self)
+                            self.consume()
+                        self.state = 379
                         self.expression(17)
                         pass
 
-                    elif la_ == 12:
-                        localctx = PrimitiveParser.AndExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                    elif la_ == 5:
+                        localctx = PrimitiveParser.RelationalExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
-                        self.state = 401
+                        self.state = 380
                         if not self.precpred(self._ctx, 15):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 15)")
-                        self.state = 402
-                        self.match(PrimitiveParser.AND)
-                        self.state = 403
+                        self.state = 381
+                        localctx.op = self._input.LT(1)
+                        _la = self._input.LA(1)
+                        if not((((_la) & ~0x3f) == 0 and ((1 << _la) & 598134331801984) != 0)):
+                            localctx.op = self._errHandler.recoverInline(self)
+                        else:
+                            self._errHandler.reportMatch(self)
+                            self.consume()
+                        self.state = 382
                         self.expression(16)
                         pass
 
-                    elif la_ == 13:
-                        localctx = PrimitiveParser.OrExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                    elif la_ == 6:
+                        localctx = PrimitiveParser.EqualityExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
-                        self.state = 404
+                        self.state = 383
                         if not self.precpred(self._ctx, 14):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 14)")
-                        self.state = 405
-                        self.match(PrimitiveParser.OR)
-                        self.state = 406
+                        self.state = 384
+                        localctx.op = self._input.LT(1)
+                        _la = self._input.LA(1)
+                        if not(_la==19 or _la==20):
+                            localctx.op = self._errHandler.recoverInline(self)
+                        else:
+                            self._errHandler.reportMatch(self)
+                            self.consume()
+                        self.state = 385
                         self.expression(15)
                         pass
 
-                    elif la_ == 14:
-                        localctx = PrimitiveParser.UnionExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                    elif la_ == 7:
+                        localctx = PrimitiveParser.AndExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
-                        self.state = 407
+                        self.state = 386
                         if not self.precpred(self._ctx, 13):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 13)")
-                        self.state = 408
-                        self.match(PrimitiveParser.UNION)
-                        self.state = 409
+                        self.state = 387
+                        self.match(PrimitiveParser.AND)
+                        self.state = 388
                         self.expression(14)
                         pass
 
-                    elif la_ == 15:
-                        localctx = PrimitiveParser.SetMinusExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
+                    elif la_ == 8:
+                        localctx = PrimitiveParser.OrExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
-                        self.state = 410
+                        self.state = 389
                         if not self.precpred(self._ctx, 12):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 12)")
-                        self.state = 411
-                        self.match(PrimitiveParser.BACKSLASH)
-                        self.state = 412
+                        self.state = 390
+                        self.match(PrimitiveParser.OR)
+                        self.state = 391
                         self.expression(13)
                         pass
 
-                    elif la_ == 16:
+                    elif la_ == 9:
                         localctx = PrimitiveParser.FnCallExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
-                        self.state = 413
-                        if not self.precpred(self._ctx, 31):
+                        self.state = 392
+                        if not self.precpred(self._ctx, 24):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 31)")
-                        self.state = 414
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 24)")
+                        self.state = 393
                         self.match(PrimitiveParser.L_PAREN)
-                        self.state = 416
+                        self.state = 395
                         self._errHandler.sync(self)
                         _la = self._input.LA(1)
                         if (((_la) & ~0x3f) == 0 and ((1 << _la) & -467794026070736854) != 0) or _la==64 or _la==65:
-                            self.state = 415
+                            self.state = 394
                             self.argList()
 
 
-                        self.state = 418
+                        self.state = 397
                         self.match(PrimitiveParser.R_PAREN)
                         pass
 
-                    elif la_ == 17:
+                    elif la_ == 10:
                         localctx = PrimitiveParser.SliceExpContext(self, PrimitiveParser.ExpressionContext(self, _parentctx, _parentState))
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_expression)
-                        self.state = 419
-                        if not self.precpred(self._ctx, 30):
+                        self.state = 398
+                        if not self.precpred(self._ctx, 23):
                             from antlr4.error.Errors import FailedPredicateException
-                            raise FailedPredicateException(self, "self.precpred(self._ctx, 30)")
-                        self.state = 420
+                            raise FailedPredicateException(self, "self.precpred(self._ctx, 23)")
+                        self.state = 399
                         self.match(PrimitiveParser.L_SQUARE)
-                        self.state = 421
+                        self.state = 400
                         self.integerExpression(0)
-                        self.state = 422
+                        self.state = 401
                         self.match(PrimitiveParser.COLON)
-                        self.state = 423
+                        self.state = 402
                         self.integerExpression(0)
-                        self.state = 424
+                        self.state = 403
                         self.match(PrimitiveParser.R_SQUARE)
                         pass
 
              
-                self.state = 430
+                self.state = 409
                 self._errHandler.sync(self)
                 _alt = self._interp.adaptivePredict(self._input,28,self._ctx)
 
@@ -3364,17 +3145,17 @@ class PrimitiveParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 431
+            self.state = 410
             self.expression(0)
-            self.state = 436
+            self.state = 415
             self._errHandler.sync(self)
             _la = self._input.LA(1)
             while _la==11:
-                self.state = 432
+                self.state = 411
                 self.match(PrimitiveParser.COMMA)
-                self.state = 433
+                self.state = 412
                 self.expression(0)
-                self.state = 438
+                self.state = 417
                 self._errHandler.sync(self)
                 _la = self._input.LA(1)
 
@@ -3420,9 +3201,9 @@ class PrimitiveParser ( Parser ):
         self.enterRule(localctx, 30, self.RULE_variable)
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 439
+            self.state = 418
             self.type_(0)
-            self.state = 440
+            self.state = 419
             self.id_()
         except RecognitionException as re:
             localctx.exception = re
@@ -3473,19 +3254,19 @@ class PrimitiveParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 442
+            self.state = 421
             self.id_()
-            self.state = 443
+            self.state = 422
             self.match(PrimitiveParser.L_PAREN)
-            self.state = 445
+            self.state = 424
             self._errHandler.sync(self)
             _la = self._input.LA(1)
             if (((_la) & ~0x3f) == 0 and ((1 << _la) & -467794026070736854) != 0) or _la==64 or _la==65:
-                self.state = 444
+                self.state = 423
                 self.argList()
 
 
-            self.state = 447
+            self.state = 426
             self.match(PrimitiveParser.R_PAREN)
         except RecognitionException as re:
             localctx.exception = re
@@ -3804,7 +3585,7 @@ class PrimitiveParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 490
+            self.state = 469
             self._errHandler.sync(self)
             la_ = self._interp.adaptivePredict(self._input,32,self._ctx)
             if la_ == 1:
@@ -3812,7 +3593,7 @@ class PrimitiveParser ( Parser ):
                 self._ctx = localctx
                 _prevctx = localctx
 
-                self.state = 450
+                self.state = 429
                 self.set_()
                 pass
 
@@ -3820,7 +3601,7 @@ class PrimitiveParser ( Parser ):
                 localctx = PrimitiveParser.BoolTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 451
+                self.state = 430
                 self.match(PrimitiveParser.BOOL)
                 pass
 
@@ -3828,7 +3609,7 @@ class PrimitiveParser ( Parser ):
                 localctx = PrimitiveParser.VoidTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 452
+                self.state = 431
                 self.match(PrimitiveParser.VOID)
                 pass
 
@@ -3836,17 +3617,17 @@ class PrimitiveParser ( Parser ):
                 localctx = PrimitiveParser.MapTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 453
+                self.state = 432
                 self.match(PrimitiveParser.MAP)
-                self.state = 454
+                self.state = 433
                 self.match(PrimitiveParser.L_ANGLE)
-                self.state = 455
+                self.state = 434
                 self.type_(0)
-                self.state = 456
+                self.state = 435
                 self.match(PrimitiveParser.COMMA)
-                self.state = 457
+                self.state = 436
                 self.type_(0)
-                self.state = 458
+                self.state = 437
                 self.match(PrimitiveParser.R_ANGLE)
                 pass
 
@@ -3854,17 +3635,17 @@ class PrimitiveParser ( Parser ):
                 localctx = PrimitiveParser.ArrayTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 460
+                self.state = 439
                 self.match(PrimitiveParser.ARRAY)
-                self.state = 461
+                self.state = 440
                 self.match(PrimitiveParser.L_ANGLE)
-                self.state = 462
+                self.state = 441
                 self.type_(0)
-                self.state = 463
+                self.state = 442
                 self.match(PrimitiveParser.COMMA)
-                self.state = 464
+                self.state = 443
                 self.integerExpression(0)
-                self.state = 465
+                self.state = 444
                 self.match(PrimitiveParser.R_ANGLE)
                 pass
 
@@ -3872,17 +3653,17 @@ class PrimitiveParser ( Parser ):
                 localctx = PrimitiveParser.FunctionTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 467
+                self.state = 446
                 self.match(PrimitiveParser.FUNCTION)
-                self.state = 468
+                self.state = 447
                 self.match(PrimitiveParser.L_ANGLE)
-                self.state = 469
+                self.state = 448
                 self.type_(0)
-                self.state = 470
+                self.state = 449
                 self.match(PrimitiveParser.COMMA)
-                self.state = 471
+                self.state = 450
                 self.type_(0)
-                self.state = 472
+                self.state = 451
                 self.match(PrimitiveParser.R_ANGLE)
                 pass
 
@@ -3890,7 +3671,7 @@ class PrimitiveParser ( Parser ):
                 localctx = PrimitiveParser.IntTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 474
+                self.state = 453
                 self.match(PrimitiveParser.INTTYPE)
                 pass
 
@@ -3898,25 +3679,25 @@ class PrimitiveParser ( Parser ):
                 localctx = PrimitiveParser.ProductTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 475
+                self.state = 454
                 self.match(PrimitiveParser.L_SQUARE)
-                self.state = 476
+                self.state = 455
                 self.type_(0)
-                self.state = 479 
+                self.state = 458 
                 self._errHandler.sync(self)
                 _la = self._input.LA(1)
                 while True:
-                    self.state = 477
+                    self.state = 456
                     self.match(PrimitiveParser.COMMA)
-                    self.state = 478
+                    self.state = 457
                     self.type_(0)
-                    self.state = 481 
+                    self.state = 460 
                     self._errHandler.sync(self)
                     _la = self._input.LA(1)
                     if not (_la==11):
                         break
 
-                self.state = 483
+                self.state = 462
                 self.match(PrimitiveParser.R_SQUARE)
                 pass
 
@@ -3924,7 +3705,7 @@ class PrimitiveParser ( Parser ):
                 localctx = PrimitiveParser.BitStringTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 485
+                self.state = 464
                 self.bitstring()
                 pass
 
@@ -3932,7 +3713,7 @@ class PrimitiveParser ( Parser ):
                 localctx = PrimitiveParser.ModIntTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 486
+                self.state = 465
                 self.modint()
                 pass
 
@@ -3940,7 +3721,7 @@ class PrimitiveParser ( Parser ):
                 localctx = PrimitiveParser.GroupElemTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 487
+                self.state = 466
                 self.groupelem()
                 pass
 
@@ -3948,7 +3729,7 @@ class PrimitiveParser ( Parser ):
                 localctx = PrimitiveParser.GroupTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 488
+                self.state = 467
                 self.match(PrimitiveParser.GROUP)
                 pass
 
@@ -3956,13 +3737,13 @@ class PrimitiveParser ( Parser ):
                 localctx = PrimitiveParser.LvalueTypeContext(self, localctx)
                 self._ctx = localctx
                 _prevctx = localctx
-                self.state = 489
+                self.state = 468
                 self.lvalue()
                 pass
 
 
             self._ctx.stop = self._input.LT(-1)
-            self.state = 496
+            self.state = 475
             self._errHandler.sync(self)
             _alt = self._interp.adaptivePredict(self._input,33,self._ctx)
             while _alt!=2 and _alt!=ATN.INVALID_ALT_NUMBER:
@@ -3972,13 +3753,13 @@ class PrimitiveParser ( Parser ):
                     _prevctx = localctx
                     localctx = PrimitiveParser.OptionalTypeContext(self, PrimitiveParser.TypeContext(self, _parentctx, _parentState))
                     self.pushNewRecursionContext(localctx, _startState, self.RULE_type)
-                    self.state = 492
+                    self.state = 471
                     if not self.precpred(self._ctx, 14):
                         from antlr4.error.Errors import FailedPredicateException
                         raise FailedPredicateException(self, "self.precpred(self._ctx, 14)")
-                    self.state = 493
+                    self.state = 472
                     self.match(PrimitiveParser.QUESTION) 
-                self.state = 498
+                self.state = 477
                 self._errHandler.sync(self)
                 _alt = self._interp.adaptivePredict(self._input,33,self._ctx)
 
@@ -4055,34 +3836,34 @@ class PrimitiveParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 507
+            self.state = 486
             self._errHandler.sync(self)
             token = self._input.LA(1)
             if token in [40, 41, 49, 56, 65]:
-                self.state = 500
+                self.state = 479
                 self.lvalue()
                 pass
             elif token in [64]:
-                self.state = 501
+                self.state = 480
                 self.match(PrimitiveParser.INT)
                 pass
             elif token in [61]:
-                self.state = 502
+                self.state = 481
                 self.match(PrimitiveParser.BINARYNUM)
                 pass
             elif token in [5]:
-                self.state = 503
+                self.state = 482
                 self.match(PrimitiveParser.L_PAREN)
-                self.state = 504
+                self.state = 483
                 self.integerExpression(0)
-                self.state = 505
+                self.state = 484
                 self.match(PrimitiveParser.R_PAREN)
                 pass
             else:
                 raise NoViableAltException(self)
 
             self._ctx.stop = self._input.LT(-1)
-            self.state = 517
+            self.state = 496
             self._errHandler.sync(self)
             _alt = self._interp.adaptivePredict(self._input,36,self._ctx)
             while _alt!=2 and _alt!=ATN.INVALID_ALT_NUMBER:
@@ -4090,17 +3871,17 @@ class PrimitiveParser ( Parser ):
                     if self._parseListeners is not None:
                         self.triggerExitRuleEvent()
                     _prevctx = localctx
-                    self.state = 515
+                    self.state = 494
                     self._errHandler.sync(self)
                     la_ = self._interp.adaptivePredict(self._input,35,self._ctx)
                     if la_ == 1:
                         localctx = PrimitiveParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
-                        self.state = 509
+                        self.state = 488
                         if not self.precpred(self._ctx, 6):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 6)")
-                        self.state = 510
+                        self.state = 489
                         localctx.op = self._input.LT(1)
                         _la = self._input.LA(1)
                         if not(_la==13 or _la==17):
@@ -4108,18 +3889,18 @@ class PrimitiveParser ( Parser ):
                         else:
                             self._errHandler.reportMatch(self)
                             self.consume()
-                        self.state = 511
+                        self.state = 490
                         self.integerExpression(7)
                         pass
 
                     elif la_ == 2:
                         localctx = PrimitiveParser.IntegerExpressionContext(self, _parentctx, _parentState)
                         self.pushNewRecursionContext(localctx, _startState, self.RULE_integerExpression)
-                        self.state = 512
+                        self.state = 491
                         if not self.precpred(self._ctx, 5):
                             from antlr4.error.Errors import FailedPredicateException
                             raise FailedPredicateException(self, "self.precpred(self._ctx, 5)")
-                        self.state = 513
+                        self.state = 492
                         localctx.op = self._input.LT(1)
                         _la = self._input.LA(1)
                         if not(_la==15 or _la==16):
@@ -4127,12 +3908,12 @@ class PrimitiveParser ( Parser ):
                         else:
                             self._errHandler.reportMatch(self)
                             self.consume()
-                        self.state = 514
+                        self.state = 493
                         self.integerExpression(6)
                         pass
 
              
-                self.state = 519
+                self.state = 498
                 self._errHandler.sync(self)
                 _alt = self._interp.adaptivePredict(self._input,36,self._ctx)
 
@@ -4186,26 +3967,26 @@ class PrimitiveParser ( Parser ):
         localctx = PrimitiveParser.IntegerAtomContext(self, self._ctx, self.state)
         self.enterRule(localctx, 38, self.RULE_integerAtom)
         try:
-            self.state = 526
+            self.state = 505
             self._errHandler.sync(self)
             token = self._input.LA(1)
             if token in [40, 41, 49, 56, 65]:
                 self.enterOuterAlt(localctx, 1)
-                self.state = 520
+                self.state = 499
                 self.lvalue()
                 pass
             elif token in [64]:
                 self.enterOuterAlt(localctx, 2)
-                self.state = 521
+                self.state = 500
                 self.match(PrimitiveParser.INT)
                 pass
             elif token in [5]:
                 self.enterOuterAlt(localctx, 3)
-                self.state = 522
+                self.state = 501
                 self.match(PrimitiveParser.L_PAREN)
-                self.state = 523
+                self.state = 502
                 self.integerExpression(0)
-                self.state = 524
+                self.state = 503
                 self.match(PrimitiveParser.R_PAREN)
                 pass
             else:
@@ -4257,24 +4038,24 @@ class PrimitiveParser ( Parser ):
         localctx = PrimitiveParser.BitstringContext(self, self._ctx, self.state)
         self.enterRule(localctx, 40, self.RULE_bitstring)
         try:
-            self.state = 534
+            self.state = 513
             self._errHandler.sync(self)
             la_ = self._interp.adaptivePredict(self._input,38,self._ctx)
             if la_ == 1:
                 self.enterOuterAlt(localctx, 1)
-                self.state = 528
+                self.state = 507
                 self.match(PrimitiveParser.BITSTRING)
-                self.state = 529
+                self.state = 508
                 self.match(PrimitiveParser.L_ANGLE)
-                self.state = 530
+                self.state = 509
                 self.integerExpression(0)
-                self.state = 531
+                self.state = 510
                 self.match(PrimitiveParser.R_ANGLE)
                 pass
 
             elif la_ == 2:
                 self.enterOuterAlt(localctx, 2)
-                self.state = 533
+                self.state = 512
                 self.match(PrimitiveParser.BITSTRING)
                 pass
 
@@ -4326,13 +4107,13 @@ class PrimitiveParser ( Parser ):
         self.enterRule(localctx, 42, self.RULE_modint)
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 536
+            self.state = 515
             self.match(PrimitiveParser.MODINT)
-            self.state = 537
+            self.state = 516
             self.match(PrimitiveParser.L_ANGLE)
-            self.state = 538
+            self.state = 517
             self.integerExpression(0)
-            self.state = 539
+            self.state = 518
             self.match(PrimitiveParser.R_ANGLE)
         except RecognitionException as re:
             localctx.exception = re
@@ -4381,13 +4162,13 @@ class PrimitiveParser ( Parser ):
         self.enterRule(localctx, 44, self.RULE_groupelem)
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 541
+            self.state = 520
             self.match(PrimitiveParser.GROUPELEM)
-            self.state = 542
+            self.state = 521
             self.match(PrimitiveParser.L_ANGLE)
-            self.state = 543
+            self.state = 522
             self.lvalue()
-            self.state = 544
+            self.state = 523
             self.match(PrimitiveParser.R_ANGLE)
         except RecognitionException as re:
             localctx.exception = re
@@ -4435,24 +4216,24 @@ class PrimitiveParser ( Parser ):
         localctx = PrimitiveParser.SetContext(self, self._ctx, self.state)
         self.enterRule(localctx, 46, self.RULE_set)
         try:
-            self.state = 552
+            self.state = 531
             self._errHandler.sync(self)
             la_ = self._interp.adaptivePredict(self._input,39,self._ctx)
             if la_ == 1:
                 self.enterOuterAlt(localctx, 1)
-                self.state = 546
+                self.state = 525
                 self.match(PrimitiveParser.SET)
-                self.state = 547
+                self.state = 526
                 self.match(PrimitiveParser.L_ANGLE)
-                self.state = 548
+                self.state = 527
                 self.type_(0)
-                self.state = 549
+                self.state = 528
                 self.match(PrimitiveParser.R_ANGLE)
                 pass
 
             elif la_ == 2:
                 self.enterOuterAlt(localctx, 2)
-                self.state = 551
+                self.state = 530
                 self.match(PrimitiveParser.SET)
                 pass
 
@@ -4498,7 +4279,7 @@ class PrimitiveParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 554
+            self.state = 533
             _la = self._input.LA(1)
             if not(_la==59 or _la==60):
                 self._errHandler.recoverInline(self)
@@ -4555,21 +4336,21 @@ class PrimitiveParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 556
+            self.state = 535
             self.match(PrimitiveParser.IMPORT)
-            self.state = 557
+            self.state = 536
             self.match(PrimitiveParser.FILESTRING)
-            self.state = 560
+            self.state = 539
             self._errHandler.sync(self)
             _la = self._input.LA(1)
             if _la==53:
-                self.state = 558
+                self.state = 537
                 self.match(PrimitiveParser.AS)
-                self.state = 559
+                self.state = 538
                 self.match(PrimitiveParser.ID)
 
 
-            self.state = 562
+            self.state = 541
             self.match(PrimitiveParser.SEMI)
         except RecognitionException as re:
             localctx.exception = re
@@ -4618,7 +4399,7 @@ class PrimitiveParser ( Parser ):
         self._la = 0 # Token type
         try:
             self.enterOuterAlt(localctx, 1)
-            self.state = 564
+            self.state = 543
             _la = self._input.LA(1)
             if not(((((_la - 40)) & ~0x3f) == 0 and ((1 << (_la - 40)) & 33554947) != 0)):
                 self._errHandler.recoverInline(self)
@@ -4649,84 +4430,56 @@ class PrimitiveParser ( Parser ):
 
     def expression_sempred(self, localctx:ExpressionContext, predIndex:int):
             if predIndex == 0:
-                return self.precpred(self._ctx, 27)
-         
-
-            if predIndex == 1:
-                return self.precpred(self._ctx, 26)
-         
-
-            if predIndex == 2:
-                return self.precpred(self._ctx, 24)
-         
-
-            if predIndex == 3:
-                return self.precpred(self._ctx, 23)
-         
-
-            if predIndex == 4:
-                return self.precpred(self._ctx, 22)
-         
-
-            if predIndex == 5:
-                return self.precpred(self._ctx, 21)
-         
-
-            if predIndex == 6:
                 return self.precpred(self._ctx, 20)
          
 
-            if predIndex == 7:
+            if predIndex == 1:
                 return self.precpred(self._ctx, 19)
          
 
-            if predIndex == 8:
-                return self.precpred(self._ctx, 18)
-         
-
-            if predIndex == 9:
+            if predIndex == 2:
                 return self.precpred(self._ctx, 17)
          
 
-            if predIndex == 10:
+            if predIndex == 3:
                 return self.precpred(self._ctx, 16)
          
 
-            if predIndex == 11:
+            if predIndex == 4:
                 return self.precpred(self._ctx, 15)
          
 
-            if predIndex == 12:
+            if predIndex == 5:
                 return self.precpred(self._ctx, 14)
          
 
-            if predIndex == 13:
+            if predIndex == 6:
                 return self.precpred(self._ctx, 13)
          
 
-            if predIndex == 14:
+            if predIndex == 7:
                 return self.precpred(self._ctx, 12)
          
 
-            if predIndex == 15:
-                return self.precpred(self._ctx, 31)
+            if predIndex == 8:
+                return self.precpred(self._ctx, 24)
          
 
-            if predIndex == 16:
-                return self.precpred(self._ctx, 30)
+            if predIndex == 9:
+                return self.precpred(self._ctx, 23)
          
 
     def type_sempred(self, localctx:TypeContext, predIndex:int):
-            if predIndex == 17:
+            if predIndex == 10:
                 return self.precpred(self._ctx, 14)
          
 
     def integerExpression_sempred(self, localctx:IntegerExpressionContext, predIndex:int):
-            if predIndex == 18:
+            if predIndex == 11:
                 return self.precpred(self._ctx, 6)
          
 
-            if predIndex == 19:
+            if predIndex == 12:
                 return self.precpred(self._ctx, 5)
          
 

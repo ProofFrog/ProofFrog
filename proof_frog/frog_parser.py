@@ -707,19 +707,32 @@ def _binary_operation(
     )
 
 
-# `*`/`/` and `+`/`-` are each one left-associative grammar alternative
-# (`expression op=(PLUS | SUBTRACT) expression`), so the operator is read
-# from the matched token rather than from the alternative's label.
-_ARITHMETIC_OPERATORS: dict[str, frog_ast.BinaryOperators] = {
-    "+": frog_ast.BinaryOperators.ADD,
-    "-": frog_ast.BinaryOperators.SUBTRACT,
-    "*": frog_ast.BinaryOperators.MULTIPLY,
-    "/": frog_ast.BinaryOperators.DIVIDE,
+# Operators sharing a precedence level are one left-associative grammar
+# alternative (`expression op=(PLUS | SUBTRACT) expression`), so the operator
+# is read from the matched token rather than from the alternative's label.
+_BINARY_OPERATORS: dict[str, frog_ast.BinaryOperators] = {
+    op.value: op
+    for op in (
+        frog_ast.BinaryOperators.ADD,
+        frog_ast.BinaryOperators.SUBTRACT,
+        frog_ast.BinaryOperators.MULTIPLY,
+        frog_ast.BinaryOperators.DIVIDE,
+        frog_ast.BinaryOperators.UNION,
+        frog_ast.BinaryOperators.SETMINUS,
+        frog_ast.BinaryOperators.LT,
+        frog_ast.BinaryOperators.LEQ,
+        frog_ast.BinaryOperators.GT,
+        frog_ast.BinaryOperators.GEQ,
+        frog_ast.BinaryOperators.IN,
+        frog_ast.BinaryOperators.SUBSETS,
+        frog_ast.BinaryOperators.EQUALS,
+        frog_ast.BinaryOperators.NOTEQUALS,
+    )
 }
 
 
-def _arithmetic_operator(token: Token) -> frog_ast.BinaryOperators:
-    return _ARITHMETIC_OPERATORS[token.text]
+def _token_operator(token: Token) -> frog_ast.BinaryOperators:
+    return _BINARY_OPERATORS[token.text]
 
 
 def _bound_binary_operation(
@@ -838,67 +851,38 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             self.visit(ctx.expression()),
         )
 
-    def visitEqualsExp(
-        self, ctx: PrimitiveParser.EqualsExpContext
+    def visitEqualityExp(
+        self, ctx: PrimitiveParser.EqualityExpContext
     ) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.EQUALS, self.visit, ctx)
+        return _binary_operation(_token_operator(ctx.op), self.visit, ctx)
 
-    def visitNotEqualsExp(
-        self, ctx: PrimitiveParser.NotEqualsExpContext
+    def visitRelationalExp(
+        self, ctx: PrimitiveParser.RelationalExpContext
     ) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.NOTEQUALS, self.visit, ctx)
-
-    def visitGtExp(self, ctx: PrimitiveParser.GtExpContext) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.GT, self.visit, ctx)
-
-    def visitLtExp(self, ctx: PrimitiveParser.LtExpContext) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.LT, self.visit, ctx)
-
-    def visitGeqExp(
-        self, ctx: PrimitiveParser.GeqExpContext
-    ) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.GEQ, self.visit, ctx)
-
-    def visitLeqExp(
-        self, ctx: PrimitiveParser.LeqExpContext
-    ) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.LEQ, self.visit, ctx)
+        return _binary_operation(_token_operator(ctx.op), self.visit, ctx)
 
     def visitAndExp(
         self, ctx: PrimitiveParser.AndExpContext
     ) -> frog_ast.BinaryOperation:
         return _binary_operation(frog_ast.BinaryOperators.AND, self.visit, ctx)
 
-    def visitSubsetsExp(
-        self, ctx: PrimitiveParser.SubsetsExpContext
-    ) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.SUBSETS, self.visit, ctx)
-
-    def visitInExp(self, ctx: PrimitiveParser.InExpContext) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.IN, self.visit, ctx)
-
     def visitOrExp(self, ctx: PrimitiveParser.OrExpContext) -> frog_ast.BinaryOperation:
         return _binary_operation(frog_ast.BinaryOperators.OR, self.visit, ctx)
 
-    def visitUnionExp(
-        self, ctx: PrimitiveParser.UnionExpContext
+    def visitUnionSetMinusExp(
+        self, ctx: PrimitiveParser.UnionSetMinusExpContext
     ) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.UNION, self.visit, ctx)
-
-    def visitSetMinusExp(
-        self, ctx: PrimitiveParser.SetMinusExpContext
-    ) -> frog_ast.BinaryOperation:
-        return _binary_operation(frog_ast.BinaryOperators.SETMINUS, self.visit, ctx)
+        return _binary_operation(_token_operator(ctx.op), self.visit, ctx)
 
     def visitAddSubtractExp(
         self, ctx: PrimitiveParser.AddSubtractExpContext
     ) -> frog_ast.BinaryOperation:
-        return _binary_operation(_arithmetic_operator(ctx.op), self.visit, ctx)
+        return _binary_operation(_token_operator(ctx.op), self.visit, ctx)
 
     def visitMultiplyDivideExp(
         self, ctx: PrimitiveParser.MultiplyDivideExpContext
     ) -> frog_ast.BinaryOperation:
-        return _binary_operation(_arithmetic_operator(ctx.op), self.visit, ctx)
+        return _binary_operation(_token_operator(ctx.op), self.visit, ctx)
 
     def visitExponentiationExp(
         self, ctx: PrimitiveParser.ExponentiationExpContext
@@ -938,7 +922,7 @@ class _SharedAST(PrimitiveVisitor, SchemeVisitor, GameVisitor, ProofVisitor):  #
             return exp
 
         return frog_ast.BinaryOperation(
-            _arithmetic_operator(ctx.op),
+            _token_operator(ctx.op),
             self.visit(ctx.integerExpression()[0]),
             self.visit(ctx.integerExpression()[1]),
         )
@@ -1500,12 +1484,12 @@ class _ProofASTGenerator(_SharedAST, ProofVisitor):  # type: ignore[misc]
     def visitBoundMultiplyDivide(
         self, ctx: ProofParser.BoundMultiplyDivideContext
     ) -> frog_ast.BinaryOperation:
-        return _bound_binary_operation(_arithmetic_operator(ctx.op), self.visit, ctx)
+        return _bound_binary_operation(_token_operator(ctx.op), self.visit, ctx)
 
     def visitBoundAddSubtract(
         self, ctx: ProofParser.BoundAddSubtractContext
     ) -> frog_ast.BinaryOperation:
-        return _bound_binary_operation(_arithmetic_operator(ctx.op), self.visit, ctx)
+        return _bound_binary_operation(_token_operator(ctx.op), self.visit, ctx)
 
     def visitBoundNegate(
         self, ctx: ProofParser.BoundNegateContext

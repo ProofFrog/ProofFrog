@@ -136,13 +136,14 @@ The following are NOT commutative:
 3. `*`, `/` (one level, left-associative: `a / b * c` is `(a / b) * c`)
 4. Unary `-` (`-a * b` is `-(a * b)`, `-a + b` is `(-a) + b`)
 5. `+`, `-` (one level, left-associative: `a - b + c` is `(a - b) + c`)
-6. Comparisons and set tests, each its own level in this order: `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `subsets` (so `a != b == c` is `a != (b == c)`)
-7. `&&`
-8. `||`
-9. `union`
-10. `\` (so `S \ T union U` is `S \ (T union U)`)
+6. `union`, `\` (one level, left-associative: `S \ T union U` is `(S \ T) union U`)
+7. `<`, `<=`, `>`, `>=`, `in`, `subsets` (one level, left-associative; `x in S union T` is `x in (S union T)`)
+8. `==`, `!=` (one level, left-associative; `a < b == c < d` is `(a < b) == (c < d)`)
+9. `&&`
+10. `||`
 
-The arithmetic levels match C, Java and Python. The comparison and set levels do not: write parentheses when mixing two operators from rows 6 to 10 (for example `(S \ T) union U`).
+Every binary level is left-associative except `^`. The arithmetic levels match C, Java and Python, and the comparison and Boolean levels match C and Java; the set operators sit between the two.
+In a sampling statement `x <- T \ E;` the last `\` separates the type from the excluded set (`x <- T \ S \ U;` excludes `U` from `T \ S`), so parenthesize an excluded set that itself contains `\`: `x <- T \ (S \ U);`.
 `||` binds looser than the comparisons, including as bitstring concatenation: `k == a || b` is `(k == a) || b`.
 
 ## 4. Statements

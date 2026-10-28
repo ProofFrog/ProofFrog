@@ -310,26 +310,34 @@ class BinaryOperators(Enum):
     EXPONENTIATE = "^"
 
     def precedence(self) -> int:
-        """Return precedence level (higher binds tighter)."""
-        if self == BinaryOperators.EXPONENTIATE:
-            return 5
-        if self in (BinaryOperators.MULTIPLY, BinaryOperators.DIVIDE):
-            return 4
-        if self in (BinaryOperators.ADD, BinaryOperators.SUBTRACT):
-            return 3
-        if self in (
-            BinaryOperators.EQUALS,
-            BinaryOperators.NOTEQUALS,
-            BinaryOperators.GT,
-            BinaryOperators.LT,
-            BinaryOperators.GEQ,
-            BinaryOperators.LEQ,
-            BinaryOperators.IN,
-            BinaryOperators.SUBSETS,
-        ):
-            return 2
-        # AND, OR, UNION, SETMINUS
-        return 1
+        """Return precedence level (higher binds tighter).
+
+        Mirrors the ``expression`` rule of ``Shared.g4``; every level is
+        left-associative except ``^``. Unary minus sits between ``*``/``/``
+        and ``+``/``-`` (see ``BinaryOperation._parenthesize``).
+        """
+        return _PRECEDENCE[self]
+
+
+_PRECEDENCE: dict[BinaryOperators, int] = {
+    BinaryOperators.EXPONENTIATE: 8,
+    BinaryOperators.MULTIPLY: 7,
+    BinaryOperators.DIVIDE: 7,
+    BinaryOperators.ADD: 6,
+    BinaryOperators.SUBTRACT: 6,
+    BinaryOperators.UNION: 5,
+    BinaryOperators.SETMINUS: 5,
+    BinaryOperators.LT: 4,
+    BinaryOperators.LEQ: 4,
+    BinaryOperators.GT: 4,
+    BinaryOperators.GEQ: 4,
+    BinaryOperators.IN: 4,
+    BinaryOperators.SUBSETS: 4,
+    BinaryOperators.EQUALS: 3,
+    BinaryOperators.NOTEQUALS: 3,
+    BinaryOperators.AND: 2,
+    BinaryOperators.OR: 1,
+}
 
 
 class UnaryOperators(Enum):
@@ -694,6 +702,19 @@ class GenericFor(Statement):
         return output_string
 
 
+def _exclusion_str(exclusion: Optional[Expression]) -> str:
+    """Print the exclusion set of ``x <- T \\ E;``.
+
+    The statement's ``\\`` is not part of either expression: the parser splits
+    at the last ``\\``, reading ``x <- T \\ A \\ B;`` as sampling from
+    ``T \\ A`` excluding ``B``. An exclusion that is a binary operation is
+    therefore parenthesized.
+    """
+    if isinstance(exclusion, BinaryOperation):
+        return f"({exclusion})"
+    return str(exclusion)
+
+
 class Sample(Statement):
     def __init__(
         self, the_type: Optional[Type], var: Expression, sampled_from: Expression
@@ -736,7 +757,11 @@ class UniqueSample(Statement):
     def __str__(self) -> str:
         prefix = f"{self.the_type} " if self.the_type else ""
         if self.surface_form == "minus":
-            return prefix + f"{self.var} <- {self.sampled_from} \\ {self.unique_set};"
+            return (
+                prefix
+                + f"{self.var} <- {self.sampled_from} \\ "
+                + f"{_exclusion_str(self.unique_set)};"
+            )
         return prefix + f"{self.var} <-uniq[{self.unique_set}] {self.sampled_from};"
 
 
@@ -790,7 +815,10 @@ class DestructuringBinding(Statement):
         if self.kind == "sample":
             return f"{self.the_type} {targets} <- {self.value};"
         if self.kind == "sample_minus":
-            return f"{self.the_type} {targets} <- {self.value} \\ {self.exclusion};"
+            return (
+                f"{self.the_type} {targets} <- {self.value} \\ "
+                f"{_exclusion_str(self.exclusion)};"
+            )
         return f"{self.the_type} {targets} = {self.value};"
 
 

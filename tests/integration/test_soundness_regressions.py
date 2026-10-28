@@ -78,6 +78,8 @@ CASES = [
      "a hoisted expression's dependency on a field read was missed"),
     ("F-230", "Atk5.proof", "reject", "HoistGroupExpToInitialize",
      "a non-deterministic exponent was frozen to one draw"),
+    ("F-232", "attack2.proof", "reject", "ExtractRepeatedTupleAccess",
+     "a repeated slice was hoisted out of the branch binding its bound j"),
     ("F-233", "attack3.proof", "reject", "ExtractRepeatedTupleAccess",
      "an element write v[0] = e evaded the reassignment guard"),
     ("F-255", "attack5_typemap.proof", "accept", "ConcatEqualityDecompose",

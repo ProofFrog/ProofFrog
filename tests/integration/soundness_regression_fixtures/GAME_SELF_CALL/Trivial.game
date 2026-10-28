@@ -1,0 +1,13 @@
+// A pair with no oracles besides Initialize, for a reduction to compose with.
+
+Game Real() {
+    Void Initialize() {
+    }
+}
+
+Game Ideal() {
+    Void Initialize() {
+    }
+}
+
+export as Trivial;

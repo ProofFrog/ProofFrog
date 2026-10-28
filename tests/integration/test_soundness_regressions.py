@@ -8,6 +8,10 @@ that the engine used to reject, crash on, or loop on, and must now verify.
 A ``reject-bound`` proof verifies but claims a ``bound:`` that is not an
 upper bound on what it establishes: the claim used to be reported verified
 and must now be reported ``NOT verified``, failing ``prove``.
+A ``type_error`` proof uses a construct the type checker now refuses
+because the engine mishandled it: the proof used to print
+``Proof Succeeded!`` and must now fail type checking with the message
+listed for it in ``TYPE_ERROR``.
 
 Each finding's proof and the files it imports live in
 ``soundness_regression_fixtures/F_<nnn>/``, copied from the audit's attack
@@ -120,8 +124,32 @@ CASES = [
      "a write to M between two writes of A[|M.keys|] went unseen; f merged into g"),
     ("DUP-FIELDS-MEMBER-READ", "member_read_control.proof", "accept",
      "RemoveDuplicateFields", "positive control for the attack above"),
+    ("GAME-SELF-CALL", "self_call.proof", "type_error", "TopologicalSort",
+     "a game's call of its own oracle was dropped as side-effect free"),
+    ("GAME-SELF-CALL", "reduction_self_call.proof", "type_error",
+     "TopologicalSort",
+     "a reduction's call of its own oracle was dropped as side-effect free"),
+    ("GAME-SELF-CALL", "scheme_this_call_control.proof", "accept",
+     "type checker", "positive control: a scheme still calls itself via this."),
+    ("MEMBER-ASSIGN", "keys_write.proof", "type_error", "RemoveUnreachable",
+     "M.keys = S was read as no write to M; a live branch was deleted"),
+    ("MEMBER-ASSIGN", "element_write_control.proof", "accept", "type checker",
+     "positive control: a map element write M[k] = v is still accepted"),
 ]
 # fmt: on
+
+# (finding, proof file) -> the error a type_error case must fail with.
+TYPE_ERROR = {
+    ("GAME-SELF-CALL", "self_call.proof"): (
+        "error: Game 'Calls' may not call its own method 'Inc'"
+    ),
+    ("GAME-SELF-CALL", "reduction_self_call.proof"): (
+        "error: Reduction 'R' may not call its own method 'Inc'"
+    ),
+    ("MEMBER-ASSIGN", "keys_write.proof"): (
+        "error: Cannot assign to 'M.keys': 'M.keys' is a member access"
+    ),
+}
 
 # (finding, proof file) -> the hop a reject case must fail at. In these
 # proofs step 1 is a true equivalence that must still pass.
@@ -162,6 +190,11 @@ def test_regression_proof(
         assert result.returncode != 0, context
         assert "Claimed bound NOT verified" in output, context
         assert "Traceback" not in output, context
+    elif expected == "type_error":
+        assert result.returncode != 0, context
+        assert "Traceback" not in output, context
+        assert TYPE_ERROR[(finding, proof)] in output, context
+        assert "Proof Succeeded!" not in output, context
     else:
         assert result.returncode != 0, context
         assert "Proof Failed!" in output, context

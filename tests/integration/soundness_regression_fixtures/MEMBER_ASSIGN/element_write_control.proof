@@ -1,0 +1,14 @@
+// Positive control: a map element write M[k] = v is still accepted, and
+// the hop verifies.
+
+import './ElementWrite.game';
+
+proof:
+
+theorem:
+    ElementWrite();
+
+games:
+    ElementWrite().Left against ElementWrite().Adversary;
+
+    ElementWrite().Right against ElementWrite().Adversary;

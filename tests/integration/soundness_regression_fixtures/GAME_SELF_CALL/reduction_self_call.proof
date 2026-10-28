@@ -1,0 +1,41 @@
+// SOUND -> the type checker rejects R.Inc() inside R.
+// UNSOUND -> prove drops the call as side-effect free and ACCEPTS the hop
+// Counter().Left -> Trivial().Real compose R(), although R's Get raises c
+// on every call (an adversary calling Get twice sees 0, 0 against Left and
+// 1, 2 against Real compose R). The hop back to Counter().Right is false
+// for the same reason.
+
+import './Counter.game';
+import './Trivial.game';
+
+Reduction R() compose Trivial() against Counter().Adversary {
+    Int c;
+    Void Initialize() {
+        challenger.Initialize();
+        c = 0;
+    }
+    Void Inc() {
+        c = c + 1;
+    }
+    Int Get() {
+        R.Inc();
+        return c;
+    }
+}
+
+proof:
+
+assume:
+    Trivial();
+
+theorem:
+    Counter();
+
+games:
+    Counter().Left against Counter().Adversary;
+
+    Trivial().Real compose R() against Counter().Adversary;
+
+    Trivial().Ideal compose R() against Counter().Adversary;
+
+    Counter().Right against Counter().Adversary;

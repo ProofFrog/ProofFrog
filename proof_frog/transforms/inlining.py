@@ -4950,6 +4950,10 @@ def _build_local_stable_alias_map(  # pylint: disable=too-many-arguments, too-ma
       (F-338; the alias-RHS sibling of F-173).
     - A RHS that reads a field written again later in the method: expanding a
       later use through the RHS would read the stale value (F-338).
+    - Locals read before their one top-level write (``Int t; r = P.f(t);
+      t = x0;``). There the local still holds its type's default
+      (FROGLANG_REFERENCE.md section 6.9), not the RHS, so expanding that
+      earlier use through the RHS would be wrong (F-177).
     """
     method_params = {p.name for p in method.signature.parameters}
     outer_names = field_names | param_names | method_params | (proof_let_names or set())
@@ -4997,6 +5001,16 @@ def _build_local_stable_alias_map(  # pylint: disable=too-many-arguments, too-ma
         return count
 
     single_assignment = {name for name in bindings if _write_count(name) == 1}
+    # Any earlier mention of a single-assignment local is a read: an earlier
+    # write would make it a second write.
+    single_assignment = {
+        name
+        for name in single_assignment
+        if not any(
+            name in referenced_variable_names(earlier)
+            for earlier in statements[: def_index[name]]
+        )
+    }
 
     aliases: dict[str, frog_ast.Expression] = {}
     while True:

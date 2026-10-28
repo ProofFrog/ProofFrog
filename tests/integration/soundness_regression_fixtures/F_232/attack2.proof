@@ -1,0 +1,18 @@
+// F-232: the two games differ (see Attack2Prop.game); the hop must be
+// refused.
+import 'Dummy.primitive';
+import 'TrivialDummy.scheme';
+import 'Attack2Prop.game';
+
+proof:
+
+let:
+    Int n;
+    TrivialDummy T = TrivialDummy(n);
+
+theorem:
+    Attack2Prop(T);
+
+games:
+    Attack2Prop(T).Real against Attack2Prop(T).Adversary;
+    Attack2Prop(T).Random against Attack2Prop(T).Adversary;

@@ -643,3 +643,89 @@ class TestSelfAssignment:
         last_call = stmts[-2]
         assert isinstance(last_call, frog_ast.Assignment)
         assert isinstance(last_call.value, frog_ast.FuncCall)
+
+
+_ELIGIBILITY = """
+    Game G() {{
+        Function<BitString<8>, BitString<16>> RF;
+        Set<BitString<8>> S;
+        {fields}
+        Void Initialize() {{
+            RF <- Function<BitString<8>, BitString<16>>;
+            {initialize}
+        }}
+        {oracles}
+        BitString<16> Query() {{
+            BitString<8> r <-uniq[S] BitString<8>;
+            BitString<16> z = RF(r);
+            return z;
+        }}
+    }}
+    """
+
+_FN = "Function<BitString<8>, BitString<16>>"
+
+
+def _simplifies_with(oracles: str, fields: str = "", initialize: str = "") -> bool:
+    game = frog_parser.parse_game(
+        _ELIGIBILITY.format(oracles=oracles, fields=fields, initialize=initialize)
+    )
+    return UniqueRFSimplification().apply(game, _make_ctx()) != game
+
+
+class TestRFWrittenOutsideSample:
+    """RF must be written only by its one sample in Initialize: after any
+    other write it need not be the random function the rewrite assumes."""
+
+    @pytest.mark.parametrize(
+        "oracles, fields, initialize",
+        [
+            # An oracle installs an adversary-chosen function.
+            (f"Void Reset({_FN} F) {{ RF = F; }}", "", ""),
+            # An oracle installs another random function the adversary queries.
+            (
+                "Void Reset() { RF = K; } "
+                "BitString<16> HashK(BitString<8> x) { return K(x); }",
+                f"{_FN} K;",
+                f"K <- {_FN};",
+            ),
+            # Initialize overwrites the sample.
+            ("", f"{_FN} K;", f"K <- {_FN}; RF = K;"),
+            # A write under a branch.
+            (f"Void Reset(Bool b, {_FN} F) {{ if (b) {{ RF = F; }} }}", "", ""),
+            # A second sample.
+            (f"Void Reset() {{ RF <- {_FN}; }}", "", ""),
+            ("", "", f"RF <- {_FN};"),
+            # A method parameter rebinding the name.
+            (f"BitString<16> Eval({_FN} RF) {{ return RF(0b00000000); }}", "", ""),
+        ],
+    )
+    def test_not_simplified(self, oracles: str, fields: str, initialize: str) -> None:
+        assert not _simplifies_with(oracles, fields, initialize)
+
+    def test_write_to_other_function_field_still_simplified(self) -> None:
+        assert _simplifies_with(f"Void Reset({_FN} F) {{ G = F; }}", f"{_FN} G;")
+
+    def test_returned_rf_not_simplified(self) -> None:
+        assert not _simplifies_with(f"{_FN} Reveal() {{ return RF; }}")
+
+
+class TestUnanalyzedCall:
+    """Every RF call must be a standalone `z = RF(r)` the analysis checks."""
+
+    @pytest.mark.parametrize(
+        "oracles",
+        [
+            # Not hoisted by ExtractRFCalls: an else-if condition.
+            "Bool Probe(Bool b, BitString<8> x, BitString<16> y) "
+            "{ if (b) { return false; } else if (RF(x) == y) { return true; } "
+            "return false; }",
+            # Embedded in a larger expression.
+            "BitString<16> Probe(BitString<8> x) { return RF(x) + 0^16; }",
+        ],
+    )
+    def test_unanalyzed_call_blocks_rewrite(self, oracles: str) -> None:
+        assert not _simplifies_with(oracles)
+
+    def test_domain_read_still_simplified(self) -> None:
+        assert _simplifies_with("Int Size() { return |RF.domain|; }")

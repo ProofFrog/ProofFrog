@@ -709,3 +709,58 @@ def test_oracle_guard_on_rewritten_value_not_simplified(hash_body: str) -> None:
 )
 def test_oracle_guard_on_stable_value_still_simplified(hash_body: str) -> None:
     assert _fired(_oracle_game(hash_body))
+
+
+def _written_game(initialize: str, oracles: str = "") -> str:
+    """H(cf) in Initialize, every oracle query to H guarded against cf; K is
+    another random function the adversary can query."""
+    return f"""
+    Game G(Int n) {{
+        Function<BitString<n>, BitString<n>> H;
+        Function<BitString<n>, BitString<n>> K;
+        BitString<n> cf;
+        BitString<n> field;
+        BitString<n> Initialize() {{
+            H <- Function<BitString<n>, BitString<n>>;
+            K <- Function<BitString<n>, BitString<n>>;
+            cf <- BitString<n>;
+            {initialize}
+            return cf;
+        }}
+        BitString<n>? Query(BitString<n> param) {{
+            if (param == cf) {{
+                return None;
+            }}
+            return H(param);
+        }}
+        BitString<n> HashK(BitString<n> x) {{
+            return K(x);
+        }}
+        {oracles}
+    }}
+    """
+
+
+@pytest.mark.parametrize(
+    "initialize, oracles",
+    [
+        # Before the call, H is overwritten with K, which HashK answers at cf.
+        ("H = K; field = H(cf);", ""),
+        # The rule is uniform: any write besides the sample declines.
+        ("field = H(cf);", "Void Reset() { H = K; }"),
+        ("field = H(cf);", "Void Reset() { H <- Function<BitString<n>, BitString<n>>; }"),
+    ],
+)
+def test_rf_written_outside_sample_not_simplified(
+    initialize: str, oracles: str
+) -> None:
+    assert not _fired(_written_game(initialize, oracles))
+
+
+def test_rf_written_only_by_sample_still_simplified() -> None:
+    assert _fired(
+        _written_game(
+            "field = H(cf);",
+            "Void Reset(Function<BitString<n>, BitString<n>> F) { K = F; }",
+        )
+    )

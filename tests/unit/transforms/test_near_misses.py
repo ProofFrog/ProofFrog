@@ -3,6 +3,7 @@ from sympy import Symbol
 from proof_frog.transforms._base import (
     NearMiss,
     PipelineContext,
+    TransformPass,
     deduplicate_near_misses,
 )
 from proof_frog import frog_parser, frog_ast
@@ -4064,3 +4065,131 @@ def test_fresh_input_near_miss_on_initialize_query_after_draw() -> None:
         "'Initialize' inserts '0b00' into 'seen' before calling 'H' on it, "
         "but Initialize calls it after drawing 'w'"
     ) in misses[0].reason
+
+
+_RF_FN = "Function<BitString<2>, BitString<2>>"
+
+
+def _rf_eligibility_misses(
+    transform: TransformPass, oracles: str, fields: str = "", initialize: str = ""
+) -> list[NearMiss]:
+    """Near misses of *transform* on a game whose Q queries H on a fresh
+    <-uniq[seen] draw (UniqueRF / FreshInput shape) and whose Initialize may
+    evaluate H at the challenge cf (ChallengeExclusion shape)."""
+    ctx = _make_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            {_RF_FN} H;
+            Set<BitString<2>> seen;
+            {fields}
+            Void Initialize() {{
+                H <- {_RF_FN};
+                {initialize}
+            }}
+            {oracles}
+            BitString<2> Q() {{
+                BitString<2> v <-uniq[seen] BitString<2>;
+                BitString<2> z = H(v);
+                return z;
+            }}
+        }}
+        """)
+    transform.apply(game, ctx)
+    return [nm for nm in ctx.near_misses if nm.transform_name == transform.name]
+
+
+@pytest.mark.parametrize(
+    "transform", [UniqueRFSimplification(), FreshInputRFToUniform()]
+)
+@pytest.mark.parametrize(
+    "oracles, fields, initialize, method",
+    [
+        (f"Void Reset({_RF_FN} F) {{ H = F; }}", "", "", "Reset"),
+        ("", f"{_RF_FN} K;", f"K <- {_RF_FN}; H = K;", "Initialize"),
+        (f"Void Reset() {{ H <- {_RF_FN}; }}", "", "", "Reset"),
+    ],
+)
+def test_rf_near_miss_on_write_outside_sample(
+    transform: TransformPass, oracles: str, fields: str, initialize: str, method: str
+) -> None:
+    """A write to H besides its sample makes H ineligible, and the near miss
+    names the writing method."""
+    misses = _rf_eligibility_misses(transform, oracles, fields, initialize)
+    written = [nm for nm in misses if "writes or rebinds 'H'" in nm.reason]
+    assert len(written) == 1
+    assert f"'{method}' writes or rebinds 'H'" in written[0].reason
+    # Fields are renamed in canonical diffs: no variable filter.  The near
+    # miss sits where the rewrite was declined.
+    assert written[0].variable is None
+    assert written[0].method == "Q"
+    assert written[0].suggestion is not None
+    assert "never assign it again" in written[0].suggestion
+
+
+@pytest.mark.parametrize(
+    "transform", [UniqueRFSimplification(), FreshInputRFToUniform()]
+)
+@pytest.mark.parametrize(
+    "oracles, fields, initialize",
+    [
+        (f"BitString<2> Hash(BitString<2> x) {{ {_RF_FN} K = H; return K(x); }}", "", ""),
+        ("BitString<2> Hash(BitString<2> x) { return K(x); }", f"{_RF_FN} K;", "K = H;"),
+        (f"{_RF_FN} Reveal() {{ return H; }}", "", ""),
+    ],
+)
+def test_rf_near_miss_on_escaping_value(
+    transform: TransformPass, oracles: str, fields: str, initialize: str
+) -> None:
+    misses = _rf_eligibility_misses(transform, oracles, fields, initialize)
+    escaped = [nm for nm in misses if "function value escapes" in nm.reason]
+    assert len(escaped) == 1
+    assert escaped[0].variable is None
+
+
+@pytest.mark.parametrize(
+    "transform", [UniqueRFSimplification(), FreshInputRFToUniform()]
+)
+def test_rf_no_eligibility_near_miss_on_direct_calls(transform: TransformPass) -> None:
+    """Writes to another Function field and direct calls to H report no
+    eligibility near miss."""
+    misses = _rf_eligibility_misses(
+        transform,
+        f"Void Reset({_RF_FN} F) {{ G = F; }} "
+        "BitString<2> Hash() { BitString<2> u <-uniq[seen] BitString<2>; "
+        "return H(u); }",
+        f"{_RF_FN} G;",
+    )
+    assert not [
+        nm
+        for nm in misses
+        if "writes or rebinds" in nm.reason or "function value escapes" in nm.reason
+    ]
+
+
+def test_unique_rf_near_miss_on_unanalyzed_call() -> None:
+    """A query to H left in an else-if condition is not checked against the
+    draws, so UniqueRF declines and names the call."""
+    misses = _rf_eligibility_misses(
+        UniqueRFSimplification(),
+        "Bool Probe(Bool b, BitString<2> x, BitString<2> y) "
+        "{ if (b) { return false; } else if (H(x) == y) { return true; } "
+        "return false; }",
+    )
+    assert len(misses) == 1
+    assert "the call 'H(x)' is not a standalone assignment" in misses[0].reason
+    assert misses[0].variable is None
+    assert misses[0].method == "Q"
+
+
+def test_challenge_exclusion_near_miss_on_rf_written_before_call() -> None:
+    misses = _rf_eligibility_misses(
+        _RC3_ChalExcl(),
+        "BitString<2>? Query(BitString<2> x) { if (x == cf) { return None; } "
+        "return H(x); }",
+        f"{_RF_FN} K; BitString<2> cf; BitString<2> y;",
+        f"K <- {_RF_FN}; cf <- BitString<2>; H = K; y = H(cf);",
+    )
+    written = [nm for nm in misses if "writes or rebinds 'H'" in nm.reason]
+    assert len(written) == 1
+    assert "'Initialize' writes or rebinds 'H'" in written[0].reason
+    assert written[0].method == "Initialize"

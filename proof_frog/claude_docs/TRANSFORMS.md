@@ -40,10 +40,12 @@ The core pipeline runs in a fixed-point loop until convergence.
 
 ### Random Functions (`random_functions.py`)
 
+The field-level RF rewrites (UniqueRFSimplification, FreshInputRFToUniform, ChallengeExclusionRFToUniform) treat a `Function` name `H` as a random function only when (a) `H` is a field sampled once by a top-level, untyped `H <- Function<...>;` in Initialize (no earlier return or read of `H`), or a sampled `let:` function (FreshInputRFToUniform only), and nothing else in the game writes or rebinds `H`: no assignment, sample or element write in any method, no second write in Initialize, no loop binder, declaration or method parameter of that name; and (b) `H`'s value never escapes: every occurrence is a direct call `H(...)` or a `.domain` read, never a copy `K = H`, an argument, a return value, or an element of a tuple, map or field. Either failure blocks the rewrite with a near miss naming the writing method or the escape (`_classify_sampled_function_fields`, `_rf_ineligibility`). A re-sample of `H` outside its one sample is refused too, although it would be sound.
+
 | Pass | Description |
 |---|---|
 | ExtractRFCalls | Extracts RF calls embedded in expressions into separate assignments, hoisting only a call evaluated as its statement starts (the statement's own expression, or an `if`'s first condition); a call in a branch or loop body is extracted inside that block. |
-| UniqueRFSimplification | Replaces `z = RF(r)` with `z <- R` when every RF input is drawn by `<-uniq` and not written before the call. |
+| UniqueRFSimplification | Replaces `z = RF(r)` with `z <- R` when every RF input is drawn by `<-uniq` and not written before the call. Every call to `RF` must be such a standalone assignment: a call left in an `else if` condition, a loop header or a larger expression (which ExtractRFCalls does not hoist) blocks the rewrite, since its input is unchecked. |
 | ChallengeExclusionRFToUniform | Replaces Initialize RF calls with uniform samples when oracle guards exclude the input. |
 | LocalRFToUniform | Replaces locally-sampled RFs called exactly once with uniform samples. |
 | DistinctConstRFToUniform | Replaces locally-sampled RFs called on pairwise-distinct literal constants with independent uniform samples. |

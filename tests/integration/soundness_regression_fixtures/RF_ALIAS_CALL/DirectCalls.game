@@ -1,0 +1,38 @@
+// Positive control: H is sampled once and only ever called directly, and
+// every query is a <-uniq[seen] draw, so H(v) is fresh in every execution.
+import 'P.primitive';
+
+Game Left(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> seen;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+    }
+    BitString<2> Hash() {
+        BitString<2> u <-uniq[seen] BitString<2>;
+        return H(u);
+    }
+    BitString<2> Fresh() {
+        BitString<2> v <-uniq[seen] BitString<2>;
+        return H(v);
+    }
+}
+
+Game Right(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> seen;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+    }
+    BitString<2> Hash() {
+        BitString<2> u <-uniq[seen] BitString<2>;
+        return H(u);
+    }
+    BitString<2> Fresh() {
+        BitString<2> v <-uniq[seen] BitString<2>;
+        BitString<2> z <- BitString<2>;
+        return z;
+    }
+}
+
+export as DirectCalls;

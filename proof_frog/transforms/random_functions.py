@@ -48,6 +48,8 @@ class _RFCallSite:
     rf_name: str
     arg_name: str
     unique_set_name: str
+    call: frog_ast.FuncCall | None = None
+    method: str | None = None
 
 
 @dataclass
@@ -68,6 +70,9 @@ class _RFAnalysis:
     call_sites: list[_RFCallSite] = field(default_factory=list)
     unique_set_name: str | None = None
     overwritten_draws: list[_OverwrittenDraw] = field(default_factory=list)
+    # A call the per-statement walk does not analyze (not a standalone
+    # ``z = RF(r)``), which made the RF ineligible.
+    unanalyzed_call: frog_ast.FuncCall | None = None
 
 
 def _get_unique_set_name(expr: frog_ast.Expression) -> str:
@@ -207,6 +212,30 @@ def _analyze_rf_eligibility(
         if rf_analysis.eligible and _rf_value_escapes(game, rf_name):
             rf_analysis.eligible = False
 
+    # Post-analysis: every call to the RF must be one of the analyzed call
+    # sites.  The walk only checks standalone ``z = RF(r)`` assignments; a call
+    # left in an else-if condition, a loop header or a larger expression (which
+    # ExtractRFCalls does not hoist) queries RF on an unchecked input, perhaps
+    # the very point a rewritten site was drawn at.
+    for rf_name, rf_analysis in analysis.items():
+        if not rf_analysis.eligible:
+            continue
+        calls = [
+            call
+            for method in game.methods
+            for call in _collect_rf_call_sites(method.block, rf_name)
+        ]
+        if len(calls) != len(rf_analysis.call_sites):
+            rf_analysis.eligible = False
+            rf_analysis.unanalyzed_call = next(
+                (
+                    call
+                    for call in calls
+                    if not any(call is site.call for site in rf_analysis.call_sites)
+                ),
+                None,
+            )
+
     # Post-analysis: reject RFs where any argument variable is used more
     # than once across call sites (RF is a function, so same input must
     # produce same output — replacing with independent samples is wrong).
@@ -330,6 +359,8 @@ def _analyze_block(
                     rf_name=rf_name,
                     arg_name=arg.name,
                     unique_set_name=set_name,
+                    call=statement.value,
+                    method=method,
                 )
             )
 
@@ -626,14 +657,29 @@ class UniqueRFSimplification(TransformPass):
         # and rewriting a unique-input evaluation of it to a fresh uniform draw
         # is unsound. Restrict to genuinely-sampled fields, mirroring
         # FreshInputRFToUniform's gate.
-        sampled_fields = _sampled_function_fields_in_init(game)
+        # A sampled field must also pass the shared eligibility rule: written
+        # only by its sample and never escaping into another name (F-019).
+        sampled_fields = _classify_sampled_function_fields(game)
         rf_types: dict[str, frog_ast.FunctionType] = {}
         for rf_field in game.fields:
-            if (
+            if not (
                 isinstance(rf_field.type, frog_ast.FunctionType)
                 and rf_field.name in sampled_fields
             ):
+                continue
+            problem = sampled_fields[rf_field.name]
+            if problem is None:
                 rf_types[rf_field.name] = rf_field.type
+                continue
+            for method in game.methods:
+                if _collect_rf_call_sites(method.block, rf_field.name):
+                    _report_ineligible_rf(
+                        ctx,
+                        "Unique RF Simplification",
+                        rf_field.name,
+                        problem,
+                        method.signature.name,
+                    )
 
         if not rf_types:
             return game
@@ -643,27 +689,35 @@ class UniqueRFSimplification(TransformPass):
             name: rf_types[name] for name, result in analysis.items() if result.eligible
         }
 
-        # Near-miss: an RF that has a guarded call but escapes via a copy /
-        # argument / alias cannot be soundly simplified (F-019).
         if ctx is not None:
             for rf_name, result in analysis.items():
-                if not result.eligible and _rf_value_escapes(game, rf_name):
+                if result.unanalyzed_call is None:
+                    continue
+                # Reported where the guarded calls it blocks are; fields are
+                # renamed in canonical diffs, so no variable filter.
+                for method_name in dict.fromkeys(
+                    site.method for site in result.call_sites
+                ):
                     ctx.near_misses.append(
                         NearMiss(
                             transform_name="Unique RF Simplification",
                             reason=(
-                                f"Random function '{rf_name}' not simplified: its "
-                                "function value escapes (copied, aliased, or passed "
-                                "as an argument), so an unguarded evaluation may "
-                                "survive"
+                                f"Random function '{rf_name}' not simplified: "
+                                f"the call '{result.unanalyzed_call}' is not a "
+                                f"standalone assignment 'z = {rf_name}(r)' (it "
+                                "is in an else-if condition, a loop header, "
+                                "or a larger expression), so it is not "
+                                "checked to query a fresh <-uniq draw and may "
+                                "repeat a rewritten query"
                             ),
-                            location=None,
+                            location=result.unanalyzed_call.origin,
                             suggestion=(
-                                "Avoid copying or passing the random function "
-                                "value; call it directly at each use site"
+                                "Evaluate the random function into a local "
+                                "before the if or loop, so every call is a "
+                                "standalone assignment"
                             ),
-                            variable=rf_name,
-                            method=None,
+                            variable=None,
+                            method=method_name,
                         )
                     )
             for rf_name, result in analysis.items():
@@ -1852,20 +1906,35 @@ class _FreshInputRFTransformer(BlockTransformer):
     injective, so a fresh leaf yields a fresh composite argument.
     """
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         rf_types: dict[str, frog_ast.FunctionType],
         ctx: PipelineContext | None = None,
         game: frog_ast.Game | None = None,
         field_names: set[str] | None = None,
+        ineligible: dict[str, _RFIneligibility] | None = None,
     ) -> None:
         self.rf_types = rf_types
+        # Sampled functions that fail the shared eligibility rule; a draw
+        # queried on one of them gets a near miss instead of a rewrite.
+        self.ineligible = ineligible if ineligible is not None else {}
         self.ctx = ctx
         # Original game and its field names, used by the soundness gate to
         # verify the <-uniq exclusion set provably covers the RF's domain.
         self.game = game
         self.field_names = field_names if field_names is not None else set()
         self._loop_depth = 0
+        # The method being transformed, for near-miss reports.
+        self._method: str | None = None
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        """Track the enclosing method for near-miss reports."""
+        saved = self._method
+        self._method = method.signature.name
+        try:
+            return self._transform_children(method)
+        finally:
+            self._method = saved
 
     def transform_numeric_for(  # type: ignore[override]
         self, node: frog_ast.NumericFor
@@ -1998,13 +2067,22 @@ class _FreshInputRFTransformer(BlockTransformer):
 
             # That single use must be as the sole argument to an RF call
             rf_call = _find_rf_call_of_var(
-                remaining, var_name, set(self.rf_types.keys())
+                remaining, var_name, set(self.rf_types) | set(self.ineligible)
             )
             if rf_call is None:
                 continue
 
             assert isinstance(rf_call.func, frog_ast.Variable)
             rf_name = rf_call.func.name
+            if rf_name in self.ineligible:
+                _report_ineligible_rf(
+                    self.ctx,
+                    "Fresh Input RF To Uniform",
+                    rf_name,
+                    self.ineligible[rf_name],
+                    self._method,
+                )
+                continue
 
             # Don't simplify if the RF call is inside a loop
             if _rf_call_in_loop(remaining, rf_name):
@@ -2088,36 +2166,47 @@ class FreshInputRFToUniform(TransformPass):
 
     name = "Fresh Input RF To Uniform"
 
-    @staticmethod
-    def _sampled_function_fields(game: frog_ast.Game) -> set[str]:
-        """Return names of Function fields that are sampled in Initialize."""
-        return _sampled_function_fields_in_init(game)
-
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         # Collect RF types from sampled game fields and sampled proof-level
         # Functions.  Only Functions that are explicitly sampled (via <-)
-        # are random functions; unsampled ones are known deterministic.
+        # are random functions; unsampled ones are known deterministic.  Each
+        # must also pass the shared eligibility rule (written only by its
+        # sample -- a sampled let: function nowhere in the game -- and never
+        # escaping into another name).
         rf_types: dict[str, frog_ast.FunctionType] = {}
-        sampled_fields = self._sampled_function_fields(game)
+        ineligible: dict[str, _RFIneligibility] = {}
+        sampled_fields = _classify_sampled_function_fields(game)
         for rf_field in game.fields:
             if (
                 isinstance(rf_field.type, frog_ast.FunctionType)
                 and rf_field.name in sampled_fields
             ):
-                rf_types[rf_field.name] = rf_field.type
+                problem = sampled_fields[rf_field.name]
+                if problem is None:
+                    rf_types[rf_field.name] = rf_field.type
+                else:
+                    ineligible[rf_field.name] = problem
         for entry in ctx.proof_let_types.type_map:
             if (
                 isinstance(entry.type, frog_ast.FunctionType)
                 and entry.name in ctx.sampled_let_names
             ):
-                rf_types[entry.name] = entry.type
+                problem = _rf_ineligibility(game, entry.name, None)
+                if problem is None:
+                    rf_types[entry.name] = entry.type
+                else:
+                    ineligible[entry.name] = problem
 
-        if not rf_types:
+        if not rf_types and not ineligible:
             return game
 
         field_names = {f.name for f in game.fields}
         return _FreshInputRFTransformer(
-            rf_types, ctx, game=game, field_names=field_names
+            rf_types,
+            ctx,
+            game=game,
+            field_names=field_names,
+            ineligible=ineligible,
         ).transform(game)
 
 
@@ -2542,22 +2631,127 @@ def _rf_args_structurally_differ(
     return _check_exprs(init_arg, oracle_arg)
 
 
-def _sampled_function_fields_in_init(
+# ---------------------------------------------------------------------------
+# Random-function eligibility (shared by the RF rewrite passes)
+# ---------------------------------------------------------------------------
+#
+# A rewrite such as ``H(v) -> z <- R`` reasons about every query ``H`` ever
+# answers, by finding the calls ``H(...)`` in the game.  That is sound only
+# when the name ``H`` denotes ONE function, sampled uniformly, throughout the
+# game, and every query to it is a call written ``H(...)``:
+#
+#   (a) ``H`` is written exactly once: by its ``H <- Function<...>`` sample
+#       (in Initialize for a field; a sampled ``let:`` function is sampled
+#       outside the game, so it is written nowhere in it).  Any other write --
+#       an assignment ``H = F`` in an oracle, a second assignment or sample in
+#       Initialize, an element write, a loop binder, declaration or method
+#       parameter rebinding the name -- can leave ``H`` holding a function the
+#       adversary knows or queries under another name.
+#   (b) ``H``'s value never escapes into another name: apart from direct calls
+#       ``H(...)`` and metadata reads ``H.domain``, any occurrence (a copy
+#       ``K = H``, an argument ``f(H)``, ``return H``, a tuple, map or field
+#       holding it) lets the adversary or the game query ``H`` through a name
+#       the call-site analysis does not follow.
+
+
+@dataclass(frozen=True)
+class _RFIneligibility:
+    """Why a sampled ``Function`` name is not a random function the RF
+    rewrites may reason about (see the eligibility rule above)."""
+
+    # "written": a write other than its one sample; "escapes": the value is
+    # used other than by a direct call or ``.domain``.
+    kind: str
+    method: str | None = None
+    origin: frog_ast.SourceOrigin | None = None
+
+    def reason(self, rf_name: str) -> str:
+        """A near-miss reason naming *rf_name*."""
+        if self.kind == "written":
+            where = f"'{self.method}'" if self.method is not None else "the game"
+            return (
+                f"Random function '{rf_name}' not simplified: {where} writes or "
+                f"rebinds '{rf_name}' besides its one '{rf_name} <- Function<...>' "
+                "sample, so after that write it need not be the sampled random "
+                "function the rewrite assumes"
+            )
+        return (
+            f"Random function '{rf_name}' not simplified: its function value "
+            "escapes (copied, aliased, returned, or passed as an argument), so "
+            "a query through another name is invisible to the call-site "
+            "analysis and an unguarded evaluation may survive"
+        )
+
+    def suggestion(self, rf_name: str) -> str:
+        """A near-miss suggestion naming *rf_name*."""
+        if self.kind == "written":
+            return (
+                f"Sample '{rf_name}' once in Initialize and never assign it "
+                "again; model a re-keyed or adversary-chosen function with a "
+                "separate field"
+            )
+        return (
+            "Avoid copying or passing the random function value; call it "
+            "directly at each use site"
+        )
+
+
+def _writes_or_rebinds_name(node: frog_ast.ASTNode, name: str) -> bool:
+    """True if *node* itself writes *name* (any l-value with base *name*) or
+    binds a new variable called *name* (loop binder, bare declaration)."""
+    if isinstance(node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)):
+        return lvalue_base_name(node.var) == name
+    if isinstance(node, frog_ast.NumericFor):
+        return node.name == name
+    if isinstance(node, frog_ast.GenericFor):
+        return node.var_name == name
+    if isinstance(node, frog_ast.VariableDeclaration):
+        return node.name == name
+    return False
+
+
+def _rf_ineligibility(
     game: frog_ast.Game,
-) -> set[str]:
-    """Return names of ``Function`` fields that are genuinely SAMPLED.
+    rf_name: str,
+    sample: frog_ast.Statement | None,
+) -> _RFIneligibility | None:
+    """Why *rf_name* fails the random-function eligibility rule above, or
+    ``None`` if it passes.
 
-    A function field is a *sampled random function* (re-samplable / ROM) only
-    when it is bound via ``H <- Function<...>`` in ``Initialize``.  A field
-    bound by an ordinary assignment ``H = F;`` (a known/standard-model
-    function) is NOT a random function, so the RF-to-uniform rewrite is invalid
-    for it (verdict vector (a)).
-
-    The sample must also hold wherever the field is read (F-349): no earlier
-    Initialize statement may return (the field would keep its initial value)
-    or read the field (it would see the initial value).
+    *sample* is the statement that samples *rf_name* in the game (its one
+    permitted write), or ``None`` for a function sampled outside the game.
     """
-    sampled: set[str] = set()
+    for method in game.methods:
+        if any(param.name == rf_name for param in method.signature.parameters):
+            return _RFIneligibility("written", method.signature.name, None)
+        write = SearchVisitor(
+            lambda n: n is not sample and _writes_or_rebinds_name(n, rf_name)
+        ).visit(method.block)
+        if write is not None:
+            return _RFIneligibility("written", method.signature.name, write.origin)
+    if _rf_value_escapes(game, rf_name):
+        return _RFIneligibility("escapes")
+    return None
+
+
+def _classify_sampled_function_fields(
+    game: frog_ast.Game,
+) -> dict[str, _RFIneligibility | None]:
+    """Map each name sampled as a ``Function`` in Initialize to why it fails
+    the random-function eligibility rule, or to ``None`` when it passes.
+
+    A function field is a *sampled random function* (ROM) only when it is
+    bound via ``H <- Function<...>`` in ``Initialize``.  A field bound by an
+    ordinary assignment ``H = F;`` (a known/standard-model function) is NOT a
+    random function, so the RF-to-uniform rewrite is invalid for it (verdict
+    vector (a)); such a field is absent from the map.
+
+    The sample must also hold wherever the field is read (F-349): it is a
+    top-level statement, no earlier Initialize statement may return (the
+    field would keep its initial value) or read the field (it would see the
+    initial value), and it is untyped (a typed sample declares a local).
+    """
+    sampled: dict[str, _RFIneligibility | None] = {}
     for method in game.methods:
         if method.signature.name != "Initialize":
             continue
@@ -2565,13 +2759,40 @@ def _sampled_function_fields_in_init(
         for idx, stmt in enumerate(stmts):
             if (
                 isinstance(stmt, frog_ast.Sample)
+                and stmt.the_type is None
                 and isinstance(stmt.var, frog_ast.Variable)
                 and isinstance(stmt.sampled_from, frog_ast.FunctionType)
                 and not may_return_before(stmts, idx)
                 and not any(_references_name(s, stmt.var.name) for s in stmts[:idx])
             ):
-                sampled.add(stmt.var.name)
+                sampled[stmt.var.name] = _rf_ineligibility(game, stmt.var.name, stmt)
     return sampled
+
+
+def _report_ineligible_rf(
+    ctx: PipelineContext | None,
+    transform_name: str,
+    rf_name: str,
+    problem: _RFIneligibility,
+    method: str | None,
+) -> None:
+    """Record a near miss for a sampled function the pass would otherwise
+    have treated as a random function, declining a rewrite in *method*."""
+    if ctx is None:
+        return
+    ctx.near_misses.append(
+        NearMiss(
+            transform_name=transform_name,
+            reason=problem.reason(rf_name),
+            location=problem.origin,
+            suggestion=problem.suggestion(rf_name),
+            # Canonical diffs rename fields, so a variable filter would hide
+            # this near miss; the method is where the rewrite was declined,
+            # not where the function is written.
+            variable=None,
+            method=method,
+        )
+    )
 
 
 def _references_name(node: frog_ast.ASTNode, name: str) -> bool:
@@ -2592,20 +2813,6 @@ def _count_rf_calls_in_block(block: frog_ast.Block, rf_name: str) -> int:
     assignments only) does not see.
     """
     return len(_collect_rf_call_sites(block, rf_name))
-
-
-def _rf_aliased_in_game(game: frog_ast.Game, rf_name: str) -> bool:
-    """True if the function field *rf_name* is copied into a local alias.
-
-    A local alias ``G = H;`` (where ``H`` is the RF) makes any subsequent
-    ``G(...)`` an RF query that the call-site scan -- which matches only by the
-    name ``rf_name`` -- cannot see (verdict vector (c)).  More generally, any
-    occurrence of ``Variable(rf_name)`` outside a direct call / property-access /
-    its own initialization lets the function value escape.  Reuses the existing
-    escape predicate so the soundness condition matches
-    :class:`UniqueRFSimplification`.
-    """
-    return _rf_value_escapes(game, rf_name)
 
 
 def _rf_arg_rewritten(
@@ -2735,7 +2942,9 @@ class ChallengeExclusionRFToUniformTransformer:
         # Vector (a): only genuinely SAMPLED random functions are eligible.  A
         # field bound by ``H = F;`` (a known function) denotes a fixed value the
         # adversary can recompute, so H(cf) is not an independent uniform draw.
-        sampled_fields = _sampled_function_fields_in_init(game)
+        # A sampled field must also pass the shared eligibility rule (written
+        # only by its sample, never escaping); that is checked per field below.
+        sampled_fields = _classify_sampled_function_fields(game)
         rf_fields: dict[str, frog_ast.FunctionType] = {}
         for f in game.fields:
             if isinstance(f.type, frog_ast.FunctionType):
@@ -2795,29 +3004,21 @@ class ChallengeExclusionRFToUniformTransformer:
             if len(init_calls) != 1:
                 continue
 
-            # Vector (c): if the RF value is copied into a local alias (or
-            # otherwise escapes), an aliased call ``G(cf)`` re-queries the init
-            # point but is invisible to the by-name call-site scan.  Decline.
-            if _rf_aliased_in_game(game, rf_name):
-                if ctx is not None:
-                    ctx.near_misses.append(
-                        NearMiss(
-                            transform_name="Challenge Exclusion RF To Uniform",
-                            reason=(
-                                f"Random function '{rf_name}' is copied, aliased, "
-                                "or passed as an argument; an RF query through the "
-                                "alias is invisible to the call-site scan and may "
-                                "re-query the challenge input"
-                            ),
-                            location=None,
-                            suggestion=(
-                                "Call the random function directly at every use "
-                                "site; do not bind it to another variable"
-                            ),
-                            variable=rf_name,
-                            method=None,
-                        )
-                    )
+            # Vector (c) and the shared eligibility rule: if the RF value is
+            # copied into an alias (or otherwise escapes), an aliased call
+            # ``G(cf)`` re-queries the init point but is invisible to the
+            # by-name call-site scan; if the field is written besides its
+            # sample (``H = K;`` before the call), H(cf) is not a random
+            # function's output.  Decline.
+            problem = sampled_fields[rf_name]
+            if problem is not None:
+                _report_ineligible_rf(
+                    ctx,
+                    "Challenge Exclusion RF To Uniform",
+                    rf_name,
+                    problem,
+                    "Initialize",
+                )
                 continue
 
             # Vector (d): the single standalone ``field = H(arg)`` must be the

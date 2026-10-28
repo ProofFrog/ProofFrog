@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'LocalAlias.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    LocalAlias(S);
+
+games:
+    LocalAlias(S).Left against LocalAlias(S).Adversary;
+    LocalAlias(S).Right against LocalAlias(S).Adversary;

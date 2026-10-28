@@ -1,0 +1,17 @@
+// Claims (a + 3) - b and (a - b) - 3 are interchangeable. They are not.
+import 'SumReorder.game';
+
+proof:
+
+let:
+    Int lambda;
+    Int n;
+
+assume:
+
+theorem:
+    SumReorder(lambda, n);
+
+games:
+    SumReorder(lambda, n).Left against SumReorder(lambda, n).Adversary;
+    SumReorder(lambda, n).Right against SumReorder(lambda, n).Adversary;

@@ -48,11 +48,11 @@ expression:
 
 	| <assoc=right> expression CARET expression #exponentiationExp
 
-	| expression TIMES expression #multiplyExp
-	| expression DIVIDE expression #divideExp
+	// `*` and `/` share one precedence level, as do `+` and `-`; each
+	// level is left-associative (a - b + c is (a - b) + c).
+	| expression op=(TIMES | DIVIDE) expression #multiplyDivideExp
 	| SUBTRACT expression #minusExp
-	| expression PLUS expression #addExp
-	| expression SUBTRACT expression #subtractExp
+	| expression op=(PLUS | SUBTRACT) expression #addSubtractExp
 	| expression EQUALSCOMPARE expression #equalsExp
 	| expression NOTEQUALS expression #notEqualsExp
 	| expression R_ANGLE expression # gtExp
@@ -103,10 +103,8 @@ type: type QUESTION #optionalType
 	;
 
 integerExpression
-	: integerExpression TIMES integerExpression
-	| integerExpression DIVIDE integerExpression
-	| integerExpression PLUS integerExpression
-	| integerExpression SUBTRACT integerExpression
+	: integerExpression op=(TIMES | DIVIDE) integerExpression
+	| integerExpression op=(PLUS | SUBTRACT) integerExpression
 	| lvalue
 	| INT
 	| BINARYNUM

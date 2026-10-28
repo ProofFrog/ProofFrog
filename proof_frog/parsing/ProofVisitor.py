@@ -34,18 +34,13 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#boundMultiply.
-    def visitBoundMultiply(self, ctx:ProofParser.BoundMultiplyContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#boundDivide.
-    def visitBoundDivide(self, ctx:ProofParser.BoundDivideContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by ProofParser#boundNegate.
     def visitBoundNegate(self, ctx:ProofParser.BoundNegateContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ProofParser#boundAddSubtract.
+    def visitBoundAddSubtract(self, ctx:ProofParser.BoundAddSubtractContext):
         return self.visitChildren(ctx)
 
 
@@ -59,8 +54,8 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#boundAdd.
-    def visitBoundAdd(self, ctx:ProofParser.BoundAddContext):
+    # Visit a parse tree produced by ProofParser#boundMultiplyDivide.
+    def visitBoundMultiplyDivide(self, ctx:ProofParser.BoundMultiplyDivideContext):
         return self.visitChildren(ctx)
 
 
@@ -76,11 +71,6 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#boundExponentiate.
     def visitBoundExponentiate(self, ctx:ProofParser.BoundExponentiateContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#boundSubtract.
-    def visitBoundSubtract(self, ctx:ProofParser.BoundSubtractContext):
         return self.visitChildren(ctx)
 
 
@@ -354,13 +344,13 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#addExp.
-    def visitAddExp(self, ctx:ProofParser.AddExpContext):
+    # Visit a parse tree produced by ProofParser#notEqualsExp.
+    def visitNotEqualsExp(self, ctx:ProofParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#notEqualsExp.
-    def visitNotEqualsExp(self, ctx:ProofParser.NotEqualsExpContext):
+    # Visit a parse tree produced by ProofParser#addSubtractExp.
+    def visitAddSubtractExp(self, ctx:ProofParser.AddSubtractExpContext):
         return self.visitChildren(ctx)
 
 
@@ -389,23 +379,18 @@ class ProofVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#subtractExp.
-    def visitSubtractExp(self, ctx:ProofParser.SubtractExpContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by ProofParser#equalsExp.
     def visitEqualsExp(self, ctx:ProofParser.EqualsExpContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#multiplyExp.
-    def visitMultiplyExp(self, ctx:ProofParser.MultiplyExpContext):
+    # Visit a parse tree produced by ProofParser#subsetsExp.
+    def visitSubsetsExp(self, ctx:ProofParser.SubsetsExpContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by ProofParser#subsetsExp.
-    def visitSubsetsExp(self, ctx:ProofParser.SubsetsExpContext):
+    # Visit a parse tree produced by ProofParser#multiplyDivideExp.
+    def visitMultiplyDivideExp(self, ctx:ProofParser.MultiplyDivideExpContext):
         return self.visitChildren(ctx)
 
 
@@ -466,11 +451,6 @@ class ProofVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ProofParser#setMinusExp.
     def visitSetMinusExp(self, ctx:ProofParser.SetMinusExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by ProofParser#divideExp.
-    def visitDivideExp(self, ctx:ProofParser.DivideExpContext):
         return self.visitChildren(ctx)
 
 

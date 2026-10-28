@@ -189,13 +189,13 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#addExp.
-    def visitAddExp(self, ctx:SchemeParser.AddExpContext):
+    # Visit a parse tree produced by SchemeParser#notEqualsExp.
+    def visitNotEqualsExp(self, ctx:SchemeParser.NotEqualsExpContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#notEqualsExp.
-    def visitNotEqualsExp(self, ctx:SchemeParser.NotEqualsExpContext):
+    # Visit a parse tree produced by SchemeParser#addSubtractExp.
+    def visitAddSubtractExp(self, ctx:SchemeParser.AddSubtractExpContext):
         return self.visitChildren(ctx)
 
 
@@ -224,23 +224,18 @@ class SchemeVisitor(ParseTreeVisitor):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#subtractExp.
-    def visitSubtractExp(self, ctx:SchemeParser.SubtractExpContext):
-        return self.visitChildren(ctx)
-
-
     # Visit a parse tree produced by SchemeParser#equalsExp.
     def visitEqualsExp(self, ctx:SchemeParser.EqualsExpContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#multiplyExp.
-    def visitMultiplyExp(self, ctx:SchemeParser.MultiplyExpContext):
+    # Visit a parse tree produced by SchemeParser#subsetsExp.
+    def visitSubsetsExp(self, ctx:SchemeParser.SubsetsExpContext):
         return self.visitChildren(ctx)
 
 
-    # Visit a parse tree produced by SchemeParser#subsetsExp.
-    def visitSubsetsExp(self, ctx:SchemeParser.SubsetsExpContext):
+    # Visit a parse tree produced by SchemeParser#multiplyDivideExp.
+    def visitMultiplyDivideExp(self, ctx:SchemeParser.MultiplyDivideExpContext):
         return self.visitChildren(ctx)
 
 
@@ -301,11 +296,6 @@ class SchemeVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by SchemeParser#setMinusExp.
     def visitSetMinusExp(self, ctx:SchemeParser.SetMinusExpContext):
-        return self.visitChildren(ctx)
-
-
-    # Visit a parse tree produced by SchemeParser#divideExp.
-    def visitDivideExp(self, ctx:SchemeParser.DivideExpContext):
         return self.visitChildren(ctx)
 
 

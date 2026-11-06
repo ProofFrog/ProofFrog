@@ -1334,10 +1334,20 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             self.stack.append(None)
             return
 
-        if operation.operator == frog_ast.UnaryOperators.NOT:
-            self.stack.append(z3.Not(val))
-        else:
-            self.stack.append(-val)
+        try:
+            if operation.operator == frog_ast.UnaryOperators.NOT:
+                self.stack.append(z3.Not(val))
+            else:
+                self.stack.append(-val)
+        except (z3.Z3Exception, TypeError):
+            # The operand has a sort the operator does not accept: a ModInt
+            # (modelled as an opaque constant, never as an integer) under
+            # `-`, or a non-Bool under `!`. Fall back exactly as
+            # leave_binary_operation does instead of crashing.
+            if self.opaque_func_call_fallback:
+                self.stack.append(self._intern_opaque(operation))
+            else:
+                self.stack.append(None)
 
     def leave_binary_operation(self, operation: frog_ast.BinaryOperation) -> None:
         operators = {

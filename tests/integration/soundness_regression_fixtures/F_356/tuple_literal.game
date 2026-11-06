@@ -1,0 +1,19 @@
+// F-356: the tuple literal `[b, b]` stored into a [ModInt<q>, Int] slot
+// reduces its first component modulo q. With q = 1 and b = 1, Left returns
+// true and Right false. The engine used to read t[0] as b (Inline Local
+// Tuple Literal).
+Game Left(Int q) {
+    Bool O(Int b) {
+        [ModInt<q>, Int] t = [b, b];
+        ModInt<q> z = 0;
+        return t[0] == z;
+    }
+}
+
+Game Right(Int q) {
+    Bool O(Int b) {
+        return b == 0;
+    }
+}
+
+export as TupleLiteral;

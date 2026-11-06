@@ -867,6 +867,55 @@ def _replace_returns_in_if(
     return frog_ast.IfStatement(list(if_stmt.conditions), new_blocks)
 
 
+def _bind_returns(
+    block: frog_ast.Block,
+    return_type: frog_ast.Type,
+    name: str,
+    counter: list[int],
+) -> frog_ast.Block:
+    """Rewrite every ``return e;`` in *block* (at any depth) into
+    ``T r = e; return r;`` with *return_type* ``T`` and a fresh ``r``.
+
+    The inliner replaces a call by the expression its callee returns; when
+    the return type converts the returned value (an ``Int`` returned as a
+    ``ModInt<q>`` is reduced modulo ``q``), the typed temporary keeps that
+    conversion at the call site (F-356).
+    """
+    new_statements: list[frog_ast.Statement] = []
+    for statement in block.statements:
+        if (
+            isinstance(statement, frog_ast.ReturnStatement)
+            and statement.expression is not None
+        ):
+            temp = f"{name}{counter[0]}"
+            counter[0] += 1
+            new_statements.append(
+                frog_ast.Assignment(
+                    copy.deepcopy(return_type),
+                    frog_ast.Variable(temp),
+                    statement.expression,
+                )
+            )
+            new_statements.append(frog_ast.ReturnStatement(frog_ast.Variable(temp)))
+        elif isinstance(statement, frog_ast.IfStatement):
+            new_statements.append(
+                frog_ast.IfStatement(
+                    list(statement.conditions),
+                    [
+                        _bind_returns(inner, return_type, name, counter)
+                        for inner in statement.blocks
+                    ],
+                )
+            )
+        elif isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
+            loop = copy.copy(statement)
+            loop.block = _bind_returns(statement.block, return_type, name, counter)
+            new_statements.append(loop)
+        else:
+            new_statements.append(statement)
+    return frog_ast.Block(new_statements)
+
+
 class InlineTransformer(Transformer):
     def __init__(self, method_lookup: Dict[Tuple[str, str], frog_ast.Method]) -> None:
         self.blocks: list[frog_ast.Block] = []
@@ -957,14 +1006,41 @@ class InlineTransformer(Transformer):
                 called_method = SubstitutionTransformer(ast_map).transform(
                     called_method
                 )
-        transformed_method = InstantiationTransformer(
-            dict(
-                zip(
-                    (param.name for param in called_method.signature.parameters),
-                    (arg for arg in exp.args),
+        # F-356: a parameter (or return) type that contains a ModInt converts
+        # an Int argument (returned value) by reducing it modulo the modulus.
+        # Substituting the argument for the parameter, or the returned
+        # expression for the call, would drop that reduction, so such a value
+        # is bound to a variable of the declared type instead; the pipeline
+        # forwards the binding when it provably keeps its value.
+        fresh_prefix = exp.func.the_object.name + "." + exp.func.name + "@"
+        fresh_suffix = str(self.statement_index)
+        bindings: list[frog_ast.Statement] = []
+        arguments: frog_ast.Namespace = {}
+        for param, arg in zip(called_method.signature.parameters, exp.args):
+            if type_contains_mod_int(param.type):
+                bound = fresh_prefix + param.name + fresh_suffix
+                bindings.append(
+                    frog_ast.Assignment(
+                        copy.deepcopy(param.type),
+                        frog_ast.Variable(bound),
+                        copy.deepcopy(arg),
+                    )
                 )
+                arguments[param.name] = frog_ast.Variable(bound)
+            else:
+                arguments[param.name] = arg
+        transformed_method = InstantiationTransformer(arguments).transform(
+            called_method
+        )
+        return_type = called_method.signature.return_type
+        if type_contains_mod_int(return_type):
+            transformed_method = copy.copy(transformed_method)
+            transformed_method.block = _bind_returns(
+                transformed_method.block,
+                return_type,
+                fresh_prefix + "return" + fresh_suffix + "_",
+                [0],
             )
-        ).transform(called_method)
 
         block_to_transform = self.blocks.pop()
 
@@ -987,7 +1063,7 @@ class InlineTransformer(Transformer):
         # branches so that normalized[:-1] contains no returns.
         normalized = _normalize_early_returns(list(transformed_method.block.statements))
 
-        statements_so_far += list(normalized[:-1])
+        statements_so_far += bindings + list(normalized[:-1])
 
         final_statement = normalized[-1]
 
@@ -1700,6 +1776,238 @@ def build_method_type_map(
     if proof_let_types is not None:
         result = result + proof_let_types
     return result
+
+
+def type_contains_mod_int(the_type: Optional[frog_ast.ASTNode]) -> bool:
+    """True if a value of *the_type* has a ``ModInt`` part (the type itself,
+    or an element, key, value, component or range of it).
+
+    These are the types an ``Int`` value can be stored into with a change of
+    value: ``ModInt<q> x = b;`` with ``b : Int`` stores ``b`` reduced modulo
+    ``q`` (and likewise for an element of a ``Set<ModInt<q>>``, a component
+    of a tuple, and so on). Every other coercion the type checker accepts
+    (``T`` into ``T?``, a subset type into its superset) keeps the value.
+    """
+    if the_type is None:
+        return False
+    return (
+        SearchVisitor[frog_ast.ASTNode](
+            lambda node: isinstance(node, frog_ast.ModIntType)
+        ).visit(the_type)
+        is not None
+    )
+
+
+_COMPARISON_OPERATORS = frozenset(
+    {
+        frog_ast.BinaryOperators.EQUALS,
+        frog_ast.BinaryOperators.NOTEQUALS,
+        frog_ast.BinaryOperators.LT,
+        frog_ast.BinaryOperators.GT,
+        frog_ast.BinaryOperators.LEQ,
+        frog_ast.BinaryOperators.GEQ,
+        frog_ast.BinaryOperators.AND,
+        frog_ast.BinaryOperators.IN,
+        frog_ast.BinaryOperators.SUBSETS,
+    }
+)
+
+_ARITHMETIC_OPERATORS = frozenset(
+    {
+        frog_ast.BinaryOperators.ADD,
+        frog_ast.BinaryOperators.SUBTRACT,
+        frog_ast.BinaryOperators.MULTIPLY,
+        frog_ast.BinaryOperators.DIVIDE,
+    }
+)
+
+
+def _member_type(
+    container: Optional[frog_ast.Type], name: str
+) -> Optional[frog_ast.Type]:
+    """Type of ``container.name`` for the built-in members of a map, a group
+    and a sampled function, or None."""
+    if isinstance(container, frog_ast.MapType):
+        if name == "keys":
+            return frog_ast.SetType(container.key_type)
+        if name == "values":
+            return frog_ast.SetType(container.value_type)
+        if name == "entries":
+            return frog_ast.SetType(
+                frog_ast.ProductType([container.key_type, container.value_type])
+            )
+    if isinstance(container, frog_ast.FunctionType) and name == "domain":
+        return frog_ast.SetType(container.domain_type)
+    return None
+
+
+def expression_type(  # pylint: disable=too-many-return-statements,too-many-branches
+    expr: frog_ast.Expression,
+    type_map: NameTypeMap,
+    proof_namespace: Optional[frog_ast.Namespace] = None,
+) -> Optional[frog_ast.Type]:
+    """Infer the type of *expr* from the declarations in *type_map*.
+
+    Returns None when the type cannot be determined, including for an
+    operation the type checker would refuse (``Int`` and ``ModInt`` operands
+    mixed), so a caller deciding soundness must treat None as unknown. The
+    map must be scoped to the method *expr* sits in (see
+    :func:`build_method_type_map`).
+    """
+    # pylint: disable=too-many-statements
+    if isinstance(expr, frog_ast.Variable):
+        return type_map.get(expr.name)
+    if isinstance(expr, frog_ast.Integer):
+        return frog_ast.IntType()
+    if isinstance(expr, frog_ast.Boolean):
+        return frog_ast.BoolType()
+    if isinstance(expr, frog_ast.BinaryNum):
+        return frog_ast.BitStringType(frog_ast.Integer(expr.length))
+    if isinstance(expr, frog_ast.BitStringLiteral):
+        return frog_ast.BitStringType(expr.length)
+    if isinstance(expr, frog_ast.GroupOrder):
+        return frog_ast.IntType()
+    if isinstance(expr, frog_ast.GroupGenerator):
+        return frog_ast.GroupElemType(expr.group)
+    if isinstance(expr, frog_ast.UnaryOperation):
+        if expr.operator == frog_ast.UnaryOperators.NOT:
+            return frog_ast.BoolType()
+        if expr.operator == frog_ast.UnaryOperators.SIZE:
+            return frog_ast.IntType()
+        return expression_type(expr.expression, type_map, proof_namespace)
+    if isinstance(expr, frog_ast.BinaryOperation):
+        if expr.operator in _COMPARISON_OPERATORS:
+            return frog_ast.BoolType()
+        left = expression_type(expr.left_expression, type_map, proof_namespace)
+        if expr.operator in (
+            frog_ast.BinaryOperators.UNION,
+            frog_ast.BinaryOperators.SETMINUS,
+        ):
+            return left
+        right = expression_type(expr.right_expression, type_map, proof_namespace)
+        if left is None or right is None:
+            return None
+        if expr.operator == frog_ast.BinaryOperators.OR:
+            if isinstance(left, frog_ast.BoolType) and isinstance(
+                right, frog_ast.BoolType
+            ):
+                return left
+            if isinstance(left, frog_ast.BitStringType) and isinstance(
+                right, frog_ast.BitStringType
+            ):
+                return frog_ast.BitStringType()
+            return None
+        if expr.operator == frog_ast.BinaryOperators.EXPONENTIATE:
+            # A ModInt or GroupElem base keeps its type; Int ^ Int is Int.
+            if isinstance(left, frog_ast.IntType) and not isinstance(
+                right, frog_ast.IntType
+            ):
+                return None
+            return left
+        if expr.operator in _ARITHMETIC_OPERATORS:
+            # Both operands have one kind: Int with Int, ModInt with ModInt,
+            # and so on. A mix only arises in a rewritten game and has no
+            # type.
+            if isinstance(left, frog_ast.IntType) != isinstance(
+                right, frog_ast.IntType
+            ):
+                return None
+            if isinstance(left, frog_ast.ModIntType) != isinstance(
+                right, frog_ast.ModIntType
+            ):
+                return None
+            return left
+        return None
+    if isinstance(expr, frog_ast.Tuple):
+        component_types: list[frog_ast.Type] = []
+        for value in expr.values:
+            value_type = expression_type(value, type_map, proof_namespace)
+            if value_type is None:
+                return None
+            component_types.append(value_type)
+        return frog_ast.ProductType(component_types)
+    if isinstance(expr, frog_ast.Set):
+        element_types = [
+            expression_type(element, type_map, proof_namespace)
+            for element in expr.elements
+        ]
+        if not element_types or any(t is None for t in element_types):
+            return None
+        if any(t != element_types[0] for t in element_types):
+            return None
+        return frog_ast.SetType(element_types[0])
+    if isinstance(expr, frog_ast.ArrayAccess):
+        base = expression_type(expr.the_array, type_map, proof_namespace)
+        if isinstance(base, frog_ast.MapType):
+            return base.value_type
+        if isinstance(base, frog_ast.ArrayType):
+            return base.element_type
+        if isinstance(base, frog_ast.ProductType) and isinstance(
+            expr.index, frog_ast.Integer
+        ):
+            if 0 <= expr.index.num < len(base.types):
+                return base.types[expr.index.num]
+        if isinstance(base, frog_ast.BitStringType):
+            return frog_ast.BitStringType(frog_ast.Integer(1))
+        return None
+    if isinstance(expr, frog_ast.Slice):
+        return frog_ast.BitStringType()
+    if isinstance(expr, frog_ast.FieldAccess):
+        if isinstance(expr.the_object, frog_ast.Variable):
+            object_type = type_map.get(expr.the_object.name)
+            if isinstance(object_type, frog_ast.GroupType):
+                if expr.name == "order":
+                    return frog_ast.IntType()
+                if expr.name in ("generator", "identity"):
+                    return frog_ast.GroupElemType(expr.the_object)
+                return None
+            member = _member_type(object_type, expr.name)
+            if member is not None:
+                return member
+            instance = (proof_namespace or {}).get(expr.the_object.name)
+            if isinstance(instance, (frog_ast.Scheme, frog_ast.Primitive)):
+                for field in instance.fields:
+                    if field.name == expr.name and not isinstance(
+                        field.type, frog_ast.SetType
+                    ):
+                        return field.type
+            return None
+        return _member_type(
+            expression_type(expr.the_object, type_map, proof_namespace), expr.name
+        )
+    if isinstance(expr, frog_ast.FuncCall):
+        if isinstance(expr.func, frog_ast.Variable):
+            func_type = type_map.get(expr.func.name)
+            if isinstance(func_type, frog_ast.FunctionType):
+                return func_type.range_type
+            return None
+        if isinstance(expr.func, frog_ast.FieldAccess) and isinstance(
+            expr.func.the_object, frog_ast.Variable
+        ):
+            instance = (proof_namespace or {}).get(expr.func.the_object.name)
+            if isinstance(instance, (frog_ast.Scheme, frog_ast.Primitive)):
+                for method in instance.methods:
+                    signature = (
+                        method.signature
+                        if isinstance(method, frog_ast.Method)
+                        else method
+                    )
+                    if signature.name == expr.func.name:
+                        return _resolve_member_type(instance, signature.return_type)
+        return None
+    return None
+
+
+def _resolve_member_type(
+    instance: frog_ast.Scheme | frog_ast.Primitive, the_type: frog_ast.Type
+) -> frog_ast.Type:
+    """Resolve a type name declared by *instance* (``Set Key = ModInt<q>;``)
+    to the type it stands for; any other type is returned unchanged."""
+    if isinstance(the_type, frog_ast.Variable):
+        for field in instance.fields:
+            if field.name == the_type.name and isinstance(field.value, frog_ast.Type):
+                return field.value
+    return the_type
 
 
 _MethodScopedT = TypeVar("_MethodScopedT", bound="MethodScopedTypeMapMixin")

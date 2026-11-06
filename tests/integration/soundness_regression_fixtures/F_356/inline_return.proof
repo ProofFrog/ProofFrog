@@ -1,0 +1,20 @@
+// F-356: claims TestPair.Left and TestPair.Right are interchangeable for
+// RetTester. They are not: Reduce returns b reduced modulo q. The method
+// inliner used to replace the call by the returned expression b.
+
+import 'Tester.primitive';
+import 'RetTester.scheme';
+import 'TestPair.game';
+
+proof:
+
+let:
+    Int q;
+    Tester T = RetTester(q);
+
+theorem:
+    TestPair(T);
+
+games:
+    TestPair(T).Left against TestPair(T).Adversary;
+    TestPair(T).Right against TestPair(T).Adversary;

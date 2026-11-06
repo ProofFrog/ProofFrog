@@ -1,0 +1,21 @@
+// Positive control for F-356: Left runs the scheme's test (b reduced
+// modulo q, compared with 0, for ArgTester(q) and RetTester(q)); Right
+// writes the same conversion out. The games are interchangeable, and both
+// canonicalize to the kept conversion `ModInt<q> v = b; return v == 0;`.
+import 'Tester.primitive';
+
+Game Left(Tester T, Int q) {
+    Bool O(Int b) {
+        return T.Test(b);
+    }
+}
+
+Game Right(Tester T, Int q) {
+    Bool O(Int b) {
+        ModInt<q> y = b;
+        ModInt<q> w = 0;
+        return w == y;
+    }
+}
+
+export as KeptPair;

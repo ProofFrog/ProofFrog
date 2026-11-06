@@ -1,0 +1,16 @@
+// F-356: claims CmpField.Left and CmpField.Right are interchangeable. They
+// are not: the field f holds q reduced modulo q (see cmp_field.game).
+
+import 'cmp_field.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    CmpField(q);
+
+games:
+    CmpField(q).Left against CmpField(q).Adversary;
+    CmpField(q).Right against CmpField(q).Adversary;

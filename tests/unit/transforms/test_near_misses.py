@@ -157,6 +157,25 @@ def test_xor_near_miss_variable_used_twice():
     assert nm.variable == "u"
 
 
+def test_inline_near_miss_on_int_stored_into_modint():
+    """F-356: a declaration that reduces an Int into a ModInt is not inlined,
+    and the near miss says why."""
+    game = frog_parser.parse_game(
+        "Game T(Int q) {\n"
+        "    Bool O(Int b, ModInt<q> a) {\n"
+        "        ModInt<q> x = b + 1;\n"
+        "        return x == a;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    assert InlineSingleUseVariable().apply(game, ctx) == game
+    misses = [nm for nm in ctx.near_misses if nm.variable == "x"]
+    assert len(misses) == 1
+    assert misses[0].transform_name == "Inline Single-Use Variable"
+    assert "ModInt" in misses[0].reason
+
+
 def test_xor_no_near_miss_when_no_sample():
     """No near-miss when there's no uniform sample at all."""
     game = _make_game("return m;")

@@ -1,0 +1,20 @@
+// F-356: the plain assignment `x = b;` to a ModInt<q> local reduces b
+// modulo q like a declaration does. With q = 1 and b = 1, Left returns true
+// and Right false. The engine used to merge the assignment into the
+// declaration (Collapse Assignment) and then read x as b.
+Game Left(Int q) {
+    Bool O(Int b) {
+        ModInt<q> x = 0;
+        x = b;
+        ModInt<q> z = 0;
+        return x == z;
+    }
+}
+
+Game Right(Int q) {
+    Bool O(Int b) {
+        return b == 0;
+    }
+}
+
+export as Reassign;

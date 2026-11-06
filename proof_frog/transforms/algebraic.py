@@ -37,6 +37,7 @@ from ._base import (
     may_return_before,
     method_bound_names,
 )
+from ._coercion import coercing_store_names_for, note_coercing_store
 from ._definedness import method_binder_counts
 from ._ordering import node_sort_key
 from ._wrappers import GroupExponentWrapper, WrapperShape, _GroupExpShape
@@ -1723,6 +1724,9 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         self._bound_names: set[str] = set()
         self._in_initialize = False
         self._type_map = NameTypeMap()
+        # F-356: names some store converts into a ModInt; such a variable
+        # holds its RHS reduced modulo the modulus, not the RHS.
+        self._coercing = coercing_store_names_for(game, ctx)
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
         self._bound_names = method_bound_names(method)
@@ -1736,6 +1740,14 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         )
         for name in reassigned:
             bindings.pop(name, None)
+        for name in sorted(set(bindings) & self._coercing):
+            bindings.pop(name)
+            note_coercing_store(
+                self.ctx,
+                "Injective Equality Simplify",
+                name,
+                method=method.signature.name,
+            )
         # Cast: predicate guarantees FuncCall values.
         funccall_bindings: dict[str, frog_ast.FuncCall] = {
             n: v for n, v in bindings.items() if isinstance(v, frog_ast.FuncCall)
@@ -2030,6 +2042,11 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         name = expr.name
         fld = next((f for f in self.game.fields if f.name == name), None)
         if fld is None:
+            return expr
+        if name in self._coercing:
+            note_coercing_store(
+                self.ctx, "Injective Equality Simplify", name, method="Initialize"
+            )
             return expr
         init = next(
             (m for m in self.game.methods if m.signature.name == "Initialize"),

@@ -39,6 +39,7 @@ from ._base import (
     has_nondeterministic_call,
     may_return_before,
 )
+from ._coercion import coercing_store_names_for
 
 
 @dataclass
@@ -2340,12 +2341,19 @@ def _find_challenge_guard(
 
 def _build_local_assignments(
     block: frog_ast.Block,
+    coercing: frozenset[str] = frozenset(),
 ) -> dict[str, frog_ast.Expression]:
-    """Build a map of ``{var_name: rhs}`` for simple local assignments."""
+    """Build a map of ``{var_name: rhs}`` for simple local assignments.
+
+    A name in *coercing* is left out: a store converts an Int into its
+    ModInt type, so it holds the RHS reduced modulo the modulus (F-356).
+    """
     result: dict[str, frog_ast.Expression] = {}
     for stmt in block.statements:
-        if isinstance(stmt, frog_ast.Assignment) and isinstance(
-            stmt.var, frog_ast.Variable
+        if (
+            isinstance(stmt, frog_ast.Assignment)
+            and isinstance(stmt.var, frog_ast.Variable)
+            and stmt.var.name not in coercing
         ):
             result[stmt.var.name] = stmt.value
     return result
@@ -2939,6 +2947,7 @@ class ChallengeExclusionRFToUniformTransformer:
             proof_namespace = {}
         field_names = [f.name for f in game.fields]
         field_types: dict[str, frog_ast.Type] = {f.name: f.type for f in game.fields}
+        coercing = coercing_store_names_for(game, ctx)
         # Vector (a): only genuinely SAMPLED random functions are eligible.  A
         # field bound by ``H = F;`` (a known function) denotes a fixed value the
         # adversary can recompute, so H(cf) is not an independent uniform draw.
@@ -3055,7 +3064,7 @@ class ChallengeExclusionRFToUniformTransformer:
             # Resolve local variable aliases in the Init RF arg so that
             # intermediate cast variables (e.g. bct2 = ct2Star) are traced
             # back to their field references.
-            init_aliases = _build_local_assignments(init_method.block)
+            init_aliases = _build_local_assignments(init_method.block, coercing)
             field_name_set = set(field_names)
             resolved_init_arg = _resolve_var_aliases(
                 init_arg, init_aliases, field_name_set
@@ -3229,7 +3238,7 @@ class ChallengeExclusionRFToUniformTransformer:
                 # Stop at field names AND guard variables so that guard-
                 # constrained variables (like ct2) are preserved as leaves
                 # for _check_leaf_pair to recognize.
-                oracle_aliases = _build_local_assignments(oracle_method.block)
+                oracle_aliases = _build_local_assignments(oracle_method.block, coercing)
                 oracle_stop = field_name_set | guard_lhs_vars
 
                 for call in all_post_calls:

@@ -1,0 +1,16 @@
+// F-356: claims TupleLiteral.Left and TupleLiteral.Right are
+// interchangeable. They are not (see tuple_literal.game).
+
+import 'tuple_literal.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    TupleLiteral(q);
+
+games:
+    TupleLiteral(q).Left against TupleLiteral(q).Adversary;
+    TupleLiteral(q).Right against TupleLiteral(q).Adversary;

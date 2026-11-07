@@ -34,6 +34,7 @@ from ._base import (
     NearMiss,
     has_nondeterministic_call,
     may_return_before,
+    method_bound_names,
 )
 
 # ---------------------------------------------------------------------------
@@ -2684,3 +2685,84 @@ class SplitUniformSamples(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return SplitUniformSampleTransformer(ctx.variables, ctx).transform(game)
+
+
+class _IndexToComponent(Transformer):
+    """Replaces ``v[i]`` (constant ``i``) by the component variable ``names[i]``."""
+
+    def __init__(self, var_name: str, names: list[str]) -> None:
+        self.var_name = var_name
+        self.names = names
+
+    def transform_ast_node(self, exp: frog_ast.ASTNode) -> Optional[frog_ast.ASTNode]:
+        if (
+            isinstance(exp, frog_ast.ArrayAccess)
+            and isinstance(exp.the_array, frog_ast.Variable)
+            and exp.the_array.name == self.var_name
+            and isinstance(exp.index, frog_ast.Integer)
+            and 0 <= exp.index.num < len(self.names)
+        ):
+            return frog_ast.Variable(self.names[exp.index.num])
+        return None
+
+
+class SplitProductSampleTransformer(BlockTransformer):
+    """Splits ``[T0, ..., Tn] v <- [T0, ..., Tn];`` into one sample per
+    component when every later use of ``v`` is ``v[i]`` with a constant
+    ``i`` and ``v`` is never written again.
+
+    Sound: the uniform distribution on a product of types is the product of
+    the uniform distributions on the components, so the components of one
+    product draw are independent uniform draws.
+    """
+
+    def __init__(self, bound_names: set[str]) -> None:
+        self.bound_names = bound_names
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        statements = list(block.statements)
+        for index, statement in enumerate(statements):
+            if not (
+                isinstance(statement, frog_ast.Sample)
+                and isinstance(statement.var, frog_ast.Variable)
+                and isinstance(statement.the_type, frog_ast.ProductType)
+            ):
+                continue
+            # The domain is the product type itself (a ProductType, or a
+            # Tuple of types when written in the source), never a value.
+            components = frog_ast.tuple_literal_values(statement.sampled_from)
+            if components is None or list(components) != list(statement.the_type.types):
+                continue
+            name = statement.var.name
+            types = list(statement.the_type.types)
+            names = [f"{name}@{i}" for i in range(len(types))]
+            if any(n in self.bound_names for n in names):
+                continue
+            rest = frog_ast.Block(statements[index + 1 :])
+            if reassigns_or_rebinds({name}, rest):
+                continue
+            new_rest = _IndexToComponent(name, names).transform(rest)
+            if name in referenced_variable_names(new_rest):
+                continue
+            samples: list[frog_ast.Statement] = [
+                frog_ast.Sample(
+                    copy.deepcopy(component),
+                    frog_ast.Variable(n),
+                    cast(frog_ast.Expression, copy.deepcopy(component)),
+                )
+                for n, component in zip(names, types)
+            ]
+            return self.transform_block(
+                frog_ast.Block(statements[:index] + samples + list(new_rest.statements))
+            )
+        return frog_ast.Block([self.transform(statement) for statement in statements])
+
+
+class SplitProductSample(TransformPass):
+    name = "Split Product Sample"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        bound: set[str] = set()
+        for method in game.methods:
+            bound |= method_bound_names(method)
+        return SplitProductSampleTransformer(bound).transform(game)

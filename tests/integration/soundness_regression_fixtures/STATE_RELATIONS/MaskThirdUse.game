@@ -1,0 +1,31 @@
+// A uniform u used twice inside s + u and once on its own (in g^u). Left
+// keeps g^(second - s) == first, Right has g^second == first: they differ
+// whenever s != 0. Replacing both s + u by u (one-time pad through a
+// repeated combination) is unsound here because of the third use.
+Game Left(Group G) {
+    ModInt<G.order> s;
+
+    Void Initialize() {
+        s <- ModInt<G.order>;
+    }
+
+    [GroupElem<G>, ModInt<G.order>, ModInt<G.order>] Draw() {
+        ModInt<G.order> u <- ModInt<G.order>;
+        return [G.generator ^ u, s + u, s + u];
+    }
+}
+
+Game Right(Group G) {
+    ModInt<G.order> s;
+
+    Void Initialize() {
+        s <- ModInt<G.order>;
+    }
+
+    [GroupElem<G>, ModInt<G.order>, ModInt<G.order>] Draw() {
+        ModInt<G.order> u <- ModInt<G.order>;
+        return [G.generator ^ u, u, u];
+    }
+}
+
+export as MaskThirdUse;

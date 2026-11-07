@@ -1,0 +1,13 @@
+import 'AbsorbedKey.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    AbsorbedKey(q);
+
+games:
+    AbsorbedKey(q).Left against AbsorbedKey(q).Adversary;
+    AbsorbedKey(q).Right against AbsorbedKey(q).Adversary;

@@ -807,6 +807,27 @@ class SimplifyIfTransformer(Transformer):
         return frog_ast.IfStatement(new_conditions, new_blocks)
 
 
+def _implied_facts(
+    cond: frog_ast.Expression, value: bool
+) -> list[tuple[frog_ast.Expression, bool]]:
+    """``cond`` with its truth *value*, then what that value forces on parts
+    of ``cond``: a false ``a || b`` makes both ``a`` and ``b`` false, a true
+    ``a && b`` makes both true, and ``!a`` having a value fixes ``a``."""
+    facts = [(cond, value)]
+    if (
+        isinstance(cond, frog_ast.UnaryOperation)
+        and cond.operator == frog_ast.UnaryOperators.NOT
+    ):
+        facts += _implied_facts(cond.expression, not value)
+    elif isinstance(cond, frog_ast.BinaryOperation) and (
+        (cond.operator == frog_ast.BinaryOperators.OR and not value)
+        or (cond.operator == frog_ast.BinaryOperators.AND and value)
+    ):
+        facts += _implied_facts(cond.left_expression, value)
+        facts += _implied_facts(cond.right_expression, value)
+    return facts
+
+
 class GuardConditionSimplificationTransformer(Transformer):
     """Replaces an if-condition by its known truth value inside its branches.
 
@@ -855,11 +876,71 @@ class GuardConditionSimplificationTransformer(Transformer):
         )
 
     def _substitute(
-        self, block: frog_ast.Block, cond: frog_ast.Expression, value: bool
+        self,
+        block: frog_ast.Block,
+        cond: frog_ast.Expression,
+        value: bool,
+        whole_condition: bool = True,
     ) -> frog_ast.Block:
+        """Substitute *cond*'s truth *value* into *block*.
+
+        The whole condition is substituted when *whole_condition* is set (the
+        branches of the ``if`` itself, as always). The facts it implies about
+        its parts are substituted only for Boolean variables (flags): those
+        are what lets a compound guard such as ``revealed || !challenged``
+        settle a later ``if (revealed)``, while replacing a comparison by a
+        constant would hide it from the passes that reason about it (e.g.
+        ``FoldEquivalentReturnBranch``)."""
         replace_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-        replace_map.set(copy.deepcopy(cond), frog_ast.Boolean(value))
+        for index, (fact, fact_value) in enumerate(_implied_facts(cond, value)):
+            if not (
+                (index == 0 and whole_condition) or isinstance(fact, frog_ast.Variable)
+            ):
+                continue
+            try:
+                replace_map.get(fact)
+            except KeyError:
+                replace_map.set(copy.deepcopy(fact), frog_ast.Boolean(fact_value))
         return SubstitutionTransformer(replace_map).transform(block)
+
+    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
+        """After ``if (C) { ...; return e; }`` (no else), the rest of the block
+        runs only when ``C`` is false: substitute that (and what it implies)
+        into the statements that follow, up to the first one that may change
+        a variable ``C`` reads."""
+        statements = list(block.statements)
+        for index, statement in enumerate(statements):
+            if not (
+                isinstance(statement, frog_ast.IfStatement)
+                and len(statement.conditions) == 1
+                and not statement.has_else_block()
+                and statement.blocks[0].statements
+                and isinstance(
+                    statement.blocks[0].statements[-1], frog_ast.ReturnStatement
+                )
+            ):
+                continue
+            cond = statement.conditions[0]
+            if isinstance(cond, frog_ast.Boolean) or not self._is_deterministic(cond):
+                continue
+            cond_vars = referenced_variable_names(cond)
+            end = index + 1
+            while end < len(statements) and not reassigns_or_rebinds(
+                cond_vars, statements[end]
+            ):
+                end += 1
+            if end == index + 1:
+                continue
+            prefix = self._substitute(
+                frog_ast.Block(statements[index + 1 : end]),
+                cond,
+                False,
+                whole_condition=False,
+            )
+            statements = (
+                statements[: index + 1] + list(prefix.statements) + statements[end:]
+            )
+        return frog_ast.Block([self.transform(s) for s in statements])
 
     def transform_if_statement(
         self, if_statement: frog_ast.IfStatement

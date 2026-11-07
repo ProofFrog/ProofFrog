@@ -733,6 +733,9 @@ The proof engine considers the following transformations to be semantics-preserv
 - **GroupElem multiplicative identity**: `G.identity * g` simplifies to `g`; `g * G.identity` simplifies to `g`; `g / G.identity` simplifies to `g`.
 - **GroupElem power-of-power**: `(h ^ a) ^ b` simplifies to `h ^ (a * b)`, when `a` and `b` have compatible types for multiplication.
 - **GroupElem exponent combination**: `g^a * g^b` simplifies to `g^(a + b)`; `g^a / g^b` simplifies to `g^(a - b)`, when the bases are structurally identical and deterministic.
+- **GroupElem power of a product**: `(a * b) ^ e` simplifies to `a ^ e * b ^ e` and `(a / b) ^ e` to `a ^ e / b ^ e` (the group is abelian), when `e` makes no call (the rewrite evaluates `e` once per factor).
+- **ModInt cancellation**: a `ModInt<q>` arithmetic expression is read as a polynomial over its atoms (variables, calls, accesses); when the rebuilt polynomial is strictly smaller, it replaces the expression, e.g. `sk + ((d + H(x)) - H(x))` becomes `sk + d`. Only when every call in it is deterministic (two evaluations of a non-deterministic call are different values). The same holds through a pure local defined earlier in the block and unchanged since, e.g. `v = d + H(x); sk = sk + (v - H(x));` with `v` also returned gives `sk = sk + d`.
+- **ModInt with uniform, repeated combination**: `u <- ModInt<q>; return [g ^ (s + u), s + u];` is equivalent to `u <- ModInt<q>; return [g ^ u, u];` when every use of `u` lies in copies of one `e + u` (or `u + e`, `e - u`, `u - e`) within a single return or assignment, with `e` deterministic: for that value of `e`, `u |-> e + u` is a bijection.
 - **Reflexive comparisons**: `x == x` simplifies to `true`; `x != x` to `false`.
 - **Injective-call equality**: for a primitive method `f` annotated `deterministic injective`, `f(a1, ..., an) == f(b1, ..., bn)` simplifies to `(a1 == b1) && ... && (an == bn)` (and the `!=` variant to the disjunction of per-argument disequalities). Sound because `injective` guarantees that distinct input tuples map to distinct outputs, so equal outputs imply equal input tuples; `deterministic` guarantees that repeated evaluation on the same input yields the same value. Does not apply to calls through sampled `Function<D, R>` variables (a random function is not injective in general).
 
@@ -742,6 +745,7 @@ The proof engine considers the following transformations to be semantics-preserv
 - **Split uniform samples**: A single `BitString<n>` sample accessed only through non-overlapping slices can be split into independent samples of each slice's length. Sound because non-overlapping slices of a uniform bitstring are independent uniform bitstrings.
 - **Sample reordering**: Independent samples can be reordered without affecting semantics.
 - **Sample sinking**: A uniform sample before an if/else can be moved into the branch that uses it (when independent of the condition).
+- **Split product samples**: `[A, B] v <- [A, B];` used only through constant indices `v[0]`, `v[1]` (and never written again) is equivalent to independent samples `A v0 <- A; B v1 <- B;`. Sound because the uniform distribution on a product is the product of the uniform distributions.
 
 ### 9.3 Random Function Simplification
 
@@ -757,6 +761,19 @@ The proof engine considers the following transformations to be semantics-preserv
 - **Redundant copy elimination**: Variables that are trivial copies of other variables are eliminated.
 - **Branch elimination**: `if (true)` and `if (false)` branches are simplified.
 - **Tuple index folding**: `[e0, e1][1]` simplifies to `e1`.
+- **Guard facts**: inside `if (C) { ... } else { ... }`, and after `if (C) { ...; return e; }` up to the first statement that may change a variable of `C`, `C` is replaced by its known value, together with what that value forces: a false `a || b` makes `a` and `b` false, a true `a && b` makes both true, `!a` fixes `a`.
+- **Bare declaration merge**: `T v; ...; v = e;` becomes `...; T v = e;` when nothing in between mentions `v` and `e` does not read it.
+- **Literal field write forwarding**: after `f = c;` for a field `f` and a literal `c`, reads of `f` in the following statements of the block, up to the next statement that may write `f`, become `c`.
+- **Express after update**: for `T v = e;` followed by an update `f = f + delta;` of a `ModInt` variable (no write to `f` or `e`'s names in between, `v` used only after the update, `delta` not reading `f`), `v` is computed after the update as `e[f := f - delta]` when that is strictly smaller than `e`'s own normal form, i.e. when `delta` cancels (e.g. `pk = g ^ (s + d); s = s + d;` becomes `s = s + d; pk = g ^ s;`).
+- **Blocked local absorption**: a pure local used once, whose inlining is blocked by a write to one of its inputs in between, takes over the largest non-tuple deterministic expression around its use whose other inputs that write leaves unchanged, computed just before the write (e.g. `x = g ^ (sk * u); sk = sk + d; return d + H(x);` becomes `x = d + H(g ^ (sk * u)); sk = sk + d; return x;`).
+
+### 9.5 Relations Between Fields Across Oracle Calls
+
+Canonicalization otherwise reasons about one method at a time. These rewrites use relations between fields that hold at every call boundary.
+
+- **Field invariant elimination**: a field `a`, written outside `Initialize`, is removed when `a == E` (for an expression `E` over the other fields, suggested by the state `Initialize` leaves) is *proved* to hold after `Initialize` and to be preserved by every oracle that writes `a` or a field of `E`. The proof executes each such method symbolically along every path (fields start as fresh names with `a` equal to `E` of them, parameters, samples and non-deterministic calls are fresh names, branch conditions add Boolean facts that rule out impossible paths, loops forget what they write) and requires `a` and `E` at every exit to have equal exact normal forms (ModInt polynomials and group products over atoms). Each method then starts from `a = E`. Example: `pk = g ^ x; sk = x;` with every update keeping `pk == g ^ sk` (even through a token masked with `H(pk ^ u)` and unmasked with `H((g ^ u) ^ sk)`) removes `pk`.
+- **Generator-power field to exponent**: a `GroupElem<G>` field written outside `Initialize` whose every write is `P = g ^ x` or `P = P * g ^ x` (up to the group algebra), set by `Initialize` before any read or return, is kept as a `ModInt<G.order>` exponent `p` (writes `p = x` / `p = p + x`, reads `g ^ p`). Exact by construction.
+- **Offset fusion** (random self-reducibility): a fixed `P = g ^ e` (written once, in `Initialize`) and a `ModInt<G.order>` offset `D` are replaced by one evolving field `s == e + D` (reads of `P` become `g ^ (s - D)`, each write of `D` moves `s` by the same amount), kept only if canonicalization then removes `D` too, i.e. `D` was only read together with `P` (as in `P * g ^ D`, `P ^ r * (g ^ r) ^ D`).
 
 ## 10. What FrogLang Does Not Model
 

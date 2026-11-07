@@ -1,0 +1,39 @@
+// a is a ModInt<q> field set to the Int b + 1, so a holds (b + 1) mod q.
+// Read as a group exponent (q need not be the group order), g^a is not
+// g^(b + 1). Removing a as "a == b + 1" drops the reduction.
+Game Left(Int q, Group G) {
+    Int b;
+    ModInt<q> a;
+
+    Void Initialize(Int n) {
+        b = n;
+        a = n + 1;
+    }
+
+    Void Inc() {
+        b = b + 1;
+        a = b + 1;
+    }
+
+    GroupElem<G> Get() {
+        return G.generator ^ a;
+    }
+}
+
+Game Right(Int q, Group G) {
+    Int b;
+
+    Void Initialize(Int n) {
+        b = n;
+    }
+
+    Void Inc() {
+        b = b + 1;
+    }
+
+    GroupElem<G> Get() {
+        return G.generator ^ (b + 1);
+    }
+}
+
+export as CoercedInvariant;

@@ -1,0 +1,16 @@
+import 'Rnd.primitive';
+import 'DrawnFixedKey.game';
+
+proof:
+
+let:
+    Group G;
+    Rnd R = Rnd(G);
+    Function<ModInt<G.order>, ModInt<G.order>> H;
+
+theorem:
+    DrawnFixedKey(G, R, H);
+
+games:
+    DrawnFixedKey(G, R, H).Left against DrawnFixedKey(G, R, H).Adversary;
+    DrawnFixedKey(G, R, H).Right against DrawnFixedKey(G, R, H).Adversary;

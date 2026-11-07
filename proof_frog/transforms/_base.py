@@ -163,6 +163,61 @@ def has_nondeterministic_call(
     return SearchVisitor(_is_nondeterministic_call).visit(expr) is not None
 
 
+def calls_are_deterministic(
+    expr: frog_ast.Expression,
+    ctx_namespace: frog_ast.Namespace,
+    let_types: Optional[NameTypeMap],
+    type_map: Optional[NameTypeMap],
+    shadowed: set[str],
+) -> bool:
+    """True if every call in *expr* returns the same value for the same
+    arguments: a ``deterministic`` primitive method, a let-bound ``Function``
+    (unless a local shadows it), or a variable of ``Function`` type in
+    *type_map* (a game field or a local holding a function).
+
+    A ``Function`` held in a game field may be reassigned between two calls,
+    so a caller that moves or duplicates such a call must also check that
+    nothing in between writes the function's name (its name is among the
+    names the expression references, which the passes below check).
+    """
+
+    def nondeterministic(node: frog_ast.ASTNode) -> bool:
+        if not isinstance(node, frog_ast.FuncCall):
+            return False
+        signature = _lookup_primitive_method(node.func, ctx_namespace)
+        if signature is not None:
+            return not signature.deterministic
+        if isinstance(node.func, frog_ast.Variable):
+            name = node.func.name
+            if (
+                name not in shadowed
+                and let_types is not None
+                and isinstance(let_types.get(name), frog_ast.FunctionType)
+            ):
+                return False
+            if type_map is not None and isinstance(
+                type_map.get(name), frog_ast.FunctionType
+            ):
+                return False
+        return True
+
+    return SearchVisitor(nondeterministic).visit(expr) is None
+
+
+def bound_names(method: frog_ast.Method) -> set[str]:
+    """:func:`method_bound_names` plus the names of bare declarations
+    ``T x;``, which also bind a local that shadows a same-named field."""
+    names = method_bound_names(method)
+
+    def _collect(node: frog_ast.ASTNode) -> bool:
+        if isinstance(node, frog_ast.VariableDeclaration):
+            names.add(node.name)
+        return False
+
+    SearchVisitor(_collect).visit(method.block)
+    return names
+
+
 class TransformPass(ABC):
     """A single canonicalization pass that can be applied to a Game AST."""
 

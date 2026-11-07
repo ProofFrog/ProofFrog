@@ -4313,3 +4313,165 @@ def test_sink_uniform_sample_near_miss_possibly_empty_domain() -> None:
     assert len(misses) == 1
     assert misses[0].variable == "x"
     assert "may be empty" in misses[0].reason
+
+
+# ---------------------------------------------------------------------------
+# State relations, ModInt cancellation and group power distribution
+# ---------------------------------------------------------------------------
+
+
+def _group_ctx() -> PipelineContext:
+    lets = NameTypeMap()
+    group = frog_ast.Variable("G")
+    lets.set("G", frog_ast.GroupType())
+    lets.set(
+        "H",
+        frog_ast.FunctionType(
+            frog_ast.GroupElemType(group),
+            frog_ast.ModIntType(frog_ast.FieldAccess(group, "order")),
+        ),
+    )
+    return PipelineContext(
+        variables={}, proof_let_types=lets, proof_namespace={}, subsets_pairs=[]
+    )
+
+
+def _names(ctx: PipelineContext) -> set[str]:
+    return {nm.transform_name for nm in ctx.near_misses}
+
+
+def test_near_miss_group_power_with_call_in_exponent() -> None:
+    from proof_frog.transforms.algebraic import GroupElemSimplification
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> f(GroupElem<G> pk, GroupElem<G> m) {
+                return (pk * m) ^ F.Sample();
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    GroupElemSimplification().apply(game, ctx)
+    assert "GroupElem Simplification" in _names(ctx)
+
+
+def test_near_miss_field_invariant_not_preserved() -> None:
+    from proof_frog.transforms.state_relations import FieldInvariantElimination
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> pk;
+            ModInt<G.order> sk;
+            GroupElem<G> Initialize() {
+                ModInt<G.order> x <- ModInt<G.order>;
+                pk = G.generator ^ x;
+                sk = x;
+                return pk;
+            }
+            GroupElem<G> Upd(ModInt<G.order> d) {
+                pk = pk * G.generator ^ d;
+                sk = sk + d + d;
+                return pk;
+            }
+            ModInt<G.order> Reveal() {
+                return sk;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    FieldInvariantElimination().apply(game, ctx)
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == "Field Invariant Elimination"]
+    assert misses and misses[0].method == "Upd"
+
+
+def test_near_miss_group_field_not_generator_power() -> None:
+    from proof_frog.transforms.state_relations import GeneratorPowerFieldToExponent
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> pk;
+            GroupElem<G> Initialize() {
+                ModInt<G.order> x <- ModInt<G.order>;
+                pk = G.generator ^ x;
+                return pk;
+            }
+            GroupElem<G> Upd(GroupElem<G> c) {
+                pk = pk * c;
+                return pk;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    GeneratorPowerFieldToExponent().apply(game, ctx)
+    assert "Generator Power Field To Exponent" in _names(ctx)
+
+
+def test_near_miss_offset_read_on_its_own() -> None:
+    from proof_frog.transforms.state_relations import OffsetFusion
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> P;
+            ModInt<G.order> D;
+            GroupElem<G> Initialize() {
+                D = 0;
+                ModInt<G.order> a <- ModInt<G.order>;
+                P = G.generator ^ a;
+                return P;
+            }
+            [GroupElem<G>, ModInt<G.order>] Shift(ModInt<G.order> d) {
+                D = D + d;
+                return [P * G.generator ^ D, D];
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert OffsetFusion().apply(game, ctx) == game
+    assert "Offset Fusion" in _names(ctx)
+
+
+def test_near_miss_modint_cancellation_blocked_by_nondeterminism() -> None:
+    from proof_frog.transforms.algebraic import ModIntCancellation
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            ModInt<G.order> f(ModInt<G.order> d) {
+                return (d + F.Sample()) - F.Sample();
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    ctx.proof_namespace["F"] = frog_parser.parse_primitive_file(
+        "Primitive P(Group G) { ModInt<G.order> Sample(); }"
+    )
+    assert ModIntCancellation().apply(game, ctx) == game
+    assert "ModInt Cancellation" in _names(ctx)
+
+
+def test_near_miss_repeated_mask_with_different_partners() -> None:
+    from proof_frog.transforms.algebraic import UniformModIntRepeatedMask
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            ModInt<G.order> s;
+            [GroupElem<G>, ModInt<G.order>] f(ModInt<G.order> e) {
+                ModInt<G.order> u <- ModInt<G.order>;
+                return [G.generator ^ (s + u), e + u];
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert UniformModIntRepeatedMask().apply(game, ctx) == game
+    assert "Uniform ModInt Repeated Mask" in _names(ctx)

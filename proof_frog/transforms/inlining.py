@@ -6421,3 +6421,51 @@ class SplitOpaqueTupleField(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return SplitOpaqueTupleFieldTransformer(ctx=ctx).transform(game)
+
+
+class MergeBareDeclaration(TransformPass):
+    """``T v; ... v = e;`` becomes ``... T v = e;``.
+
+    The bare declaration's default value is never read when nothing between
+    it and the first assignment (in the same block, at the top level)
+    mentions ``v`` and ``e`` does not read ``v``; the two forms are then the
+    same program. Inlining a method with an early return leaves exactly this
+    shape once all but one of the result variable's assignments have been
+    removed, and the merged form is what the rest of the pipeline expects.
+    """
+
+    name = "Merge Bare Declaration"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return _MergeBareDeclarationTransformer().transform(game)
+
+
+class _MergeBareDeclarationTransformer(BlockTransformer):
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        statements = list(block.statements)
+        for index, statement in enumerate(statements):
+            if not isinstance(statement, frog_ast.VariableDeclaration):
+                continue
+            name = statement.name
+            for later in range(index + 1, len(statements)):
+                candidate = statements[later]
+                if (
+                    isinstance(candidate, frog_ast.Assignment)
+                    and candidate.the_type is None
+                    and candidate.var == frog_ast.Variable(name)
+                    and name not in referenced_variable_names(candidate.value)
+                ):
+                    merged = frog_ast.Assignment(
+                        copy.deepcopy(statement.type),
+                        frog_ast.Variable(name),
+                        candidate.value,
+                    )
+                    return frog_ast.Block(
+                        statements[:index]
+                        + statements[index + 1 : later]
+                        + [merged]
+                        + statements[later + 1 :]
+                    )
+                if name in referenced_variable_names(candidate):
+                    break
+        return block

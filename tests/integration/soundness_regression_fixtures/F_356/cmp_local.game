@@ -1,0 +1,20 @@
+// F-356: `ModInt<q> x = b;` with `b : Int` stores b reduced modulo q, so
+// Left's O compares b mod q with 0 while Right's compares the integer b with
+// 0. With q = 1 and b = 1, Left returns true and Right false. The engine
+// used to read x as b (Remove Redundant Copies) and z as 0, giving
+// `return b == 0;` on both sides.
+Game Left(Int q) {
+    Bool O(Int b) {
+        ModInt<q> x = b;
+        ModInt<q> z = 0;
+        return x == z;
+    }
+}
+
+Game Right(Int q) {
+    Bool O(Int b) {
+        return b == 0;
+    }
+}
+
+export as CmpLocal;

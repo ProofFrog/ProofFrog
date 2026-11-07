@@ -36,6 +36,7 @@ from ._base import (
     _lookup_primitive_method,
     may_return_before,
 )
+from ._coercion import coercing_store_names_for, note_coercing_store
 from ._definedness import (
     calls_game_method,
     initialize_unassigned_fields,
@@ -231,7 +232,19 @@ class RedundantCopyTransformer(BlockTransformer):
         return ct;
       becomes:
         return c;
+
+    A copy that converts its source (``ModInt<q> v = w;`` with ``w : Int``
+    holds ``w`` reduced modulo ``q``) is not redundant; the names such a
+    store writes are passed in *coercing* (F-356).
     """
+
+    def __init__(
+        self,
+        coercing: frozenset[str] = frozenset(),
+        ctx: PipelineContext | None = None,
+    ) -> None:
+        self.coercing = coercing
+        self.ctx = ctx
 
     def _transform_block_wrapper(
         self,
@@ -256,6 +269,13 @@ class RedundantCopyTransformer(BlockTransformer):
                 copy_name = statement.var.name
                 original_name = statement.value.name
             else:
+                continue
+
+            # F-356: `ModInt<q> v = w;` with `w : Int` holds `w mod q`.
+            if copy_name in self.coercing:
+                note_coercing_store(
+                    self.ctx, "Remove Redundant Copies", copy_name, statement.origin
+                )
                 continue
 
             # Self-assignment (e.g., r = r after inlining): just remove it
@@ -318,8 +338,13 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
         return v1 + G.evaluate(v2) + mL;
     """
 
-    def __init__(self, ctx: PipelineContext | None = None) -> None:
+    def __init__(
+        self,
+        ctx: PipelineContext | None = None,
+        coercing: frozenset[str] = frozenset(),
+    ) -> None:
         self.ctx = ctx
+        self.coercing = coercing
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -336,6 +361,13 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
 
             var_name = statement.var.name
             expr = statement.value
+
+            # F-356: `ModInt<q> v = e;` with `e : Int` holds `e mod q`.
+            if var_name in self.coercing:
+                note_coercing_store(
+                    self.ctx, "Inline Single-Use Variable", var_name, statement.origin
+                )
+                continue
 
             def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
                 return isinstance(node, frog_ast.Variable) and node.name == name
@@ -518,6 +550,7 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
         self,
         ctx: PipelineContext | None = None,
         field_names: set[str] | None = None,
+        coercing: frozenset[str] = frozenset(),
     ) -> None:
         self.ctx = ctx
         # Game field names. The rewrite drops each branch's trailing `x = A`
@@ -525,6 +558,9 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
         # across oracle calls and is observable, so dropping it is unsound
         # (F-159); the pass fires only for locals.
         self._field_names: set[str] = field_names or set()
+        # F-356: names some store converts into a ModInt; `x = A` then holds
+        # `A` reduced modulo the modulus, so `A` cannot replace `x`.
+        self._coercing = coercing
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -562,6 +598,12 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
             # store. If `var` is a game field, that store is observable across
             # oracle calls, so dropping it changes behaviour -- decline.
             if var_name in self._field_names:
+                continue
+
+            if var_name in self._coercing:
+                note_coercing_store(
+                    self.ctx, "If-Split Branch Assignment", var_name, statement.origin
+                )
                 continue
 
             # Must have subsequent statements
@@ -687,9 +729,17 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
         return F(a || b, a || b);
     """
 
-    def __init__(self, function_var_names: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        function_var_names: set[str] | None = None,
+        coercing: frozenset[str] = frozenset(),
+        ctx: PipelineContext | None = None,
+    ) -> None:
         super().__init__()
         self._function_var_names = function_var_names or set()
+        # F-356: names some store converts into a ModInt.
+        self._coercing = coercing
+        self.ctx = ctx
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -704,6 +754,15 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
 
             var_name = statement.var.name
             expr = statement.value
+
+            if var_name in self._coercing:
+                note_coercing_store(
+                    self.ctx,
+                    "Inline Multi-Use Pure Expressions",
+                    var_name,
+                    statement.origin,
+                )
+                continue
 
             # Skip function calls in general — multi-use inlining
             # duplicates the call at every use site, changing the
@@ -940,11 +999,20 @@ class RedundantFieldCopyTransformer(BlockTransformer):
         fieldName <- Type;
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        coercing: frozenset[str] = frozenset(),
+        ctx: PipelineContext | None = None,
+    ) -> None:
         self.fields: list[str] = []
+        self._field_types: dict[str, frog_ast.Type] = {}
+        # F-356: names some store converts into a ModInt.
+        self._coercing = coercing
+        self.ctx = ctx
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.fields = [field.name for field in game.fields]
+        self._field_types = {field.name: field.type for field in game.fields}
         new_game = copy.deepcopy(game)
         new_game.methods = [self.transform(method) for method in new_game.methods]
         return new_game
@@ -1011,6 +1079,21 @@ class RedundantFieldCopyTransformer(BlockTransformer):
                 # / drop statements, the block never shrinks, and the
                 # self-recursive transform diverges. Require the ordering.
                 if not no_other_uses or decl_index == -1 or decl_index >= index:
+                    continue
+                # F-356: `T v = e; f = v;` becomes `f = e;`, which converts `e`
+                # to the field's type directly. When `v` holds `e` converted
+                # (an Int reduced into a ModInt), that is the same value only
+                # if the field has exactly the type `T`.
+                local_name = statement.value.name
+                if local_name in self._coercing and (
+                    self._field_types.get(statement.var.name) != decl_statement.the_type
+                ):
+                    note_coercing_store(
+                        self.ctx,
+                        "Remove redundant variables for fields",
+                        local_name,
+                        decl_statement.origin,
+                    )
                     continue
                 # Check that the field is not accessed (read or written)
                 # between the declaration and the field assignment.
@@ -1089,10 +1172,17 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
         self,
         proof_namespace: frog_ast.Namespace | None = None,
         proof_let_types: NameTypeMap | None = None,
+        coercing: frozenset[str] = frozenset(),
+        ctx: PipelineContext | None = None,
     ) -> None:
         self.fields: list[str] = []
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
+        # F-356: names some store converts into a ModInt. `v = expr` then
+        # holds `expr` reduced modulo the modulus, so neither stands for the
+        # other.
+        self._coercing = coercing
+        self.ctx = ctx
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.fields = [field.name for field in game.fields]
@@ -1102,6 +1192,18 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
+            if (
+                isinstance(statement, frog_ast.Assignment)
+                and isinstance(statement.var, frog_ast.Variable)
+                and statement.var.name in self._coercing
+            ):
+                note_coercing_store(
+                    self.ctx,
+                    "Forward Expression Alias",
+                    statement.var.name,
+                    statement.origin,
+                )
+                continue
             is_typed_decl = (
                 isinstance(statement, frog_ast.Assignment)
                 and statement.the_type is not None
@@ -1336,10 +1438,14 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
         proof_namespace: frog_ast.Namespace | None = None,
         proof_let_types: NameTypeMap | None = None,
         ctx: PipelineContext | None = None,
+        coercing: frozenset[str] = frozenset(),
     ) -> None:
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
         self.ctx = ctx
+        # F-356: names some store converts into a ModInt (here: an Int
+        # element of the literal stored into a ModInt component).
+        self._coercing = coercing
 
     @staticmethod
     def _classify_uses(
@@ -1378,6 +1484,11 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
                 continue
 
             var_name = statement.var.name
+            if var_name in self._coercing:
+                note_coercing_store(
+                    self.ctx, "Inline Local Tuple Literal", var_name, statement.origin
+                )
+                continue
             remaining = frog_ast.Block(
                 copy.deepcopy(list(block.statements[index + 1 :]))
             )
@@ -1631,7 +1742,9 @@ class RedundantCopy(TransformPass):
     name = "Remove Redundant Copies"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return RedundantCopyTransformer().transform(game)
+        return RedundantCopyTransformer(
+            coercing_store_names_for(game, ctx), ctx
+        ).transform(game)
 
 
 class IfSplitBranchAssignment(TransformPass):
@@ -1639,7 +1752,9 @@ class IfSplitBranchAssignment(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return IfSplitBranchAssignmentTransformer(
-            ctx, field_names={f.name for f in game.fields}
+            ctx,
+            field_names={f.name for f in game.fields},
+            coercing=coercing_store_names_for(game, ctx),
         ).transform(game)
 
 
@@ -1647,7 +1762,9 @@ class InlineSingleUseVariable(TransformPass):
     name = "Inline Single-Use Variables"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return InlineSingleUseVariableTransformer(ctx).transform(game)
+        return InlineSingleUseVariableTransformer(
+            ctx, coercing_store_names_for(game, ctx)
+        ).transform(game)
 
 
 class CollapseAssignment(TransformPass):
@@ -1668,6 +1785,8 @@ class ForwardExpressionAlias(TransformPass):
         return ForwardExpressionAliasTransformer(
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
+            coercing=coercing_store_names_for(game, ctx),
+            ctx=ctx,
         ).transform(game)
 
 
@@ -1679,6 +1798,7 @@ class InlineLocalTupleLiteral(TransformPass):
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
             ctx=ctx,
+            coercing=coercing_store_names_for(game, ctx),
         ).transform(game)
 
 
@@ -2312,7 +2432,9 @@ class InlineMultiUsePureExpression(TransformPass):
                 if isinstance(pair.type, frog_ast.FunctionType):
                     function_var_names.add(pair.name)
         return InlineMultiUsePureExpressionTransformer(
-            function_var_names=function_var_names
+            function_var_names=function_var_names,
+            coercing=coercing_store_names_for(game, ctx),
+            ctx=ctx,
         ).transform(game)
 
 
@@ -2320,7 +2442,9 @@ class RedundantFieldCopy(TransformPass):
     name = "Remove redundant variables for fields"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return RedundantFieldCopyTransformer().transform(game)
+        return RedundantFieldCopyTransformer(
+            coercing_store_names_for(game, ctx), ctx
+        ).transform(game)
 
 
 class HoistFieldPureAliasTransformer(BlockTransformer):
@@ -2350,10 +2474,15 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
         self,
         proof_namespace: frog_ast.Namespace | None = None,
         proof_let_types: NameTypeMap | None = None,
+        coercing: frozenset[str] = frozenset(),
+        ctx: PipelineContext | None = None,
     ) -> None:
         self.fields: list[str] = []
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types: NameTypeMap | None = proof_let_types
+        # F-356: names some store converts into a ModInt.
+        self._coercing = coercing
+        self.ctx = ctx
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.fields = [field.name for field in game.fields]
@@ -2373,6 +2502,13 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                 continue
             expr = statement.value
             field_name = statement.var.name
+            # F-356: the field holds `expr` reduced into its ModInt type, so
+            # it cannot replace an earlier occurrence of `expr`.
+            if field_name in self._coercing:
+                note_coercing_store(
+                    self.ctx, "Hoist Field Pure Alias", field_name, statement.origin
+                )
+                continue
             # Skip tuples, literals, and field-to-field copies
             if isinstance(
                 expr,
@@ -2581,6 +2717,8 @@ class HoistFieldPureAlias(TransformPass):
         return HoistFieldPureAliasTransformer(
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
+            coercing=coercing_store_names_for(game, ctx),
+            ctx=ctx,
         ).transform(game)
 
 
@@ -2759,6 +2897,17 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                     assign_expr = stmt.value
 
         if assign_count != 1 or assign_expr is None:
+            return None
+
+        # 1a. F-356: a ModInt field assigned an Int holds it reduced modulo
+        # the modulus, not the assigned expression.
+        if field_name in coercing_store_names_for(game, self.ctx):
+            note_coercing_store(
+                self.ctx,
+                "Inline Single-Use Field",
+                field_name,
+                method=game.methods[assign_method_idx].signature.name,
+            )
             return None
 
         # 1b. A self-referential assignment (``c = c + 1``) is accumulator
@@ -4924,6 +5073,7 @@ def _build_local_stable_alias_map(  # pylint: disable=too-many-arguments, too-ma
     proof_namespace: frog_ast.Namespace | None,
     function_var_names: set[str] | None,
     proof_let_names: set[str] | None,
+    coercing: frozenset[str] = frozenset(),
 ) -> dict[str, frog_ast.Expression]:
     """Return a map from local variable name -> RHS expression for top-level
     single-assignment locals in *method* whose RHS is stable.
@@ -4954,6 +5104,8 @@ def _build_local_stable_alias_map(  # pylint: disable=too-many-arguments, too-ma
       t = x0;``). There the local still holds its type's default
       (FROGLANG_REFERENCE.md section 6.9), not the RHS, so expanding that
       earlier use through the RHS would be wrong (F-177).
+    - Names in *coercing*: a store converts an Int into their ModInt type,
+      so they hold the RHS reduced modulo the modulus (F-356).
     """
     method_params = {p.name for p in method.signature.parameters}
     outer_names = field_names | param_names | method_params | (proof_let_names or set())
@@ -4967,7 +5119,7 @@ def _build_local_stable_alias_map(  # pylint: disable=too-many-arguments, too-ma
         if not isinstance(stmt.var, frog_ast.Variable):
             continue
         name = stmt.var.name
-        if name in outer_names:
+        if name in outer_names or name in coercing:
             continue
         if isinstance(stmt.value, frog_ast.Variable) and stmt.value.name == name:
             # Skip self-assignments.
@@ -5157,6 +5309,7 @@ class CrossMethodFieldAliasTransformer:
         # Common case: CSE introduces ``v1 = NG.Generator();`` and reuses v1
         # in multiple field RHSs and oracle expressions; expanding through v1
         # makes the cross-method match succeed.
+        coercing = coercing_store_names_for(game, self._ctx)
         method_aliases: list[dict[str, frog_ast.Expression]] = [
             _build_local_stable_alias_map(
                 m,
@@ -5165,6 +5318,7 @@ class CrossMethodFieldAliasTransformer:
                 self.proof_namespace,
                 None,
                 proof_let_names,
+                coercing,
             )
             for m in game.methods
         ]
@@ -5188,6 +5342,18 @@ class CrossMethodFieldAliasTransformer:
                 if m is None or not m.deterministic:
                     continue
                 if not call.args:
+                    continue
+                # F-356: a ModInt field assigned an Int-valued call holds the
+                # call's value reduced modulo the modulus, so it cannot
+                # replace the call.
+                if stmt.var.name in coercing:
+                    note_coercing_store(
+                        self._ctx,
+                        "Cross-Method Field Alias",
+                        stmt.var.name,
+                        stmt.origin,
+                        method.signature.name,
+                    )
                     continue
                 if not all(
                     _is_stable_arg(
@@ -5503,6 +5669,9 @@ class HoistDeterministicCallToInitializeTransformer:
             if self._proof_let_types is not None
             else set()
         )
+        # F-356: no local that holds its RHS converted into a ModInt is
+        # expanded through that RHS.
+        coercing = coercing_store_names_for(game, self._ctx)
 
         init_idx = _locate_initialize_index(game)
         if init_idx is None:
@@ -5552,6 +5721,7 @@ class HoistDeterministicCallToInitializeTransformer:
             self.proof_namespace,
             function_var_names,
             proof_let_names,
+            coercing,
         )
         existing_aliased_calls: list[frog_ast.ASTNode] = []
         for stmt in game.methods[init_idx].block.statements:
@@ -5587,6 +5757,7 @@ class HoistDeterministicCallToInitializeTransformer:
                 self.proof_namespace,
                 function_var_names,
                 proof_let_names,
+                coercing,
             )
             collector = _DeterministicCallCollector(
                 self.proof_namespace, function_var_names=function_var_names
@@ -5756,6 +5927,7 @@ class HoistDeterministicCallToInitializeTransformer:
                 self.proof_namespace,
                 function_var_names,
                 proof_let_names,
+                coercing,
             )
 
             def _expand(expr: frog_ast.ASTNode) -> frog_ast.ASTNode:
@@ -5790,6 +5962,7 @@ class HoistDeterministicCallToInitializeTransformer:
                     self.proof_namespace,
                     function_var_names,
                     proof_let_names,
+                    coercing,
                 )
                 collector = _DeterministicCallCollector(
                     self.proof_namespace, function_var_names=function_var_names

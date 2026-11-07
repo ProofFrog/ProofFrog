@@ -42,6 +42,7 @@ from ._base import (
     method_bound_names,
     _lookup_primitive_method,
 )
+from ._coercion import coercing_store_names_for, note_coercing_store
 from ._definedness import GameDefinedness, method_binder_counts
 
 # ---------------------------------------------------------------------------
@@ -1307,6 +1308,13 @@ class RemoveUnreachableTransformer(BlockTransformer):
         self.ctx = ctx
         self._block_path: dict[int, list[z3.AstRef]] = {}
         self._block_versions: dict[int, dict[str, int]] = {}
+        # F-356: a store that converts an Int into a ModInt does not make its
+        # target equal to the RHS, so it records no path fact.
+        self._coercing: frozenset[str] = (
+            coercing_store_names_for(ast, ctx)
+            if isinstance(ast, frog_ast.Game)
+            else frozenset()
+        )
 
     def _condition_is_nondeterministic(self, cond: frog_ast.Expression) -> bool:
         namespace = self.ctx.proof_namespace if self.ctx else {}
@@ -1400,7 +1408,10 @@ class RemoveUnreachableTransformer(BlockTransformer):
             if not isinstance(statement, frog_ast.IfStatement):
                 old_versions = dict(variable_version_map)
                 # Track assignments as path constraints for nested reasoning
-                if isinstance(statement, frog_ast.Assignment):
+                if (
+                    isinstance(statement, frog_ast.Assignment)
+                    and lvalue_base_name(statement.var) not in self._coercing
+                ):
                     type_map = GetTypeMapVisitor(statement).visit(self.ast)
                     # The stopping point excludes the assignment itself,
                     # so manually add the declared type for the LHS.
@@ -1669,6 +1680,8 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
         self,
         proof_namespace: frog_ast.Namespace | None = None,
         proof_let_types: NameTypeMap | None = None,
+        coercing: frozenset[str] = frozenset(),
+        ctx: PipelineContext | None = None,
     ) -> None:
         self.field_names: list[str] = []
         self.param_names: list[str] = []
@@ -1677,6 +1690,9 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
         self.field_definitions: dict[str, frog_ast.Expression] = {}
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
+        # F-356: fields some store converts into a ModInt.
+        self._coercing = coercing
+        self.ctx = ctx
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.field_names = [field.name for field in game.fields]
@@ -1742,6 +1758,17 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
             # F-349: an earlier return in Initialize may skip the definition,
             # leaving the field at its initial value.
             if name in skippable:
+                continue
+            # F-356: a ModInt field assigned an Int holds it reduced modulo
+            # the modulus, not its definition.
+            if name in self._coercing:
+                note_coercing_store(
+                    self.ctx,
+                    "If Condition Alias Substitution",
+                    name,
+                    None,
+                    "Initialize",
+                )
                 continue
             used_names = {v.name for v in VariableCollectionVisitor().visit(expr)}
             if not used_names <= set(self.field_names):
@@ -2664,6 +2691,7 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
         init = next((m for m in game.methods if m.signature.name == "Initialize"), None)
         if init is None:
             return []
+        coercing = coercing_store_names_for(game, self.ctx)
         result: list[tuple[frog_ast.Variable, frog_ast.Expression]] = []
         for def_index, stmt in enumerate(init.block.statements):
             if not (
@@ -2674,6 +2702,17 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             ):
                 continue
             if counts.get(stmt.var.name, 0) != 1:
+                continue
+            # F-356: a ModInt field assigned an Int holds it reduced modulo
+            # the modulus, not the RHS.
+            if stmt.var.name in coercing:
+                note_coercing_store(
+                    self.ctx,
+                    "Fold Equivalent Return Branch",
+                    stmt.var.name,
+                    stmt.origin,
+                    "Initialize",
+                )
                 continue
             # A definition is a call (`F = D(x)`) or a comparison
             # (`F = a == b`, e.g. an identical-until-bad flag folded by
@@ -3559,6 +3598,8 @@ class IfConditionAliasSubstitution(TransformPass):
         return IfConditionAliasSubstitutionTransformer(
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
+            coercing=coercing_store_names_for(game, ctx),
+            ctx=ctx,
         ).transform(game)
 
 

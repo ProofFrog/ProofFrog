@@ -1,0 +1,14 @@
+// F-356: Test passes its Int input to a helper whose parameter is
+// ModInt<q>, so the helper sees b reduced modulo q.
+import 'Tester.primitive';
+
+Scheme ArgTester(Int q) extends Tester {
+    Bool Test(Int b) {
+        return this.IsZero(b);
+    }
+
+    Bool IsZero(ModInt<q> x) {
+        ModInt<q> z = 0;
+        return x == z;
+    }
+}

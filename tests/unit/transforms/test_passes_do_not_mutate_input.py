@@ -113,8 +113,7 @@ _COPIES_EXPECTED = """
 BitString<8> f(BitString<8> a, Bool c) {
     BitString<8> acc = a + a;
     if (c) {
-        BitString<8> e = acc;
-        acc = e + a;
+        acc = acc + a;
     } else {
         return a + a;
     }

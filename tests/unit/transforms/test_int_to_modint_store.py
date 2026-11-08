@@ -598,3 +598,44 @@ def test_f356_inliner_substitutes_other_parameters_and_returns() -> None:
     )
     assert "Int r = b;" in text
     assert "@" not in text
+
+
+def test_f356_bound_copy_of_updated_field_is_forwarded() -> None:
+    """The inliner binds a ``ModInt`` argument to a typed copy, and the
+    callee's result overwrites the field it copied. The copy keeps its value
+    (no conversion) and is read only before the overwrite, so it is still
+    forwarded: ``s = S.Add(s, d);`` ends as ``s = s + d;``, the same as
+    writing the update directly."""
+    scheme = frog_parser.parse_scheme_file("""
+        Scheme S(Int q) extends P {
+            ModInt<q> Add(ModInt<q> s, ModInt<q> d) {
+                return s + d;
+            }
+        }
+        """)
+    lookup = {("S", m.signature.name): m for m in scheme.methods}
+    game = InlineTransformer(lookup).transform(frog_parser.parse_game("""
+            Game T(Int q) {
+                ModInt<q> s;
+                ModInt<q> O(ModInt<q> d) {
+                    s = S.Add(s, d);
+                    return s;
+                }
+            }
+            """))
+    assert "ModInt<q> S.Add@s0 = s;" in str(game)
+    for _ in range(5):
+        ctx = _ctx()
+        result = InlineSingleUseVariable().apply(RedundantCopy().apply(game, ctx), ctx)
+        if result == game:
+            break
+        game = result
+    assert game == frog_parser.parse_game("""
+        Game T(Int q) {
+            ModInt<q> s;
+            ModInt<q> O(ModInt<q> d) {
+                s = s + d;
+                return s;
+            }
+        }
+        """)

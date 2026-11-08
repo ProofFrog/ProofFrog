@@ -186,6 +186,140 @@ from proof_frog.transforms.inlining import RedundantCopyTransformer
             }
             """,
         ),
+        # The original is overwritten, but the copy is read only in the value
+        # that overwrites it (evaluated before the store): the copy goes.
+        (
+            """
+            Int f(Int a, Int d) {
+                Int b = a;
+                a = b + d;
+                return a;
+            }
+            """,
+            """
+            Int f(Int a, Int d) {
+                a = a + d;
+                return a;
+            }
+            """,
+        ),
+        # Reads of the copy before the overwrite only.
+        (
+            """
+            Int f(Int a) {
+                Int b = a;
+                Int c = b + 1;
+                a = 5;
+                return c + a;
+            }
+            """,
+            """
+            Int f(Int a) {
+                Int c = a + 1;
+                a = 5;
+                return c + a;
+            }
+            """,
+        ),
+        # The first write is nested in a branch, and the copy is not read from
+        # there on: the reads before it are rewritten.
+        (
+            """
+            Int f(Int a, Bool x) {
+                Int b = a;
+                Int c = b + 1;
+                if (x) {
+                    a = 1;
+                }
+                return c + a;
+            }
+            """,
+            """
+            Int f(Int a, Bool x) {
+                Int c = a + 1;
+                if (x) {
+                    a = 1;
+                }
+                return c + a;
+            }
+            """,
+        ),
+        # Decline: the copy is read in the overwriting value AND afterwards.
+        (
+            """
+            Int f(Int a, Int d) {
+                Int b = a;
+                a = b + d;
+                return b;
+            }
+            """,
+            """
+            Int f(Int a, Int d) {
+                Int b = a;
+                a = b + d;
+                return b;
+            }
+            """,
+        ),
+        # Decline: the copy is read after the original is resampled.
+        (
+            """
+            BitString<8> f(BitString<8> a) {
+                BitString<8> b = a;
+                a <- BitString<8>;
+                return a + b;
+            }
+            """,
+            """
+            BitString<8> f(BitString<8> a) {
+                BitString<8> b = a;
+                a <- BitString<8>;
+                return a + b;
+            }
+            """,
+        ),
+        # Decline: the first write is nested in a branch that reads the copy
+        # after the write.
+        (
+            """
+            Int f(Int a, Bool x) {
+                Int b = a;
+                if (x) {
+                    a = b + 1;
+                    return b;
+                }
+                return a;
+            }
+            """,
+            """
+            Int f(Int a, Bool x) {
+                Int b = a;
+                if (x) {
+                    a = b + 1;
+                    return b;
+                }
+                return a;
+            }
+            """,
+        ),
+        # Decline: an element write is not a plain overwrite, even when the
+        # copy is read only in its value.
+        (
+            """
+            Array<Int, 2> f(Array<Int, 2> w) {
+                Array<Int, 2> v = w;
+                w[0] = v[1];
+                return w;
+            }
+            """,
+            """
+            Array<Int, 2> f(Array<Int, 2> w) {
+                Array<Int, 2> v = w;
+                w[0] = v[1];
+                return w;
+            }
+            """,
+        ),
     ],
 )
 def test_redundant_copies(

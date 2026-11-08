@@ -24,6 +24,7 @@ from proof_frog.transforms.control_flow import (
     IfFalseReturnToConjunction,
 )
 from proof_frog.transforms.inlining import (
+    RedundantCopy,
     InlineSingleUseVariable,
     InlineSingleUseField,
     DeduplicateDeterministicCalls,
@@ -174,6 +175,33 @@ def test_inline_near_miss_on_int_stored_into_modint():
     assert len(misses) == 1
     assert misses[0].transform_name == "Inline Single-Use Variable"
     assert "ModInt" in misses[0].reason
+
+
+def test_redundant_copy_near_miss_copy_read_after_overwrite():
+    """A copy read after its original is overwritten is kept, and the near
+    miss names the copy."""
+    game = _make_game(
+        "BitString<lambda> old = m;\n"
+        "        m = old + m;\n"
+        "        return old + m;"
+    )
+    ctx = _make_ctx()
+    assert RedundantCopy().apply(game, ctx) == game
+    misses = [nm for nm in ctx.near_misses if nm.variable == "old"]
+    assert len(misses) == 1
+    assert misses[0].transform_name == "Remove Redundant Copies"
+    assert "after 'm' is written" in misses[0].reason
+
+
+def test_redundant_copy_no_near_miss_when_read_only_in_overwrite():
+    """The copy is read only in the value that overwrites the original: the
+    pass fires and reports nothing."""
+    game = _make_game(
+        "BitString<lambda> old = m;\n        m = old + m;\n        return m;"
+    )
+    ctx = _make_ctx()
+    assert RedundantCopy().apply(game, ctx) != game
+    assert not ctx.near_misses
 
 
 def test_xor_no_near_miss_when_no_sample():

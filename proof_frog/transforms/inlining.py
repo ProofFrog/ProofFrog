@@ -222,9 +222,13 @@ class _VarCountVisitor(Visitor[int]):
 class RedundantCopyTransformer(BlockTransformer):
     """Eliminates redundant variable copies by substituting the original.
 
-    When a typed assignment ``Type v = w`` creates a simple copy and neither
-    ``v`` nor ``w`` is reassigned afterward, all uses of ``v`` are replaced
-    with ``w`` and the copy assignment is removed.
+    When a typed assignment ``Type v = w`` creates a simple copy, ``v`` is
+    never reassigned afterward, and ``w`` still holds the copied value at
+    every read of ``v``, all uses of ``v`` are replaced with ``w`` and the
+    copy assignment is removed. ``w`` may be written later: the reads of
+    ``v`` must then all come before the first statement that writes or
+    rebinds ``w``, or sit in the value of that statement when it is the
+    plain overwrite ``w = e;`` (``e`` is evaluated before the store).
 
     Example::
 
@@ -232,6 +236,13 @@ class RedundantCopyTransformer(BlockTransformer):
         return ct;
       becomes:
         return c;
+
+    and (the copy an inlined callee makes of the value it updates)::
+
+        ModInt<q> old = s;
+        s = old + d;
+      becomes:
+        s = s + d;
 
     A copy that converts its source (``ModInt<q> v = w;`` with ``w : Int``
     holds ``w`` reduced modulo ``q``) is not redundant; the names such a
@@ -296,31 +307,101 @@ class RedundantCopyTransformer(BlockTransformer):
             was_written = SearchVisitor[frog_ast.Variable](
                 functools.partial(written_to, copy_name)
             ).visit(remaining_block)
+            if was_written:
+                continue
             original_reassigned = SearchVisitor[frog_ast.Variable](
                 functools.partial(written_to, original_name)
             ).visit(remaining_block)
-            # If the copy was reassigned, or the original was reassigned
-            # (making the substitution unsafe), skip.
-            if was_written or original_reassigned:
-                continue
+            # When the original is written later, the copy still holds the
+            # original's value up to that write. The copy is then redundant
+            # only if every read of it happens before the write.
+            span = len(remaining_block.statements)
+            if original_reassigned:
+                read_span = _copy_reads_before_overwrite(
+                    remaining_block.statements, copy_name, original_name
+                )
+                if read_span is None:
+                    if self.ctx is not None:
+                        self.ctx.near_misses.append(
+                            NearMiss(
+                                transform_name="Remove Redundant Copies",
+                                reason=(
+                                    f"Cannot remove copy '{copy_name}' of "
+                                    f"'{original_name}': the copy is read after "
+                                    f"'{original_name}' is written"
+                                ),
+                                location=statement.origin,
+                                suggestion=(
+                                    f"Read '{copy_name}' only before the write to "
+                                    f"'{original_name}' (or in the value that "
+                                    f"overwrites it)"
+                                ),
+                                variable=copy_name,
+                                method=None,
+                            )
+                        )
+                    continue
+                span = read_span
 
             def copy_used(copy_name: str, node: frog_ast.ASTNode) -> bool:
                 return isinstance(node, frog_ast.Variable) and node.name == copy_name
 
+            head = frog_ast.Block(list(remaining_block.statements[:span]))
             while True:
                 copy_found = SearchVisitor[frog_ast.Variable](
                     functools.partial(copy_used, copy_name)
-                ).visit(remaining_block)
+                ).visit(head)
                 if copy_found is None:
                     break
-                remaining_block = ReplaceTransformer(
+                head = ReplaceTransformer(
                     copy_found, frog_ast.Variable(original_name)
-                ).transform(remaining_block)
+                ).transform(head)
 
             return self.transform_block(
-                frog_ast.Block(list(block.statements[:index])) + remaining_block
+                frog_ast.Block(
+                    list(block.statements[:index])
+                    + list(head.statements)
+                    + list(remaining_block.statements[span:])
+                )
             )
         return block
+
+
+def _copy_reads_before_overwrite(
+    statements: Sequence[frog_ast.Statement], copy_name: str, original_name: str
+) -> int | None:
+    """How many of *statements* (those after ``T copy = original;``) read the
+    copy while the original still holds the copied value, or ``None``.
+
+    The original is written by a later statement. Let ``S_j`` be the first
+    statement that writes or rebinds it (nested writes count). Reading
+    ``original`` in place of ``copy`` is exact in ``S_0 .. S_{j-1}``, and in
+    the value of ``S_j`` when ``S_j`` is the plain overwrite ``original = e;``
+    (``e`` is evaluated before the store). The copy may not be read anywhere
+    after that. Returns the length of the prefix to rewrite (``j`` or
+    ``j + 1``), or ``None`` when some read of the copy sees a changed
+    original.
+    """
+
+    def reads_copy(node: frog_ast.ASTNode) -> bool:
+        return copy_name in referenced_variable_names(node)
+
+    for j, statement in enumerate(statements):
+        if not reassigns_or_rebinds({original_name}, statement):
+            continue
+        if not any(reads_copy(later) for later in statements[j:]):
+            return j
+        if any(reads_copy(later) for later in statements[j + 1 :]):
+            return None
+        if (
+            isinstance(statement, frog_ast.Assignment)
+            and statement.the_type is None
+            and isinstance(statement.var, frog_ast.Variable)
+            and statement.var.name == original_name
+        ):
+            return j + 1
+        return None
+    return None
 
 
 class InlineSingleUseVariableTransformer(BlockTransformer):

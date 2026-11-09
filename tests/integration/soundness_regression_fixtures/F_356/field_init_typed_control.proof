@@ -1,0 +1,16 @@
+// Positive control for F-356: TypedFieldInit.Left and TypedFieldInit.Right
+// are interchangeable (see TypedFieldInit.game).
+import 'TypedFieldInit.game';
+
+proof:
+
+let:
+    Int q;
+    ModInt<q> x;
+
+theorem:
+    TypedFieldInit(q, x);
+
+games:
+    TypedFieldInit(q, x).Left against TypedFieldInit(q, x).Adversary;
+    TypedFieldInit(q, x).Right against TypedFieldInit(q, x).Adversary;

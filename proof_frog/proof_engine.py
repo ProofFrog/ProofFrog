@@ -2489,7 +2489,7 @@ class ProofEngine:
 T = TypeVar("T", bound=Union[frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game])
 
 
-class InstantiationCaptureError(Exception):
+class InstantiationCaptureError(visitors.InstantiationError):
     """Instantiation would let a scheme or primitive field capture a name in
     an instantiation argument (F-341)."""
 
@@ -2620,7 +2620,14 @@ def instantiate(
     ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
     for index, parameter in enumerate(root.parameters):
         ast_map.set(frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
-    new_root = visitors.SubstitutionTransformer(ast_map).transform(root)
+    substitution = visitors.SubstitutionTransformer(ast_map)
+    field_value_types: dict[str, Optional[frog_ast.Type]] = {}
+    for name, value_type in _field_initializer_types(root).items():
+        substituted = None if value_type is None else substitution.transform(value_type)
+        field_value_types[name] = (
+            substituted if isinstance(substituted, frog_ast.Type) else None
+        )
+    new_root = substitution.transform(root)
     # Ensure independent copy before mutation — transform may share lists
     new_root = copy.copy(new_root)
     new_root.parameters = []
@@ -2633,7 +2640,34 @@ def instantiate(
                     "arguments, so the argument would be read as the field. "
                     "Rename the field or the argument."
                 )
-    return visitors.InstantiationTransformer(namespace).transform(new_root)
+    return visitors.InstantiationTransformer(namespace, field_value_types).transform(
+        new_root
+    )
+
+
+def _field_initializer_types(
+    root: frog_ast.Game | frog_ast.Scheme | frog_ast.Primitive,
+) -> dict[str, Optional[frog_ast.Type]]:
+    """The type of each of *root*'s field initializers where it is written,
+    from *root*'s parameter and field declarations (None if unknown).
+
+    An initializer is a store into its field (F-356): ``ModInt<q> f = q;``
+    with ``q : Int`` holds ``q`` reduced modulo ``q``, so instantiation may
+    read the field as its initializer only when the two types agree. The
+    type is taken before the arguments replace the parameters, because only
+    *root*'s own declarations say what its names are.
+    """
+    type_map = visitors.NameTypeMap()
+    for parameter in root.parameters:
+        type_map.set(parameter.name, parameter.type)
+    for field in root.fields:
+        type_map.set(field.name, field.type)
+    return {
+        field.name: visitors.expression_type(field.value, type_map)
+        for field in root.fields
+        if isinstance(field.value, frog_ast.Expression)
+        and field.type != frog_ast.SetType()
+    }
 
 
 def instantiated_field_names(

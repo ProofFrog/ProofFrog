@@ -1,0 +1,19 @@
+// F-356 (field initializer): an initializer is a store into its field, so
+// `ModInt<q> f = q;` holds q mod q = 0 and f + f == f holds: Left's Test
+// returns true, while Right's compares the integer q with 0 (false for
+// q = 1). Instantiation used to read f as its initializer q, which made
+// Left's Test the integer comparison q + q == q, that is q == 0.
+Game Left(Int q) {
+    ModInt<q> f = q;
+    Bool Test() {
+        return f + f == f;
+    }
+}
+
+Game Right(Int q) {
+    Bool Test() {
+        return q == 0;
+    }
+}
+
+export as FieldInit;

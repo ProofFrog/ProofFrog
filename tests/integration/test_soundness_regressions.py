@@ -136,6 +136,22 @@ CASES = [
      "positive control: the kept parameter conversion matches one written out"),
     ("F-356", "kept_return_control.proof", "accept", "method inliner",
      "positive control: the kept return conversion matches one written out"),
+    ("F-356", "field_init.proof", "reject", "instantiation",
+     "a ModInt<q> field initialized with the Int q was read as q"),
+    ("F-356", "field_init_int_compare.proof", "type_error", "instantiation",
+     "in a proof, a ModInt<q> field with an Int initializer was typed Int"),
+    ("F-356", "scheme_field_init.proof", "type_error", "instantiation",
+     "a scheme's ModInt<q> field initialized with the Int q was read as q"),
+    ("F-356", "field_init_typed_control.proof", "accept", "instantiation",
+     "positive control: an initializer of the field's type is still read"),
+    ("F-356", "field_init_literal.proof", "reject", "instantiation",
+     "a ModInt<2> field initialized with the literal 1 was read as the Int 1"),
+    ("F-356", "field_init_zero.proof", "type_error", "instantiation",
+     "in a proof, a ModInt<2> field initialized with 0 was typed Int"),
+    ("F-356", "scheme_field_literal.proof", "type_error", "instantiation",
+     "a scheme's ModInt<2> field initialized with the literal 1 was read as 1"),
+    ("F-356", "scheme_field_typed_control.proof", "accept", "instantiation",
+     "positive control: a scheme field initializer of its type is still read"),
     ("F-361", "collateral_poison_powpow.proof", "reject",
      "GroupElemSimplification",
      "a let GroupElem<G> t retyped the game's field t in H; (t^x)^y was folded"),
@@ -146,6 +162,10 @@ CASES = [
      "positive control: a field in G still folds next to a let t in H"),
     ("F-361", "step_assumption_control.proof", "accept", "ApplyAssumptions",
      "positive control: a step assumption follows the rename of a field named like a let"),
+    ("F-362", "control_E_noguard.proof", "reject", "instantiation",
+     "a game field n captured the let n carried into the game by inlined S.Get()"),
+    ("F-362", "collision_control.proof", "accept", "instantiation",
+     "positive control: a field named like the let keeps its own reads"),
     ("F-363", "attack_dedup_nondet_arg.proof", "reject",
      "DeduplicateDeterministicCalls",
      "R.Det(R.Draw()) twice was merged although each call draws its argument"),
@@ -281,6 +301,20 @@ CASES = [
 
 # (finding, proof file) -> the error a type_error case must fail with.
 TYPE_ERROR = {
+    ("F-356", "field_init_int_compare.proof"): (
+        "error: Cannot compare different types ModInt<q> and Int"
+    ),
+    ("F-356", "scheme_field_init.proof"): (
+        "error: Cannot instantiate ModField: its field 'f' stores its "
+        "initializer q in type ModInt<q>"
+    ),
+    ("F-356", "field_init_zero.proof"): (
+        "error: Can not use operator - with types ModInt<2> and Int"
+    ),
+    ("F-356", "scheme_field_literal.proof"): (
+        "error: Cannot instantiate LiteralModField: its field 'f' stores its "
+        "initializer 1 in type ModInt<2>"
+    ),
     ("GAME-SELF-CALL", "self_call.proof"): (
         "error: Game 'Calls' may not call its own method 'Inc'"
     ),

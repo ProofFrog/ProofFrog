@@ -380,7 +380,7 @@ The adversary has no direct access to the game's internal state (fields). It can
 
 The execution of a game `G` with an adversary `A` proceeds as follows:
 
-1. **Field initialization**: All state fields are initialized according to their declarations. Fields with explicit initializers (`Type x = expr;`) are set to the value of `expr`. Fields without initializers (`Type x;`) start at their type's default (section 6.9).
+1. **Field initialization**: All state fields are initialized according to their declarations. Fields with explicit initializers (`Type x = expr;`) are set to the value of `expr`, converted to `Type` like any store (an `Int` stored in a `ModInt<q>` field is reduced modulo `q`). Fields without initializers (`Type x;`) start at their type's default (section 6.9).
 
 2. **Initialize phase**: If the game has an `Initialize` method, it is called exactly once. This typically performs setup operations like sampling cryptographic keys.
 
@@ -492,6 +492,8 @@ This follows proof assistants such as Isabelle/HOL (`undefined`, an unspecified 
 When a security game is instantiated with a scheme, the scheme's methods become callable within the game body. For example, if `CPA(E)` is instantiated with `E = OTP(lambda)`, then calls to `E.Enc(k, m)` within the game body invoke the OTP scheme's `Enc` method.
 
 During proof verification, these method calls are **inlined**: the call `E.Enc(k, m)` is replaced by the body of OTP's `Enc` method with parameters substituted. This is the primary mechanism by which the proof engine reduces abstract game descriptions to concrete, comparable code.
+
+A scheme field with an initializer (`Int lambda = lambda;`) is read as its initializer, in the scheme's methods and as `E.lambda`. That is only exact when the initializer already has the field's type (or the field's type holds no `ModInt`), so the engine refuses, with a type error, a scheme whose field initializer would be converted: an `Int` stored in a `ModInt<q>` field, including an integer literal such as `0` (the field's arithmetic is modular, the literal's is not). A game field whose initializer is converted stays a field holding the converted value.
 
 ### 7.2 Game Composition with Reductions
 

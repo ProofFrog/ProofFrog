@@ -1,0 +1,15 @@
+// Target: ModInt Simplification. See ZeroBase.game.
+// Expected: Proof Failed.
+import 'ZeroBase.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    ZeroBase(q);
+
+games:
+    ZeroBase(q).Left against ZeroBase(q).Adversary;
+    ZeroBase(q).Right against ZeroBase(q).Adversary;

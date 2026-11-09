@@ -370,6 +370,30 @@ def detect_possibly_empty_draw_diff(hunk: DiffHunk) -> bool:
     return current_draws != next_draws
 
 
+# `e ^ 0`, a power with the literal exponent 0 (a bit-string literal `0^n`
+# prints without spaces).
+_POWER_OF_ZERO = re.compile(r"\^ 0(?!\w)")
+
+
+def detect_power_of_zero_diff(hunk: DiffHunk) -> bool:
+    """Check if one side keeps a power of zero ``e ^ 0`` and the other has
+    none.
+
+    A canonical form keeps ``e ^ 0`` only for a ``ModInt`` base (an ``Int``
+    power is folded, a group power becomes ``G.identity``). ModInt
+    Simplification rewrites it to the literal 1 only where the value is
+    returned or stored as its own ModInt type, or multiplied into a ModInt
+    operand: elsewhere the literal would be read as an ``Int`` (F-364).
+    """
+    current = any(
+        _POWER_OF_ZERO.search(_strip_diff_prefix(line)) for line in hunk.current_lines
+    )
+    next_side = any(
+        _POWER_OF_ZERO.search(_strip_diff_prefix(line)) for line in hunk.next_lines
+    )
+    return current != next_side
+
+
 _DETECTORS: list[tuple[Callable[[DiffHunk], bool], str, str]] = []
 
 
@@ -422,6 +446,14 @@ _register(
     "Keep the same draw at the same place in both games; if its domain is"
     + " never empty, draw from a type or exclude a set literal smaller than"
     + " the type instead",
+)
+_register(
+    detect_power_of_zero_diff,
+    "The engine keeps a ModInt power of zero 'x ^ 0' (the ModInt one, which"
+    + " is 0 when the modulus is 1) unless it is the whole value returned or"
+    + " stored as its ModInt type, or a factor of a ModInt product",
+    "Write the same power in both games, multiply it into a ModInt operand"
+    + " (x ^ 0 * y becomes y), or store it in a ModInt local first",
 )
 
 ENGINE_LIMITATION_DETECTORS = _DETECTORS

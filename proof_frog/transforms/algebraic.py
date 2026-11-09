@@ -901,7 +901,21 @@ class ModIntSimplificationTransformer(MethodScopedTypeMapMixin):
     - Multiplicative zero: a * 0 = 0, 0 * a = 0
     - Additive inverse: a - a = 0 (only when a is pure/deterministic)
     - Double negation: -(-a) = a
-    - Exponentiation: a ^ 0 = 1, a ^ 1 = a
+    - Exponentiation: a ^ 1 = a; a ^ 0 = 1 only where the value is converted
+      to its own ModInt type (see below)
+
+    A rewrite whose result is an integer literal leaves an ``Int`` where a
+    ``ModInt<q>`` value was, and every later reader takes that literal as an
+    ``Int`` (Symbolic Computation folds ``1 + 1`` to ``2``; the Z3 layer
+    compares it as an integer). That is exact for 0, which is 0 in every
+    modulus, but not for 1: ``a ^ 0`` is the ModInt one, which is 0 when
+    q = 1, and two copies of it add to 0 when q = 2, while ``1 + 1 == 0`` is
+    false (F-364). So ``a ^ 0`` becomes the literal 1 only as the whole
+    value of a return or store of the same ModInt type, which reduces the
+    literal mod q again, and as a factor of a product with a ModInt operand
+    (``a ^ 0 * b`` is ``b``). Elsewhere it is kept, with a near miss. A power
+    whose base the rules reduce to the literal 0 (``(a - a) ^ 0``) keeps its
+    base as written, so it is not left as the Int ``0 ^ 0``.
     """
 
     def __init__(
@@ -909,14 +923,133 @@ class ModIntSimplificationTransformer(MethodScopedTypeMapMixin):
         type_map: NameTypeMap,
         proof_namespace: frog_ast.Namespace | None = None,
         proof_let_types: Optional[NameTypeMap] = None,
+        ctx: PipelineContext | None = None,
     ) -> None:
         self.type_map = type_map
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
+        self._ctx = ctx
+        self._method_name: str | None = None
+        self._return_type: frog_ast.Type | None = None
+        # The value expression of the return or store being transformed, and
+        # the ModInt type it is converted to (None outside such a statement).
+        self._converted_value: frog_ast.Expression | None = None
+        self._converted_type: frog_ast.ModIntType | None = None
 
     def _is_modint_expr(self, expr: frog_ast.Expression) -> bool:
         return isinstance(
             _get_expression_type(expr, self.type_map), frog_ast.ModIntType
+        )
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.ASTNode:
+        saved = (self._method_name, self._return_type)
+        self._method_name = method.signature.name
+        self._return_type = method.signature.return_type
+        try:
+            return super().transform_method(method)
+        finally:
+            self._method_name, self._return_type = saved
+
+    def _transform_converted(
+        self, statement: frog_ast.Statement, value: frog_ast.Expression, target: object
+    ) -> frog_ast.ASTNode:
+        """Transforms *statement*, whose *value* is converted to *target*."""
+        saved = (self._converted_value, self._converted_type)
+        if isinstance(target, frog_ast.ModIntType):
+            self._converted_value, self._converted_type = value, target
+        else:
+            self._converted_value, self._converted_type = None, None
+        try:
+            return self._transform_children(statement)
+        finally:
+            self._converted_value, self._converted_type = saved
+
+    def transform_return_statement(
+        self, return_statement: frog_ast.ReturnStatement
+    ) -> frog_ast.ASTNode:
+        return self._transform_converted(
+            return_statement, return_statement.expression, self._return_type
+        )
+
+    def transform_assignment(self, assignment: frog_ast.Assignment) -> frog_ast.ASTNode:
+        target: object = assignment.the_type
+        if target is None and isinstance(assignment.var, frog_ast.Variable):
+            target = self.type_map.get(assignment.var.name)
+        return self._transform_converted(assignment, assignment.value, target)
+
+    def _is_modint_one(self, expr: frog_ast.Expression) -> bool:
+        """``a ^ 0`` with a ModInt base: the ModInt one of a's type."""
+        return (
+            isinstance(expr, frog_ast.BinaryOperation)
+            and expr.operator == frog_ast.BinaryOperators.EXPONENTIATE
+            and _is_integer_literal(expr.right_expression, 0)
+            and self._is_modint_expr(expr.left_expression)
+        )
+
+    def _absorb_modint_one(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> Optional[frog_ast.Expression]:
+        """``a ^ 0 * b`` and ``b * a ^ 0`` are ``b`` for ``b`` of a's ModInt
+        type (in every modulus, q = 1 included). Checked on the operands as
+        written, before ``a ^ 0`` is visited, so it is not reported."""
+        left = binary_operation.left_expression
+        right = binary_operation.right_expression
+        for one, other in ((left, right), (right, left)):
+            if not self._is_modint_one(one) or not self._is_modint_expr(other):
+                continue
+            assert isinstance(one, frog_ast.BinaryOperation)
+            if _get_expression_type(
+                one.left_expression, self.type_map
+            ) == _get_expression_type(other, self.type_map):
+                return self.transform(other)
+        return None
+
+    def _simplify_modint_power(
+        self,
+        binary_operation: frog_ast.BinaryOperation,
+        left: frog_ast.Expression,
+        right: frog_ast.Expression,
+    ) -> frog_ast.Expression:
+        """``a ^ e`` with *a* a ModInt (as written); *left* and *right* are
+        the transformed base and exponent."""
+        if _is_integer_literal(right, 1):
+            return left
+        if not self._is_modint_expr(left):
+            # The base became an Int-typed form (``a - a`` -> ``0``): keep it
+            # as written, so that the power stays ModInt-typed.
+            left = binary_operation.left_expression
+        if not _is_integer_literal(right, 0):
+            return frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.EXPONENTIATE, left, right
+            )
+        if (
+            binary_operation is self._converted_value
+            and _get_expression_type(left, self.type_map) == self._converted_type
+        ):
+            return frog_ast.Integer(1)
+        if self._ctx is not None:
+            self._ctx.near_misses.append(
+                NearMiss(
+                    transform_name="ModInt Simplification",
+                    reason=(
+                        f"'{binary_operation}' not rewritten to 1: it is the "
+                        "ModInt one, not the Int 1 (it is 0 when the modulus "
+                        "is 1, and two copies add to 0 when it is 2), and "
+                        "the literal would be read as an Int here"
+                    ),
+                    location=binary_operation.origin,
+                    suggestion=(
+                        "It becomes 1 only as the whole value of a return or "
+                        "store of its ModInt type, or as a factor of a "
+                        "product with a ModInt operand (a ^ 0 * b becomes b); "
+                        "otherwise write the same power in the other game"
+                    ),
+                    variable=None,
+                    method=self._method_name,
+                )
+            )
+        return frog_ast.BinaryOperation(
+            frog_ast.BinaryOperators.EXPONENTIATE, left, right
         )
 
     def transform_unary_operation(
@@ -941,6 +1074,10 @@ class ModIntSimplificationTransformer(MethodScopedTypeMapMixin):
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
     ) -> frog_ast.Expression:
+        if binary_operation.operator == frog_ast.BinaryOperators.MULTIPLY:
+            absorbed = self._absorb_modint_one(binary_operation)
+            if absorbed is not None:
+                return absorbed
         transformed = frog_ast.BinaryOperation(
             binary_operation.operator,
             self.transform(binary_operation.left_expression),
@@ -950,12 +1087,14 @@ class ModIntSimplificationTransformer(MethodScopedTypeMapMixin):
         right = transformed.right_expression
         op = transformed.operator
 
+        if op == frog_ast.BinaryOperators.EXPONENTIATE and (
+            self._is_modint_expr(binary_operation.left_expression)
+            or self._is_modint_expr(left)
+        ):
+            return self._simplify_modint_power(binary_operation, left, right)
+
         if not self._is_modint_expr(left) and not self._is_modint_expr(right):
-            # Check for exponentiation where base is ModInt
-            if op != frog_ast.BinaryOperators.EXPONENTIATE:
-                return transformed
-            if not self._is_modint_expr(left):
-                return transformed
+            return transformed
 
         # Additive identity: a + 0 = a, 0 + a = a
         if op == frog_ast.BinaryOperators.ADD:
@@ -985,13 +1124,6 @@ class ModIntSimplificationTransformer(MethodScopedTypeMapMixin):
                 return frog_ast.Integer(0)
             if _is_integer_literal(left, 0):
                 return frog_ast.Integer(0)
-
-        # Exponentiation identities: a ^ 0 = 1, a ^ 1 = a
-        if op == frog_ast.BinaryOperators.EXPONENTIATE:
-            if _is_integer_literal(right, 0):
-                return frog_ast.Integer(1)
-            if _is_integer_literal(right, 1):
-                return left
 
         return transformed
 
@@ -1538,6 +1670,7 @@ class ModIntSimplification(TransformPass):
                 type_map,
                 proof_namespace=ctx.proof_namespace,
                 proof_let_types=ctx.proof_let_types,
+                ctx=ctx,
             )
             .scope_to_game(game, ctx.proof_let_types)
             .transform(game)

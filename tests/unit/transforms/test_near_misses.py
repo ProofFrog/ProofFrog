@@ -9,6 +9,7 @@ from proof_frog.transforms._base import (
 from proof_frog import frog_parser, frog_ast
 from proof_frog.transforms.algebraic import (
     InjectiveEqualitySimplify,
+    ModIntSimplification,
     UniformXorSimplification,
     UniformModIntSimplification,
     XorCancellation,
@@ -175,6 +176,48 @@ def test_inline_near_miss_on_int_stored_into_modint():
     assert len(misses) == 1
     assert misses[0].transform_name == "Inline Single-Use Variable"
     assert "ModInt" in misses[0].reason
+
+
+def test_near_miss_modint_simplification_keeps_power_of_zero():
+    """F-364: a ModInt `x ^ 0` read as a value (here inside a comparison) is
+    not rewritten to the Int 1, and the near miss names the power."""
+    game = frog_parser.parse_game(
+        "Game T(Int q) {\n"
+        "    Bool O(ModInt<q> x, ModInt<q> y) {\n"
+        "        return x ^ 0 + x ^ 0 == y - y;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    result = ModIntSimplification().apply(game, ctx)
+    assert "x ^ 0 + x ^ 0 == 0" in str(result)
+    misses = [
+        nm for nm in ctx.near_misses if nm.transform_name == "ModInt Simplification"
+    ]
+    assert len(misses) == 2
+    assert all("x ^ 0" in nm.reason and nm.method == "O" for nm in misses)
+
+
+def test_no_near_miss_modint_simplification_power_of_zero_converted():
+    """F-364 controls: `x ^ 0` returned as its ModInt type, or multiplied
+    into a ModInt operand, is simplified and reports nothing."""
+    game = frog_parser.parse_game(
+        "Game T(Int q) {\n"
+        "    ModInt<q> One(ModInt<q> x) {\n"
+        "        return x ^ 0;\n"
+        "    }\n"
+        "    ModInt<q> Times(ModInt<q> x, ModInt<q> y) {\n"
+        "        return x ^ 0 * y;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    result = ModIntSimplification().apply(game, ctx)
+    assert "return 1;" in str(result)
+    assert "return y;" in str(result)
+    assert not [
+        nm for nm in ctx.near_misses if nm.transform_name == "ModInt Simplification"
+    ]
 
 
 def test_redundant_copy_near_miss_copy_read_after_overwrite():

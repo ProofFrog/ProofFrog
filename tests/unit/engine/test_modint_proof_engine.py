@@ -405,6 +405,203 @@ class TestModIntSimplificationExponentiation:
         assert result == expected
 
 
+def _simplify_method(source: str, **types: frog_ast.Type) -> frog_ast.Method:
+    method = frog_parser.parse_method(source)
+    return ModIntSimplificationTransformer(_type_map_with(**types)).transform(method)
+
+
+_Q = _modint(_var("q"))
+
+
+class TestModIntPowerOfZeroKeepsItsType:
+    """F-364: `a ^ 0` on ModInt<q> is the ModInt one, which is 0 when q = 1
+    and adds to 0 with itself when q = 2. The Int literal 1 stands for it
+    only where the value is converted to ModInt<q> again."""
+
+    def test_f364_power_zero_in_comparison_kept(self) -> None:
+        """Rewritten to `1 + 1 == 0`, Symbolic Computation would fold it to
+        the false `2 == 0`; the powers stay."""
+        result = _simplify_method(
+            """
+            Bool f(ModInt<q> a) {
+                return a ^ 0 + a ^ 0 == a - a;
+            }
+            """,
+            a=_Q,
+        )
+        expected = frog_parser.parse_method("""
+            Bool f(ModInt<q> a) {
+                return a ^ 0 + a ^ 0 == 0;
+            }
+        """)
+        assert result == expected
+
+    def test_f364_power_zero_inside_returned_sum_kept(self) -> None:
+        """Only the whole returned value is converted: inside `a ^ 0 + b`
+        the literal would be a mixed Int operand."""
+        source = """
+            ModInt<q> f(ModInt<q> a, ModInt<q> b) {
+                return a ^ 0 + b;
+            }
+        """
+        assert _simplify_method(source, a=_Q, b=_Q) == frog_parser.parse_method(source)
+
+    def test_f364_zero_base_keeps_base(self) -> None:
+        """`(a - a) ^ 0` must not become the Int `0 ^ 0`, which Symbolic
+        Computation folds to the Int 1."""
+        result = _simplify_method(
+            """
+            Bool f(ModInt<q> a) {
+                return (a - a) ^ 0 == a - a;
+            }
+            """,
+            a=_Q,
+        )
+        expected = frog_parser.parse_method("""
+            Bool f(ModInt<q> a) {
+                return (a - a) ^ 0 == 0;
+            }
+        """)
+        assert result == expected
+
+    def test_f364_zero_base_power_one_is_zero(self) -> None:
+        result = _simplify_method(
+            """
+            ModInt<q> f(ModInt<q> a) {
+                return (a - a) ^ 1;
+            }
+            """,
+            a=_Q,
+        )
+        expected = frog_parser.parse_method("""
+            ModInt<q> f(ModInt<q> a) {
+                return 0;
+            }
+        """)
+        assert result == expected
+
+    def test_f364_zero_base_returned_becomes_one(self) -> None:
+        """A returned power of zero is converted to ModInt<q> by the return,
+        whatever its base."""
+        result = _simplify_method(
+            """
+            ModInt<q> f(ModInt<q> a) {
+                return (a - a) ^ 0;
+            }
+            """,
+            a=_Q,
+        )
+        expected = frog_parser.parse_method("""
+            ModInt<q> f(ModInt<q> a) {
+                return 1;
+            }
+        """)
+        assert result == expected
+
+    def test_f364_power_zero_typed_store_becomes_one(self) -> None:
+        result = _simplify_method(
+            """
+            ModInt<q> f(ModInt<q> a) {
+                ModInt<q> one = a ^ 0;
+                return one + a;
+            }
+            """,
+            a=_Q,
+            one=_Q,
+        )
+        expected = frog_parser.parse_method("""
+            ModInt<q> f(ModInt<q> a) {
+                ModInt<q> one = 1;
+                return one + a;
+            }
+        """)
+        assert result == expected
+
+    def test_f364_power_zero_plain_store_becomes_one(self) -> None:
+        result = _simplify_method(
+            """
+            Void f(ModInt<q> a) {
+                s = a ^ 0;
+            }
+            """,
+            a=_Q,
+            s=_Q,
+        )
+        expected = frog_parser.parse_method("""
+            Void f(ModInt<q> a) {
+                s = 1;
+            }
+        """)
+        assert result == expected
+
+    def test_f364_power_zero_store_of_other_modulus_kept(self) -> None:
+        """The conversion reduces mod the target's modulus, so the target
+        must have the power's own type."""
+        source = """
+            ModInt<p> f(ModInt<q> a) {
+                return a ^ 0;
+            }
+        """
+        assert _simplify_method(source, a=_Q) == frog_parser.parse_method(source)
+
+    def test_f364_power_zero_store_to_non_modint_kept(self) -> None:
+        source = """
+            Bool f(ModInt<q> a) {
+                Bool b = a ^ 0 == a;
+                return b;
+            }
+        """
+        assert _simplify_method(source, a=_Q, b=frog_ast.BoolType()) == (
+            frog_parser.parse_method(source)
+        )
+
+    @pytest.mark.parametrize("product", ["a ^ 0 * b", "b * a ^ 0"])
+    def test_f364_power_zero_absorbed_by_product(self, product: str) -> None:
+        result = _simplify_method(
+            f"""
+            Bool f(ModInt<q> a, ModInt<q> b, ModInt<q> c) {{
+                return {product} == c;
+            }}
+            """,
+            a=_Q,
+            b=_Q,
+            c=_Q,
+        )
+        expected = frog_parser.parse_method("""
+            Bool f(ModInt<q> a, ModInt<q> b, ModInt<q> c) {
+                return b == c;
+            }
+        """)
+        assert result == expected
+
+    def test_f364_power_zero_times_zero_is_zero(self) -> None:
+        result = _simplify_method(
+            """
+            Bool f(ModInt<q> a, ModInt<q> c) {
+                return (c - c) * a ^ 0 == c;
+            }
+            """,
+            a=_Q,
+            c=_Q,
+        )
+        expected = frog_parser.parse_method("""
+            Bool f(ModInt<q> a, ModInt<q> c) {
+                return 0 == c;
+            }
+        """)
+        assert result == expected
+
+    def test_f364_power_zero_not_absorbed_by_other_modulus(self) -> None:
+        source = """
+            Bool f(ModInt<q> a, ModInt<p> b, ModInt<p> c) {
+                return a ^ 0 * b == c;
+            }
+        """
+        p = _modint(_var("p"))
+        result = _simplify_method(source, a=_Q, b=p, c=p)
+        assert result == frog_parser.parse_method(source)
+
+
 class TestModIntSimplificationNegation:
     def test_double_negation(self) -> None:
         """-(-a) -> a for ModInt."""

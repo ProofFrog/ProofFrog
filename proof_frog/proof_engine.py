@@ -218,6 +218,21 @@ def _check_equivalent_task(task: _EquivalenceTask) -> EquivalenceResult:
     )
 
 
+def _z3_sort_label(formula: object) -> str:
+    """Name the Z3 sort of a `Z3FormulaVisitor` result for a message. The
+    visitor leaves a Python `bool` or `int` for a literal and a Python tuple
+    for a tuple value."""
+    if isinstance(formula, z3.ExprRef):
+        return str(formula.sort())
+    if isinstance(formula, bool):
+        return "Bool"
+    if isinstance(formula, int):
+        return "Int"
+    if isinstance(formula, tuple):
+        return "[" + ", ".join(_z3_sort_label(item) for item in formula) + "]"
+    return type(formula).__name__
+
+
 def _z3_check_expression_pair(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     current_game_ast: frog_ast.Game,
     next_game_ast: frog_ast.Game,
@@ -270,9 +285,26 @@ def _z3_check_expression_pair(  # pylint: disable=too-many-arguments,too-many-po
                 f"{current_expr} vs {next_expr}"
             ),
         )
+    # Fail closed (F-365): the two sides can have Z3 sorts that do not
+    # compare. The visitor interns a value it cannot model as an atom of the
+    # uninterpreted `Opaque` sort, so a Bool comparison it cannot translate
+    # (`0 == x + 1` over ModInt) faces a Bool literal on the other side, and
+    # `==` raises instead of building a formula. Such a pair is not proved
+    # equivalent, so the hop fails with the sorts named.
+    try:
+        difference = z3.Not(first_formula == next_formula)
+    except (z3.Z3Exception, TypeError):
+        return EquivalenceResult(
+            valid=False,
+            failure_detail=(
+                f"Could not compare {kind} in Z3: sort mismatch "
+                f"({_z3_sort_label(first_formula)} vs "
+                f"{_z3_sort_label(next_formula)}): {current_expr} vs {next_expr}"
+            ),
+        )
     solver = z3.Solver()
     solver.set("timeout", 30000)
-    solver.add(z3.Not(first_formula == next_formula))
+    solver.add(difference)
     if solver.check() != z3.unsat:
         return EquivalenceResult(
             valid=False,

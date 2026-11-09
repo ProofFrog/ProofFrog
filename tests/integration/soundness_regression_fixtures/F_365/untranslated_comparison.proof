@@ -1,0 +1,15 @@
+// Target: the residual Z3 equivalence check. See UntranslatedComparison.game.
+// Expected: Proof Failed (no crash).
+import 'UntranslatedComparison.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    UntranslatedComparison(q);
+
+games:
+    UntranslatedComparison(q).Left against UntranslatedComparison(q).Adversary;
+    UntranslatedComparison(q).Right against UntranslatedComparison(q).Adversary;

@@ -11,6 +11,7 @@ from proof_frog.diagnostics import (
     detect_if_condition_reorder_diff,
     detect_unfolded_negation_diff,
     detect_possibly_empty_draw_diff,
+    detect_power_of_zero_diff,
     DiffHunk,
 )
 from proof_frog.transforms._base import NearMiss
@@ -375,3 +376,23 @@ def test_detect_possibly_empty_draw_false(
 ) -> None:
     hunk = DiffHunk(method="Draw", current_lines=current_lines, next_lines=next_lines)
     assert detect_possibly_empty_draw_diff(hunk) is False
+
+
+@pytest.mark.parametrize(
+    "current_lines, next_lines, expected",
+    [
+        # F-364: a kept ModInt power of zero against an expression without one.
+        (["-    return arg1 ^ 0 + arg2;"], ["+    return 1 + arg2;"], True),
+        (["-    return arg2;"], ["+    return arg1 ^ 0 * arg3 + arg2;"], True),
+        # The same power on both sides is not the difference.
+        (["-    return arg1 ^ 0 + arg2;"], ["+    return arg1 ^ 0 + arg3;"], False),
+        # A bit-string literal 0^n is not a power, and 05 is not the exponent 0.
+        (["-    return 0^lambda;"], ["+    return arg1;"], False),
+        (["-    return arg1 ^ 05;"], ["+    return arg1;"], False),
+    ],
+)
+def test_detect_power_of_zero(
+    current_lines: list[str], next_lines: list[str], expected: bool
+) -> None:
+    hunk = DiffHunk(method="Probe", current_lines=current_lines, next_lines=next_lines)
+    assert detect_power_of_zero_diff(hunk) is expected

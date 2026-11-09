@@ -1,0 +1,37 @@
+// Positive control for the F-364 attacks: x ^ 0 is the ModInt one in every
+// modulus (q = 1 included), so x^0 * y is y; returning x ^ 0 from a
+// ModInt<q> oracle, or storing it into a ModInt<q> local, gives 1 reduced
+// mod q, the same value as returning 1. ModInt Simplification still
+// simplifies these.
+// Expected: Proof Succeeded.
+
+Game Left(Int q) {
+    ModInt<q> Product(ModInt<q> x, ModInt<q> y) {
+        return x ^ 0 * y;
+    }
+
+    ModInt<q> One(ModInt<q> x) {
+        return x ^ 0;
+    }
+
+    ModInt<q> Store(ModInt<q> x) {
+        ModInt<q> one = x ^ 0;
+        return one;
+    }
+}
+
+Game Right(Int q) {
+    ModInt<q> Product(ModInt<q> x, ModInt<q> y) {
+        return y;
+    }
+
+    ModInt<q> One(ModInt<q> x) {
+        return 1;
+    }
+
+    ModInt<q> Store(ModInt<q> x) {
+        return 1;
+    }
+}
+
+export as PowerOfZeroControl;

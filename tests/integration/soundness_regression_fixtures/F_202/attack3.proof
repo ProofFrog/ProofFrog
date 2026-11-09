@@ -1,0 +1,21 @@
+// Attack 3 (DeduplicateDeterministicCalls) e2e artifact.
+// Claims as a THEOREM (no assumptions) that Left == Right in attack3_prop.game.
+// A distinguisher exists (O once, test t[0]==t[1]: Left draws two independent
+// F.Gen() values, Right draws one), so a sound engine must reject this proof.
+// If `prove` succeeds, the pass's lack of an argument-purity check is
+// confirmed unsound end-to-end.
+import 'DetPrimS.primitive';
+import 'attack3_prop.game';
+
+proof:
+
+let:
+    Int n;
+    DetPrimS F = DetPrimS(BitString<n>);
+
+theorem:
+    Attack3Prop(F);
+
+games:
+    Attack3Prop(F).Left against Attack3Prop(F).Adversary;
+    Attack3Prop(F).Right against Attack3Prop(F).Adversary;

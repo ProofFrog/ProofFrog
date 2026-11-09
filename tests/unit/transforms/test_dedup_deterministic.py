@@ -6,9 +6,12 @@ calls and single occurrences are left untouched.
 """
 
 from proof_frog import frog_ast, frog_parser
+from proof_frog.transforms._base import PipelineContext
 from proof_frog.transforms.inlining import (
+    DeduplicateDeterministicCalls,
     DeduplicateDeterministicCallsTransformer,
 )
+from proof_frog.visitors import NameTypeMap
 
 
 def _make_det_namespace() -> frog_ast.Namespace:
@@ -462,3 +465,118 @@ class TestDeduplicateDeterministicCalls:
         ).transform(method)
         # The second G.evaluate(k) is replaced by a reference to the first result.
         assert str(result) != str(method), "stable-arg dedup should still fire"
+
+
+def _make_draw_namespace() -> frog_ast.Namespace:
+    """Namespace with primitive R: ``Det`` deterministic, ``Draw`` not."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive R(Int q) {
+            ModInt<q> Draw();
+            deterministic ModInt<q> Det(ModInt<q> x);
+        }
+        """)
+    return {"R": prim}
+
+
+def _let_function_types() -> NameTypeMap:
+    """Proof let types declaring ``H`` as a ``Function<ModInt<q>, ModInt<q>>``."""
+    let_types = NameTypeMap()
+    mod_q = frog_ast.ModIntType(frog_ast.Variable("q"))
+    let_types.set("H", frog_ast.FunctionType(mod_q, mod_q))
+    return let_types
+
+
+class TestDedupNondeterministicArgument:
+    """F-363 / F-202: equal deterministic calls are merged only when their
+    arguments are deterministic too, because each occurrence evaluates its
+    own arguments."""
+
+    def test_f363_nondeterministic_argument_not_deduped(self) -> None:
+        """`[R.Det(R.Draw()), R.Det(R.Draw())]` draws twice; merging the two
+        calls would make the components always equal."""
+        source = """
+            [ModInt<q>, ModInt<q>] f() {
+                return [R.Det(R.Draw()), R.Det(R.Draw())];
+            }
+            """
+        result = DeduplicateDeterministicCallsTransformer(
+            proof_namespace=_make_draw_namespace()
+        ).transform(frog_parser.parse_method(source))
+        assert result == frog_parser.parse_method(source)
+
+    def test_f202_nondeterministic_call_inside_argument_not_deduped(self) -> None:
+        """The check covers the whole argument, not only its outermost node:
+        `R.Draw()` nested in `R.Draw() + x` still draws once per call."""
+        source = """
+            [ModInt<q>, ModInt<q>] f(ModInt<q> x) {
+                return [R.Det(R.Draw() + x), R.Det(R.Draw() + x)];
+            }
+            """
+        result = DeduplicateDeterministicCallsTransformer(
+            proof_namespace=_make_draw_namespace()
+        ).transform(frog_parser.parse_method(source))
+        assert result == frog_parser.parse_method(source)
+
+    def test_f363_deterministic_nested_argument_still_deduped(self) -> None:
+        """Positive control: a nested deterministic call in the argument does
+        not block the merge."""
+        method = frog_parser.parse_method("""
+            [ModInt<q>, ModInt<q>] f(ModInt<q> x) {
+                return [R.Det(R.Det(x)), R.Det(R.Det(x))];
+            }
+            """)
+        expected = frog_parser.parse_method("""
+            [ModInt<q>, ModInt<q>] f(ModInt<q> x) {
+                ModInt<q> __determ_0__ = R.Det(R.Det(x));
+                return [__determ_0__, __determ_0__];
+            }
+            """)
+        result = DeduplicateDeterministicCallsTransformer(
+            proof_namespace=_make_draw_namespace()
+        ).transform(method)
+        assert result == expected
+
+    def test_f363_let_function_argument_still_deduped(self) -> None:
+        """Positive control: a call to a `let:`-bound Function is
+        deterministic, so equal calls taking it as an argument are merged.
+        The pass reads the let types from the pipeline context."""
+        game = frog_parser.parse_game("""
+            Game T(Int q) {
+                [ModInt<q>, ModInt<q>] f(ModInt<q> x) {
+                    return [R.Det(H(x)), R.Det(H(x))];
+                }
+            }
+            """)
+        expected = frog_parser.parse_game("""
+            Game T(Int q) {
+                [ModInt<q>, ModInt<q>] f(ModInt<q> x) {
+                    ModInt<q> __determ_0__ = R.Det(H(x));
+                    return [__determ_0__, __determ_0__];
+                }
+            }
+            """)
+        ctx = PipelineContext(
+            variables={},
+            proof_let_types=_let_function_types(),
+            proof_namespace=_make_draw_namespace(),
+            subsets_pairs=[],
+        )
+        assert DeduplicateDeterministicCalls().apply(game, ctx) == expected
+
+    def test_f363_function_resampled_between_calls_not_deduped(self) -> None:
+        """A local Function re-sampled between the two calls changes the
+        argument's value, even though calling a Function is deterministic."""
+        source = """
+            [ModInt<q>, ModInt<q>] f(ModInt<q> x) {
+                Function<ModInt<q>, ModInt<q>> H <- Function<ModInt<q>, ModInt<q>>;
+                ModInt<q> a = R.Det(H(x));
+                H <- Function<ModInt<q>, ModInt<q>>;
+                ModInt<q> b = R.Det(H(x));
+                return [a, b];
+            }
+            """
+        result = DeduplicateDeterministicCallsTransformer(
+            proof_namespace=_make_draw_namespace(),
+            proof_let_types=_let_function_types(),
+        ).transform(frog_parser.parse_method(source))
+        assert result == frog_parser.parse_method(source)

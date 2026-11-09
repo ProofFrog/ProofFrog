@@ -33,6 +33,7 @@ from ..visitors import (
     expression_type,
     lvalue_base_name,
     type_contains_mod_int,
+    with_proof_let_types,
 )
 from ._base import NearMiss, PipelineContext
 
@@ -266,8 +267,7 @@ def coercing_store_names(
         field_map = NameTypeMap()
         for field in game.fields:
             field_map.set(field.name, field.type)
-        if proof_let_types is not None:
-            field_map = field_map + proof_let_types
+        field_map = with_proof_let_types(field_map, proof_let_types)
         for field in game.fields:
             if field.value is not None and not store_keeps_value(
                 field.type, field.value, field_map, proof_namespace

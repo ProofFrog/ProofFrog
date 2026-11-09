@@ -1667,6 +1667,26 @@ class NameTypeMap:
         return new_map
 
 
+def with_proof_let_types(
+    type_map: NameTypeMap, proof_let_types: Optional[NameTypeMap]
+) -> NameTypeMap:
+    """*type_map* (a game's declarations) with *proof_let_types* filled in
+    underneath it.
+
+    A proof's ``let:`` names are the outer scope of every game in the proof,
+    so a name the game declares itself (a field, parameter or local) keeps
+    the game's type, and a ``let:`` type applies only to a name the game
+    does not declare. ``NameTypeMap.__add__`` lets its right operand win, so
+    the old ``type_map + proof_let_types`` let a ``let:`` entry that is not
+    passed to the game retype a same-named game field (F-361: a field
+    ``GroupElem<H> t`` read as the let ``GroupElem<G> t`` folded
+    ``(t ^ x) ^ y`` into ``t ^ (x * y)`` in the wrong group order).
+    """
+    if proof_let_types is None:
+        return type_map
+    return proof_let_types + type_map
+
+
 F = TypeVar("F", bound=Callable[..., Any])
 
 
@@ -1732,7 +1752,8 @@ def build_game_type_map(
     """Build a NameTypeMap containing all variable types declared in a game.
 
     Collects types from fields, method parameters, assignments, and samples.
-    Optionally merges with proof-level let types.
+    Optionally merges with proof-level let types, which apply only to names
+    the game does not declare (:func:`with_proof_let_types`).
 
     WARNING: this map is *game-wide and scope-blind*. Because
     :meth:`NameTypeMap.set` is last-write-wins, a parameter or local named
@@ -1749,9 +1770,7 @@ def build_game_type_map(
     # Use a dummy stopping point that won't match any real node to collect everything
     dummy = frog_ast.Boolean(True)
     type_map = GetTypeMapVisitor(dummy).visit(game)
-    if proof_let_types is not None:
-        type_map = type_map + proof_let_types
-    return type_map
+    return with_proof_let_types(type_map, proof_let_types)
 
 
 def build_method_type_map(
@@ -1764,8 +1783,9 @@ def build_method_type_map(
     Contains the game's fields (module-global) plus only *method*'s own
     parameters and local declarations -- crucially NOT other methods'
     params/locals. A method-local binding shadowing a field name wins within
-    the method. Optionally merges proof-level let types (which win last,
-    matching :func:`build_game_type_map`).
+    the method. Optionally merges proof-level let types, which apply only to
+    names neither the game nor the method declares
+    (:func:`with_proof_let_types`, as in :func:`build_game_type_map`).
 
     This is the sound, scope-correct replacement for
     :func:`build_game_type_map` whenever a transform reasons about the type of
@@ -1780,12 +1800,9 @@ def build_method_type_map(
     for field in game.fields:
         field_map.set(field.name, field.type)
     method_map = GetTypeMapVisitor(dummy).visit(method)
-    # field_map + method_map: a method-local shadowing a field wins.
-    # + proof_let_types last, matching build_game_type_map's precedence.
-    result = field_map + method_map
-    if proof_let_types is not None:
-        result = result + proof_let_types
-    return result
+    # field_map + method_map: a method-local shadowing a field wins; both
+    # shadow a proof let of the same name.
+    return with_proof_let_types(field_map + method_map, proof_let_types)
 
 
 def type_contains_mod_int(the_type: Optional[frog_ast.ASTNode]) -> bool:

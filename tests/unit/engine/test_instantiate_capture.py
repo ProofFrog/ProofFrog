@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from proof_frog import frog_ast, frog_parser
+from proof_frog import frog_ast, frog_parser, proof_engine, visitors
 from proof_frog.proof_engine import InstantiationCaptureError, instantiate
 
 
@@ -184,3 +184,84 @@ def test_f341_scheme_field_reexporting_argument_is_allowed(tmp_path: Path) -> No
     assert isinstance(scheme, frog_ast.Scheme)
     out = instantiate(scheme, _lam(), {})
     assert "return m + lambda;" in str(out)
+
+
+# F-361: a game field named like a namespace (proof ``let:``) name. The
+# engine resolves proof steps with ``rename_namespace_fields=True``.
+
+
+_SHADOWING_GAME = """
+    Game G(Int n) {
+        Int t;
+        Void Put(Int v) { t = v; }
+        Int O() { return t + n; }
+    }
+    """
+
+
+def test_f361_game_field_named_like_namespace_name_is_renamed() -> None:
+    """Field `t` and a `let:` `t` the game is not passed must stay apart:
+    otherwise later passes read the field with the let's type, and inlined
+    scheme code reading the let `t` would read the field."""
+    game = frog_parser.parse_game(_SHADOWING_GAME)
+    out = instantiate(game, _lam(), {"t": None}, rename_namespace_fields=True)
+    (field,) = out.fields
+    assert field.name != "t" and field.name.startswith("__i")
+    assert _returned(_oracle(out)) == frog_parser.parse_expression(
+        f"{field.name} + lambda"
+    )
+    assert f"{field.name} = v;" in str(_oracle(out, "Put"))
+    assert "t" not in visitors.referenced_variable_names(out)
+
+
+def test_f361_namespace_rename_is_opt_in() -> None:
+    """The type checker instantiates without the flag and keeps the name."""
+    game = frog_parser.parse_game(_SHADOWING_GAME)
+    out = instantiate(game, _lam(), {"t": None})
+    assert [field.name for field in out.fields] == ["t"]
+
+
+def test_f361_set_alias_field_named_like_namespace_name_is_kept() -> None:
+    """A `Set` alias field is substituted into every use, so nothing is left
+    to collide; renaming it would leave its type-position uses dangling."""
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            Set K = BitString<n>;
+            K O(K x) { return x; }
+        }
+        """)
+    out = instantiate(game, _lam(), {"K": None}, rename_namespace_fields=True)
+    assert [field.name for field in out.fields] == ["K"]
+    assert "BitString<lambda> O(BitString<lambda>" in str(out)
+
+
+def test_f361_renamed_field_initializers_keep_outer_references() -> None:
+    """A field's own initializer and the earlier ones are evaluated before
+    the field is bound, so their `t` is the parameter; later initializers
+    and the methods read the renamed field."""
+    game = frog_parser.parse_game("""
+        Game G(Int t) {
+            Int a = t;
+            Int t = t;
+            Int b = t;
+            Int O() { return a + t + b; }
+        }
+        """)
+    out = instantiate(game, _lam(), {"t": None}, rename_namespace_fields=True)
+    names = [field.name for field in out.fields]
+    assert names[0] == "a" and names[2] == "b" and names[1].startswith("__i")
+    # Every initializer, and so every read, comes out as the argument.
+    assert [str(field.value) for field in out.fields] == ["lambda"] * 3
+    assert _returned(_oracle(out)) == frog_parser.parse_expression(
+        "lambda + lambda + lambda"
+    )
+
+
+def test_f361_instantiated_field_names_matches_instantiate() -> None:
+    """Step assumptions name a field as written; the lookup must give the
+    name `instantiate` gives it."""
+    game = frog_parser.parse_game(_SHADOWING_GAME)
+    names = proof_engine.instantiated_field_names(game, _lam(), {"t": None})
+    out = instantiate(game, _lam(), {"t": None}, rename_namespace_fields=True)
+    assert names == {"t": out.fields[0].name}
+    assert not proof_engine.instantiated_field_names(game, _lam(), {})

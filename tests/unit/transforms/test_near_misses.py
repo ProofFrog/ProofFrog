@@ -791,6 +791,43 @@ def test_dedup_no_near_miss_when_deterministic():
     assert len(dedup_misses) == 0
 
 
+def test_dedup_near_miss_nondeterministic_argument():
+    """F-363: equal deterministic calls whose argument draws fresh coins are
+    not merged, and the pass says why."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive R(Int q) {
+            ModInt<q> Draw();
+            deterministic ModInt<q> Det(ModInt<q> x);
+        }
+        """)
+    game_src = (
+        "Game TestGame(Int q) {\n"
+        "    [ModInt<q>, ModInt<q>] Compute() {\n"
+        "        return [R.Det(R.Draw()), R.Det(R.Draw())];\n"
+        "    }\n"
+        "}"
+    )
+    game = frog_parser.parse_game(game_src)
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"R": prim},
+        subsets_pairs=[],
+    )
+    result = DeduplicateDeterministicCalls().apply(game, ctx)
+
+    assert result == frog_parser.parse_game(game_src)
+    dedup_misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Deduplicate Deterministic Calls"
+    ]
+    assert len(dedup_misses) == 1
+    assert "R.Det(R.Draw())" in dedup_misses[0].reason
+    assert "not annotated deterministic" in dedup_misses[0].reason
+    assert dedup_misses[0].suggestion is not None
+
+
 # --- Uniform Bijection Elimination near-miss tests ---
 
 

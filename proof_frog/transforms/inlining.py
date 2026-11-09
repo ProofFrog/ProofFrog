@@ -4399,6 +4399,8 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
     Within a single block, finds duplicate calls to ``deterministic`` primitive
     methods with structurally equal arguments, extracts the first occurrence
     into a fresh ``__determ_N__`` variable, and replaces all occurrences.
+    The arguments must themselves be deterministic (no call to a method not
+    annotated ``deterministic``) and keep their value between the calls.
 
     Scans top-level statements *and* if-statement conditions. If-conditions
     are always evaluated when the if-statement is reached, so extracting a
@@ -4476,6 +4478,12 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         dup_group: list[frog_ast.FuncCall] | None = None
         for group in groups:
             if len(group) >= 2:
+                # F-363 / F-202: each occurrence evaluates its own arguments,
+                # so equal calls return the same value only if the arguments
+                # do too. `[R.Det(R.Draw()), R.Det(R.Draw())]` draws twice.
+                if self._has_nondeterministic_argument(group[0]):
+                    self._note_nondeterministic_argument(group[0])
+                    continue
                 # Verify no argument variable is reassigned between the
                 # first and last statement containing a call from this group.
                 if self._args_stable_across_calls(block, group):
@@ -4567,6 +4575,47 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
 
         # Recurse to handle remaining duplicate groups
         return self.transform_block(frog_ast.Block(new_stmts))
+
+    def _has_nondeterministic_argument(self, call: frog_ast.FuncCall) -> bool:
+        """True if an argument of *call* calls a method that is not
+        deterministic, so two occurrences of *call* may receive different
+        argument values.
+
+        The proof's let types are passed so that a call to a ``let:``-bound
+        ``Function<D, R>`` counts as deterministic. A method-local binding of
+        the same name needs no special case: whatever ``Function`` value it
+        holds is also deterministic, and a write to it between the two calls
+        is caught by ``_args_stable_across_calls``, which reads the callee
+        name as an argument variable."""
+        let_types = self._proof_let_types
+        if let_types is None and self._ctx is not None:
+            let_types = self._ctx.proof_let_types
+        return any(
+            has_nondeterministic_call(arg, self.proof_namespace, let_types)
+            for arg in call.args
+        )
+
+    def _note_nondeterministic_argument(self, call: frog_ast.FuncCall) -> None:
+        if self._ctx is None:
+            return
+        self._ctx.near_misses.append(
+            NearMiss(
+                transform_name="Deduplicate Deterministic Calls",
+                reason=(
+                    f"Duplicate deterministic call {call} not merged: an "
+                    "argument calls a method that is not annotated "
+                    "deterministic, so each occurrence evaluates it "
+                    "independently"
+                ),
+                location=None,
+                suggestion=(
+                    "If both calls are meant to use the same argument value, "
+                    "compute it once into a local variable and pass that"
+                ),
+                variable=None,
+                method=None,
+            )
+        )
 
     def _args_stable_across_calls(
         self,

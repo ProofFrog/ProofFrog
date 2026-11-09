@@ -1,0 +1,19 @@
+// Positive control: two equal deterministic calls whose argument calls a
+// random function sampled in let: are still merged.
+// Expected: Proof Succeeded!
+import 'Rnd.primitive';
+import 'DedupLetFunctionArg.game';
+
+proof:
+
+let:
+    Int q;
+    Rnd R = Rnd(q);
+    Function<ModInt<q>, ModInt<q>> H <- Function<ModInt<q>, ModInt<q>>;
+
+theorem:
+    DedupLetFunctionArg(R, q, H);
+
+games:
+    DedupLetFunctionArg(R, q, H).Left against DedupLetFunctionArg(R, q, H).Adversary;
+    DedupLetFunctionArg(R, q, H).Right against DedupLetFunctionArg(R, q, H).Adversary;

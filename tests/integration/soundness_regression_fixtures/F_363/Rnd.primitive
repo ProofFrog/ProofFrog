@@ -1,0 +1,8 @@
+// Helper primitive for the DeduplicateDeterministicCalls proofs in this
+// directory: Draw is non-deterministic (fresh coins per call), Det is
+// annotated deterministic. No expected engine behaviour of its own (see the
+// proofs that import it).
+Primitive Rnd(Int q) {
+    ModInt<q> Draw();
+    deterministic ModInt<q> Det(ModInt<q> x);
+}

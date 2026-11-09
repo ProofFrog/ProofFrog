@@ -414,7 +414,7 @@ For **phased games**, the execution is:
 **Method annotations** on primitive declarations can override this default:
 - `deterministic` — the method always returns the same output for the same inputs. The engine exploits this annotation in several ways:
   - **Purity for inlining/aliasing**: Deterministic calls are treated as pure expressions for expression aliasing (`ForwardExpressionAlias`), field hoisting (`HoistFieldPureAlias`), assignment collapsing (`CollapseAssignment`), field inlining (`InlineSingleUseField`), and tuple index folding (`FoldTupleIndex`).
-  - **Same-method deduplication**: `DeduplicateDeterministicCalls` extracts duplicate deterministic calls with structurally equal arguments into a shared local variable. For example, `[F.evaluate(k, x), F.evaluate(k, x)]` becomes `v = F.evaluate(k, x); [v, v]`.
+  - **Same-method deduplication**: `DeduplicateDeterministicCalls` extracts duplicate deterministic calls with structurally equal arguments into a shared local variable. For example, `[F.evaluate(k, x), F.evaluate(k, x)]` becomes `v = F.evaluate(k, x); [v, v]`. The arguments must be deterministic too: `[F.evaluate(F.Gen()), F.evaluate(F.Gen())]` with `Gen` not annotated `deterministic` evaluates `Gen` twice, independently, and is left alone.
   - **Cross-method field alias**: `CrossMethodFieldAlias` propagates field assignments of deterministic calls to other methods. If Initialize stores `field = F.evaluate(k)` and an oracle also calls `F.evaluate(k)`, the oracle's call is replaced with the field reference.
 - `injective` — the method maps distinct inputs to distinct outputs. The `ChallengeExclusionRFToUniform` transform uses this to see through encoding wrappers when checking whether RF arguments structurally differ.
 

@@ -1,0 +1,17 @@
+// Sound control for attack_dedup_nondet_arg.proof. See DedupDetArg.game.
+// Expected (sound or not): Proof Succeeded!
+import 'Rnd.primitive';
+import 'DedupDetArg.game';
+
+proof:
+
+let:
+    Int q;
+    Rnd R = Rnd(q);
+
+theorem:
+    DedupDetArg(R, q);
+
+games:
+    DedupDetArg(R, q).Left against DedupDetArg(R, q).Adversary;
+    DedupDetArg(R, q).Right against DedupDetArg(R, q).Adversary;

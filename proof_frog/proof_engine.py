@@ -266,14 +266,20 @@ def _z3_check_expression_pair(  # pylint: disable=too-many-arguments,too-many-po
             ),
         )
 
+    # The game's own declarations shadow a same-named proof let (F-361).
     first_formula = visitors.Z3FormulaVisitor(
-        visitors.GetTypeMapVisitor(current_expr).visit(current_game_ast)
-        + proof_let_types,
+        visitors.with_proof_let_types(
+            visitors.GetTypeMapVisitor(current_expr).visit(current_game_ast),
+            proof_let_types,
+        ),
         opaque_func_call_fallback=True,
         proof_namespace=proof_namespace,
     ).visit(current_expr)
     next_formula = visitors.Z3FormulaVisitor(
-        visitors.GetTypeMapVisitor(next_expr).visit(next_game_ast) + proof_let_types,
+        visitors.with_proof_let_types(
+            visitors.GetTypeMapVisitor(next_expr).visit(next_game_ast),
+            proof_let_types,
+        ),
         opaque_func_call_fallback=True,
         proof_namespace=proof_namespace,
     ).visit(next_expr)
@@ -1831,8 +1837,17 @@ class ProofEngine:
             ).visit(expression)
             applies_to = WhichGame.CURRENT
             while assumption_field is not None:
+                assert isinstance(
+                    assumption_field.the_object,
+                    (frog_ast.ParameterizedGame, frog_ast.ConcreteGame),
+                )
+                # The field as the resolved game names it: instantiation
+                # renames a field named like a `let:` entry (F-361).
+                field_name = self._instantiated_field_name(
+                    assumption_field.the_object, assumption_field.name
+                )
                 new_var = frog_ast.Variable(
-                    get_challenger_field_name(assumption_field.name)
+                    get_challenger_field_name(field_name)
                     if (
                         assumption_field.the_object == current_step.challenger
                         and current_step.reduction
@@ -1841,7 +1856,7 @@ class ProofEngine:
                         assumption_field.the_object == next_step.challenger
                         and next_step.reduction
                     )
-                    else assumption_field.name
+                    else field_name
                 )
                 if assumption_field.the_object in (
                     next_step.challenger,
@@ -2143,19 +2158,8 @@ class ProofEngine:
         all use one resolution path. Names are *not* canonicalized (use
         ``canonicalize_game`` for that).
         """
-        game: frog_ast.Game
-        if isinstance(challenger, frog_ast.ConcreteGame):
-            game_file = self.definition_namespace[challenger.game.name]
-            assert isinstance(game_file, frog_ast.GameFile)
-            game = instantiate(
-                game_file.get_game(challenger.which),
-                challenger.game.args,
-                self.proof_namespace,
-            )
-        else:
-            game_node = self.definition_namespace[challenger.name]
-            assert isinstance(game_node, frog_ast.Game)
-            game = instantiate(game_node, challenger.args, self.proof_namespace)
+        root, args = self._step_game_definition(challenger)
+        game = instantiate(root, args, self.proof_namespace, True)
 
         lookup = dict(self.method_lookup)
         if reduction:
@@ -2192,6 +2196,28 @@ class ProofEngine:
                 stacklevel=2,
             )
         return game
+
+    def _step_game_definition(
+        self, game: frog_ast.ParameterizedGame | frog_ast.ConcreteGame
+    ) -> tuple[frog_ast.Game, list[frog_ast.Expression]]:
+        """The definition a proof step's game instantiates, and its arguments."""
+        if isinstance(game, frog_ast.ConcreteGame):
+            game_file = self.definition_namespace[game.game.name]
+            assert isinstance(game_file, frog_ast.GameFile)
+            return game_file.get_game(game.which), game.game.args
+        game_node = self.definition_namespace[game.name]
+        assert isinstance(game_node, frog_ast.Game)
+        return game_node, game.args
+
+    def _instantiated_field_name(
+        self, game: frog_ast.ParameterizedGame | frog_ast.ConcreteGame, name: str
+    ) -> str:
+        """The name field *name* of the step game *game* has once
+        :meth:`resolve_step_game` has instantiated it."""
+        root, args = self._step_game_definition(game)
+        return instantiated_field_names(root, args, self.proof_namespace).get(
+            name, name
+        )
 
     # Takes in a game from a proof step, and returns the AST associated with that game
     def _get_game_ast(
@@ -2475,6 +2501,7 @@ def _avoid_instantiation_capture(
     root: T,
     args: list[frog_ast.Expression],
     namespace: frog_ast.Namespace,
+    rename_namespace_fields: bool = False,
 ) -> T:
     """Rename the bindings inside *root* that the name-keyed substitutions of
     :func:`instantiate` would otherwise capture (F-341).
@@ -2488,8 +2515,18 @@ def _avoid_instantiation_capture(
       is renamed to a fresh ``__iN__`` (otherwise ``Int O(Int n) { return n; }``
       loses its argument, or an argument ``lambda`` is captured by a parameter
       ``lambda``);
-    * a GAME field named like a free name of an argument is renamed (fields are
-      internal to a game). A scheme or primitive field cannot be renamed (it is
+    * a GAME field named like a free name of an argument is renamed (fields
+      are internal to a game), and with *rename_namespace_fields* so is one
+      named like a namespace name. A proof's ``let:`` names are the outer
+      scope of every game, so inside the game the field wins; the rename
+      keeps it that way once inlined scheme code that reads the ``let:``
+      name lands next to it, and once later passes look the name up in the
+      proof's ``let:`` types or namespace (F-361). A ``Set`` alias field is
+      left alone there: ``InstantiationTransformer`` substitutes its value
+      for every reference, so none is left to collide. A renamed field's own
+      initializer and the earlier fields' initializers keep their
+      references, since they are evaluated before the field is bound. A
+      scheme or primitive field cannot be renamed (it is
       part of the interface, read as ``E.field``), so such a collision is
       refused unless the field just re-exports that same name, as in
       ``Int lambda = lambda;`` instantiated with ``lambda``, which is checked
@@ -2524,26 +2561,59 @@ def _avoid_instantiation_capture(
             for method in new_root.methods
         ]
     if isinstance(new_root, frog_ast.Game):
-        field_rename = {name: fresh() for name in sorted(field_names & arg_names)}
+        shadowed = set(arg_names)
+        if rename_namespace_fields:
+            shadowed |= set(namespace) - {
+                field.name for field in root.fields if field.type == frog_ast.SetType()
+            }
+        field_rename = {name: fresh() for name in sorted(field_names & shadowed)}
         if field_rename:
-            new_root.fields = [
-                frog_ast.Field(
-                    field.type,
-                    field_rename.get(field.name, field.name),
-                    field.value,
-                )
-                for field in new_root.fields
+            new_root.fields = _rename_game_fields(new_root.fields, field_rename)
+            new_root.methods = [
+                visitors.rename_value_references(method, field_rename)
+                for method in new_root.methods
             ]
-            new_root = visitors.rename_value_references(new_root, field_rename)
     return new_root
+
+
+def _rename_game_fields(
+    fields: list[frog_ast.Field], rename: dict[str, str]
+) -> list[frog_ast.Field]:
+    """*fields* with each field in *rename* renamed, and the references to it
+    in the declarations after it renamed with it. A field's own initializer
+    and the ones before it are evaluated before it is bound, so a same-named
+    reference there (a game parameter) is left alone."""
+    in_scope: dict[str, str] = {}
+    renamed: list[frog_ast.Field] = []
+    for field in fields:
+        new_field = (
+            visitors.rename_value_references(field, in_scope) if in_scope else field
+        )
+        if field.name in rename:
+            new_field = frog_ast.Field(
+                new_field.type, rename[field.name], new_field.value
+            )
+            in_scope[field.name] = rename[field.name]
+        renamed.append(new_field)
+    return renamed
 
 
 def instantiate(
     root: T,
     args: list[frog_ast.Expression],
     namespace: frog_ast.Namespace,
+    rename_namespace_fields: bool = False,
 ) -> T:
-    root = _avoid_instantiation_capture(root, args, namespace)
+    """*root* with its parameters replaced by *args* and the names *namespace*
+    binds substituted, capture-avoiding (:func:`_avoid_instantiation_capture`).
+
+    *rename_namespace_fields* also renames a game field named like a
+    namespace name, so that the field and the proof's ``let:`` entry stay
+    apart in the canonicalization that follows (F-361). The engine passes it
+    when it resolves a proof step; the type checker does not need it, since
+    it resolves names by scope.
+    """
+    root = _avoid_instantiation_capture(root, args, namespace, rename_namespace_fields)
     arg_names: set[str] = set()
     for arg in args:
         arg_names |= visitors.referenced_variable_names(arg)
@@ -2564,6 +2634,25 @@ def instantiate(
                     "Rename the field or the argument."
                 )
     return visitors.InstantiationTransformer(namespace).transform(new_root)
+
+
+def instantiated_field_names(
+    root: frog_ast.Game,
+    args: list[frog_ast.Expression],
+    namespace: frog_ast.Namespace,
+) -> dict[str, str]:
+    """For each field of *root* that ``instantiate(root, args, namespace,
+    rename_namespace_fields=True)`` renames, its new name.
+
+    A step assumption names a game's field as written in the game
+    (``R(F, q).count``), so it must be put through the same rename to keep
+    reading the field."""
+    renamed = _avoid_instantiation_capture(root, args, namespace, True)
+    return {
+        old.name: new.name
+        for old, new in zip(root.fields, renamed.fields)
+        if old.name != new.name
+    }
 
 
 def rewrite_this_in_scheme(name: str, scheme: frog_ast.Scheme) -> frog_ast.Scheme:

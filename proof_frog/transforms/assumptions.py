@@ -16,6 +16,7 @@ from ..visitors import (
     Z3FormulaVisitor,
     GetTypeMapVisitor,
     NameTypeMap,
+    with_proof_let_types,
 )
 from ._base import TransformPass, PipelineContext
 
@@ -37,7 +38,9 @@ class SimplifyRangeTransformer(Transformer):
     ) -> None:
         self.game = game
         self.proof_let_types = proof_let_types
-        type_map = GetTypeMapVisitor(game.methods[0]).visit(game) + proof_let_types
+        type_map = with_proof_let_types(
+            GetTypeMapVisitor(game.methods[0]).visit(game), proof_let_types
+        )
         self.assumed_op = operation
         self.assumed_formula = Z3FormulaVisitor(type_map).visit(operation)
         if self.assumed_formula is not None:
@@ -77,7 +80,9 @@ class SimplifyRangeTransformer(Transformer):
             or self.assumed_formula is None
         ):
             return operation
-        type_map = GetTypeMapVisitor(operation).visit(self.game) + self.proof_let_types
+        type_map = with_proof_let_types(
+            GetTypeMapVisitor(operation).visit(self.game), self.proof_let_types
+        )
         statement_formula = Z3FormulaVisitor(type_map).visit(operation)
         if statement_formula is None:
             return operation

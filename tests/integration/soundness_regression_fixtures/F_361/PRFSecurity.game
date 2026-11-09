@@ -1,0 +1,29 @@
+// PRF security: a keyed PRF is indistinguishable from a random function.
+// Real: evaluates the PRF with a secret key. Random: evaluates a truly random function.
+
+import 'PRF.primitive';
+
+Game Real(PRF F) {
+    BitString<F.lambda> k;
+    Void Initialize() {
+        k <- BitString<F.lambda>;
+    }
+
+    BitString<F.out> Lookup(BitString<F.in> x) {
+        return F.evaluate(k, x);
+    }
+}
+
+Game Random(PRF F) {
+    Function<BitString<F.in>, BitString<F.out>> RF;
+
+    Void Initialize() {
+        RF <- Function<BitString<F.in>, BitString<F.out>>;
+    }
+
+    BitString<F.out> Lookup(BitString<F.in> x) {
+        return RF(x);
+    }
+}
+
+export as PRFSecurity;

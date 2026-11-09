@@ -1,0 +1,19 @@
+// F-361: a proof let retyping a same-named game field. See
+// collateral_poison_powpow.game. The let t is not used by the theorem; it
+// only collides with the game's field t.
+// Expected if sound: Proof Failed. If unsound: Proof Succeeded!
+import 'collateral_poison_powpow.game';
+
+proof:
+
+let:
+    Group G;
+    Group H;
+    GroupElem<G> t;
+
+theorem:
+    CollateralPowPow(G, H);
+
+games:
+    CollateralPowPow(G, H).Left against CollateralPowPow(G, H).Adversary;
+    CollateralPowPow(G, H).Right against CollateralPowPow(G, H).Adversary;

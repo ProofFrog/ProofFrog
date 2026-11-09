@@ -32,6 +32,7 @@ from ..visitors import (
     referenced_variable_names,
     reassigns_or_rebinds,
     block_unconditionally_returns,
+    with_proof_let_types,
 )
 from ._base import (
     TransformPass,
@@ -2967,7 +2968,7 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             # Build Z3 formulas with opaque-FuncCall fallback.
             type_map = GetTypeMapVisitor(stmt).visit(self.ast)
             visitor = Z3FormulaVisitor(
-                type_map + (self.ctx.proof_let_types or NameTypeMap()),
+                with_proof_let_types(type_map, self.ctx.proof_let_types),
                 variable_version_map={},
                 opaque_func_call_fallback=True,
                 # Enable the in-visitor non-determinism backstop: any P/X/Y

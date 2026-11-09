@@ -1,0 +1,41 @@
+// Target: the group-exponent folds, which combine exponents only when they
+// are Int or ModInt<G.order>, under proof lets that share their names with
+// game fields.
+// The fields x and y are ModInt<q>; the proof has lets `Int x; Int y;` that
+// are not passed to the game. If the lets' types are applied to the fields,
+// the exponents look like Int and
+//     g ^ (x + y) / g ^ y  ->  g ^ x
+// is folded, although x + y is reduced mod q first and q is not the group
+// order. Concretely, G of order 5, q = 3, Store(2, 2): Left = Hg(g^1 / g^2)
+// = Hg(g^4), Right = Hg(g^2); with Hg injective (a let-bound known function)
+// Probe(1) separates the games.
+// Expected if sound: Proof Failed. If unsound: Proof Succeeded!
+Game Left(Int q, Group G, Function<GroupElem<G>, ModInt<q>> Hg) {
+    ModInt<q> x;
+    ModInt<q> y;
+
+    Void Store(ModInt<q> x0, ModInt<q> y0) {
+        x = x0;
+        y = y0;
+    }
+
+    ModInt<q> Probe(ModInt<q> b) {
+        return b * Hg((G.generator ^ (x + y)) / (G.generator ^ y));
+    }
+}
+
+Game Right(Int q, Group G, Function<GroupElem<G>, ModInt<q>> Hg) {
+    ModInt<q> x;
+    ModInt<q> y;
+
+    Void Store(ModInt<q> x0, ModInt<q> y0) {
+        x = x0;
+        y = y0;
+    }
+
+    ModInt<q> Probe(ModInt<q> b) {
+        return b * Hg(G.generator ^ x);
+    }
+}
+
+export as AttackN5;

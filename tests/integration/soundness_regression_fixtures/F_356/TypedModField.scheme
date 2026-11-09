@@ -1,0 +1,10 @@
+// F-356 support scheme (positive control): the field f is initialized with
+// the parameter x, which already has f's type ModInt<q>, so f holds x.
+import 'ModTest.primitive';
+
+Scheme TypedModField(Int q, ModInt<q> x) extends ModTest {
+    ModInt<q> f = x;
+    Bool Test() {
+        return f + f == f;
+    }
+}

@@ -73,9 +73,10 @@ def check_well_formed(
 ) -> None:
     try:
         _check_well_formed(root, file_name, allowed_root)
-    except proof_engine.InstantiationCaptureError as e:
+    except visitors.InstantiationError as e:
         # A scheme/primitive field would capture a name in its instantiation
-        # arguments (F-341): report it as an ordinary type error.
+        # arguments (F-341), or a scheme field's initializer converts the
+        # value it stores (F-356): report it as an ordinary type error.
         print_error(root, str(e), file_name)
 
 

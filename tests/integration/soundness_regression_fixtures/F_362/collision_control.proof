@@ -1,0 +1,18 @@
+// Positive control for F-362: CollisionControl.Left and
+// CollisionControl.Right are interchangeable (see CollisionControl.game).
+import 'Flag.primitive';
+import 'FlagImpl.scheme';
+import 'CollisionControl.game';
+
+proof:
+
+let:
+    Bool n;
+    Flag S = FlagImpl(n);
+
+theorem:
+    CollisionControl(S);
+
+games:
+    CollisionControl(S).Left against CollisionControl(S).Adversary;
+    CollisionControl(S).Right against CollisionControl(S).Adversary;

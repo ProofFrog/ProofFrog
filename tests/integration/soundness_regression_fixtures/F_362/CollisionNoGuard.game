@@ -1,0 +1,40 @@
+// F-362: both games have a field n, named like the proof's let n that the
+// scheme reads. Left's Q returns S.Get(), which is the let n; Right's Q
+// returns the field n. With the let n = true and no call to Flip they differ
+// (true against false). Inlining S.Get() used to carry the name n into the
+// game, where the field n captured it, so Left's Q returned the field.
+import 'Flag.primitive';
+
+Game Left(Flag S) {
+    Bool n;
+
+    Void Initialize() {
+        n = false;
+    }
+
+    Void Flip() {
+        n = true;
+    }
+
+    Bool Q() {
+        return S.Get();
+    }
+}
+
+Game Right(Flag S) {
+    Bool n;
+
+    Void Initialize() {
+        n = false;
+    }
+
+    Void Flip() {
+        n = true;
+    }
+
+    Bool Q() {
+        return n;
+    }
+}
+
+export as CollisionNoGuard;

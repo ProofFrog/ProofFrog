@@ -1,0 +1,11 @@
+// F-356 support scheme: the field f stores the literal 1 in ModInt<2>, so
+// f + f == f - f holds (1 + 1 = 0 = 1 - 1 in ModInt<2>). Read as its
+// initializer, the Int 1, the test is the integer 1 + 1 == 1 - 1, false.
+import 'ModTest.primitive';
+
+Scheme LiteralModField(Int q) extends ModTest {
+    ModInt<2> f = 1;
+    Bool Test() {
+        return f + f == f - f;
+    }
+}

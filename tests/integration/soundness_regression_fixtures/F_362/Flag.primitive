@@ -1,0 +1,4 @@
+// F-362 support primitive: a primitive parameterized by a public Boolean.
+Primitive Flag(Bool b) {
+    Bool Get();
+}

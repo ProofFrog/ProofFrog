@@ -1,0 +1,15 @@
+// F-356: claims FieldInitLiteral.Left and FieldInitLiteral.Right are
+// interchangeable. They are not (see FieldInitLiteral.game). Sound engine:
+// Proof Failed!
+import 'FieldInitLiteral.game';
+
+proof:
+
+let:
+
+theorem:
+    FieldInitLiteral();
+
+games:
+    FieldInitLiteral().Left against FieldInitLiteral().Adversary;
+    FieldInitLiteral().Right against FieldInitLiteral().Adversary;

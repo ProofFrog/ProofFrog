@@ -624,8 +624,40 @@ def rename_value_references(
     return node_copy
 
 
+def _field_alias_value(
+    module: frog_ast.Scheme | frog_ast.Primitive, name: str
+) -> Optional[frog_ast.ASTNode]:
+    """The initializer of *module*'s field *name*, when ``module.name`` may
+    be read as it; None if there is no such field or initializer, or if the
+    initializer may be stored with a change of value (an ``Int`` reduced
+    into a ``ModInt`` field, F-356; its type is not known here)."""
+    for field in module.fields:
+        if field.name == name:
+            if field.value is None or not store_keeps_value_of_type(
+                field.type, field.value, lambda: None
+            ):
+                return None
+            return field.value
+    return None
+
+
+class InstantiationError(Exception):
+    """Instantiating a game, scheme or primitive cannot give a faithful
+    copy; reported to the user as a type error."""
+
+
+class ConvertingFieldInitializerError(InstantiationError):
+    """A scheme field's initializer converts the value it stores (an ``Int``
+    into a ``ModInt``), so its reads cannot be replaced by the initializer
+    (F-356)."""
+
+
 class InstantiationTransformer(Transformer):
-    def __init__(self, namespace: frog_ast.Namespace) -> None:
+    def __init__(
+        self,
+        namespace: frog_ast.Namespace,
+        field_value_types: Optional[dict[str, Optional[frog_ast.Type]]] = None,
+    ) -> None:
         self.namespace = dict(namespace)
         # Field names that are reassigned somewhere in the module currently being
         # transformed. Their initializer must NOT be substituted into method
@@ -633,18 +665,43 @@ class InstantiationTransformer(Transformer):
         # genuine state, not a constant alias, so replacing reads of `c` with `0`
         # would silently drop the mutation (see audit F-045).
         self._mutable_fields: set[str] = set()
+        # The type of each field initializer where it is declared (None if
+        # unknown), with the module's parameters already substituted
+        # (:func:`proof_engine.instantiate` supplies it). A field whose
+        # initializer is not listed has an unknown initializer type.
+        self._field_value_types = dict(field_value_types or {})
+        self._module: Optional[frog_ast.ASTNode] = None
 
     def _instantiate_module(self, node: T) -> T:
-        saved = self._mutable_fields
+        saved = (self._mutable_fields, self._module)
         written: set[str] = set()
         for field in getattr(node, "fields", []):
             if field.value is not None and reassigns_or_rebinds({field.name}, node):
                 written.add(field.name)
         self._mutable_fields = written
+        self._module = node
         try:
             return self._transform_children(node)
         finally:
-            self._mutable_fields = saved
+            self._mutable_fields, self._module = saved
+
+    def _initializer_keeps_value(self, field: frog_ast.Field) -> bool:
+        """True if *field*'s initializer is stored unchanged, so the field
+        can be read as its initializer. An initializer is a store into the
+        field: an ``Int`` stored into a ``ModInt<q>`` field is reduced
+        modulo ``q`` (F-356), so such a field does not hold its
+        initializer. That includes an integer literal (``ModInt<2> f =
+        1;``): replaced by the literal, a read would be an ``Int``."""
+        assert field.value is not None
+        declared = self._field_value_types.get(field.name)
+
+        def value_type() -> Optional[frog_ast.Type]:
+            if declared is None:
+                return None
+            resolved = self.transform(declared)
+            return resolved if isinstance(resolved, frog_ast.Type) else None
+
+        return store_keeps_value_of_type(field.type, field.value, value_type)
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.ASTNode:
         return self._instantiate_module(game)
@@ -673,6 +730,27 @@ class InstantiationTransformer(Transformer):
         # register its initializer for substitution into reads (audit F-045).
         # A pre-existing namespace binding (a proof-let constant) is left intact.
         if field.name in self._mutable_fields:
+            self.namespace.pop(field.name, None)
+        elif new_field.value is not None and not self._initializer_keeps_value(
+            new_field
+        ):
+            # The field holds its initializer converted to its type (an Int
+            # reduced into a ModInt), not the initializer, so its reads must
+            # not be replaced by the initializer (F-356). A game field stays
+            # a field. A scheme's methods would carry the field's name into
+            # every game they are inlined into, so refuse.
+            if isinstance(self._module, frog_ast.Scheme):
+                raise ConvertingFieldInitializerError(
+                    f"Cannot instantiate {self._module.name}: its field "
+                    f"'{field.name}' stores its initializer {field.value} in "
+                    f"type {new_field.type}, so the field does not hold the "
+                    "initializer: an Int stored in a ModInt is reduced modulo "
+                    "the modulus, and arithmetic on the field is modular, "
+                    "while on an Int, even a literal, it is not. The engine "
+                    "can only read a scheme field as its initializer. Give "
+                    f"the initializer the type {new_field.type}, or declare "
+                    "the value as a local in the methods that use it."
+                )
             self.namespace.pop(field.name, None)
         else:
             self.namespace[field.name] = ns_value
@@ -714,14 +792,7 @@ class InstantiationTransformer(Transformer):
                 ):
                     return copy.deepcopy(value.members[field_access.name])
             elif isinstance(value, (frog_ast.Scheme, frog_ast.Primitive)):
-                the_field = next(
-                    (
-                        field.value
-                        for field in value.fields
-                        if field.name == field_access.name
-                    ),
-                    None,
-                )
+                the_field = _field_alias_value(value, field_access.name)
                 if the_field is not None:
                     result = copy.deepcopy(the_field)
                     # Convert Tuple of types to ProductType for Set field aliases
@@ -748,14 +819,7 @@ class InstantiationTransformer(Transformer):
             assert isinstance(func_call.func, frog_ast.Variable)
             scheme_def = self.namespace[func_call.func.name]
             if isinstance(scheme_def, (frog_ast.Scheme, frog_ast.Primitive)):
-                the_field = next(
-                    (
-                        field.value
-                        for field in scheme_def.fields
-                        if field.name == field_access.name
-                    ),
-                    None,
-                )
+                the_field = _field_alias_value(scheme_def, field_access.name)
                 if the_field is not None:
                     result = copy.deepcopy(the_field)
                     # Substitute scheme parameters with the FuncCall's actual args
@@ -1853,6 +1917,86 @@ def type_contains_mod_int(the_type: Optional[frog_ast.ASTNode]) -> bool:
         ).visit(the_type)
         is not None
     )
+
+
+def store_may_change_value(  # pylint: disable=too-many-return-statements
+    target: Optional[frog_ast.Type], value_type: Optional[frog_ast.Type]
+) -> bool:
+    """True if storing a value of *value_type* into a slot of type *target*
+    may change the value, i.e. an ``Int`` part of the value may land in a
+    ``ModInt`` part of the slot. An unknown *value_type* (None) may."""
+    if not type_contains_mod_int(target):
+        return False
+    if value_type is None:
+        return True
+    if isinstance(target, frog_ast.ModIntType):
+        return not isinstance(value_type, frog_ast.ModIntType)
+    if isinstance(target, frog_ast.OptionalType):
+        inner = (
+            value_type.the_type
+            if isinstance(value_type, frog_ast.OptionalType)
+            else value_type
+        )
+        return store_may_change_value(target.the_type, inner)
+    if isinstance(target, frog_ast.ProductType):
+        if isinstance(value_type, frog_ast.ProductType) and len(
+            value_type.types
+        ) == len(target.types):
+            return any(
+                store_may_change_value(slot, part)
+                for slot, part in zip(target.types, value_type.types)
+            )
+        return True
+    if isinstance(target, frog_ast.SetType):
+        if isinstance(value_type, frog_ast.SetType):
+            return store_may_change_value(
+                target.parameterization, value_type.parameterization
+            )
+        return True
+    if isinstance(target, frog_ast.ArrayType):
+        if isinstance(value_type, frog_ast.ArrayType):
+            return store_may_change_value(target.element_type, value_type.element_type)
+        return True
+    if isinstance(target, frog_ast.MapType):
+        if isinstance(value_type, frog_ast.MapType):
+            return store_may_change_value(
+                target.key_type, value_type.key_type
+            ) or store_may_change_value(target.value_type, value_type.value_type)
+        return True
+    if isinstance(target, frog_ast.FunctionType):
+        if isinstance(value_type, frog_ast.FunctionType):
+            return store_may_change_value(
+                target.domain_type, value_type.domain_type
+            ) or store_may_change_value(target.range_type, value_type.range_type)
+        return True
+    return True
+
+
+def store_keeps_value_of_type(
+    target_type: frog_ast.Type,
+    value: frog_ast.ASTNode,
+    value_type: Callable[[], Optional[frog_ast.Type]],
+) -> bool:
+    """True if storing *value* into a slot of *target_type* keeps the value
+    exactly, so the slot can be read as *value*.
+
+    *value_type* gives the value's type (None if unknown); it is called only
+    when the answer depends on it. False when an ``Int`` part of the value may
+    be stored into a ``ModInt`` part of the slot (F-356), including when the
+    value's type is unknown there. That includes an integer literal the
+    modulus represents as itself (``1`` into ``ModInt<2>``): the stored number
+    is the same, but a read replaced by the literal is an ``Int``, so the
+    arithmetic around it would no longer be taken modulo the modulus
+    (``f + f == f - f`` is true for ``ModInt<2> f = 1;``, ``1 + 1 == 1 - 1``
+    is false).
+    """
+    if not type_contains_mod_int(target_type):
+        return True
+    if isinstance(value, frog_ast.NoneExpression) and isinstance(
+        target_type, frog_ast.OptionalType
+    ):
+        return True
+    return not store_may_change_value(target_type, value_type())
 
 
 _COMPARISON_OPERATORS = frozenset(

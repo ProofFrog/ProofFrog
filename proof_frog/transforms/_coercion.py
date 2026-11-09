@@ -32,6 +32,8 @@ from ..visitors import (
     build_method_type_map,
     expression_type,
     lvalue_base_name,
+    store_keeps_value_of_type,
+    store_may_change_value,
     type_contains_mod_int,
     with_proof_let_types,
 )
@@ -51,57 +53,6 @@ def _in_range_literal(value: frog_ast.Expression, target: frog_ast.ModIntType) -
     )
 
 
-def _may_change(  # pylint: disable=too-many-return-statements
-    target: Optional[frog_ast.Type], value_type: Optional[frog_ast.Type]
-) -> bool:
-    """True if storing a value of *value_type* into a slot of type *target*
-    may change the value, i.e. an ``Int`` part of the value may land in a
-    ``ModInt`` part of the slot. An unknown *value_type* (None) may."""
-    if not type_contains_mod_int(target):
-        return False
-    if value_type is None:
-        return True
-    if isinstance(target, frog_ast.ModIntType):
-        return not isinstance(value_type, frog_ast.ModIntType)
-    if isinstance(target, frog_ast.OptionalType):
-        inner = (
-            value_type.the_type
-            if isinstance(value_type, frog_ast.OptionalType)
-            else value_type
-        )
-        return _may_change(target.the_type, inner)
-    if isinstance(target, frog_ast.ProductType):
-        if isinstance(value_type, frog_ast.ProductType) and len(
-            value_type.types
-        ) == len(target.types):
-            return any(
-                _may_change(slot, part)
-                for slot, part in zip(target.types, value_type.types)
-            )
-        return True
-    if isinstance(target, frog_ast.SetType):
-        if isinstance(value_type, frog_ast.SetType):
-            return _may_change(target.parameterization, value_type.parameterization)
-        return True
-    if isinstance(target, frog_ast.ArrayType):
-        if isinstance(value_type, frog_ast.ArrayType):
-            return _may_change(target.element_type, value_type.element_type)
-        return True
-    if isinstance(target, frog_ast.MapType):
-        if isinstance(value_type, frog_ast.MapType):
-            return _may_change(target.key_type, value_type.key_type) or _may_change(
-                target.value_type, value_type.value_type
-            )
-        return True
-    if isinstance(target, frog_ast.FunctionType):
-        if isinstance(value_type, frog_ast.FunctionType):
-            return _may_change(
-                target.domain_type, value_type.domain_type
-            ) or _may_change(target.range_type, value_type.range_type)
-        return True
-    return True
-
-
 def store_keeps_value(
     target_type: Optional[frog_ast.Type],
     value: frog_ast.Expression,
@@ -118,12 +69,6 @@ def store_keeps_value(
     """
     if target_type is None:
         return False
-    if not type_contains_mod_int(target_type):
-        return True
-    if isinstance(value, frog_ast.NoneExpression) and isinstance(
-        target_type, frog_ast.OptionalType
-    ):
-        return True
     slot = (
         target_type.the_type
         if isinstance(target_type, frog_ast.OptionalType)
@@ -131,8 +76,10 @@ def store_keeps_value(
     )
     if isinstance(slot, frog_ast.ModIntType) and _in_range_literal(value, slot):
         return True
-    return not _may_change(
-        target_type, expression_type(value, type_map, proof_namespace)
+    return store_keeps_value_of_type(
+        target_type,
+        value,
+        lambda: expression_type(value, type_map, proof_namespace),
     )
 
 
@@ -201,7 +148,7 @@ def _changing_store_target(
         if not type_contains_mod_int(target_type):
             return None
         element = _sampled_element_type(node.sampled_from, type_map, proof_namespace)
-        if _may_change(target_type, element):
+        if store_may_change_value(target_type, element):
             return lvalue_base_name(node.var)
     return None
 

@@ -1,0 +1,20 @@
+// F-356 (field initializer, Int literal): `ModInt<2> f = 1;` stores 1,
+// which ModInt<2> represents as itself, but f is still a ModInt<2>: in it
+// 1 + 1 = 0 = 1 - 1, so f + f == f - f holds and Left's Test returns true,
+// while Right's returns false. Instantiation used to read f as the literal
+// 1, an Int, which made Left's Test the integer comparison 1 + 1 == 1 - 1,
+// that is false.
+Game Left() {
+    ModInt<2> f = 1;
+    Bool Test() {
+        return f + f == f - f;
+    }
+}
+
+Game Right() {
+    Bool Test() {
+        return false;
+    }
+}
+
+export as FieldInitLiteral;

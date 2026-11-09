@@ -867,6 +867,29 @@ def _replace_returns_in_if(
     return frog_ast.IfStatement(list(if_stmt.conditions), new_blocks)
 
 
+def substitutable_argument(arg: frog_ast.Expression) -> bool:
+    """True if the inliner may substitute *arg* for the callee's parameter
+    instead of binding it to a variable: *arg* calls no method or function.
+
+    A call evaluates its argument once, before the callee's body;
+    substitution evaluates the argument expression wherever the callee reads
+    the parameter, as often as it reads it (and not at all when it never
+    reads it). A call in the argument may draw, change a challenger's
+    state, or not complete, so substituting it can turn one draw into two
+    or drop the call altogether (F-371). An expression without calls has no
+    effect and always completes, and it gives the value it had at the call
+    wherever the callee reads it, because nothing in the callee writes the
+    caller's variables, as long as the callee does not assign the parameter
+    itself. (``Int`` into ``ModInt`` parameters are bound separately, F-356.)
+    """
+    return (
+        SearchVisitor[frog_ast.ASTNode](
+            lambda node: isinstance(node, frog_ast.FuncCall)
+        ).visit(arg)
+        is None
+    )
+
+
 def _bind_returns(
     block: frog_ast.Block,
     return_type: frog_ast.Type,
@@ -1006,18 +1029,25 @@ class InlineTransformer(Transformer):
                 called_method = SubstitutionTransformer(ast_map).transform(
                     called_method
                 )
+        # A call evaluates each argument once, before the callee's body, and
+        # stores it in the parameter. Substituting the argument expression for
+        # the parameter is the same only when the argument calls nothing
+        # (`substitutable_argument`). An argument with a call is bound to a
+        # variable of the parameter's type, so a draw is drawn once even when
+        # the callee reads its parameter twice (F-371), and still made when
+        # the callee never reads it.
         # F-356: a parameter (or return) type that contains a ModInt converts
         # an Int argument (returned value) by reducing it modulo the modulus.
         # Substituting the argument for the parameter, or the returned
         # expression for the call, would drop that reduction, so such a value
-        # is bound to a variable of the declared type instead; the pipeline
-        # forwards the binding when it provably keeps its value.
+        # is bound even when it is a variable or a literal.
+        # The pipeline forwards a binding when it provably keeps its value.
         fresh_prefix = exp.func.the_object.name + "." + exp.func.name + "@"
         fresh_suffix = str(self.statement_index)
         bindings: list[frog_ast.Statement] = []
         arguments: frog_ast.Namespace = {}
         for param, arg in zip(called_method.signature.parameters, exp.args):
-            if type_contains_mod_int(param.type):
+            if type_contains_mod_int(param.type) or not substitutable_argument(arg):
                 bound = fresh_prefix + param.name + fresh_suffix
                 bindings.append(
                     frog_ast.Assignment(

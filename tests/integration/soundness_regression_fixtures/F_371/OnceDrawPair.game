@@ -1,0 +1,17 @@
+// Positive control: a draw passed on and read once is one uniform draw.
+import 'Caller.primitive';
+
+Game Left(Caller T, Int n) {
+    BitString<n> O() {
+        return T.OnceDraw();
+    }
+}
+
+Game Right(Caller T, Int n) {
+    BitString<n> O() {
+        BitString<n> r <- BitString<n>;
+        return r;
+    }
+}
+
+export as OnceDrawPair;

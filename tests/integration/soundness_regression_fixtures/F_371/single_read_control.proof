@@ -1,0 +1,20 @@
+// F-371 positive control: a bound draw read once is forwarded into its read.
+// Sound engine: Proof Succeeded!
+import 'Caller.primitive';
+import 'Hash.primitive';
+import 'Callers.scheme';
+import 'OnceDrawPair.game';
+
+proof:
+
+let:
+    Int n;
+    Hash H;
+    Caller T = Callers(n, H);
+
+theorem:
+    OnceDrawPair(T, n);
+
+games:
+    OnceDrawPair(T, n).Left against OnceDrawPair(T, n).Adversary;
+    OnceDrawPair(T, n).Right against OnceDrawPair(T, n).Adversary;

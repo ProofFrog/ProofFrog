@@ -1,0 +1,21 @@
+// F-371 positive control: an argument without calls (y + 1^n), read twice,
+// is still substituted, so Same(y + 1^n) is true. Sound engine: Proof
+// Succeeded!
+import 'Caller.primitive';
+import 'Hash.primitive';
+import 'Callers.scheme';
+import 'SamePurePair.game';
+
+proof:
+
+let:
+    Int n;
+    Hash H;
+    Caller T = Callers(n, H);
+
+theorem:
+    SamePurePair(T, n);
+
+games:
+    SamePurePair(T, n).Left against SamePurePair(T, n).Adversary;
+    SamePurePair(T, n).Right against SamePurePair(T, n).Adversary;

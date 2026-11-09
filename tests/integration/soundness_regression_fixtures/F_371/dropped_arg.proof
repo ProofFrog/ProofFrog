@@ -1,0 +1,23 @@
+// F-371 (method inliner). Dropped passes a draw from outside S to Ignore,
+// which never reads its parameter. When S holds every BitString<n> the draw
+// does not complete, which the adversary observes; Right always returns.
+// The inliner substituted the argument for the (absent) reads, which dropped
+// the draw. Sound engine: Proof Failed!
+import 'Caller.primitive';
+import 'Hash.primitive';
+import 'Callers.scheme';
+import 'DroppedPair.game';
+
+proof:
+
+let:
+    Int n;
+    Hash H;
+    Caller T = Callers(n, H);
+
+theorem:
+    DroppedPair(T, n);
+
+games:
+    DroppedPair(T, n).Left against DroppedPair(T, n).Adversary;
+    DroppedPair(T, n).Right against DroppedPair(T, n).Adversary;

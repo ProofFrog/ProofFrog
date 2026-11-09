@@ -1,0 +1,20 @@
+// F-371 positive control: a bound draw from a type that is never read is
+// removed as dead code. Sound engine: Proof Succeeded!
+import 'Caller.primitive';
+import 'Hash.primitive';
+import 'Callers.scheme';
+import 'IgnoreDrawPair.game';
+
+proof:
+
+let:
+    Int n;
+    Hash H;
+    Caller T = Callers(n, H);
+
+theorem:
+    IgnoreDrawPair(T, n);
+
+games:
+    IgnoreDrawPair(T, n).Left against IgnoreDrawPair(T, n).Adversary;
+    IgnoreDrawPair(T, n).Right against IgnoreDrawPair(T, n).Adversary;

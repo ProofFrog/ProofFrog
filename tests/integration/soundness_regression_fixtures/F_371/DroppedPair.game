@@ -1,0 +1,17 @@
+// Left does not complete when S holds every BitString<n> (the draw from
+// outside S has nothing to draw); Right always returns 0^n.
+import 'Caller.primitive';
+
+Game Left(Caller T, Int n) {
+    BitString<n> O(Set<BitString<n>> S) {
+        return T.Dropped(S);
+    }
+}
+
+Game Right(Caller T, Int n) {
+    BitString<n> O(Set<BitString<n>> S) {
+        return 0^n;
+    }
+}
+
+export as DroppedPair;

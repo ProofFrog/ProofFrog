@@ -1,0 +1,18 @@
+// Support pair for scheme_param_store.proof: Left runs the scheme's test,
+// Right compares the integer q with 0. With ParamModTest(q, q) and q = 1,
+// Left returns true and Right false.
+import 'ModTest.primitive';
+
+Game Left(ModTest T, Int q) {
+    Bool Test() {
+        return T.Test();
+    }
+}
+
+Game Right(ModTest T, Int q) {
+    Bool Test() {
+        return q == 0;
+    }
+}
+
+export as SchemeParamPair;

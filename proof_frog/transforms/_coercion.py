@@ -40,19 +40,6 @@ from ..visitors import (
 from ._base import NearMiss, PipelineContext
 
 
-def _in_range_literal(value: frog_ast.Expression, target: frog_ast.ModIntType) -> bool:
-    """True if *value* is an integer literal that every ``ModInt`` of
-    *target*'s modulus represents as itself: ``0`` for any modulus, and
-    ``0 <= n < m`` for a literal modulus ``m``."""
-    if not isinstance(value, frog_ast.Integer):
-        return False
-    if value.num == 0:
-        return True
-    return isinstance(target.modulus, frog_ast.Integer) and (
-        0 <= value.num < target.modulus.num
-    )
-
-
 def store_keeps_value(
     target_type: Optional[frog_ast.Type],
     value: frog_ast.Expression,
@@ -66,16 +53,15 @@ def store_keeps_value(
     part of the slot, and also when the slot's type is unknown or the value's
     type cannot be inferred where it would matter. *type_map* must be scoped
     to the method the store sits in.
+
+    An integer literal is an ``Int`` even when the modulus represents it as
+    itself (``1`` into ``ModInt<2>``, ``0`` into any ``ModInt<q>``): the
+    stored number is the same, but a read replaced by the literal is ``Int``
+    arithmetic, so ``x + x == x - x`` (true for ``ModInt<2> x = 1;``) would
+    become ``1 + 1 == 1 - 1`` (false).
     """
     if target_type is None:
         return False
-    slot = (
-        target_type.the_type
-        if isinstance(target_type, frog_ast.OptionalType)
-        else target_type
-    )
-    if isinstance(slot, frog_ast.ModIntType) and _in_range_literal(value, slot):
-        return True
     return store_keeps_value_of_type(
         target_type,
         value,

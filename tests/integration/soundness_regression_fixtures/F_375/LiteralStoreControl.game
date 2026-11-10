@@ -1,0 +1,17 @@
+// F-375 positive control: the same forwarding of a local whose value
+// already has its ModInt type. x holds y, so x + x == y + y always holds and
+// Left's Test equals Right's. Expected: Proof Succeeded!
+Game Left(Int q, ModInt<q> y) {
+    Bool Test() {
+        ModInt<q> x = y;
+        return x + x == y + y;
+    }
+}
+
+Game Right(Int q, ModInt<q> y) {
+    Bool Test() {
+        return true;
+    }
+}
+
+export as LiteralStoreControl;

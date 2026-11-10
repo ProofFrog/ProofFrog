@@ -1,0 +1,21 @@
+// F-375 (literal store, nonzero): a local ModInt<2> x = 1; holds 1, which
+// ModInt<2> represents as itself, but x is still a ModInt<2>: in it
+// 1 + 1 = 0 = 1 - 1, so x + x == x - x holds and Left's Test returns true,
+// while Right's returns false. The forwarding passes used to count an
+// in-range literal as a store that keeps its value and replaced x by the
+// literal 1, an Int, which made Left's Test the integer comparison
+// 1 + 1 == 1 - 1, that is false.
+Game Left() {
+    Bool Test() {
+        ModInt<2> x = 1;
+        return x + x == x - x;
+    }
+}
+
+Game Right() {
+    Bool Test() {
+        return false;
+    }
+}
+
+export as LitLocal;

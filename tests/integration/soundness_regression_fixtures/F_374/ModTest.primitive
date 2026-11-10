@@ -1,0 +1,4 @@
+// Support primitive for scheme_param_store.proof: one Boolean test.
+Primitive ModTest(Int q) {
+    Bool Test();
+}

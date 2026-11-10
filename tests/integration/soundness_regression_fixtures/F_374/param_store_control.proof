@@ -1,0 +1,16 @@
+// F-374 positive control (see ParamStoreControl.game). Expected:
+// Proof Succeeded!
+import 'ParamStoreControl.game';
+
+proof:
+
+let:
+    Int q;
+    Int a;
+
+theorem:
+    ParamStoreControl(q, a);
+
+games:
+    ParamStoreControl(q, a).Left against ParamStoreControl(q, a).Adversary;
+    ParamStoreControl(q, a).Right against ParamStoreControl(q, a).Adversary;

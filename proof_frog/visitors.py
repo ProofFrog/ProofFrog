@@ -706,6 +706,13 @@ class InstantiationTransformer(Transformer):
     def transform_game(self, game: frog_ast.Game) -> frog_ast.ASTNode:
         return self._instantiate_module(game)
 
+    def transform_reduction(self, reduction: frog_ast.Reduction) -> frog_ast.ASTNode:
+        # Transformer dispatch is by exact class, so without this a reduction
+        # skipped the module set-up: a field its methods write was read as
+        # its initializer (``Int c = 0;`` with ``c = c + 1;`` became
+        # ``0 = 0 + 1;``).
+        return self._instantiate_module(reduction)
+
     def transform_scheme(self, scheme: frog_ast.Scheme) -> frog_ast.ASTNode:
         return self._instantiate_module(scheme)
 

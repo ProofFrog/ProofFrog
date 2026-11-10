@@ -1,0 +1,18 @@
+// F-374 (Int literal argument): ParamLiteral(1) stores 1 in x : ModInt<2>.
+// In ModInt<2>, 1 + 1 = 0 = 1 - 1, so x + x == x - x holds and Left's Test
+// returns true, while Right's returns false. Instantiation used to replace
+// x by the literal 1, an Int, which made Left's Test the integer comparison
+// 1 + 1 == 1 - 1, that is false.
+Game Left(ModInt<2> x) {
+    Bool Test() {
+        return x + x == x - x;
+    }
+}
+
+Game Right(ModInt<2> x) {
+    Bool Test() {
+        return false;
+    }
+}
+
+export as ParamLiteral;

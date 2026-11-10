@@ -31,6 +31,7 @@ from proof_frog.transforms.inlining import (
     DeduplicateDeterministicCalls,
     ExtractRepeatedTupleAccess,
     HoistDeterministicCallToInitialize,
+    InlineMultiUsePureExpression,
 )
 from proof_frog.transforms.sampling import (
     MergeUniformSamples,
@@ -175,6 +176,28 @@ def test_inline_near_miss_on_int_stored_into_modint():
     misses = [nm for nm in ctx.near_misses if nm.variable == "x"]
     assert len(misses) == 1
     assert misses[0].transform_name == "Inline Single-Use Variable"
+    assert "ModInt" in misses[0].reason
+
+
+@pytest.mark.parametrize("decl", ["ModInt<2> x = 1;", "ModInt<q> x = 0;"])
+def test_inline_near_miss_on_int_literal_stored_into_modint(decl):
+    """F-375: an integer literal is an Int, even one the modulus represents
+    as itself, so a ModInt local holding it is not forwarded as the literal
+    (``x + x == x - x`` would become Int arithmetic), and the near miss says
+    why."""
+    game = frog_parser.parse_game(
+        "Game T(Int q) {\n"
+        "    Bool O() {\n"
+        f"        {decl}\n"
+        "        return x + x == x - x;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    assert InlineMultiUsePureExpression().apply(game, ctx) == game
+    misses = [nm for nm in ctx.near_misses if nm.variable == "x"]
+    assert len(misses) == 1
+    assert misses[0].transform_name == "Inline Multi-Use Pure Expressions"
     assert "ModInt" in misses[0].reason
 
 

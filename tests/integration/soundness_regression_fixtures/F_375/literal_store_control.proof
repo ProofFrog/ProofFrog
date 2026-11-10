@@ -1,0 +1,16 @@
+// F-375 positive control (see LiteralStoreControl.game). Expected:
+// Proof Succeeded!
+import 'LiteralStoreControl.game';
+
+proof:
+
+let:
+    Int q;
+    ModInt<q> y;
+
+theorem:
+    LiteralStoreControl(q, y);
+
+games:
+    LiteralStoreControl(q, y).Left against LiteralStoreControl(q, y).Adversary;
+    LiteralStoreControl(q, y).Right against LiteralStoreControl(q, y).Adversary;

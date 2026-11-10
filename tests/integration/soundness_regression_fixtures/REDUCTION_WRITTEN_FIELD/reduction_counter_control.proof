@@ -1,0 +1,33 @@
+// A reduction keeps a query counter in an initialized field that its method
+// increments, and passes it through the Echo challenger. The composed game
+// counts like both sides of CountPair, so every hop is true. Instantiation
+// used to read a reduction's field as its initializer even when a method
+// writes it (a game's written field stays a field), so the counter became
+// 0 = 0 + 1; return challenger.Echo(0); and hops 1 and 3 failed.
+// Expected: Proof Succeeded!
+import 'Echo.game';
+import 'CountPair.game';
+
+Reduction R_Count() compose Echo() against CountPair().Adversary {
+    Int c = 0;
+    Int Next() {
+        c = c + 1;
+        return challenger.Echo(c);
+    }
+}
+
+proof:
+
+let:
+
+assume:
+    Echo();
+
+theorem:
+    CountPair();
+
+games:
+    CountPair().Left against CountPair().Adversary;
+    Echo().Real compose R_Count() against CountPair().Adversary;
+    Echo().Ideal compose R_Count() against CountPair().Adversary;
+    CountPair().Right against CountPair().Adversary;

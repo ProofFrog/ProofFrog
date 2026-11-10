@@ -60,7 +60,12 @@ def test_f356_game_field_with_initializer_of_its_type_is_read_as_it() -> None:
             Bool Test() { return f + f == f; }
         }
         """)
-    out = instantiate(game, [_q(), frog_ast.Variable("y")], {"q": None, "y": None})
+    out = instantiate(
+        game,
+        [_q(), frog_ast.Variable("y")],
+        {"q": None, "y": None},
+        arg_types=[frog_ast.IntType(), frog_ast.ModIntType(_q())],
+    )
     assert _test_return(out) == frog_parser.parse_expression("y + y == y")
 
 
@@ -143,7 +148,10 @@ def test_f356_field_of_a_set_parameter_typed_initializer_is_read_as_it() -> None
         """)
     mod_q = frog_ast.ModIntType(_q())
     out = instantiate(
-        game, [frog_ast.Variable("T"), frog_ast.Variable("y")], {"T": mod_q, "y": None}
+        game,
+        [frog_ast.Variable("T"), frog_ast.Variable("y")],
+        {"T": mod_q, "y": None},
+        arg_types=[None, frog_ast.Variable("T")],
     )
     assert _test_return(out) == frog_parser.parse_expression("y + y == y")
 
@@ -208,7 +216,12 @@ def test_f356_scheme_field_with_initializer_of_its_type_is_read_as_it(
     tmp_path: Path,
 ) -> None:
     scheme = _scheme(tmp_path, "Int q, ModInt<q> x", "ModInt<q> f = x;")
-    out = instantiate(scheme, [_q(), frog_ast.Variable("y")], {"q": None, "y": None})
+    out = instantiate(
+        scheme,
+        [_q(), frog_ast.Variable("y")],
+        {"q": None, "y": None},
+        arg_types=[frog_ast.IntType(), frog_ast.ModIntType(_q())],
+    )
     assert _test_return(out) == frog_parser.parse_expression("y + y == y")
 
 

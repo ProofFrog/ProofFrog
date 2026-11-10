@@ -772,11 +772,17 @@ class ProofEngine:
                 # Necessary because mypy doesn't allow for union types with typevar functions
                 if isinstance(definition, frog_ast.Primitive):
                     self.proof_namespace[let.name] = instantiate(
-                        definition, let.value.args, self.proof_namespace
+                        definition,
+                        let.value.args,
+                        self.proof_namespace,
+                        arg_types=self._argument_types(let.value.args),
                     )
                 elif isinstance(definition, frog_ast.Scheme):
                     self.proof_namespace[let.name] = instantiate(
-                        definition, let.value.args, self.proof_namespace
+                        definition,
+                        let.value.args,
+                        self.proof_namespace,
+                        arg_types=self._argument_types(let.value.args),
                     )
                 else:
                     raise TypeError("Must instantiate either a Primitive or Scheme ")
@@ -2159,7 +2165,9 @@ class ProofEngine:
         ``canonicalize_game`` for that).
         """
         root, args = self._step_game_definition(challenger)
-        game = instantiate(root, args, self.proof_namespace, True)
+        game = instantiate(
+            root, args, self.proof_namespace, True, self._argument_types(args)
+        )
 
         lookup = dict(self.method_lookup)
         if reduction:
@@ -2196,6 +2204,17 @@ class ProofEngine:
                 stacklevel=2,
             )
         return game
+
+    def _argument_types(
+        self, args: list[frog_ast.Expression]
+    ) -> list[Optional[frog_ast.Type]]:
+        """The type of each instantiation argument written in the proof (None
+        if unknown), so that :func:`instantiate` can tell an argument its
+        parameter would convert (F-374)."""
+        return [
+            visitors.expression_type(arg, self.proof_let_types, self.proof_namespace)
+            for arg in args
+        ]
 
     def _step_game_definition(
         self, game: frog_ast.ParameterizedGame | frog_ast.ConcreteGame
@@ -2502,6 +2521,7 @@ def _avoid_instantiation_capture(
     args: list[frog_ast.Expression],
     namespace: frog_ast.Namespace,
     rename_namespace_fields: bool = False,
+    bound_parameters: frozenset[str] = frozenset(),
 ) -> T:
     """Rename the bindings inside *root* that the name-keyed substitutions of
     :func:`instantiate` would otherwise capture (F-341).
@@ -2531,6 +2551,10 @@ def _avoid_instantiation_capture(
       refused unless the field just re-exports that same name, as in
       ``Int lambda = lambda;`` instantiated with ``lambda``, which is checked
       after substitution by :func:`instantiate`.
+    * a game parameter in *bound_parameters*, which :func:`instantiate`
+      binds as a game field instead of substituting (an argument the
+      parameter's type would convert), is renamed by the field rule above,
+      since it becomes a field.
     """
     arg_names: set[str] = set()
     for arg in args:
@@ -2573,6 +2597,25 @@ def _avoid_instantiation_capture(
                 visitors.rename_value_references(method, field_rename)
                 for method in new_root.methods
             ]
+        parameter_rename = {
+            name: fresh() for name in sorted(set(bound_parameters) & shadowed)
+        }
+        if parameter_rename:
+            new_root.parameters = [
+                frog_ast.Parameter(
+                    visitors.rename_value_references(param, parameter_rename).type,
+                    parameter_rename.get(param.name, param.name),
+                )
+                for param in new_root.parameters
+            ]
+            new_root.fields = [
+                visitors.rename_value_references(field, parameter_rename)
+                for field in new_root.fields
+            ]
+            new_root.methods = [
+                visitors.rename_value_references(method, parameter_rename)
+                for method in new_root.methods
+            ]
     return new_root
 
 
@@ -2598,11 +2641,66 @@ def _rename_game_fields(
     return renamed
 
 
+class ConvertingParameterError(visitors.InstantiationError):
+    """A scheme or primitive parameter would store its argument with a change
+    of value (an ``Int`` into a ``ModInt``), so its reads cannot be replaced
+    by the argument."""
+
+
+def _converting_parameters(
+    root: frog_ast.Game | frog_ast.Scheme | frog_ast.Primitive,
+    args: list[frog_ast.Expression],
+    namespace: frog_ast.Namespace,
+    arg_types: Optional[list[Optional[frog_ast.Type]]],
+) -> dict[int, Optional[frog_ast.Type]]:
+    """The parameters of *root* that store their argument with a change of
+    value, by index, each with its type in the caller's terms.
+
+    A parameter receives its argument like a store (F-374): the type checker
+    accepts an ``Int`` argument for a ``ModInt<q>`` parameter, and the
+    parameter then holds the ``Int`` reduced modulo ``q``, so it cannot be
+    read as the argument. The parameter's type is taken with the arguments
+    and *namespace* substituted, and the argument's type from *arg_types*
+    (its type where the argument is written; None, or no list, if unknown).
+    An unknown argument type counts as converting wherever the parameter's
+    type holds a ``ModInt``.
+    """
+    ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+    for index, parameter in enumerate(root.parameters[: len(args)]):
+        ast_map.set(frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
+    substitution = visitors.SubstitutionTransformer(ast_map)
+    resolver = visitors.InstantiationTransformer(namespace)
+
+    def resolved(the_type: Optional[frog_ast.ASTNode]) -> Optional[frog_ast.Type]:
+        if the_type is None:
+            return None
+        result = resolver.transform(copy.deepcopy(the_type))
+        return result if isinstance(result, frog_ast.Type) else None
+
+    converting: dict[int, Optional[frog_ast.Type]] = {}
+    for index, parameter in enumerate(root.parameters[: len(args)]):
+        slot = resolved(substitution.transform(parameter.type))
+        if slot is None:
+            if not visitors.type_contains_mod_int(parameter.type):
+                continue
+            converting[index] = None
+            continue
+        if not visitors.type_contains_mod_int(slot):
+            continue
+        given = arg_types[index] if arg_types and index < len(arg_types) else None
+        if not visitors.store_keeps_value_of_type(
+            slot, args[index], lambda given=given: resolved(given)  # type: ignore[misc]
+        ):
+            converting[index] = slot
+    return converting
+
+
 def instantiate(
     root: T,
     args: list[frog_ast.Expression],
     namespace: frog_ast.Namespace,
     rename_namespace_fields: bool = False,
+    arg_types: Optional[list[Optional[frog_ast.Type]]] = None,
 ) -> T:
     """*root* with its parameters replaced by *args* and the names *namespace*
     binds substituted, capture-avoiding (:func:`_avoid_instantiation_capture`).
@@ -2612,13 +2710,43 @@ def instantiate(
     apart in the canonicalization that follows (F-361). The engine passes it
     when it resolves a proof step; the type checker does not need it, since
     it resolves names by scope.
+
+    *arg_types* gives each argument's type where the argument is written
+    (None for unknown; no list: all unknown). A parameter that would store
+    its argument with a change of value (an ``Int`` into a ``ModInt``,
+    :func:`_converting_parameters`) is not replaced by the argument: a game
+    parameter becomes a game field initialized with the argument, ahead of
+    the game's own fields, and a scheme or primitive parameter is refused
+    (:class:`ConvertingParameterError`), because its methods would carry the
+    parameter's name into the games they are inlined into.
     """
-    root = _avoid_instantiation_capture(root, args, namespace, rename_namespace_fields)
+    converting = _converting_parameters(root, args, namespace, arg_types)
+    if converting and not isinstance(root, frog_ast.Game):
+        index, slot = next(iter(converting.items()))
+        given = arg_types[index] if arg_types and index < len(arg_types) else None
+        raise ConvertingParameterError(
+            f"Cannot instantiate {root.name}: its parameter "
+            f"'{root.parameters[index].name}' of type "
+            f"{slot if slot is not None else root.parameters[index].type} "
+            f"is given {args[index]} (of type "
+            f"{given if given is not None else 'unknown'}), which it stores with "
+            "a change of value: an Int stored in a ModInt is reduced modulo the "
+            "modulus, and arithmetic on the parameter is modular, while on an "
+            "Int, even a literal, it is not. The engine can only read a scheme "
+            "or primitive parameter as its argument. Pass an argument of the "
+            "parameter's type."
+        )
+    bound_names = frozenset(root.parameters[index].name for index in converting)
+    root = _avoid_instantiation_capture(
+        root, args, namespace, rename_namespace_fields, bound_names
+    )
     arg_names: set[str] = set()
     for arg in args:
         arg_names |= visitors.referenced_variable_names(arg)
     ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
     for index, parameter in enumerate(root.parameters):
+        if index in converting:
+            continue
         ast_map.set(frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
     substitution = visitors.SubstitutionTransformer(ast_map)
     field_value_types: dict[str, Optional[frog_ast.Type]] = {}
@@ -2631,6 +2759,21 @@ def instantiate(
     # Ensure independent copy before mutation — transform may share lists
     new_root = copy.copy(new_root)
     new_root.parameters = []
+    if converting:
+        # A converting game parameter holds its argument converted to its
+        # type, so it stays a name: a field initialized with the argument,
+        # which InstantiationTransformer keeps as a field (its initializer's
+        # type is not recorded, so it counts as converting) and which the
+        # forwarding passes do not forward.
+        bound_fields: list[frog_ast.Field] = []
+        for index in sorted(converting):
+            parameter = root.parameters[index]
+            bound_type = substitution.transform(copy.deepcopy(parameter.type))
+            assert isinstance(bound_type, frog_ast.Type)
+            bound_fields.append(
+                frog_ast.Field(bound_type, parameter.name, copy.deepcopy(args[index]))
+            )
+        new_root.fields = bound_fields + list(new_root.fields)
     if not isinstance(new_root, frog_ast.Game):
         for field in new_root.fields:
             if field.name in arg_names and field.value != frog_ast.Variable(field.name):

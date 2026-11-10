@@ -243,6 +243,46 @@ def test_no_near_miss_modint_simplification_power_of_zero_converted():
     ]
 
 
+def test_near_miss_modint_simplification_keeps_division_of_zeros():
+    """A ModInt division whose operands both reduce to the literal 0 keeps
+    them as written (the Int division 0 / 0 is another value), and the near
+    miss names the division."""
+    game = frog_parser.parse_game(
+        "Game T(Int q) {\n"
+        "    ModInt<q> O(ModInt<q> x, ModInt<q> y) {\n"
+        "        return (x - x) / (y - y);\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    assert ModIntSimplification().apply(game, ctx) == game
+    misses = [
+        nm for nm in ctx.near_misses if nm.transform_name == "ModInt Simplification"
+    ]
+    assert len(misses) == 1
+    assert misses[0].method == "O"
+    assert "'(x - x) / (y - y)' not simplified" in misses[0].reason
+    assert "Int division" in misses[0].reason
+    assert misses[0].suggestion is not None
+    assert "write the same division in the other game" in misses[0].suggestion
+
+
+def test_no_near_miss_modint_simplification_division_with_modint_operand():
+    game = frog_parser.parse_game(
+        "Game T(Int q) {\n"
+        "    ModInt<q> O(ModInt<q> x, ModInt<q> y) {\n"
+        "        return (x - x) / y;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    result = ModIntSimplification().apply(game, ctx)
+    assert "return 0 / y;" in str(result)
+    assert not [
+        nm for nm in ctx.near_misses if nm.transform_name == "ModInt Simplification"
+    ]
+
+
 def test_redundant_copy_near_miss_copy_read_after_overwrite():
     """A copy read after its original is overwritten is kept, and the near
     miss names the copy."""
@@ -3694,6 +3734,27 @@ def test_symbolic_no_near_miss_on_bit_string_literal() -> None:
         """)
     SymbolicComputation().apply(game, ctx)
     assert not ctx.near_misses
+
+
+@pytest.mark.parametrize("expression", ["0 / 0", "5 / 0", "(2 - 1) / 0"])
+def test_symbolic_near_miss_on_division_by_zero(expression: str) -> None:
+    """Division by zero has an unspecified value, so ``c / 0`` is not folded
+    (Python's floor division used to raise and abort the proof)."""
+    misses = _symbolic_misses(expression)
+    assert len(misses) == 1
+    assert misses[0].method == "Test"
+    assert misses[0].variable is None
+    reason = misses[0].reason
+    assert "not folded: division by zero has an unspecified value" in reason
+    assert misses[0].suggestion is not None
+    assert "write the same division in the other game" in misses[0].suggestion
+
+
+@pytest.mark.parametrize("expression", ["0 / 5", "6 / 3", "n / 0", "x / 0"])
+def test_symbolic_no_near_miss_on_division(expression: str) -> None:
+    """Folded divisions, and divisions the pass never evaluates (a symbolic
+    or unknown dividend), report nothing."""
+    assert not _symbolic_misses(expression)
 
 
 def _duplicate_fields_misses(source: str) -> list[NearMiss]:

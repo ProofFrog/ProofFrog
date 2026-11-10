@@ -1602,6 +1602,21 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             return
 
         if (
+            operation.operator == frog_ast.BinaryOperators.DIVIDE
+            and isinstance(left_item, int)
+            and isinstance(right_item, int)
+        ):
+            # Two Python integers would be divided by Python's true division:
+            # a float, not FrogLang's integer division, and an exception for
+            # `c / 0` (an unspecified value determined by its operands, which
+            # Symbolic Computation leaves unfolded). Not modelled.
+            if self.opaque_func_call_fallback:
+                self.stack.append(self._intern_opaque(operation))
+            else:
+                self.stack.append(None)
+            return
+
+        if (
             right_item is not None
             and left_item is not None
             and not isinstance(left_item, str)

@@ -1,0 +1,20 @@
+// F-376 (Apply Assumptions, crash): when a step assumption applies to a
+// game, the pass translated every comparison, &&, ||, ! and unary minus of
+// the game to Z3 and handed each formula to the solver. The Int negation -n
+// translates to a Z3 integer, not a Bool, so the solver raised "Value cannot
+// be converted into a Z3 Boolean value" and the whole proof aborted.
+// Left and Right differ: Probe(1) returns -1 in Left and 1 in Right.
+// Expected: Proof Failed! (no crash).
+Game Left() {
+    Int Probe(Int n) {
+        return -n;
+    }
+}
+
+Game Right() {
+    Int Probe(Int n) {
+        return n;
+    }
+}
+
+export as CrashNegDistinct;

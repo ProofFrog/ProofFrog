@@ -183,3 +183,55 @@ def test_engine_rejects_different_values(left: str, right: str) -> None:
 )
 def test_engine_accepts_equal_values(left: str, right: str) -> None:
     assert _equivalent(f"Game L() {{ {left} }}", f"Game R() {{ {right} }}")
+
+
+@pytest.mark.parametrize(
+    "expression, expected",
+    [
+        ("0 / 0", "0 / 0"),
+        ("5 / 0", "5 / 0"),
+        ("(1 + 1) / (2 - 2)", "2 / 0"),
+        # SymPy reduces each operand to 0, the next application sees 0 / 0.
+        ("(lambda - lambda) / (lambda - lambda)", "0 / 0"),
+    ],
+)
+def test_division_by_zero_not_folded(expression: str, expected: str) -> None:
+    """Division by zero has an unspecified value, not a literal one; Python's
+    floor division raised ZeroDivisionError and aborted the whole proof."""
+    method = _return(expression)
+    for _ in range(2):
+        method = SymbolicComputationTransformer(_LAMBDA).transform(method)
+    assert method == _return(expected)
+
+
+@pytest.mark.parametrize(
+    "expression, expected",
+    [("0 / 5", "0"), ("6 / 3", "2"), ("(4 - 2) / (1 + 1)", "1")],
+)
+def test_division_by_nonzero_still_folds(expression: str, expected: str) -> None:
+    transformed = SymbolicComputationTransformer(_LAMBDA).transform(_return(expression))
+    assert transformed == _return(expected)
+
+
+def test_engine_accepts_equal_divisions_by_zero() -> None:
+    """Two divisions by zero with the same operands are the same value."""
+    assert _equivalent(
+        "Game L() { Int E() { return (1 - 1) / (2 - 2); } }",
+        "Game R() { Int E() { return 0 / 0; } }",
+    )
+
+
+@pytest.mark.parametrize(
+    "left, right",
+    [
+        ("Int E() { return 0 / 0; }", "Int E() { return 1 / 0; }"),
+        ("Int E() { return 0 / 0; }", "Int E() { return 0; }"),
+        (
+            "Int E(Int a) { if ((1 - 1) / (2 - 2) == a) { return 1; } return 0; }",
+            "Int E(Int a) { return 0; }",
+        ),
+    ],
+)
+def test_engine_rejects_unequal_division_by_zero(left: str, right: str) -> None:
+    """Refused, not crashed: the pass and the Z3 layer leave ``c / 0`` alone."""
+    assert not _equivalent(f"Game L() {{ {left} }}", f"Game R() {{ {right} }}")

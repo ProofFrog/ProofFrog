@@ -201,6 +201,23 @@ CASES = [
      "positive control: a bound draw read once is forwarded into its read"),
     ("F-371", "unread_draw_control.proof", "accept", "method inliner",
      "positive control: an unread bound draw from a type is removed"),
+    ("F-373", "param_write.proof", "reject", "method inliner",
+     "a callee's x = 0^n; on its parameter assigned the caller's variable"),
+    ("F-373", "param_element_write.proof", "reject", "method inliner",
+     "a callee's X[k] = 0^n; on its Map parameter wrote the caller's map"),
+    ("F-373", "sample_write.proof", "reject", "method inliner",
+     "a callee's draw into its parameter overwrote the caller's variable"),
+    ("F-373", "uniq_insert.proof", "reject", "method inliner",
+     "a callee's <-uniq[S] draw inserted into the caller's set"),
+    ("F-373", "tuple_element_write.proof", "reject", "method inliner",
+     "a callee's A[0] = 0^n; on its tuple parameter wrote the caller's tuple"),
+    ("F-373", "challenger_write.proof", "reject", "method inliner",
+     "a challenger oracle's write to its parameter assigned the reduction's"
+     " variable"),
+    ("F-373", "param_write_control.proof", "accept", "method inliner",
+     "positive control: the caller reads the written parameter's returned value"),
+    ("F-373", "expr_arg_control.proof", "accept", "method inliner",
+     "an expression argument was substituted into the callee's write"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),
@@ -326,9 +343,12 @@ TYPE_ERROR = {
     ),
 }
 
-# (finding, proof file) -> the hop a reject case must fail at. In these
-# proofs step 1 is a true equivalence that must still pass.
+# (finding, proof file) -> the hop a reject case must fail at. Every other
+# hop in these proofs is true and must still pass.
 FAILED_STEP = {
+    ("F-373", "challenger_write.proof"): (
+        "Step 1 failed: Probe(n).Left -> Echo(n).Left compose R(n)"
+    ),
     ("Z3-FIELD-ACCESS", "group_equality.proof"): (
         "Step 2 failed: Swapped(G) -> GroupEquality(G).Right"
     ),

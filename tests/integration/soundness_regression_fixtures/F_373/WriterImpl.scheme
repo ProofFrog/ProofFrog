@@ -1,0 +1,25 @@
+// Target: the method inliner (proof_frog/visitors.py InlineTransformer).
+// Each method passes a caller value to a helper that assigns its own
+// parameter. A call passes the value, so the helper's write cannot change
+// the caller's variable (lexical scoping, ruling Q1).
+import 'Writer.primitive';
+
+Scheme WriterImpl(Int n) extends Writer {
+    BitString<n> Reset(BitString<n> y) {
+        return this.Zero(y);
+    }
+
+    Bool Clear(Map<BitString<n>, BitString<n>> M, BitString<n> k) {
+        return this.ClearAt(M, k);
+    }
+
+    BitString<n> Zero(BitString<n> x) {
+        x = 0^n;
+        return x;
+    }
+
+    Bool ClearAt(Map<BitString<n>, BitString<n>> X, BitString<n> k) {
+        X[k] = 0^n;
+        return true;
+    }
+}

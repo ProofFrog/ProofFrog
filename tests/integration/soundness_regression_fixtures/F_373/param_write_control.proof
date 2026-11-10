@@ -1,0 +1,17 @@
+// Proof for ParamWriteControl.game (target, hypothesis and expected outcome in its header).
+import 'Writer.primitive';
+import 'WriterImpl.scheme';
+import 'ParamWriteControl.game';
+
+proof:
+
+let:
+    Int n;
+    Writer T = WriterImpl(n);
+
+theorem:
+    ParamWriteControl(T, n);
+
+games:
+    ParamWriteControl(T, n).Left against ParamWriteControl(T, n).Adversary;
+    ParamWriteControl(T, n).Right against ParamWriteControl(T, n).Adversary;

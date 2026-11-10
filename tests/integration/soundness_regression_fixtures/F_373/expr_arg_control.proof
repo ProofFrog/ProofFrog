@@ -1,0 +1,17 @@
+// Proof for ExprArgControl.game (target, hypothesis and expected outcome in its header).
+import 'Writer2.primitive';
+import 'Writer2Impl.scheme';
+import 'ExprArgControl.game';
+
+proof:
+
+let:
+    Int n;
+    Writer2 T = Writer2Impl(n);
+
+theorem:
+    ExprArgControl(T, n);
+
+games:
+    ExprArgControl(T, n).Left against ExprArgControl(T, n).Adversary;
+    ExprArgControl(T, n).Right against ExprArgControl(T, n).Adversary;

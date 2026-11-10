@@ -512,9 +512,11 @@ The composition merges the `Initialize` methods:
 
 **Inlining** is the process of replacing a method call with the method's body, substituting parameters with arguments. This is the key mechanism by which the proof engine transforms composed games into flat, comparable code.
 
+**Arguments are passed by value.** A method call evaluates each argument once, before the callee's body, and the callee gets its own copy of each value, `Map`, `Array`, `Set` and tuple arguments included. A callee may assign its parameter (`x = e;`), draw into it, write an element of it (`X[k] = v;`) or insert into it with `<-uniq[X]`; none of these changes the caller's variable.
+
 When inlining `obj.method(arg1, arg2)`:
 1. A fresh copy of the method body is created.
-2. Each formal parameter is substituted with the corresponding argument expression, except where that would change what the call computes: an argument that calls a method or function (which may draw, change a challenger's state, or not complete, and must run exactly once whether the callee reads the parameter twice or never) and a parameter whose type contains a `ModInt` (which reduces an `Int` argument) are bound instead, by a declaration `T obj.method@param<i> = arg;` of the parameter's type placed before the body.
+2. Each formal parameter is substituted with the corresponding argument expression, except where that would change what the call computes: an argument that calls a method or function (which may draw, change a challenger's state, or not complete, and must run exactly once whether the callee reads the parameter twice or never), a parameter the callee writes (substitution would turn the callee's write into a write to the caller's variable) and a parameter whose type contains a `ModInt` (which reduces an `Int` argument) are bound instead, by a declaration `T obj.method@param<i> = arg;` of the parameter's type placed before the body.
 3. Locally declared variables are renamed to avoid name collisions (using a scheme like `method@varname`).
 4. The method call expression is replaced by the return expression (or the call statement is replaced by the method body for void methods).
 

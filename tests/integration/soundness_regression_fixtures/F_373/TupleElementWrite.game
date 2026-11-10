@@ -1,0 +1,22 @@
+// Target: the method inliner (InlineTransformer), parameter substitution.
+// Hypothesis: as ParamElementWrite, for an element write `A[0] = 0^n;` to
+// a tuple parameter: substituting the caller's a writes a[0] itself.
+// Left returns the adversary's a[0]; Right returns 0^n. Sound engine:
+// Proof Failed! (advantage 1 - 2^-n). Unsound engine: Proof Succeeded!
+import 'Writer2.primitive';
+
+Game Left(Writer2 T, Int n) {
+    BitString<n> O([BitString<n>, BitString<n>] a) {
+        BitString<n> z = T.ZeroFirst(a);
+        return a[0];
+    }
+}
+
+Game Right(Writer2 T, Int n) {
+    BitString<n> O([BitString<n>, BitString<n>] a) {
+        a[0] = 0^n;
+        return a[0];
+    }
+}
+
+export as TupleElementWrite;

@@ -1,0 +1,6 @@
+Primitive Writer2(Int n) {
+    BitString<n> Redraw(BitString<n> y);
+    Bool Pick(Set<BitString<n>> S);
+    BitString<n> ZeroFirst([BitString<n>, BitString<n>] A);
+    BitString<n> Reset2(BitString<n> x);
+}

@@ -602,6 +602,82 @@ class TestModIntPowerOfZeroKeepsItsType:
         assert result == frog_parser.parse_method(source)
 
 
+class TestModIntDivisionKeepsItsType:
+    """A ModInt division whose operands both reduce to literals must not be
+    left as the Int division `0 / 0`: a ModInt division by zero is another
+    unspecified value than an Int one, and an Int `(n - n) / (n - n)` in
+    another game canonicalizes to the same `0 / 0`."""
+
+    @pytest.mark.parametrize(
+        "division",
+        [
+            "(a - a) / (b - b)",
+            "((a - a) * b) / (b - b)",
+            "((a - a) + (b - b)) / (b - b)",
+        ],
+    )
+    def test_division_of_zeros_keeps_operands(self, division: str) -> None:
+        source = f"""
+            ModInt<q> f(ModInt<q> a, ModInt<q> b) {{
+                return {division};
+            }}
+        """
+        result = _simplify_method(source, a=_Q, b=_Q)
+        assert result == frog_parser.parse_method(source)
+
+    @pytest.mark.parametrize(
+        "division, expected",
+        [("(a - a) / b", "0 / b"), ("a / (b - b)", "a / 0")],
+    )
+    def test_division_with_modint_operand_still_simplified(
+        self, division: str, expected: str
+    ) -> None:
+        """One ModInt operand keeps the division ModInt-typed."""
+        result = _simplify_method(
+            f"""
+            ModInt<q> f(ModInt<q> a, ModInt<q> b) {{
+                return {division};
+            }}
+            """,
+            a=_Q,
+            b=_Q,
+        )
+        expected_method = frog_parser.parse_method(f"""
+            ModInt<q> f(ModInt<q> a, ModInt<q> b) {{
+                return {expected};
+            }}
+        """)
+        assert result == expected_method
+
+    def test_division_by_untyped_call_still_simplified(self) -> None:
+        """A divisor that is not a literal (here a call the type map does not
+        type) is not ambiguous, so the dividend is still simplified."""
+        result = _simplify_method(
+            """
+            ModInt<q> f(ModInt<q> a, ModInt<q> b) {
+                return (a - a) / F.g(b);
+            }
+            """,
+            a=_Q,
+            b=_Q,
+        )
+        expected = frog_parser.parse_method("""
+            ModInt<q> f(ModInt<q> a, ModInt<q> b) {
+                return 0 / F.g(b);
+            }
+        """)
+        assert result == expected
+
+    def test_int_division_untouched(self) -> None:
+        source = """
+            Int f(Int n) {
+                return (n - n) / (n - n);
+            }
+        """
+        result = _simplify_method(source, n=frog_ast.IntType())
+        assert result == frog_parser.parse_method(source)
+
+
 class TestModIntSimplificationNegation:
     def test_double_negation(self) -> None:
         """-(-a) -> a for ModInt."""

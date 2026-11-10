@@ -1,0 +1,13 @@
+// F-376 control: a true hop next to the step assumption 1 < 2.
+// Sound engine: Proof Succeeded!
+import 'CrashNegControl.game';
+
+proof:
+
+theorem:
+    CrashNegControl();
+
+games:
+    CrashNegControl().Left against CrashNegControl().Adversary;
+    assume 1 < 2;
+    CrashNegControl().Right against CrashNegControl().Adversary;

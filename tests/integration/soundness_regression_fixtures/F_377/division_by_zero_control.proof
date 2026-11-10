@@ -1,0 +1,15 @@
+// F-377 control: see DivisionByZeroControl.game.
+// Sound engine: Proof Succeeded!
+import 'DivisionByZeroControl.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    DivisionByZeroControl(q);
+
+games:
+    DivisionByZeroControl(q).Left against DivisionByZeroControl(q).Adversary;
+    DivisionByZeroControl(q).Right against DivisionByZeroControl(q).Adversary;

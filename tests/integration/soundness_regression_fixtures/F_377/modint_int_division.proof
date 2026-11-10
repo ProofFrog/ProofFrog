@@ -1,0 +1,16 @@
+// F-377: claims ModIntIntDivision(q).Left and .Right are interchangeable.
+// Nothing makes them so (see ModIntIntDivision.game).
+// Sound engine: Proof Failed!
+import 'ModIntIntDivision.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    ModIntIntDivision(q);
+
+games:
+    ModIntIntDivision(q).Left against ModIntIntDivision(q).Adversary;
+    ModIntIntDivision(q).Right against ModIntIntDivision(q).Adversary;

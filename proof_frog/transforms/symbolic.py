@@ -122,6 +122,14 @@ class SymbolicComputationTransformer(Transformer):
                 isinstance(left_val, int) and isinstance(right_val, int)
             ):
                 pass  # leave symbolic divisions unsimplified
+            elif (
+                binary_operation.operator == frog_ast.BinaryOperators.DIVIDE
+                and right_val == 0
+            ):
+                # Division by zero is an unspecified value determined by its
+                # operands (it does not fail), so ``c / 0`` has no literal to
+                # fold to.  Python's floor division would raise here.
+                self._note_division_by_zero(binary_operation)
             else:
                 simplified_expression = operators[binary_operation.operator](
                     left_val, right_val
@@ -142,6 +150,30 @@ class SymbolicComputationTransformer(Transformer):
         if isinstance(operand, _VALUED_NODES) and len(pushed) == 1:
             return pushed[0]
         return None
+
+    def _note_division_by_zero(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> None:
+        """Records a division by the literal 0 left unfolded."""
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Symbolic Computation",
+                reason=(
+                    f"'{binary_operation}' not folded: division by zero has an "
+                    "unspecified value, not a literal one"
+                ),
+                location=binary_operation.origin,
+                suggestion=(
+                    "Divide by a value that is nonzero, or write the same "
+                    "division in the other game; two divisions by zero are "
+                    "equal only when their operands are"
+                ),
+                variable=None,
+                method=self._method_name,
+            )
+        )
 
     def _is_negated_constant(self, operand: frog_ast.Expression) -> bool:
         """``-c`` for an Int literal or Int parameter ``c``."""

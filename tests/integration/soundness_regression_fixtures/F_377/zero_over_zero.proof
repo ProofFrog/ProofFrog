@@ -1,0 +1,16 @@
+// F-377: claims ZeroOverZero(q).Left and ZeroOverZero(q).Right are
+// interchangeable. They are not (see ZeroOverZero.game).
+// Sound engine: Proof Failed!
+import 'ZeroOverZero.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    ZeroOverZero(q);
+
+games:
+    ZeroOverZero(q).Left against ZeroOverZero(q).Adversary;
+    ZeroOverZero(q).Right against ZeroOverZero(q).Adversary;

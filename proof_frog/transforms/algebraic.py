@@ -778,6 +778,29 @@ def _is_integer_literal(expr: frog_ast.Expression, value: int) -> bool:
     return isinstance(expr, frog_ast.Integer) and expr.num == value
 
 
+def _is_literal_arithmetic(expr: frog_ast.Expression) -> bool:
+    """An expression built from integer literals alone (``0``, ``0 + 0``),
+    which Symbolic Computation evaluates as Int arithmetic."""
+    if isinstance(expr, frog_ast.Integer):
+        return True
+    if isinstance(expr, frog_ast.UnaryOperation):
+        return expr.operator == frog_ast.UnaryOperators.MINUS and (
+            _is_literal_arithmetic(expr.expression)
+        )
+    if isinstance(expr, frog_ast.BinaryOperation):
+        return expr.operator in (
+            frog_ast.BinaryOperators.ADD,
+            frog_ast.BinaryOperators.SUBTRACT,
+            frog_ast.BinaryOperators.MULTIPLY,
+            frog_ast.BinaryOperators.DIVIDE,
+            frog_ast.BinaryOperators.EXPONENTIATE,
+        ) and (
+            _is_literal_arithmetic(expr.left_expression)
+            and _is_literal_arithmetic(expr.right_expression)
+        )
+    return False
+
+
 def _modulus_is_group_order(
     modulus: frog_ast.Expression,
     base: Optional[frog_ast.Expression],
@@ -915,7 +938,10 @@ class ModIntSimplificationTransformer(MethodScopedTypeMapMixin):
     literal mod q again, and as a factor of a product with a ModInt operand
     (``a ^ 0 * b`` is ``b``). Elsewhere it is kept, with a near miss. A power
     whose base the rules reduce to the literal 0 (``(a - a) ^ 0``) keeps its
-    base as written, so it is not left as the Int ``0 ^ 0``.
+    base as written, so it is not left as the Int ``0 ^ 0``. Likewise a
+    division whose operands the rules reduce to literals (``(a - a) / (b -
+    b)``) keeps its operands as written, so it is not left as the Int
+    ``0 / 0``.
     """
 
     def __init__(
@@ -1052,6 +1078,39 @@ class ModIntSimplificationTransformer(MethodScopedTypeMapMixin):
             frog_ast.BinaryOperators.EXPONENTIATE, left, right
         )
 
+    def _keep_modint_division(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        """A ModInt division whose operands both reduce to integer literals
+        (``(a - a) / (b - b)`` -> ``0 / 0``) keeps its operands as written:
+        the Int division ``0 / 0`` is another unspecified value than the
+        ModInt one, and an Int division by zero written in another game would
+        canonicalize to the same ``0 / 0``."""
+        if self._ctx is not None:
+            self._ctx.near_misses.append(
+                NearMiss(
+                    transform_name="ModInt Simplification",
+                    reason=(
+                        f"Operands of '{binary_operation}' not simplified: "
+                        "both would become Int literals, and the result "
+                        "would be read as an Int division (a ModInt division "
+                        "by zero is another unspecified value than an Int one)"
+                    ),
+                    location=binary_operation.origin,
+                    suggestion=(
+                        "Divide by a ModInt value that is not zero, or write "
+                        "the same division in the other game"
+                    ),
+                    variable=None,
+                    method=self._method_name,
+                )
+            )
+        return frog_ast.BinaryOperation(
+            frog_ast.BinaryOperators.DIVIDE,
+            binary_operation.left_expression,
+            binary_operation.right_expression,
+        )
+
     def transform_unary_operation(
         self, unary_operation: frog_ast.UnaryOperation
     ) -> frog_ast.Expression:
@@ -1094,6 +1153,16 @@ class ModIntSimplificationTransformer(MethodScopedTypeMapMixin):
             return self._simplify_modint_power(binary_operation, left, right)
 
         if not self._is_modint_expr(left) and not self._is_modint_expr(right):
+            if (
+                op == frog_ast.BinaryOperators.DIVIDE
+                and _is_literal_arithmetic(left)
+                and _is_literal_arithmetic(right)
+                and (
+                    self._is_modint_expr(binary_operation.left_expression)
+                    or self._is_modint_expr(binary_operation.right_expression)
+                )
+            ):
+                return self._keep_modint_division(binary_operation)
             return transformed
 
         # Additive identity: a + 0 = a, 0 + a = a

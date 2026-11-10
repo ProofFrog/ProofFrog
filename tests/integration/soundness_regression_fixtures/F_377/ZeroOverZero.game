@@ -1,0 +1,21 @@
+// F-377 (Symbolic Computation, crash): ModInt Simplification rewrote x - x
+// and y - y to the literal 0, leaving the division 0 / 0, and Symbolic
+// Computation evaluated a division of two integer literals with Python's
+// floor division, which raised ZeroDivisionError and aborted the whole proof
+// ("division by zero"). Division by zero returns an unspecified value, so
+// there is no literal to fold to.
+// Left returns that unspecified value, Right returns x: the games differ.
+// Expected: Proof Failed! (no crash).
+Game Left(Int q) {
+    ModInt<q> Probe(ModInt<q> x, ModInt<q> y) {
+        return (x - x) / (y - y);
+    }
+}
+
+Game Right(Int q) {
+    ModInt<q> Probe(ModInt<q> x, ModInt<q> y) {
+        return x;
+    }
+}
+
+export as ZeroOverZero;

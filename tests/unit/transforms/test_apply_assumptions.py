@@ -164,3 +164,87 @@ class TestContradictionCheckSoundness:
         cond = _get_first_condition(result)
         assert isinstance(cond, frog_ast.Boolean)
         assert cond.bool is True
+
+
+class TestNonBoolFormulas:
+    """Only a Bool formula can be handed to the solver. The Int negation
+    `-n` translates to a Z3 integer, and `solver.add` on it raised "Value
+    cannot be converted into a Z3 Boolean value", aborting the whole proof
+    whenever a step assumption applied to a game containing `-n`."""
+
+    _NEGATION_GAME = """
+        Game G() {
+            Int n;
+            Int Query() {
+                if (n < 5) {
+                    return -n;
+                }
+                return n;
+            }
+        }
+        """
+
+    def test_negation_left_unchanged(self) -> None:
+        assumption, game = _make_assumption_and_game("n > 10", self._NEGATION_GAME)
+        result = SimplifyRangeTransformer(NameTypeMap(), game, assumption).transform(
+            game
+        )
+        if_stmt = result.methods[0].block.statements[0]
+        assert isinstance(if_stmt, frog_ast.IfStatement)
+        # The condition is still decided; the negation stays as written.
+        assert if_stmt.conditions[0] == frog_ast.Boolean(False)
+        assert str(if_stmt.blocks[0].statements[0]) == "return -n;"
+
+    def test_negation_with_literal_assumption(self) -> None:
+        """`1 < 2` translates to the Python bool True, not a Z3 Bool."""
+        assumption, game = _make_assumption_and_game("1 < 2", self._NEGATION_GAME)
+        result = SimplifyRangeTransformer(NameTypeMap(), game, assumption).transform(
+            game
+        )
+        assert result == game
+
+    def test_literal_condition_decided(self) -> None:
+        """A comparison of literals (a Python bool formula) is still settled."""
+        assumption, game = _make_assumption_and_game(
+            "n > 10",
+            """
+            Game G() {
+                Int n;
+                Bool Query() {
+                    if (1 < 2) {
+                        return true;
+                    }
+                    return false;
+                }
+            }
+            """,
+        )
+        result = SimplifyRangeTransformer(NameTypeMap(), game, assumption).transform(
+            game
+        )
+        assert _get_first_condition(result) == frog_ast.Boolean(True)
+
+    def test_solver_exception_leaves_condition(self) -> None:
+        """A formula the solver refuses falls back to no rewrite."""
+        assumption, game = _make_assumption_and_game(
+            "n > 10",
+            """
+            Game G() {
+                Int n;
+                Bool Query() {
+                    if (n < 5) {
+                        return true;
+                    }
+                    return false;
+                }
+            }
+            """,
+        )
+        transformer = SimplifyRangeTransformer(NameTypeMap(), game, assumption)
+
+        def refuse(*_args: object) -> None:
+            raise z3.Z3Exception("sort mismatch")
+
+        transformer.solver.add = refuse  # type: ignore[method-assign]
+        result = transformer.transform(game)
+        assert _get_first_condition(result) == _get_first_condition(game)

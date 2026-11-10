@@ -1,0 +1,22 @@
+// F-377 (ModInt Simplification): Left divides the ModInt zero by itself, a
+// ModInt division by zero; Right divides the Int zero by itself, an Int
+// division by zero, and returns it reduced mod q. These are two different
+// unspecified values (one of type ModInt<q>, one of type Int), so nothing
+// makes them equal. ModInt Simplification rewrote x - x and y - y to the
+// literal 0, so Left's division became the Int-typed 0 / 0, the same form as
+// Right's (q - q) / (q - q) after Symbolic Computation. Once 0 / 0 is no
+// longer folded, the two would canonicalize to the same return 0 / 0;.
+// Expected: Proof Failed!
+Game Left(Int q) {
+    ModInt<q> Probe(ModInt<q> x, ModInt<q> y) {
+        return (x - x) / (y - y);
+    }
+}
+
+Game Right(Int q) {
+    ModInt<q> Probe(ModInt<q> x, ModInt<q> y) {
+        return (q - q) / (q - q);
+    }
+}
+
+export as ModIntIntDivision;

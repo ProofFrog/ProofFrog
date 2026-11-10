@@ -218,6 +218,21 @@ CASES = [
      "positive control: the caller reads the written parameter's returned value"),
     ("F-373", "expr_arg_control.proof", "accept", "method inliner",
      "an expression argument was substituted into the callee's write"),
+    ("F-374", "param_store.proof", "reject", "instantiation",
+     "an Int argument for a ModInt<q> game parameter was read unreduced"),
+    ("F-374", "param_literal.proof", "reject", "instantiation",
+     "an Int literal argument for a ModInt<2> game parameter was read as an Int"),
+    ("F-374", "scheme_param_store.proof", "type_error", "instantiation",
+     "an Int argument for a ModInt<q> scheme parameter was read unreduced"),
+    ("F-374", "param_store_control.proof", "accept", "instantiation",
+     "positive control: a converting game parameter is kept as a field"),
+    ("F-375", "lit_local.proof", "reject", "InlineMultiUsePureExpression",
+     "a ModInt<2> local holding the literal 1 was forwarded as the Int 1"),
+    ("F-375", "zero_local.proof", "reject", "InlineMultiUsePureExpression",
+     "a ModInt<q> local holding the literal 0 was forwarded as the Int 0"),
+    ("F-375", "literal_store_control.proof", "accept",
+     "InlineMultiUsePureExpression",
+     "positive control: a local of its value's ModInt type is still forwarded"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),
@@ -313,6 +328,9 @@ CASES = [
      "M.keys = S was read as no write to M; a live branch was deleted"),
     ("MEMBER-ASSIGN", "element_write_control.proof", "accept", "type checker",
      "positive control: a map element write M[k] = v is still accepted"),
+    ("REDUCTION-WRITTEN-FIELD", "reduction_counter_control.proof", "accept",
+     "instantiation",
+     "a reduction field its method writes was read as its initializer"),
 ]
 # fmt: on
 
@@ -331,6 +349,10 @@ TYPE_ERROR = {
     ("F-356", "scheme_field_literal.proof"): (
         "error: Cannot instantiate LiteralModField: its field 'f' stores its "
         "initializer 1 in type ModInt<2>"
+    ),
+    ("F-374", "scheme_param_store.proof"): (
+        "error: Cannot instantiate ParamModTest: its parameter 'x' of type "
+        "ModInt<q> is given q (of type Int)"
     ),
     ("GAME-SELF-CALL", "self_call.proof"): (
         "error: Game 'Calls' may not call its own method 'Inc'"

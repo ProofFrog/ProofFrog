@@ -75,8 +75,9 @@ def check_well_formed(
         _check_well_formed(root, file_name, allowed_root)
     except visitors.InstantiationError as e:
         # A scheme/primitive field would capture a name in its instantiation
-        # arguments (F-341), or a scheme field's initializer converts the
-        # value it stores (F-356): report it as an ordinary type error.
+        # arguments (F-341), or a scheme field's initializer (F-356) or a
+        # scheme or primitive parameter (F-374) converts the value it
+        # stores: report it as an ordinary type error.
         print_error(root, str(e), file_name)
 
 
@@ -205,7 +206,12 @@ class VariableTypeVisitor(visitors.Visitor[None]):
     ) -> visitors.InstantiableType:
         return get_type_from_instantiable(
             name,
-            proof_engine.instantiate(root, args, self.instantiation_namespace),
+            proof_engine.instantiate(
+                root,
+                args,
+                self.instantiation_namespace,
+                arg_types=self._argument_types(args),
+            ),
             just_methods,
         )
 
@@ -266,6 +272,7 @@ class VariableTypeVisitor(visitors.Visitor[None]):
                         root,
                         field.value.args,
                         self.instantiation_namespace,
+                        arg_types=self._argument_types(field.value.args),
                     )
                     instantiated_type = get_type_from_instantiable(
                         field.value.func.name, instantiated_scheme
@@ -381,6 +388,23 @@ class VariableTypeVisitor(visitors.Visitor[None]):
 
     def leave_generic_for(self, _: frog_ast.GenericFor) -> None:
         self.variable_type_map_stack.pop()
+
+    def _argument_types(
+        self, args: list[frog_ast.Expression]
+    ) -> list[Optional[frog_ast.Type]]:
+        """The type of each argument that is a name or an integer literal
+        (None for any other argument, or a name whose type is not a type):
+        instantiation needs them to tell an argument its parameter would
+        convert (an Int into a ModInt, F-374)."""
+        types: list[Optional[frog_ast.Type]] = []
+        for arg in args:
+            found: PossibleType = None
+            if isinstance(arg, frog_ast.Variable):
+                found = self.get_type(arg.name)
+            elif isinstance(arg, frog_ast.Integer):
+                found = frog_ast.IntType()
+            types.append(found if isinstance(found, frog_ast.Type) else None)
+        return types
 
     def get_type(self, name: str) -> PossibleType:
         for the_map in reversed(self.variable_type_map_stack):
@@ -1570,7 +1594,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             tuple[frog_ast.Expression, frog_ast.Expression]
         ] = []
         self._instantiation_cache: dict[
-            tuple[str, tuple[str, ...]], frog_ast.Instantiable
+            tuple[str, tuple[str, ...], tuple[str, ...]], frog_ast.Instantiable
         ] = {}
 
     def result(self) -> None:
@@ -2059,6 +2083,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 adversary_definition.games[0],
                 reduction.play_against.args,
                 combined_ns,
+                arg_types=self._argument_types(reduction.play_against.args),
             ),
             True,
         )
@@ -2116,6 +2141,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             ),
             challenger.args,
             self.instantiation_namespace,
+            arg_types=self._argument_types(challenger.args),
         )
         instantiated_methods = get_type_from_instantiable(
             challenger.name,
@@ -2987,6 +3013,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             target_game,
             concrete_game.game.args,
             self.instantiation_namespace,
+            arg_types=self._argument_types(concrete_game.game.args),
         )
         self.ast_type_map.set(
             concrete_game,
@@ -3040,8 +3067,20 @@ class CheckTypeVisitor(VariableTypeVisitor):
             if isinstance(arg_t, frog_ast.Type):
                 param_bindings[param.name] = arg_t  # type: ignore[assignment]
 
+        # The argument types decide whether a parameter stores its argument
+        # with a change of value (an Int into a ModInt, F-374), which
+        # instantiation binds as a game field or refuses for a scheme.
+        known_arg_types: list[Optional[frog_ast.Type]] = [
+            arg_type if isinstance(arg_type, frog_ast.Type) else None
+            for arg_type in arg_types
+        ]
+
         # Check cache to avoid redundant instantiation and type-checking
-        cache_key = (scheme.name, tuple(str(a) for a in args))
+        cache_key = (
+            scheme.name,
+            tuple(str(a) for a in args),
+            tuple(str(t) for t in known_arg_types),
+        )
         cached = self._instantiation_cache.get(cache_key)
         if cached is not None:
             # Re-propagate subsets constraints from the cached result
@@ -3064,7 +3103,9 @@ class CheckTypeVisitor(VariableTypeVisitor):
             },
         }
 
-        instantiated_scheme = proof_engine.instantiate(scheme, args, combined_ns)
+        instantiated_scheme = proof_engine.instantiate(
+            scheme, args, combined_ns, arg_types=known_arg_types
+        )
 
         # Extract subsets constraints from requires clauses
         subsets_pairs = _extract_subsets_pairs(instantiated_scheme)
@@ -3109,6 +3150,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
                     definition.games[0],
                     func_call.args,
                     self.instantiation_namespace,
+                    arg_types=self._argument_types(func_call.args),
                 )
                 self.ast_type_map.set(
                     func_call,
@@ -3120,6 +3162,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
                     definition,
                     func_call.args,
                     self.instantiation_namespace,
+                    arg_types=self._argument_types(func_call.args),
                 )
                 self.ast_type_map.set(
                     func_call,

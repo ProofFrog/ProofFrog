@@ -1,0 +1,14 @@
+// F-375: claims LitLocal().Left and LitLocal().Right are interchangeable.
+// They are not (see LitLocal.game). Sound engine: Proof Failed!
+import 'LitLocal.game';
+
+proof:
+
+let:
+
+theorem:
+    LitLocal();
+
+games:
+    LitLocal().Left against LitLocal().Adversary;
+    LitLocal().Right against LitLocal().Adversary;

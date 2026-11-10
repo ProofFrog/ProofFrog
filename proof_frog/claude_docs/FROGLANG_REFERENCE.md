@@ -495,6 +495,8 @@ During proof verification, these method calls are **inlined**: the call `E.Enc(k
 
 A scheme field with an initializer (`Int lambda = lambda;`) is read as its initializer, in the scheme's methods and as `E.lambda`. That is only exact when the initializer already has the field's type (or the field's type holds no `ModInt`), so the engine refuses, with a type error, a scheme whose field initializer would be converted: an `Int` stored in a `ModInt<q>` field, including an integer literal such as `0` (the field's arithmetic is modular, the literal's is not). A game field whose initializer is converted stays a field holding the converted value.
 
+A parameter of a game, reduction, scheme or primitive receives its argument the same way: an `Int` argument for a `ModInt<q>` parameter (or a parameter with a `ModInt<q>` part) is reduced modulo `q`, an integer literal included. The engine replaces a parameter by its argument only when the argument already has the parameter's type there. Otherwise a game or reduction keeps the parameter as a field holding the converted argument, and a scheme or primitive is refused with a type error, for the same reason as a converted scheme field.
+
 ### 7.2 Game Composition with Reductions
 
 When a game is composed with a reduction, the resulting system is a new game whose oracles are the reduction's methods. The reduction's `challenger` variable is bound to the composed security game.

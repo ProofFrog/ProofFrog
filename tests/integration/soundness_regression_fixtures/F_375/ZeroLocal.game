@@ -1,0 +1,20 @@
+// F-375 (literal store, zero): a local ModInt<q> x = 0; is a ModInt<q>, so
+// x ^ 0 is 1 modulo q and x ^ 0 + x ^ 0 == x - x holds exactly when q
+// divides 2: Left's Test returns true for q = 1 and q = 2, while Right's
+// returns false. The forwarding passes used to replace x by the literal 0,
+// an Int; 0 ^ 0 was then folded to the Int 1 and Left's Test to 2 == 0,
+// that is false.
+Game Left(Int q) {
+    Bool Test() {
+        ModInt<q> x = 0;
+        return x ^ 0 + x ^ 0 == x - x;
+    }
+}
+
+Game Right(Int q) {
+    Bool Test() {
+        return false;
+    }
+}
+
+export as ZeroLocal;

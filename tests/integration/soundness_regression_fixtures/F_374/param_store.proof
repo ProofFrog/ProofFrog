@@ -1,0 +1,16 @@
+// F-374: claims ParamStore(q, q).Left and ParamStore(q, q).Right are
+// interchangeable. They are not (see ParamStore.game). Sound engine:
+// Proof Failed!
+import 'ParamStore.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    ParamStore(q, q);
+
+games:
+    ParamStore(q, q).Left against ParamStore(q, q).Adversary;
+    ParamStore(q, q).Right against ParamStore(q, q).Adversary;

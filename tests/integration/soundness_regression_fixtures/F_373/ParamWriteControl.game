@@ -1,0 +1,18 @@
+// Control for ParamWrite: Reset returns 0^n whatever it is passed, so both
+// sides return 0^n. Sound engine: Proof Succeeded!
+import 'Writer.primitive';
+
+Game Left(Writer T, Int n) {
+    BitString<n> O(BitString<n> y) {
+        BitString<n> z = T.Reset(y);
+        return z;
+    }
+}
+
+Game Right(Writer T, Int n) {
+    BitString<n> O(BitString<n> y) {
+        return 0^n;
+    }
+}
+
+export as ParamWriteControl;

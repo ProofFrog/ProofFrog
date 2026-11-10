@@ -1,0 +1,27 @@
+// Target: the method inliner (InlineTransformer), parameter substitution.
+// Hypothesis: `x <-uniq[S] T;` adds x to S. With the caller's field S
+// substituted for Pick's Set parameter, the insertion grows the caller's S.
+// Left: Pick inserts into its own copy, so S stays empty and Size returns
+// 0; Right inserts into S, so Size returns 1, 2, ... Sound engine: Proof
+// Failed! (advantage 1). Unsound engine: Proof Succeeded!
+import 'Writer2.primitive';
+
+Game Left(Writer2 T, Int n) {
+    Set<BitString<n>> S;
+
+    Int Size() {
+        Bool b = T.Pick(S);
+        return |S|;
+    }
+}
+
+Game Right(Writer2 T, Int n) {
+    Set<BitString<n>> S;
+
+    Int Size() {
+        BitString<n> x <-uniq[S] BitString<n>;
+        return |S|;
+    }
+}
+
+export as UniqInsert;

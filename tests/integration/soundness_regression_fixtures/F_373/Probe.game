@@ -1,0 +1,15 @@
+// Left returns 0^n, Right returns the adversary's y: distinguishable with
+// advantage 1 - 2^-n.
+Game Left(Int n) {
+    BitString<n> O(BitString<n> y) {
+        return 0^n;
+    }
+}
+
+Game Right(Int n) {
+    BitString<n> O(BitString<n> y) {
+        return y;
+    }
+}
+
+export as Probe;

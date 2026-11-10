@@ -944,7 +944,9 @@ def substitutable_argument(arg: frog_ast.Expression) -> bool:
     effect and always completes, and it gives the value it had at the call
     wherever the callee reads it, because nothing in the callee writes the
     caller's variables, as long as the callee does not assign the parameter
-    itself. (``Int`` into ``ModInt`` parameters are bound separately, F-356.)
+    itself. (``Int`` into ``ModInt`` parameters are bound separately, F-356,
+    and so is a parameter the callee writes, which is its own copy of the
+    argument.)
     """
     return (
         SearchVisitor[frog_ast.ASTNode](
@@ -1105,13 +1107,23 @@ class InlineTransformer(Transformer):
         # Substituting the argument for the parameter, or the returned
         # expression for the call, would drop that reduction, so such a value
         # is bound even when it is a variable or a literal.
+        # A parameter the callee writes (assigns, samples into, writes an
+        # element of, inserts into with `<-uniq`, or rebinds) is bound too:
+        # arguments are passed by value, so the callee's parameter is its own
+        # copy. Substituting the argument would turn the callee's write into a
+        # write to the caller's variable (`x = 0^n;` becoming `y = 0^n;`, or
+        # `X[k] = v;` writing the caller's map).
         # The pipeline forwards a binding when it provably keeps its value.
         fresh_prefix = exp.func.the_object.name + "." + exp.func.name + "@"
         fresh_suffix = str(self.statement_index)
         bindings: list[frog_ast.Statement] = []
         arguments: frog_ast.Namespace = {}
         for param, arg in zip(called_method.signature.parameters, exp.args):
-            if type_contains_mod_int(param.type) or not substitutable_argument(arg):
+            if (
+                type_contains_mod_int(param.type)
+                or not substitutable_argument(arg)
+                or reassigns_or_rebinds({param.name}, called_method.block)
+            ):
                 bound = fresh_prefix + param.name + fresh_suffix
                 bindings.append(
                     frog_ast.Assignment(

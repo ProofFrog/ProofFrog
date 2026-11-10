@@ -1,0 +1,24 @@
+// Target: the method inliner (InlineTransformer), parameter substitution.
+// Hypothesis: as ParamWrite, for a draw `y <- BitString<n>;` into the
+// callee's parameter: substituting the caller's y makes the draw overwrite
+// the caller's y.
+// Left returns the adversary's y (Redraw draws into its own copy); Right
+// draws a fresh y and returns it. Sound engine: Proof Failed! (advantage
+// 1 - 2^-n). Unsound engine: Proof Succeeded!
+import 'Writer2.primitive';
+
+Game Left(Writer2 T, Int n) {
+    BitString<n> O(BitString<n> y) {
+        BitString<n> z = T.Redraw(y);
+        return y;
+    }
+}
+
+Game Right(Writer2 T, Int n) {
+    BitString<n> O(BitString<n> y) {
+        y <- BitString<n>;
+        return y;
+    }
+}
+
+export as SampleWrite;

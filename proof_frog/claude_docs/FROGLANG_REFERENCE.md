@@ -156,6 +156,7 @@ In a sampling statement `x <- T \ E;` the last `\` separates the type from the e
 - **Declaration only**: `Type x;` — declares a variable without a value. Until assigned it holds its type's default (section 6.9): empty for `Map` and `Set`, `None` for `T?`, and an unspecified value otherwise.
 - **Declaration with assignment**: `Type x = expr;` — declares and initializes.
 - **Assignment**: `x = expr;` or `a[i] = expr;` — assigns to an existing variable or updates an array/map element.
+- **Names**: a local declaration (`Type x = ...;`, `Type x <- ...;`, `Type x;`, a `for` binder) may not reuse the name of a parameter of its method, and an identifier of the form `__a<N>__` (the engine's fresh names) may not be written. The type checker rejects both.
 - **Assignment targets**: the target of an assignment or sample (`=`, `<-`, `<-uniq`) is a variable or an element `a[i]` / `M[k]` of one, at any depth (`M[k][0]`). A member access is read-only and cannot be a target, anywhere in it: `M.keys = S;`, `M.keys[0] = v;`, `E.lambda = 5;` or `this.x = v;` is a type error. An index may read a member (`M[|M.keys|] = v;` is fine).
 
 ### 4.2 Sampling

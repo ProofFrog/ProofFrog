@@ -1,0 +1,14 @@
+// __a7__ is the form of the engine's fresh names.
+Game Left(Int n) {
+    BitString<n> F(BitString<n> __a7__) {
+        return __a7__;
+    }
+}
+
+Game Right(Int n) {
+    BitString<n> F(BitString<n> __a7__) {
+        return __a7__;
+    }
+}
+
+export as ReservedName;

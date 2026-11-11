@@ -4,6 +4,10 @@ These rules need names and scopes but no types, so name resolution runs them
 on each file (the file being checked and every file it imports) before the
 type checker:
 
+- An identifier of the form the engine mints for its own fresh names
+  (``__a<N>__``, used by alpha renaming) may not be written by a user.
+- A local declaration (typed assignment or draw, bare declaration, ``for``
+  binder) may not reuse the name of a parameter of its method.
 - A length, modulus or size in a type (``BitString<n>``, ``ModInt<q>``,
   ``Array<T, n>``) and the length of a literal ``0^n`` / ``1^n`` may not name
   a variable that is assigned or drawn anywhere: only parameters, proof
@@ -14,10 +18,13 @@ type checker:
 reports them.
 """
 
+import re
 from typing import Optional
 
 from . import frog_ast
 from . import visitors
+
+_RESERVED_NAME = re.compile(r"__a\d+__")
 
 
 class Violation:
@@ -34,6 +41,27 @@ class _Binding:
     def __init__(self, name: str, kind: str) -> None:
         self.name = name
         self.kind = kind
+
+
+class _NameNodeVisitor(visitors.Visitor[list[tuple[frog_ast.ASTNode, str]]]):
+    """Every identifier a node declares or references, with its node."""
+
+    def __init__(self) -> None:
+        self.found: list[tuple[frog_ast.ASTNode, str]] = []
+
+    def result(self) -> list[tuple[frog_ast.ASTNode, str]]:
+        return self.found
+
+    def visit_ast_node(self, node: frog_ast.ASTNode) -> None:
+        for attribute in ("name", "var_name"):
+            value = getattr(node, attribute, None)
+            if isinstance(value, str):
+                self.found.append((node, value))
+        names = getattr(node, "names", None)
+        if isinstance(names, list):
+            for value in names:
+                if isinstance(value, str):
+                    self.found.append((node, value))
 
 
 class _SizeNameVisitor(visitors.Visitor[list[tuple[frog_ast.ASTNode, str]]]):
@@ -109,6 +137,8 @@ class _ComponentChecker:
         self.written: set[int] = set()
         self.size_uses: list[tuple[frog_ast.ASTNode, str, _Binding]] = []
         self.violations: list[Violation] = []
+        self.method_params: dict[str, _Binding] = {}
+        self.method_name = ""
 
     def _lookup(self, name: str) -> Optional[_Binding]:
         for scope in reversed(self.scopes):
@@ -134,7 +164,15 @@ class _ComponentChecker:
         if binding is not None:
             self.written.add(id(binding))
 
-    def _declare(self, _node: frog_ast.ASTNode, name: str) -> None:
+    def _declare(self, node: frog_ast.ASTNode, name: str) -> None:
+        if name in self.method_params:
+            self.violations.append(
+                Violation(
+                    node,
+                    f"Local '{name}' shadows the parameter '{name}' of method"
+                    f" {self.method_name}: a local may not reuse a parameter's name",
+                )
+            )
         self.scopes[-1][name] = _Binding(name, "local")
 
     def check(self, component: frog_ast.ASTNode) -> list[Violation]:
@@ -185,7 +223,10 @@ class _ComponentChecker:
             self._record_sizes(param.type)
             params[param.name] = _Binding(param.name, "parameter")
         self.scopes.append(dict(params))
+        self.method_params = params
+        self.method_name = signature.name
         self._check_block(method.block)
+        self.method_params = {}
         self.scopes.pop()
 
     def _check_block(self, block: frog_ast.Block) -> None:
@@ -261,6 +302,21 @@ def _components(root: frog_ast.ASTNode) -> list[frog_ast.ASTNode]:
 def check_structural_rules(root: frog_ast.ASTNode) -> list[Violation]:
     """The violations of this module's rules in a parsed file."""
     violations: list[Violation] = []
+    reserved = [
+        (node, name)
+        for node, name in _NameNodeVisitor().visit(root)
+        if _RESERVED_NAME.fullmatch(name)
+    ]
+    # Report a use the parser located (a parameter node carries no position).
+    reserved.sort(key=lambda found: found[0].line_num < 0)
+    for node, name in reserved:
+        violations.append(
+            Violation(
+                node,
+                f"'{name}' is reserved: identifiers of the form __a<N>__"
+                " are the engine's fresh names",
+            )
+        )
     for component in _components(root):
         violations.extend(_ComponentChecker().check(component))
     return violations

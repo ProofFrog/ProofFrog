@@ -1,0 +1,16 @@
+// A user-written identifier of the form __a<N>__ is ill-formed.
+import 'ReservedName.game';
+
+proof:
+
+let:
+    Int n;
+
+assume:
+
+theorem:
+    ReservedName(n);
+
+games:
+    ReservedName(n).Left against ReservedName(n).Adversary;
+    ReservedName(n).Right against ReservedName(n).Adversary;

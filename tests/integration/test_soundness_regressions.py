@@ -355,6 +355,12 @@ CASES = [
      "a literal length named a local written after its declaration"),
     ("F-367", "constant_length_control.proof", "accept", "type checker",
      "positive control: lengths naming never-written variables"),
+    ("F-366", "reserved_name.proof", "type_error", "type checker",
+     "a user-written __a7__ name survived alpha renaming as a fresh name"),
+    ("F-366", "parameter_shadowing.proof", "type_error", "type checker",
+     "a local shadowed a method parameter"),
+    ("F-366", "distinct_names_control.proof", "accept", "type checker",
+     "positive control: locals that do not reuse a parameter's name"),
 ]
 # fmt: on
 
@@ -401,6 +407,13 @@ TYPE_ERROR = {
     ),
     ("F-367", "written_local_length.proof"): (
         "error: The size in 0^k names local 'k', which is assigned or sampled"
+    ),
+    ("F-366", "reserved_name.proof"): (
+        "error: '__a7__' is reserved: identifiers of the form __a<N>__ are the"
+        " engine's fresh names"
+    ),
+    ("F-366", "parameter_shadowing.proof"): (
+        "error: Local 'x' shadows the parameter 'x' of method F"
     ),
 }
 

@@ -1,0 +1,24 @@
+// Locals with names of their own, in sibling blocks.
+Game Left(Int n) {
+    BitString<n> F(BitString<n> x, Bool c) {
+        if (c) {
+            BitString<n> y = 0^n;
+            return y;
+        }
+        BitString<n> y = x;
+        return y;
+    }
+}
+
+Game Right(Int n) {
+    BitString<n> F(BitString<n> x, Bool c) {
+        if (c) {
+            BitString<n> y = 0^n;
+            return y;
+        }
+        BitString<n> y = x;
+        return y;
+    }
+}
+
+export as DistinctNames;

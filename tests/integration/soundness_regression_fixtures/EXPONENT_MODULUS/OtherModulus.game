@@ -1,0 +1,14 @@
+// The exponent a lives in ModInt<q>, not ModInt<G.order>.
+Game Left(Group G, Int q) {
+    GroupElem<G> Power(ModInt<q> a) {
+        return G.generator ^ a;
+    }
+}
+
+Game Right(Group G, Int q) {
+    GroupElem<G> Power(ModInt<q> a) {
+        return G.generator ^ a;
+    }
+}
+
+export as OtherModulus;

@@ -97,7 +97,7 @@ This makes `Key` (or `E.Key` when accessed through an instance `E`) usable as a 
 **Group element operations** (on `GroupElem<G>`; both operands must belong to the same group):
 - `*` (multiplication): the abelian group operation; `a * b` produces a `GroupElem<G>`
 - `/` (division): `a / b` computes `a * b^(-1)`, yielding a `GroupElem<G>`
-- `^` (exponentiation): `h ^ x` where `h` is `GroupElem<G>` and `x` is `ModInt<G.order>` or `Int`, yielding `GroupElem<G>`. This computes the scalar power of a group element.
+- `^` (exponentiation): `h ^ x` where `h` is `GroupElem<G>` and `x` is `ModInt<G.order>` or `Int`, yielding `GroupElem<G>`. This computes the scalar power of a group element. An exponent of any other type, `ModInt<m>` with `m` not `G.order` included, is a type error.
 
 **Bitstring operations:**
 - `+` on `BitString<n>`: bitwise XOR (both operands must have the same length `n`)

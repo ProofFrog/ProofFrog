@@ -1,0 +1,14 @@
+// The exponent a is a scalar of H, not of G.
+Game Left(Group G, Group H) {
+    GroupElem<G> Power(ModInt<H.order> a) {
+        return G.generator ^ a;
+    }
+}
+
+Game Right(Group G, Group H) {
+    GroupElem<G> Power(ModInt<H.order> a) {
+        return G.generator ^ a;
+    }
+}
+
+export as OtherGroup;

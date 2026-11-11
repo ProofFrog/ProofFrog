@@ -1,0 +1,7 @@
+// A primitive that draws an element of an abstract pair type.
+Primitive Pairs(Int n, Set PairSpace) {
+    Int n = n;
+    Set Pair = PairSpace;
+
+    Pair Draw();
+}

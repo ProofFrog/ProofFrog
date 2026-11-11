@@ -1,0 +1,12 @@
+// The product type below is drawn as a whole: its first component is optional, which has no uniform distribution.
+import 'Pairs.primitive';
+
+Scheme OptionalPairs(Int n) extends Pairs {
+    Int n = n;
+    Set Pair = [BitString<n>?, BitString<n>];
+
+    Pair Draw() {
+        Pair p <- Pair;
+        return p;
+    }
+}

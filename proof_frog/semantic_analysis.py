@@ -2525,6 +2525,21 @@ class CheckTypeVisitor(VariableTypeVisitor):
             elif isinstance(left_type, frog_ast.GroupElemType) and isinstance(
                 right_type, (frog_ast.ModIntType, frog_ast.IntType)
             ):
+                # A group exponent is read modulo the group's order, so a
+                # ModInt exponent must live in ModInt<G.order>; an exponent of
+                # another modulus has no meaning as a scalar of G.
+                group_order = frog_ast.ModIntType(
+                    frog_ast.FieldAccess(left_type.group, "order")
+                )
+                if isinstance(right_type, frog_ast.ModIntType) and not (
+                    self.check_types(group_order, right_type)
+                ):
+                    self.print_error(
+                        bin_op,
+                        f"Exponent of a {left_type} must have type Int or"
+                        f" {group_order}, got {right_type}",
+                        hint=f"declare the exponent as {group_order}",
+                    )
                 self.ast_type_map.set(bin_op, left_type)
             else:
                 self.print_error(

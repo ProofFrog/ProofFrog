@@ -361,6 +361,12 @@ CASES = [
      "a local shadowed a method parameter"),
     ("F-366", "distinct_names_control.proof", "accept", "type checker",
      "positive control: locals that do not reuse a parameter's name"),
+    ("EXPONENT-MODULUS", "other_modulus.proof", "type_error", "type checker",
+     "a group exponent of type ModInt<q> was read modulo the group order"),
+    ("EXPONENT-MODULUS", "other_group.proof", "type_error", "type checker",
+     "a scalar of another group was used as an exponent"),
+    ("EXPONENT-MODULUS", "order_exponents_control.proof", "accept",
+     "type checker", "positive control: ModInt<G.order> and Int exponents"),
 ]
 # fmt: on
 
@@ -414,6 +420,14 @@ TYPE_ERROR = {
     ),
     ("F-366", "parameter_shadowing.proof"): (
         "error: Local 'x' shadows the parameter 'x' of method F"
+    ),
+    ("EXPONENT-MODULUS", "other_modulus.proof"): (
+        "error: Exponent of a GroupElem<G> must have type Int or"
+        " ModInt<G.order>, got ModInt<q>"
+    ),
+    ("EXPONENT-MODULUS", "other_group.proof"): (
+        "error: Exponent of a GroupElem<G> must have type Int or"
+        " ModInt<G.order>, got ModInt<H.order>"
     ),
 }
 

@@ -367,6 +367,10 @@ CASES = [
      "a scalar of another group was used as an exponent"),
     ("EXPONENT-MODULUS", "order_exponents_control.proof", "accept",
      "type checker", "positive control: ModInt<G.order> and Int exponents"),
+    ("INT-DIVISION", "int_division.proof", "type_error", "type checker",
+     "division on Int, which the numeric back ends read three ways"),
+    ("INT-DIVISION", "modint_division_control.proof", "accept",
+     "type checker", "positive control: division on ModInt<q>"),
 ]
 # fmt: on
 
@@ -429,6 +433,7 @@ TYPE_ERROR = {
         "error: Exponent of a GroupElem<G> must have type Int or"
         " ModInt<G.order>, got ModInt<H.order>"
     ),
+    ("INT-DIVISION", "int_division.proof"): ("error: Cannot use operator / on Int"),
 }
 
 # (finding, proof file) -> the hop a reject case must fail at. Every other

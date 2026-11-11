@@ -42,6 +42,8 @@ CASES = [
      "single-use scan blind to binders across a duplicate re-declaration"),
     ("F-101", "AttackA4.proof", "type_error", "DeadGuardedAssignmentElimination",
      "a shadowed inner variable entailed a guard about the outer one"),
+    ("F-101", "attack_a4_local.proof", "reject", "DeadGuardedAssignmentElimination",
+     "a shadowing inner local entailed a guard about the outer local"),
     ("F-152", "atk1b.proof", "reject", "InlineLocalTupleLiteral",
      "a tuple-element write v[k] = e was missed, so a stale literal was inlined"),
     ("F-153", "atk2.proof", "reject", "InlineLocalTupleLiteral",

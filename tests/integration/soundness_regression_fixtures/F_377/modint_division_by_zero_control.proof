@@ -1,0 +1,15 @@
+// F-377 control: see ModIntDivisionByZeroControl.game.
+// Sound engine: Proof Succeeded!
+import 'ModIntDivisionByZeroControl.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    ModIntDivisionByZeroControl(q);
+
+games:
+    ModIntDivisionByZeroControl(q).Left against ModIntDivisionByZeroControl(q).Adversary;
+    ModIntDivisionByZeroControl(q).Right against ModIntDivisionByZeroControl(q).Adversary;

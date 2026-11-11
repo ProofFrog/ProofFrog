@@ -1,0 +1,16 @@
+// Both sides return one draw of the scheme's pair type.
+import 'Pairs.primitive';
+
+Game Left(Pairs E) {
+    E.Pair Q() {
+        return E.Draw();
+    }
+}
+
+Game Right(Pairs E) {
+    E.Pair Q() {
+        return E.Draw();
+    }
+}
+
+export as DrawPair;

@@ -343,6 +343,12 @@ CASES = [
     ("REDUCTION-WRITTEN-FIELD", "reduction_counter_control.proof", "accept",
      "instantiation",
      "a reduction field its method writes was read as its initializer"),
+    ("SAMPLE-COMPONENTS", "optional_component.proof", "type_error",
+     "type checker", "a product draw with an optional component was accepted"),
+    ("SAMPLE-COMPONENTS", "int_component.proof", "type_error", "type checker",
+     "a product draw with an Int component was accepted"),
+    ("SAMPLE-COMPONENTS", "finite_components_control.proof", "accept",
+     "type checker", "positive control: a product of finite types is drawn"),
 ]
 # fmt: on
 
@@ -374,6 +380,14 @@ TYPE_ERROR = {
     ),
     ("MEMBER-ASSIGN", "keys_write.proof"): (
         "error: Cannot assign to 'M.keys': 'M.keys' is a member access"
+    ),
+    ("SAMPLE-COMPONENTS", "optional_component.proof"): (
+        "error: Cannot sample from [BitString<n>?, BitString<n>]: its component"
+        " BitString<n>? has no uniform distribution"
+    ),
+    ("SAMPLE-COMPONENTS", "int_component.proof"): (
+        "error: Cannot sample from [Int, BitString<n>]: its component Int has"
+        " no uniform distribution"
     ),
 }
 

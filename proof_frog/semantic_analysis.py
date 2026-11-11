@@ -2849,9 +2849,21 @@ class CheckTypeVisitor(VariableTypeVisitor):
         Bool, BitString<n>, ModInt<q> and friends are finite, so a uniform
         draw is well defined. Int is unbounded, and an optional type has no
         natural weight for None, so neither admits one. Applies to both
-        sampling forms ('<-' and '<-uniq[S]' / '<- T \\ E').
+        sampling forms ('<-' and '<-uniq[S]' / '<- T \\ E'), and to every
+        component of a product or array type, written directly or reached
+        through an alias: a draw of '[BitString<n>?, BitString<n>]' draws its
+        first component from an optional type.
         """
         resolved = self._resolve_type_alias(sampled_from)
+        component = self._unsamplable_component(resolved, frozenset())
+        if component is not None and component is not resolved:
+            self.print_error(
+                location,
+                f"Cannot sample from {resolved}: its component {component}"
+                " has no uniform distribution (uniform sampling requires a"
+                " finite type)",
+                hint="sample each component from a finite type",
+            )
         if isinstance(resolved, frog_ast.IntType):
             self.print_error(
                 location,
@@ -2865,6 +2877,41 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 " uniform sampling requires a finite type",
                 hint=f"sample from {resolved.the_type} instead",
             )
+
+    def _unsamplable_component(
+        self, the_type: PossibleType | frog_ast.Expression, seen: frozenset[str]
+    ) -> Optional[frog_ast.Type]:
+        """The first part of a sampled type that has no uniform distribution:
+        the type itself when it is Int or optional, else such a component of a
+        product or array type at any depth, each part resolved through its
+        aliases (a 'Set P = [A, [Int, B]];' alias holds a tuple of types);
+        None if there is none."""
+        if isinstance(the_type, frog_ast.Variable):
+            if the_type.name in seen:
+                return None
+            seen = seen | {the_type.name}
+            alias = self.instantiation_namespace.get(the_type.name)
+            if isinstance(alias, frog_ast.Tuple):
+                the_type = alias
+            else:
+                resolved = self._resolve_type_alias(the_type)
+                if resolved is the_type or not isinstance(resolved, frog_ast.Type):
+                    return None
+                the_type = resolved
+        if isinstance(the_type, (frog_ast.IntType, frog_ast.OptionalType)):
+            return the_type
+        parts: list[PossibleType | frog_ast.Expression] = []
+        if isinstance(the_type, frog_ast.ProductType):
+            parts = list(the_type.types)
+        elif isinstance(the_type, frog_ast.Tuple):
+            parts = list(the_type.values)
+        elif isinstance(the_type, frog_ast.ArrayType):
+            parts = [the_type.element_type]
+        for part in parts:
+            found = self._unsamplable_component(part, seen)
+            if found is not None:
+                return found
+        return None
 
     def leave_sample(self, sample: frog_ast.Sample) -> None:
         super().leave_sample(sample)

@@ -1,0 +1,19 @@
+// Positive control: a draw of [BitString<n>, BitString<n>] is well formed.
+import 'Pairs.primitive';
+import 'FinitePairs.scheme';
+import 'DrawPair.game';
+
+proof:
+
+let:
+    Int n;
+    Pairs E = FinitePairs(n);
+
+assume:
+
+theorem:
+    DrawPair(E);
+
+games:
+    DrawPair(E).Left against DrawPair(E).Adversary;
+    DrawPair(E).Right against DrawPair(E).Adversary;

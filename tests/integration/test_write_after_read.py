@@ -16,6 +16,9 @@ Each case is a pair of proofs over one-oracle games, run through the real CLI
 
 ``S.Draw`` and ``S.Mix`` are non-deterministic calls, opaque to the engine;
 the chain ``c -> d -> e`` is what delays ``a``.
+
+A case with ``type_error`` set uses a construct the type checker now refuses:
+both its proofs must stop at type checking with that message.
 """
 
 import subprocess
@@ -55,6 +58,8 @@ class Case:  # pylint: disable=too-many-instance-attributes
     control: str
     primitive: str = "Mix"
     let: str = "Mixer S;"
+    # The type checker's message, if it refuses this shape.
+    type_error: str | None = None
 
     def game_file(self, right: str) -> str:
         param = "BMixer S" if self.primitive == "BMix" else "Mixer S"
@@ -194,9 +199,15 @@ CASES = [
     # A typed declaration with an initializer that shadows a field. Left's
     # readers see the field, the attack's delayed reader the new local. (The
     # name is one the alpha-renamer leaves alone, so the shadowing reaches the
-    # sort.)
+    # sort.) Since ruling Q7 (2026-11-06) the type checker refuses such a name,
+    # so no well-typed proof reaches the sort this way; the dependency edges
+    # stay pinned by unit tests in tests/unit/other/test_dependencies.py.
     Case(
         name="typed_shadowing_declaration",
+        type_error=(
+            "error: '__a5__' is reserved: identifiers of the form __a<N>__ are"
+            " the engine's fresh names"
+        ),
         prelude="""    Int __a5__;
     Void Initialize() { __a5__ = 7; }
     Void Store(Int v) { __a5__ = v; }""",
@@ -375,10 +386,25 @@ def _prove(tmp_path: Path, case: Case, right: str) -> subprocess.CompletedProces
     )
 
 
+def _refused(case: Case, result: subprocess.CompletedProcess[str]) -> bool:
+    """For a case the type checker refuses, check that it stopped there with
+    its message, and say so."""
+    if case.type_error is None:
+        return False
+    output = result.stdout + result.stderr
+    assert result.returncode != 0, output
+    assert case.type_error in output, output
+    assert "Proof Succeeded!" not in output, output
+    assert "Proof Failed!" not in output, output
+    return True
+
+
 @pytest.mark.parametrize("case", CASES, ids=[case.name for case in CASES])
 def test_f354_reader_moved_below_write_is_rejected(tmp_path: Path, case: Case) -> None:
     """The delayed reader sits below the write on the right only."""
     result = _prove(tmp_path, case, case.attack)
+    if _refused(case, result):
+        return
     assert result.returncode != 0, result.stdout + result.stderr
     assert "Proof Failed!" in result.stdout, result.stdout + result.stderr
 
@@ -389,5 +415,7 @@ def test_f354_readers_swapped_above_write_still_verify(
 ) -> None:
     """Sound twin: the two readers trade places, both still above the write."""
     result = _prove(tmp_path, case, case.control)
+    if _refused(case, result):
+        return
     assert result.returncode == 0, result.stdout + result.stderr
     assert "Proof Succeeded!" in result.stdout, result.stdout + result.stderr

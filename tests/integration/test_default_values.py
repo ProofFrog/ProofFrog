@@ -16,7 +16,8 @@ from pathlib import Path
 
 import pytest
 
-# name -> (fields, Left's body, Right's body, return type, expected)
+# name -> (fields, Left's body, Right's body, return type, expected); a
+# "type_error" case must stop at type checking with its TYPE_ERROR message.
 CASES = {
     # Unused reads of a default or of a partial operation are dropped.
     "DeadFieldRead": ("Int f;", "Int v = f; return 0;", "return 0;", "Int", "accept"),
@@ -28,7 +29,16 @@ CASES = {
         "accept",
     ),
     "DeadLocalRead": ("", "Int x; Int v = x; return 0;", "return 0;", "Int", "accept"),
-    "DeadDivision": ("", "Int v = 1 / k; return 0;", "return 0;", "Int", "accept"),
+    "DeadModIntDivision": (
+        "",
+        "ModInt<7> a = k; ModInt<7> v = a / a; return 0;",
+        "return 0;",
+        "Int",
+        "accept",
+    ),
+    # Division on Int is refused since ruling Q6 (2026-11-06); the ModInt case
+    # above keeps checking that an unused division is dropped.
+    "DeadDivision": ("", "Int v = 1 / k; return 0;", "return 0;", "Int", "type_error"),
     # Two fields of one type hold the same default until assigned.
     "SameTypeDefaults": ("Int f; Int g;", "return f;", "return g;", "Int", "accept"),
     # Nothing else is known about an unspecified value.
@@ -47,6 +57,8 @@ CASES = {
         "reject",
     ),
 }
+
+TYPE_ERROR = {"DeadDivision": "error: Cannot use operator / on Int"}
 
 
 def _write_case(directory: Path, name: str) -> Path:
@@ -78,7 +90,12 @@ def test_default_value_semantics(name: str, tmp_path: Path) -> None:
     )
     output = result.stdout + result.stderr
     assert "Traceback" not in output, output
-    if CASES[name][4] == "accept":
+    if CASES[name][4] == "type_error":
+        assert result.returncode != 0, output
+        assert TYPE_ERROR[name] in output, output
+        assert "Proof Succeeded!" not in output, output
+        assert "Proof Failed!" not in output, output
+    elif CASES[name][4] == "accept":
         assert result.returncode == 0, output
         assert "Proof Succeeded!" in output, output
     else:

@@ -349,6 +349,12 @@ CASES = [
      "a product draw with an Int component was accepted"),
     ("SAMPLE-COMPONENTS", "finite_components_control.proof", "accept",
      "type checker", "positive control: a product of finite types is drawn"),
+    ("F-367", "written_field_length.proof", "type_error", "type checker",
+     "a type length named a field an oracle writes"),
+    ("F-367", "written_local_length.proof", "type_error", "type checker",
+     "a literal length named a local written after its declaration"),
+    ("F-367", "constant_length_control.proof", "accept", "type checker",
+     "positive control: lengths naming never-written variables"),
 ]
 # fmt: on
 
@@ -388,6 +394,13 @@ TYPE_ERROR = {
     ("SAMPLE-COMPONENTS", "int_component.proof"): (
         "error: Cannot sample from [Int, BitString<n>]: its component Int has"
         " no uniform distribution"
+    ),
+    ("F-367", "written_field_length.proof"): (
+        "error: The size in BitString<m> names field 'm', which is assigned or"
+        " sampled"
+    ),
+    ("F-367", "written_local_length.proof"): (
+        "error: The size in 0^k names local 'k', which is assigned or sampled"
     ),
 }
 

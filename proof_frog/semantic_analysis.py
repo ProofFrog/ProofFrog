@@ -7,6 +7,7 @@ from . import advantage
 from . import frog_ast
 from . import frog_parser
 from . import proof_engine
+from . import structural_rules
 from . import suggestions as _suggestions
 from . import upto
 from . import visitors
@@ -152,6 +153,9 @@ def name_resolution(
                 name = imp.rename if imp.rename else parsed_file.get_export_name()
                 import_namespace[name] = parsed_file
                 all_imports[resolved] = parsed_file
+        violations = structural_rules.check_structural_rules(root)
+        if violations:
+            print_error(violations[0].node, violations[0].message, file_name)
         NameResolutionVisitor(import_namespace, file_name).visit(root)
 
     do_name_resolution(initial_root, initial_file_name)

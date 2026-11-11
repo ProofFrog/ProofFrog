@@ -1,0 +1,16 @@
+// A literal length that names a written local is ill-formed.
+import 'WrittenLocalLength.game';
+
+proof:
+
+let:
+    Int n;
+
+assume:
+
+theorem:
+    WrittenLocalLength(n);
+
+games:
+    WrittenLocalLength(n).Left against WrittenLocalLength(n).Adversary;
+    WrittenLocalLength(n).Right against WrittenLocalLength(n).Adversary;

@@ -39,6 +39,8 @@ The fundamental semantic unit is the **game**: a stateful interactive system tha
 
 - **`Set<T>`**: Finite sets of elements of type `T`. A set variable declared without a value starts empty. An unparameterized `Set` in a primitive signature is an abstract type placeholder.
 
+- **Sizes in types are constant**: a length, modulus or size in a type (`BitString<n>`, `ModInt<q>`, `Array<T, n>`) and the length of a literal `0^n` / `1^n` may name parameters, proof `let:` entries and variables never written after their declaration (such as a scheme's `Int lambda = lambda;`), but not a variable that is assigned or sampled anywhere, so a type means the same thing throughout an execution. The type checker rejects the other cases.
+
 - **`Function<D, R>`**: The type of truly random functions from domain `D` to range `R`. A value of this type represents a lazily-evaluated random function: each distinct input independently maps to a uniformly random output, and repeated queries on the same input return the same result. This models the idealized random oracle / random function abstraction.
 
 - **`T?`** (Optional): Either a value of type `T` or `None`. Used for operations that may fail (e.g., decryption may return `Message?`). An optional variable declared without a value starts as `None`.

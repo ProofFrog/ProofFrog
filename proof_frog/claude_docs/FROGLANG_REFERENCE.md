@@ -91,7 +91,8 @@ This makes `Key` (or `E.Key` when accessed through an instance `E`) usable as a 
 ### 3.4 Operators
 
 **Arithmetic** (on `Int` and `ModInt<q>`; `ModInt` arithmetic is performed mod `q`):
-- `+` (addition), `-` (subtraction), `*` (multiplication), `/` (integer division), `^` (exponentiation, right-associative)
+- `+` (addition), `-` (subtraction), `*` (multiplication), `^` (exponentiation, right-associative)
+- `/` (division) on `ModInt<q>` only: `a / b` is `a * b^(-1)` mod `q`, and an unspecified value determined by `a` and `b` when `b` has no inverse mod `q` (section 6.9). `/` on `Int` is a type error.
 - Unary `-` (negation)
 
 **Group element operations** (on `GroupElem<G>`; both operands must belong to the same group):

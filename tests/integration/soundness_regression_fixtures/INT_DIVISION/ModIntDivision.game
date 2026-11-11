@@ -1,0 +1,14 @@
+// Division of two ModInt<q> values (multiplication by the inverse).
+Game Left(Int q) {
+    ModInt<q> Ratio(ModInt<q> a, ModInt<q> b) {
+        return a / b;
+    }
+}
+
+Game Right(Int q) {
+    ModInt<q> Ratio(ModInt<q> a, ModInt<q> b) {
+        return a / b;
+    }
+}
+
+export as ModIntDivision;

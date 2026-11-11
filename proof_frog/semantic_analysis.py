@@ -2502,7 +2502,14 @@ class CheckTypeVisitor(VariableTypeVisitor):
                     )
                 self.ast_type_map.set(bin_op, left_type)
             elif left_type == frog_ast.IntType() and right_type == frog_ast.IntType():
-                self.ast_type_map.set(bin_op, frog_ast.IntType())
+                # Division on Int has no meaning in FrogLang: '/' is
+                # multiplication by the inverse on ModInt<q> and GroupElem<G>.
+                self.print_error(
+                    bin_op,
+                    "Cannot use operator / on Int: division is defined only on"
+                    " ModInt<q> (multiplication by the inverse) and GroupElem<G>",
+                    hint="compute in a ModInt<q> type instead",
+                )
             elif isinstance(left_type, frog_ast.GroupElemType) and isinstance(
                 right_type, frog_ast.GroupElemType
             ):

@@ -1,0 +1,16 @@
+// Division on Int is ill-formed.
+import 'IntDivision.game';
+
+proof:
+
+let:
+    Int n;
+
+assume:
+
+theorem:
+    IntDivision(n);
+
+games:
+    IntDivision(n).Left against IntDivision(n).Adversary;
+    IntDivision(n).Right against IntDivision(n).Adversary;

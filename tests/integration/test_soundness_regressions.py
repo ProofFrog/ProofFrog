@@ -40,7 +40,7 @@ FIXTURES = Path(__file__).parent / "soundness_regression_fixtures"
 CASES = [
     ("F-062", "a2_probe.proof", "reject", "MergeProductSamples",
      "single-use scan blind to binders across a duplicate re-declaration"),
-    ("F-101", "AttackA4.proof", "reject", "DeadGuardedAssignmentElimination",
+    ("F-101", "AttackA4.proof", "type_error", "DeadGuardedAssignmentElimination",
      "a shadowed inner variable entailed a guard about the outer one"),
     ("F-152", "atk1b.proof", "reject", "InlineLocalTupleLiteral",
      "a tuple-element write v[k] = e was missed, so a stale literal was inlined"),
@@ -152,10 +152,10 @@ CASES = [
      "a scheme's ModInt<2> field initialized with the literal 1 was read as 1"),
     ("F-356", "scheme_field_typed_control.proof", "accept", "instantiation",
      "positive control: a scheme field initializer of its type is still read"),
-    ("F-361", "collateral_poison_powpow.proof", "reject",
+    ("F-361", "collateral_poison_powpow.proof", "type_error",
      "GroupElemSimplification",
      "a let GroupElem<G> t retyped the game's field t in H; (t^x)^y was folded"),
-    ("F-361", "attack_N5.proof", "reject", "group-exponent folds",
+    ("F-361", "attack_N5.proof", "type_error", "group-exponent folds",
      "lets Int x, y retyped ModInt<q> fields; g^(x+y)/g^y was folded to g^x"),
     ("F-361", "shadowed_powpow_control.proof", "accept",
      "GroupElemSimplification",
@@ -239,12 +239,15 @@ CASES = [
      "a true hop next to a step assumption aborted on the Int negation -n"),
     ("F-377", "zero_over_zero.proof", "reject", "SymbolicComputation",
      "0 / 0 was folded with Python floor division, which aborted the proof"),
-    ("F-377", "int_division_condition.proof", "reject", "Z3FormulaVisitor",
+    ("F-377", "int_division_condition.proof", "type_error", "Z3FormulaVisitor",
      "0 / 0 in an if condition was divided with Python true division"),
-    ("F-377", "modint_int_division.proof", "reject", "ModIntSimplification",
+    ("F-377", "modint_int_division.proof", "type_error", "ModIntSimplification",
      "a ModInt division of zeros became the Int 0 / 0 of the other game"),
-    ("F-377", "division_by_zero_control.proof", "accept", "SymbolicComputation",
+    ("F-377", "division_by_zero_control.proof", "type_error", "SymbolicComputation",
      "true equivalences around division by zero aborted the proof"),
+    ("F-377", "modint_division_by_zero_control.proof", "accept",
+     "SymbolicComputation",
+     "positive control: the equivalences above with ModInt<q> division"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),
@@ -265,8 +268,10 @@ CASES = [
      "ConcatEqualityDecompose", "positive control for the attack above"),
     ("ARITH-PRECEDENCE", "sum_reorder.proof", "reject", "SymbolicComputation",
      "+ bound tighter than -, so SymPy's a - b + 3 re-parsed as a - (b + 3)"),
-    ("ARITH-PRECEDENCE", "same_level_control.proof", "accept", "parser",
+    ("ARITH-PRECEDENCE", "same_level_control.proof", "type_error", "parser",
      "positive control: + with -, and * with /, share left-associative levels"),
+    ("ARITH-PRECEDENCE", "same_level_modint_control.proof", "accept", "parser",
+     "positive control: the levels above, with * and / on ModInt<q>"),
     ("ARITH-PRECEDENCE", "claimed_bound.proof", "reject-bound", "parser",
      "2 - 1 + 1 in a bound: clause read as 2 - (1 + 1), so a too-small claim passed"),
     ("FRESH-INPUT-DROPPED-DRAW", "dropped_size.proof", "reject",
@@ -434,6 +439,25 @@ TYPE_ERROR = {
         " ModInt<G.order>, got ModInt<H.order>"
     ),
     ("INT-DIVISION", "int_division.proof"): ("error: Cannot use operator / on Int"),
+    ("F-101", "AttackA4.proof"): (
+        "error: Local 'x' shadows the parameter 'x' of method O"
+    ),
+    ("F-361", "collateral_poison_powpow.proof"): (
+        "error: Exponent of a GroupElem<H> must have type Int or"
+        " ModInt<H.order>, got ModInt<G.order>"
+    ),
+    ("F-361", "attack_N5.proof"): (
+        "error: Exponent of a GroupElem<G> must have type Int or"
+        " ModInt<G.order>, got ModInt<q>"
+    ),
+    ("F-377", "int_division_condition.proof"): ("error: Cannot use operator / on Int"),
+    ("F-377", "modint_int_division.proof"): ("error: Cannot use operator / on Int"),
+    ("F-377", "division_by_zero_control.proof"): (
+        "error: Cannot use operator / on Int"
+    ),
+    ("ARITH-PRECEDENCE", "same_level_control.proof"): (
+        "error: Cannot use operator / on Int"
+    ),
 }
 
 # (finding, proof file) -> the hop a reject case must fail at. Every other

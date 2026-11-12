@@ -808,6 +808,71 @@ class SimplifyIfTransformer(Transformer):
         return frog_ast.IfStatement(new_conditions, new_blocks)
 
 
+def _implied_facts(
+    cond: frog_ast.Expression, value: bool
+) -> list[tuple[frog_ast.Expression, bool]]:
+    """``cond`` with its truth *value*, then what that value forces on parts
+    of ``cond``: a false ``a || b`` makes both ``a`` and ``b`` false, a true
+    ``a && b`` makes both true, and ``!a`` having a value fixes ``a``."""
+    facts = [(cond, value)]
+    if (
+        isinstance(cond, frog_ast.UnaryOperation)
+        and cond.operator == frog_ast.UnaryOperators.NOT
+    ):
+        facts += _implied_facts(cond.expression, not value)
+    elif isinstance(cond, frog_ast.BinaryOperation) and (
+        (cond.operator == frog_ast.BinaryOperators.OR and not value)
+        or (cond.operator == frog_ast.BinaryOperators.AND and value)
+    ):
+        facts += _implied_facts(cond.left_expression, value)
+        facts += _implied_facts(cond.right_expression, value)
+    return facts
+
+
+def _bool_flags(game: frog_ast.Game | None, method: frog_ast.Method) -> set[str]:
+    """The names each of whose declarations in *method* (its parameters and
+    typed locals) and in *game* (its parameters and fields) is a ``Bool``.
+
+    Every declaration counts, not only the last one, so a name declared
+    ``Bool`` in one block and another type elsewhere is not a flag."""
+    types: dict[str, list[frog_ast.Type]] = {}
+
+    def add(name: str, the_type: frog_ast.Type) -> None:
+        types.setdefault(name, []).append(the_type)
+
+    if game is not None:
+        for parameter in game.parameters:
+            add(parameter.name, parameter.type)
+        for field in game.fields:
+            add(field.name, field.type)
+    for parameter in method.signature.parameters:
+        add(parameter.name, parameter.type)
+
+    def visit(node: frog_ast.ASTNode) -> bool:
+        if (
+            isinstance(
+                node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            )
+            and node.the_type is not None
+            and isinstance(node.var, frog_ast.Variable)
+        ):
+            add(node.var.name, node.the_type)
+        elif isinstance(node, frog_ast.VariableDeclaration):
+            add(node.name, node.type)
+        elif isinstance(node, frog_ast.NumericFor):
+            add(node.name, frog_ast.IntType())
+        elif isinstance(node, frog_ast.GenericFor):
+            add(node.var_name, node.var_type)
+        return False
+
+    SearchVisitor(visit).visit(method.block)
+    return {
+        name
+        for name, declared in types.items()
+        if all(isinstance(the_type, frog_ast.BoolType) for the_type in declared)
+    }
+
+
 class GuardConditionSimplificationTransformer(Transformer):
     """Replaces an if-condition by its known truth value inside its branches.
 
@@ -830,6 +895,24 @@ class GuardConditionSimplificationTransformer(Transformer):
 
     def __init__(self, ctx: PipelineContext | None = None) -> None:
         self.ctx = ctx
+        self._game: frog_ast.Game | None = None
+        self._flags: set[str] = set()
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        saved = self._game
+        self._game = game
+        try:
+            return self._transform_children(game)
+        finally:
+            self._game = saved
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        saved = self._flags
+        self._flags = _bool_flags(self._game, method)
+        try:
+            return self._transform_children(method)
+        finally:
+            self._flags = saved
 
     def _is_deterministic(self, expr: frog_ast.Expression) -> bool:
         namespace = self.ctx.proof_namespace if self.ctx else {}
@@ -856,11 +939,77 @@ class GuardConditionSimplificationTransformer(Transformer):
         )
 
     def _substitute(
-        self, block: frog_ast.Block, cond: frog_ast.Expression, value: bool
+        self,
+        block: frog_ast.Block,
+        cond: frog_ast.Expression,
+        value: bool,
+        whole_condition: bool = True,
     ) -> frog_ast.Block:
+        """Substitute *cond*'s truth *value* into *block*.
+
+        The whole condition is substituted when *whole_condition* is set (the
+        branches of the ``if`` itself, as always). The facts it implies about
+        its parts are substituted only for Boolean variables (flags): those
+        are what lets a compound guard such as ``revealed || !challenged``
+        settle a later ``if (revealed)``, while replacing a comparison by a
+        constant would hide it from the passes that reason about it (e.g.
+        ``FoldEquivalentReturnBranch``). A part is a flag only if every
+        declaration of its name is a ``Bool`` (F-370(f)): ``||`` is also
+        bit-string concatenation, and the decomposition does not look at
+        operand types."""
         replace_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-        replace_map.set(copy.deepcopy(cond), frog_ast.Boolean(value))
+        for index, (fact, fact_value) in enumerate(_implied_facts(cond, value)):
+            if not (
+                (index == 0 and whole_condition)
+                or (isinstance(fact, frog_ast.Variable) and fact.name in self._flags)
+            ):
+                continue
+            try:
+                replace_map.get(fact)
+            except KeyError:
+                replace_map.set(copy.deepcopy(fact), frog_ast.Boolean(fact_value))
         return SubstitutionTransformer(replace_map).transform(block)
+
+    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
+        """After ``if (C) { ...; return e; }`` (no else), the rest of the block
+        runs only when ``C`` is false: substitute the values that a false
+        ``C`` gives its Boolean flags (``C`` itself only when it is a flag)
+        into the statements that follow, up to the first one that may change
+        a variable ``C`` reads. A part of ``C`` that is not a flag is left in
+        place (see :meth:`_substitute`)."""
+        statements = list(block.statements)
+        for index, statement in enumerate(statements):
+            if not (
+                isinstance(statement, frog_ast.IfStatement)
+                and len(statement.conditions) == 1
+                and not statement.has_else_block()
+                and statement.blocks[0].statements
+                and isinstance(
+                    statement.blocks[0].statements[-1], frog_ast.ReturnStatement
+                )
+            ):
+                continue
+            cond = statement.conditions[0]
+            if isinstance(cond, frog_ast.Boolean) or not self._is_deterministic(cond):
+                continue
+            cond_vars = referenced_variable_names(cond)
+            end = index + 1
+            while end < len(statements) and not reassigns_or_rebinds(
+                cond_vars, statements[end]
+            ):
+                end += 1
+            if end == index + 1:
+                continue
+            prefix = self._substitute(
+                frog_ast.Block(statements[index + 1 : end]),
+                cond,
+                False,
+                whole_condition=False,
+            )
+            statements = (
+                statements[: index + 1] + list(prefix.statements) + statements[end:]
+            )
+        return frog_ast.Block([self.transform(s) for s in statements])
 
     def transform_if_statement(
         self, if_statement: frog_ast.IfStatement

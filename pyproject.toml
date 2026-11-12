@@ -40,8 +40,8 @@ dependencies = [
 # The three checkers are pinned to a minor series so that a new release cannot
 # turn CI red on an unrelated change. Upgrade them in a PR of their own.
 dev = ["mypy ~= 2.4.0", "pylint ~= 4.1.1", "types-colorama", "pytest", "pytest-xdist", "black ~= 26.5", "flit", "twine"]
-# mcp 2.x renamed FastMCP (used by proof_frog/mcp_server.py); stay on 1.x until ported.
-mcp = ["mcp[cli] >= 1.0, < 2"]
+# mcp_server.py uses mcp.server.mcpserver.MCPServer (the 2.x name of 1.x's FastMCP).
+mcp = ["mcp[cli] >= 2.3, < 3"]
 
 [project.urls]
 Source = "https://github.com/ProofFrog/ProofFrog"

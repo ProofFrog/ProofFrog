@@ -25,7 +25,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP  # pylint: disable=import-error
+from mcp.server.mcpserver import MCPServer  # pylint: disable=import-error
+from mcp.server.mcpserver.exceptions import ToolError  # pylint: disable=import-error
 
 from . import frog_parser
 from . import describe as describe_module
@@ -40,7 +41,7 @@ from .web_server import (
     _build_tree,
 )
 
-mcp: FastMCP = FastMCP(
+mcp: MCPServer = MCPServer(
     "ProofFrog",
     instructions=(
         "Tools for reading, writing, parsing, and proving ProofFrog cryptographic "
@@ -58,8 +59,12 @@ mcp: FastMCP = FastMCP(
 _directory: str = "."  # pylint: disable=invalid-name
 
 
-class _PathOutsideDirectory(Exception):
-    """Raised when a resolved path escapes the server's working directory."""
+class _PathOutsideDirectory(ToolError):  # type: ignore[misc]
+    """Raised when a resolved path escapes the server's working directory.
+
+    A ToolError, so the MCP SDK returns its message to the client (other
+    exceptions reach the client only as "Error executing tool <name>").
+    """
 
 
 def _safe_resolve(path: str) -> str:
@@ -121,7 +126,12 @@ def read_file(path: str) -> str:
 
     Path is relative to the server's working directory.
     """
-    return Path(_safe_resolve(path)).read_text(encoding="utf-8")
+    try:
+        return Path(_safe_resolve(path)).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise ToolError(
+            f"Cannot read '{path}': {getattr(e, 'strerror', None) or e}"
+        ) from e
 
 
 @mcp.tool()  # type: ignore[misc, untyped-decorator]
@@ -133,8 +143,11 @@ def write_file(path: str, content: str) -> dict[str, Any]:
     Returns {"success": true, "path": "<absolute path>"}.
     """
     abs_path = Path(_safe_resolve(path))
-    abs_path.parent.mkdir(parents=True, exist_ok=True)
-    abs_path.write_text(content, encoding="utf-8")
+    try:
+        abs_path.parent.mkdir(parents=True, exist_ok=True)
+        abs_path.write_text(content, encoding="utf-8")
+    except OSError as e:
+        raise ToolError(f"Cannot write '{path}': {e.strerror or e}") from e
     return {"success": True, "path": str(abs_path)}
 
 

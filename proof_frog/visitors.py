@@ -2400,17 +2400,30 @@ def reassigns_or_rebinds(names: set[str], node: frog_ast.ASTNode) -> bool:
       initializer) that rebinds one of *names*, shadowing the outer binding
       (F-196: a typed ``T x = e;`` is an ``Assignment`` and already caught by
       the l-value case above, but a no-initializer declaration was not, so a
-      structural substitution could still capture the inner binding).
+      structural substitution could still capture the inner binding);
+    - a tuple write: a ``DestructuringBinding`` (``[T1, T2] [a, b] = e;``,
+      kept only by a ``desugar=False`` parse) naming one of *names*, or a write
+      whose l-value is a tuple literal (``[a, b] = e;``) with an element that
+      writes one of them.
 
     Conservative by design: any such occurrence anywhere in *node* -- including
     nested branches and loop bodies -- counts, because callers substitute
     structurally and are not scope-aware.
     """
 
+    def _writes(target: frog_ast.ASTNode) -> bool:
+        if isinstance(target, frog_ast.Tuple):
+            return any(_writes(value) for value in target.values)
+        return lvalue_base_name(target) in names
+
     def _mutates(inner: frog_ast.ASTNode) -> bool:
         if isinstance(
             inner, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
-        ) and (lvalue_base_name(inner.var) in names):
+        ) and _writes(inner.var):
+            return True
+        if isinstance(inner, frog_ast.DestructuringBinding) and (
+            set(inner.names) & names
+        ):
             return True
         if (
             isinstance(inner, frog_ast.UniqueSample)

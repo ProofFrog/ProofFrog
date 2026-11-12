@@ -1,0 +1,26 @@
+// Positive control for zero_power_base_var_exp: ModInt<q> zeros as
+// operands of a sum, a product and a comparison, where rebuilding them as
+// the literal 0 is exact in every modulus. Left's Probe is z == z, and
+// Left's Scale returns 0 mod q.
+// Expected: Proof Succeeded! both before and after a fix.
+Game Left(Int q) {
+    Bool Probe(ModInt<q> x, ModInt<q> y, ModInt<q> z) {
+        return (x - x) * y + z == z + (y - y);
+    }
+
+    ModInt<q> Scale(ModInt<q> x, ModInt<q> y) {
+        return (x - x) * y;
+    }
+}
+
+Game Right(Int q) {
+    Bool Probe(ModInt<q> x, ModInt<q> y, ModInt<q> z) {
+        return true;
+    }
+
+    ModInt<q> Scale(ModInt<q> x, ModInt<q> y) {
+        return y - y;
+    }
+}
+
+export as ZeroOperandControl;

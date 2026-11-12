@@ -1,0 +1,44 @@
+// Endpoints for gpfe_initializer.proof. Both sides are the same game: Q
+// starts at the parameter pub and moves by g on every Upd; P is a
+// generator-power key.
+Game Left(Group G, GroupElem<G> pub) {
+    GroupElem<G> P;
+    GroupElem<G> Q = pub;
+
+    Void Initialize() {
+        ModInt<G.order> e <- ModInt<G.order>;
+        P = G.generator ^ e;
+    }
+
+    GroupElem<G> Upd(ModInt<G.order> d) {
+        P = P * G.generator ^ d;
+        Q = Q * G.generator;
+        return P;
+    }
+
+    GroupElem<G> GetQ() {
+        return Q;
+    }
+}
+
+Game Right(Group G, GroupElem<G> pub) {
+    GroupElem<G> P;
+    GroupElem<G> Q = pub;
+
+    Void Initialize() {
+        ModInt<G.order> e <- ModInt<G.order>;
+        P = G.generator ^ e;
+    }
+
+    GroupElem<G> Upd(ModInt<G.order> d) {
+        P = P * G.generator ^ d;
+        Q = Q * G.generator;
+        return P;
+    }
+
+    GroupElem<G> GetQ() {
+        return Q;
+    }
+}
+
+export as GpfeEnds;

@@ -1,0 +1,22 @@
+// Target: Offset Fusion. See FusionMid.game.
+// The middle game's Q starts at the default value of a field, the endpoints'
+// Q at the let element h. Distinguisher for hop 1: call GetQ() first and
+// output 1 iff it returns h. Endpoint: always 1; middle game: only if h
+// equals that default value.
+// Expected: Proof Failed.
+import 'FusionEnds.game';
+import 'FusionMid.game';
+
+proof:
+
+let:
+    Group G;
+    GroupElem<G> h;
+
+theorem:
+    FusionEnds(G, h);
+
+games:
+    FusionEnds(G, h).Left against FusionEnds(G, h).Adversary;
+    FusionMid(G).Left against FusionEnds(G, h).Adversary;
+    FusionEnds(G, h).Right against FusionEnds(G, h).Adversary;

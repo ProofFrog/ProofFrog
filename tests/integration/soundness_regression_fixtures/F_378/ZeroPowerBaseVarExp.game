@@ -1,0 +1,30 @@
+// Target: ModInt Cancellation, through the algebra normalizer's
+// rebuild of a ModInt value equal to 0 inside an atom: a power with a
+// non-literal exponent is an atom of the polynomial, and its base was
+// rebuilt with canonical children.
+// Hypothesis: the zero ((x + y) - x) - y, which released ModInt
+// Simplification does not fold (it is not syntactically a - a), is rebuilt
+// as the Int literal 0 as the base of e ^ n, so e ^ n + e ^ n becomes the Int
+// expression 2 * 0 ^ n. Left (ModInt<q>) and Right (ModInt<p>) then
+// canonicalize alike, the modulus gone. The exponent is a method parameter,
+// not a proof parameter, so Symbolic Computation does not evaluate 0 ^ n.
+// The games are distinguishable: for q = 2, p = 3 and n = 0, Left returns
+// 1 + 1 == 0 in ModInt<2>, true, and Right 1 + 1 == 0 in ModInt<3>, false.
+// Expected if sound: Proof Failed! Unsound: Proof Succeeded!
+Game Left(Int q, Int p) {
+    Bool Probe(Int n) {
+        ModInt<q> x <- ModInt<q>;
+        ModInt<q> y <- ModInt<q>;
+        return ((x + y) - x - y) ^ n + ((x + y) - x - y) ^ n == y - y;
+    }
+}
+
+Game Right(Int q, Int p) {
+    Bool Probe(Int n) {
+        ModInt<p> x <- ModInt<p>;
+        ModInt<p> y <- ModInt<p>;
+        return ((x + y) - x - y) ^ n + ((x + y) - x - y) ^ n == y - y;
+    }
+}
+
+export as ZeroPowerBaseVarExp;

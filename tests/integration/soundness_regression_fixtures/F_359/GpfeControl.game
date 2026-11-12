@@ -1,0 +1,46 @@
+// Positive control for gpfe_initializer.proof. Left keeps a generator-power
+// key P as a group element, Right keeps its exponent s; P == g^s at every
+// call boundary, so the games are interchangeable. The other field Q starts
+// at the parameter pub, not at P, so Generator Power Field To Exponent still
+// replaces P by its exponent.
+// Expected: Proof Succeeded.
+Game Left(Group G, GroupElem<G> pub) {
+    GroupElem<G> P;
+    GroupElem<G> Q = pub;
+
+    Void Initialize() {
+        ModInt<G.order> e <- ModInt<G.order>;
+        P = G.generator ^ e;
+    }
+
+    GroupElem<G> Upd(ModInt<G.order> d) {
+        P = P * G.generator ^ d;
+        Q = Q * G.generator;
+        return P;
+    }
+
+    GroupElem<G> GetQ() {
+        return Q;
+    }
+}
+
+Game Right(Group G, GroupElem<G> pub) {
+    ModInt<G.order> s;
+    GroupElem<G> Q = pub;
+
+    Void Initialize() {
+        s <- ModInt<G.order>;
+    }
+
+    GroupElem<G> Upd(ModInt<G.order> d) {
+        s = s + d;
+        Q = Q * G.generator;
+        return G.generator ^ s;
+    }
+
+    GroupElem<G> GetQ() {
+        return Q;
+    }
+}
+
+export as GpfeControl;

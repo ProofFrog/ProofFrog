@@ -1,0 +1,14 @@
+import 'CoercedAbsorption.game';
+
+proof:
+
+let:
+    Int q;
+    Group G;
+
+theorem:
+    CoercedAbsorption(q, G);
+
+games:
+    CoercedAbsorption(q, G).Left against CoercedAbsorption(q, G).Adversary;
+    CoercedAbsorption(q, G).Right against CoercedAbsorption(q, G).Adversary;

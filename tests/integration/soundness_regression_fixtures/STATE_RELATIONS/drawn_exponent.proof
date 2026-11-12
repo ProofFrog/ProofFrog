@@ -1,0 +1,16 @@
+import 'Rnd.primitive';
+import 'DrawnExponent.game';
+
+proof:
+
+let:
+    Group G;
+    Rnd R = Rnd(G);
+    Function<ModInt<G.order>, ModInt<G.order>> H;
+
+theorem:
+    DrawnExponent(G, R, H);
+
+games:
+    DrawnExponent(G, R, H).Left against DrawnExponent(G, R, H).Adversary;
+    DrawnExponent(G, R, H).Right against DrawnExponent(G, R, H).Adversary;

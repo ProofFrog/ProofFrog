@@ -1,0 +1,15 @@
+// Positive control: the Int literal 0 is still forwarded for a ModInt field
+// read as an operand of + next to a ModInt operand, where it is exact.
+import 'ZeroOffset.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    ZeroOffset(q);
+
+games:
+    ZeroOffset(q).Left against ZeroOffset(q).Adversary;
+    ZeroOffset(q).Right against ZeroOffset(q).Adversary;

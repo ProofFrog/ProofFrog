@@ -1,0 +1,44 @@
+// Left keeps pk and sk, but Upd moves sk by 2d and pk by d, so after an
+// update pk != g^sk. Right keeps only sk and answers g^sk. A field-invariant
+// pass that removed pk as g^sk would make the two games look equal.
+Game Left(Group G) {
+    GroupElem<G> pk;
+    ModInt<G.order> sk;
+
+    GroupElem<G> Initialize() {
+        ModInt<G.order> x <- ModInt<G.order>;
+        pk = G.generator ^ x;
+        sk = x;
+        return pk;
+    }
+
+    GroupElem<G> Upd(ModInt<G.order> d) {
+        pk = pk * G.generator ^ d;
+        sk = sk + d + d;
+        return pk;
+    }
+
+    ModInt<G.order> Reveal() {
+        return sk;
+    }
+}
+
+Game Right(Group G) {
+    ModInt<G.order> sk;
+
+    GroupElem<G> Initialize() {
+        sk <- ModInt<G.order>;
+        return G.generator ^ sk;
+    }
+
+    GroupElem<G> Upd(ModInt<G.order> d) {
+        sk = sk + d + d;
+        return G.generator ^ sk;
+    }
+
+    ModInt<G.order> Reveal() {
+        return sk;
+    }
+}
+
+export as FalseInvariant;

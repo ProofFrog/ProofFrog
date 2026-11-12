@@ -1,0 +1,65 @@
+// Target: the algebra normalizer's canonical rebuild, reached through
+// Cancel Through Local. v = x + 5 (written with x^0 so that it type checks)
+// is used three times, so it is not inlined; the pass substitutes it into
+// the ModInt return value x + H(g ^ (v - x)) and writes back the canonical
+// form. The exponent v - x is the ModInt<q> value 5 mod q (1 mod q in Get1);
+// the normalizer rebuilt it as the Int literal 5 (1), dropping the reduction
+// mod q, so Left's canonical form became Right's. Both sides keep v, so the
+// exponent is the only difference.
+// The games are distinguishable: take q = 4, a group of order 3 and H
+// injective on the group. Call Get5(1) and Get1(1) and compare the answers.
+// On the left both exponents are 1 mod 4, so the answers are equal; on the
+// right they are 1 + H(g^5) = 1 + H(g^2) and 1 + H(g), which differ.
+// Expected: Proof Failed.
+
+Game Left(Group G, Int q, Function<GroupElem<G>, ModInt<q>> H) {
+    ModInt<q> w5;
+    ModInt<q> u5;
+    ModInt<q> w1;
+    ModInt<q> u1;
+
+    ModInt<q> Get5(ModInt<q> x) {
+        ModInt<q> v = x + (x ^ 0 + x ^ 0 + x ^ 0 + x ^ 0 + x ^ 0);
+        w5 = v * x;
+        u5 = v * v;
+        return x + H(G.generator ^ (v - x));
+    }
+
+    ModInt<q> Get1(ModInt<q> x) {
+        ModInt<q> v = x + x ^ 0;
+        w1 = v * x;
+        u1 = v * v;
+        return x + H(G.generator ^ (v - x));
+    }
+
+    ModInt<q> Peek() {
+        return w5 + u5 + w1 + u1;
+    }
+}
+
+Game Right(Group G, Int q, Function<GroupElem<G>, ModInt<q>> H) {
+    ModInt<q> w5;
+    ModInt<q> u5;
+    ModInt<q> w1;
+    ModInt<q> u1;
+
+    ModInt<q> Get5(ModInt<q> x) {
+        ModInt<q> v = x + (x ^ 0 + x ^ 0 + x ^ 0 + x ^ 0 + x ^ 0);
+        w5 = v * x;
+        u5 = v * v;
+        return x + H(G.generator ^ 5);
+    }
+
+    ModInt<q> Get1(ModInt<q> x) {
+        ModInt<q> v = x + x ^ 0;
+        w1 = v * x;
+        u1 = v * v;
+        return x + H(G.generator ^ 1);
+    }
+
+    ModInt<q> Peek() {
+        return w5 + u5 + w1 + u1;
+    }
+}
+
+export as CancelThroughLocalConstant;

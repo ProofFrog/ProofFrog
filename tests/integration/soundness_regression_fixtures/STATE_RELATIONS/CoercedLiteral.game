@@ -1,0 +1,30 @@
+// f is a ModInt<q> field set to 7, so it holds 7 mod q; forwarding the
+// literal 7 into a group exponent drops the reduction (q = 5, group order 3:
+// g^2 versus g^1).
+Game Left(Int q, Group G) {
+    ModInt<q> f;
+
+    GroupElem<G> Get(ModInt<q> y) {
+        f = 7;
+        return G.generator ^ f;
+    }
+
+    ModInt<q> Read() {
+        return f;
+    }
+}
+
+Game Right(Int q, Group G) {
+    ModInt<q> f;
+
+    GroupElem<G> Get(ModInt<q> y) {
+        f = 7;
+        return G.generator ^ 7;
+    }
+
+    ModInt<q> Read() {
+        return f;
+    }
+}
+
+export as CoercedLiteral;

@@ -1,0 +1,16 @@
+// Positive control: see FusionControl.game.
+// Expected: Proof Succeeded.
+import 'FusionControl.game';
+
+proof:
+
+let:
+    Group G;
+    GroupElem<G> h;
+
+theorem:
+    FusionControl(G, h);
+
+games:
+    FusionControl(G, h).Left against FusionControl(G, h).Adversary;
+    FusionControl(G, h).Right against FusionControl(G, h).Adversary;

@@ -1,0 +1,54 @@
+// x is both the map key and part of the stored value. Moving a + d into x
+// (past the update of a) must not change the key: Left stores at the old a,
+// Right at the new one.
+Game Left(Int q) {
+    Map<ModInt<q>, ModInt<q>> M;
+    ModInt<q> a;
+    ModInt<q> d;
+
+    Void Initialize() {
+        a <- ModInt<q>;
+        d <- ModInt<q>;
+    }
+
+    ModInt<q> RevealA() {
+        return a;
+    }
+
+    Void Put() {
+        ModInt<q> x = a;
+        a = a + d;
+        M[x] = x + d;
+    }
+
+    Bool Check(ModInt<q> k) {
+        return k in M;
+    }
+}
+
+Game Right(Int q) {
+    Map<ModInt<q>, ModInt<q>> M;
+    ModInt<q> a;
+    ModInt<q> d;
+
+    Void Initialize() {
+        a <- ModInt<q>;
+        d <- ModInt<q>;
+    }
+
+    ModInt<q> RevealA() {
+        return a;
+    }
+
+    Void Put() {
+        ModInt<q> x = a + d;
+        a = a + d;
+        M[x] = x;
+    }
+
+    Bool Check(ModInt<q> k) {
+        return k in M;
+    }
+}
+
+export as AbsorbedKey;

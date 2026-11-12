@@ -1,0 +1,42 @@
+// Endpoints for fusion_initializer.proof. Both sides are the same game: one
+// evolving secret s, and a field Q that starts at the parameter pub and
+// moves by g on every Shift.
+Game Left(Group G, GroupElem<G> pub) {
+    ModInt<G.order> s;
+    GroupElem<G> Q = pub;
+
+    Void Initialize() {
+        s <- ModInt<G.order>;
+    }
+
+    GroupElem<G> Shift(ModInt<G.order> r) {
+        s = s + r;
+        Q = Q * G.generator;
+        return G.generator ^ s;
+    }
+
+    GroupElem<G> GetQ() {
+        return Q;
+    }
+}
+
+Game Right(Group G, GroupElem<G> pub) {
+    ModInt<G.order> s;
+    GroupElem<G> Q = pub;
+
+    Void Initialize() {
+        s <- ModInt<G.order>;
+    }
+
+    GroupElem<G> Shift(ModInt<G.order> r) {
+        s = s + r;
+        Q = Q * G.generator;
+        return G.generator ^ s;
+    }
+
+    GroupElem<G> GetQ() {
+        return Q;
+    }
+}
+
+export as FusionEnds;

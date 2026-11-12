@@ -1,0 +1,46 @@
+// The fixed key is g^(e + H(R.Draw()) - H(R.Draw())), not g^e, so the
+// revealed sk does not match it in Left; in Right it does.
+import 'Rnd.primitive';
+
+Game Left(Group G, Rnd R, Function<ModInt<G.order>, ModInt<G.order>> H) {
+    GroupElem<G> P;
+    ModInt<G.order> sk;
+    ModInt<G.order> D;
+
+    Void Initialize() {
+        ModInt<G.order> e <- ModInt<G.order>;
+        P = G.generator ^ (e + H(R.Draw()) - H(R.Draw()));
+        sk = e;
+        D = 0;
+    }
+
+    GroupElem<G> Shift(ModInt<G.order> r) {
+        D = D + r;
+        return P * G.generator ^ D;
+    }
+
+    ModInt<G.order> Reveal() {
+        return sk;
+    }
+}
+
+Game Right(Group G, Rnd R, Function<ModInt<G.order>, ModInt<G.order>> H) {
+    ModInt<G.order> sk;
+    ModInt<G.order> s;
+
+    Void Initialize() {
+        sk <- ModInt<G.order>;
+        s = sk;
+    }
+
+    GroupElem<G> Shift(ModInt<G.order> r) {
+        s = s + r;
+        return G.generator ^ s;
+    }
+
+    ModInt<G.order> Reveal() {
+        return sk;
+    }
+}
+
+export as DrawnFixedKey;

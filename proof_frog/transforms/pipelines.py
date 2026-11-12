@@ -14,6 +14,7 @@ from .sampling import (
     SliceOfInlineConcat,
     MergeUniformSamples,
     MergeProductSamples,
+    SplitProductSample,
 )
 from .sampling import (
     SplitUniformSamples,
@@ -36,6 +37,7 @@ from .random_functions import (
 from .map_iteration import LazyMapScan
 from .map_reindex import MapKeyReindex
 from .inlining import (
+    MergeBareDeclaration,
     RedundantCopy,
     IfSplitBranchAssignment,
     InlineSingleUseVariable,
@@ -65,6 +67,11 @@ from .algebraic import (
     XorCancellation,
     XorIdentity,
     ModIntSimplification,
+    ModIntCancellation,
+    UniformModIntRepeatedMask,
+    ExpressAfterUpdate,
+    CancelThroughLocal,
+    BlockedLocalAbsorption,
     NormalizeCommutativeChains,
     FlattenConcatChain,
     ReflexiveComparison,
@@ -103,6 +110,12 @@ from .control_flow import (
     FlagSetToAssignment,
 )
 from .types import DeadNullGuardElimination, SubsetTypeNormalization
+from .state_relations import (
+    FieldInvariantElimination,
+    GeneratorPowerFieldToExponent,
+    OffsetFusion,
+    ForwardLiteralFieldWrite,
+)
 from .tuples import (
     FoldTupleIndex,
     ExpandTuple,
@@ -128,6 +141,8 @@ CORE_PIPELINE: list[TransformPass] = [
     # sites): once either fires, the split-declaration tuple spelling can
     # no longer be normalized to the decl-with-initializer route (#255).
     SplitBareTupleDeclarations(),
+    SplitProductSample(),
+    MergeBareDeclaration(),
     SingleCallFieldToLocal(),
     CounterGuardedFieldToLocal(),
     SymbolicComputation(),
@@ -158,6 +173,7 @@ CORE_PIPELINE: list[TransformPass] = [
     ForwardExpressionAlias(),
     UniformXorSimplification(),
     UniformModIntSimplification(),
+    UniformModIntRepeatedMask(),
     UniformGroupElemSimplification(),
     TopologicalSort(),
     HoistFieldPureAlias(),
@@ -191,6 +207,10 @@ CORE_PIPELINE: list[TransformPass] = [
     XorCancellation(),
     XorIdentity(),
     ModIntSimplification(),
+    ModIntCancellation(),
+    ExpressAfterUpdate(),
+    CancelThroughLocal(),
+    BlockedLocalAbsorption(),
     HoistGroupExpToInitialize(),
     RefactorGroupElemFieldExp(),
     GroupElemSimplification(),
@@ -214,6 +234,10 @@ CORE_PIPELINE: list[TransformPass] = [
     DeadGuardedAssignmentElimination(),
     IfFalseReturnToConjunction(),
     FoldEquivalentReturnBranch(),
+    ForwardLiteralFieldWrite(),
+    FieldInvariantElimination(),
+    GeneratorPowerFieldToExponent(),
+    OffsetFusion(),
 ]
 
 STANDARDIZATION_PIPELINE: list[TransformPass] = [

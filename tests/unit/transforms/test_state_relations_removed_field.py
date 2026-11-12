@@ -117,6 +117,14 @@ def test_f359_offset_fusion_keeps_a_fixed_key_another_field_is_initialized_from(
     assert any("field 'Q'" in r for r in _reasons(ctx, "Offset Fusion"))
 
 
+def test_f359_offset_fusion_still_fires_when_no_other_field_names_it() -> None:
+    game = _game("Group G, GroupElem<G> pub", _FUSION_BODY.format(init="pub"))
+    result = OffsetFusion().apply(game, _ctx())
+    assert "h" not in _field_names(result)
+    assert "h@fused" in _field_names(result)
+    assert _unbound_reference(result, "h") is None
+
+
 # --- Field Invariant Elimination (F-359, F-360) ------------------------------
 
 

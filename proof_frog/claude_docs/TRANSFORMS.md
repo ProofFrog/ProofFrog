@@ -22,6 +22,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 | SinkUniformSample | Moves a uniform sample into the single if-branch that uses it, or past an `if` when it is used only after it. Declines (with a near miss) for a draw from a runtime set value (a field, parameter or local), whose domain may be empty: such a draw may not complete, and moving it would change the traces on which that happens (see the draws-that-may-not-complete note below). |
 | LocalizeInitOnlyFieldSample | Converts field samples to local samples when the field is only used in Initialize. |
 | SliceOfInlineConcat | Rewrites slice-of-concat expressions when bounds line up with the underlying concat components. |
+| SplitProductSample | Splits a uniform sample of a product type (`[A, B] v <- [A, B];`) that is never written again and is used only through constant indices into independent samples of each component (`A v@0 <- A; B v@1 <- B;`, fresh names). |
 
 ### Symbolic (`symbolic.py`)
 
@@ -88,6 +89,7 @@ The field-level RF rewrites (UniqueRFSimplification, FreshInputRFToUniform, Chal
 | InlineLocalTupleLiteral | Substitutes `[T0,...] v = [e0,...]` through constant-index accesses when accesses are pure. Also fires on the optional form `[T0,...]? v = [e0,...]` under the same conditions, since a tuple literal is never `None`: every later reference to `v` is a constant-index access `v[k]` (a bare use such as `v == None` or `return v` blocks it, so a null guard on `v` must first be removed by DeadNullGuardElimination), `v` and the free variables of the elements are not written later, and an element with a non-deterministic call is projected exactly once and not inside a loop. Declines when an element that indexes a map or array would be dropped or moved (more cautious than needed: such a read cannot fail, FROGLANG_REFERENCE.md section 6.9): such an element must be projected by the statement right after the declaration, which must not be a branch or loop. Declines when an element mentions a same-named outer `v`. |
 | InlineMultiUsePureExpression | Inlines multi-use pure (call-free) expressions at every use site; also inlines `Function<D,R>` proof-let calls. |
 | RedundantFieldCopy | Eliminates intermediate locals used only to assign to a field. |
+| MergeBareDeclaration | Merges `T v; ... v = e;` into `... T v = e;` when the assignment is at the top level of the same block, nothing in between mentions `v` and `e` does not read `v`. Near miss when `e` reads `v`, or a statement in between reads `v` before a later top-level assignment. |
 
 ### Algebraic (`algebraic.py`)
 
@@ -102,7 +104,7 @@ The field-level RF rewrites (UniqueRFSimplification, FreshInputRFToUniform, Chal
 | XorCancellation | Cancels pairs of identical terms in XOR chains (`a + a` = `0^n`). |
 | XorIdentity | Removes `0^n` terms from XOR chains. |
 | ModIntSimplification | Applies algebraic identities for ModInt arithmetic (identity, zero, inverse). |
-| GroupElemSimplification | Group algebra identities: power-of-power, `g^0`/`g^1`, identity element rules. |
+| GroupElemSimplification | Group algebra identities: power-of-power, `g^0`/`g^1`, identity element rules, and `(a * b)^e` = `a^e * b^e` (likewise for `/`) when `e` makes no call. |
 | GroupElemCancellation | Cancels matching terms in GroupElem multiply/divide chains (`x * m / x` = `m`). |
 | GroupElemExponentCombination | Combines same-base exponentiations: `g^a * g^b` = `g^(a+b)`. |
 | NormalizeCommutativeChains | Sorts operands of commutative chains by structural key; also normalizes `==`/`!=` operand order. |
@@ -111,6 +113,11 @@ The field-level RF rewrites (UniqueRFSimplification, FreshInputRFToUniform, Chal
 | InjectiveEqualitySimplify | Rewrites `f(a1,...) == f(b1,...)` to `(a1==b1) && ...` when `f` is `deterministic injective`. An operand may be a local bound once to such a call, or a field assigned once in `Initialize`, outside the method being rewritten; it is resolved to its call only when every value the call reads, including one read only through a member access (`M` in `F.Enc(\|M.keys\|)`), is unchanged at the comparison. |
 | ConcatEqualityDecompose | Decomposes `(a \|\| b \|\| ...) op other` into pairwise slice equalities when concatenation-term lengths are derivable. An operand may be a top-level local bound once to a concatenation; it is resolved to that concatenation only when every value the concatenation reads, including one read only through a member access (`M` in `F.Ev(\|M.keys\|) \|\| u`), is unchanged in the method. |
 | TupleEqualityDecompose | Rewrites `a != b` between tuple-typed expressions to the per-component disjunction of `!=`. `==` is intentionally NOT decomposed. |
+| ModIntCancellation | Rewrites a ModInt arithmetic expression to its exact normal form (`_algebra.py`) when that is strictly smaller: `sk + ((d + H(x)) - H(x))` = `sk + d`. Every call it cancels or moves must be deterministic. The rebuild has no integer literal next to a ModInt operand (a coefficient up to 4 is repeated addition, `u + u`); a nonzero constant, a constant term or a larger coefficient, and a zero where an `Int` operand would change the operation (base of `^`, operand of `/`), are kept as written (near miss). |
+| CancelThroughLocal | ModInt cancellation through a pure local that is also used elsewhere: `v = d + H(x); sk = sk + (v - H(x));` gives `sk = sk + d;`. Same literal and determinism rules as ModIntCancellation. |
+| ExpressAfterUpdate | Moves `T v = e;` after a following update `f = f + delta;` of a ModInt variable, as `e[f := f - delta]`, when that is strictly smaller (the delta cancels): `pk = g ^ (s + d); s = s + d;` becomes `s = s + d; pk = g ^ s;`. |
+| BlockedLocalAbsorption | A pure single-use local whose inlining is blocked by a write in between takes over the largest deterministic expression around its use that the write leaves unchanged, computed before the write: `x = g ^ (sk * u); sk = sk + d; return d + H(x);` becomes `x = d + H(g ^ (sk * u)); sk = sk + d; return x;`. |
+| UniformModIntRepeatedMask | A uniform ModInt `u` used only in copies of one `e + u` within a single statement is used bare: `return [g ^ (s + u), s + u];` becomes `return [g ^ u, u];`. |
 
 ### Control Flow (`control_flow.py`)
 
@@ -130,6 +137,7 @@ The field-level RF rewrites (UniqueRFSimplification, FreshInputRFToUniform, Chal
 | FlagSetToAssignment | Folds `x = false; S; if (C) { x = true; }` into `x = false; S; x = C;` when S does not mention `x` (the flag-raise shape of identical-until-bad pairs). |
 | RemoveEmptyIf | Drops an `if` whose branches are all empty when its conditions make no call and index no map/array (else records a near-miss). |
 | FoldEquivalentReturnBranch | Folds `if (P) { return X; } return Y;` to `return Y;` when Z3 proves `P ⇒ (X ↔ Y)`. Refuses on any non-deterministic call. Fields assigned once in Initialize (to a deterministic call or a comparison) are expanded to their definitions in P, X and Y when every value the definition reads is fixed from the definition on and none of its names is rebound at the fold site; Z3 is also told that `injective` primitive methods are injective (`D(a) == D(b)` implies `a == b`). |
+| GuardConditionSimplification | Inside the branches of an `if (C)` with a single condition that makes no non-deterministic call, in a branch that writes no variable of `C`, replaces `C` by its value, and each Boolean flag of `C` whose value that value forces is replaced by it (a false `a \|\| b` makes `a` and `b` false). After `if (C) { ...; return e; }`, replaces the flags a false `C` settles in the following statements, up to the first that may change a variable of `C`. A name is a flag only if every declaration of it is a `Bool`. |
 
 ### Types (`types.py`)
 
@@ -146,6 +154,17 @@ The field-level RF rewrites (UniqueRFSimplification, FreshInputRFToUniform, Chal
 | ExpandTuple | Expands product-typed variables into individual component variables. |
 | SimplifyTuple | Collapses `[v[0], v[1], ...]` back to `v`. |
 | CollapseSingleIndexTuple | Collapses product-typed variable accessed at a single constant index. |
+
+### State Relations (`state_relations.py`)
+
+Run at the end of the core pipeline. They use relations between a game's fields across oracle calls; a pass that removes a field keeps it (near miss) when the new game would still name it with nothing in scope to bind it.
+
+| Pass | Description |
+|---|---|
+| ForwardLiteralFieldWrite | After `f = c;` for a field `f` and a literal `c` that `f` holds exactly (`Bool`, `Int`, `None`; not bit strings), replaces reads of `f` by `c` in the same block, up to the next statement that may write `f`. For a ModInt field only `0`, and a statement is rewritten only if every read of `f` in it is an operand of `+`, or the right operand of `-`, next to a ModInt operand that does not read `f` or a name bound twice (the literal is an `Int`: `D ^ n` and `D + D` stay; near miss). |
+| FieldInvariantElimination | Removes a field `a`, written outside Initialize, once `a == E` over other fields is proved to hold after Initialize and to be preserved by every oracle (each method executed symbolically, path by path, exit values compared by normal form); reads of `a` become `E`. The only `E` tried is `a`'s value at the end of an Initialize with one path, over the fields holding its drawn values. |
+| GeneratorPowerFieldToExponent | A group field with no initializer, set first in Initialize, also written outside Initialize, and written only as `P = g ^ x` or `P = P * g ^ x` with every exponent atom a `ModInt<G.order>`, is kept as its exponent `P@exp` (`P@exp = x`, `P@exp = P@exp + x`); reads become `g ^ P@exp`. |
+| OffsetFusion | Replaces a fixed `P = g ^ e` and an additive offset `D` by one evolving secret `P@fused == e + D`, kept only if the core pipeline then removes `D` (random self-reducibility). |
 
 ## Standardization Pipeline
 

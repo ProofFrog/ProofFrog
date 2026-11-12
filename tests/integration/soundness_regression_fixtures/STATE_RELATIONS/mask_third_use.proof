@@ -1,0 +1,13 @@
+import 'MaskThirdUse.game';
+
+proof:
+
+let:
+    Group G;
+
+theorem:
+    MaskThirdUse(G);
+
+games:
+    MaskThirdUse(G).Left against MaskThirdUse(G).Adversary;
+    MaskThirdUse(G).Right against MaskThirdUse(G).Adversary;

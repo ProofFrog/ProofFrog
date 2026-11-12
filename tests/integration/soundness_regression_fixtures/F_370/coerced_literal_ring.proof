@@ -1,0 +1,14 @@
+// Forward Literal Field Write must not forward an Int literal stored into a
+// ModInt field: Left's Get always returns true, Right's false.
+import 'CoercedLiteralRing.game';
+
+proof:
+
+let:
+
+theorem:
+    CoercedLiteralRing();
+
+games:
+    CoercedLiteralRing().Left against CoercedLiteralRing().Adversary;
+    CoercedLiteralRing().Right against CoercedLiteralRing().Adversary;

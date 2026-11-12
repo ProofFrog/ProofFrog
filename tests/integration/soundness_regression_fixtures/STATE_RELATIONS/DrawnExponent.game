@@ -1,0 +1,41 @@
+// The exponent x + H(R.Draw()) - H(R.Draw()) is two independent draws, not
+// x: Left moves P by a random amount on top of x, Right by x alone.
+import 'Rnd.primitive';
+
+Game Left(Group G, Rnd R, Function<ModInt<G.order>, ModInt<G.order>> H) {
+    GroupElem<G> P;
+
+    Void Initialize() {
+        ModInt<G.order> e <- ModInt<G.order>;
+        P = G.generator ^ e;
+    }
+
+    GroupElem<G> Upd(ModInt<G.order> x) {
+        P = P * G.generator ^ (x + H(R.Draw()) - H(R.Draw()));
+        return P;
+    }
+
+    GroupElem<G> Get() {
+        return P;
+    }
+}
+
+Game Right(Group G, Rnd R, Function<ModInt<G.order>, ModInt<G.order>> H) {
+    GroupElem<G> P;
+
+    Void Initialize() {
+        ModInt<G.order> e <- ModInt<G.order>;
+        P = G.generator ^ e;
+    }
+
+    GroupElem<G> Upd(ModInt<G.order> x) {
+        P = P * G.generator ^ x;
+        return P;
+    }
+
+    GroupElem<G> Get() {
+        return P;
+    }
+}
+
+export as DrawnExponent;

@@ -1,0 +1,56 @@
+// Target: Blocked Local Absorption. Left's local x = s is blocked by the
+// update of s, so the pass absorbs its use: round one declares
+// Int x = H(s); and leaves h ^ (x + |S|). Round two typed x with the method
+// type map built before round one, where x was still ModInt<q>, so it took
+// x + |S| for a ModInt<q> value and declared ModInt<q> x = H(s) + |S|;,
+// which reduces the Int sum mod q. Left's canonical form became Right's.
+// The games are distinguishable: with q = 2, a group of order 3 and H the
+// constant 0, call Add(1), Add(2) and then Get(1). Left returns g^(0 + 2)
+// = g^2; Right returns g^((0 + 2) mod 2), the identity.
+// Expected: Proof Failed.
+
+Game Left(Group G, Int q, Function<ModInt<q>, Int> H) {
+    ModInt<q> s;
+    GroupElem<G> h;
+    Set<Int> S;
+
+    Void Initialize() {
+        s = 0;
+        h = G.generator;
+    }
+
+    Void Add(Int z) {
+        S = S union {z};
+    }
+
+    GroupElem<G> Get(ModInt<q> r) {
+        ModInt<q> x = s;
+        s = s + r;
+        h = h ^ s;
+        return h ^ (H(x) + |S|);
+    }
+}
+
+Game Right(Group G, Int q, Function<ModInt<q>, Int> H) {
+    ModInt<q> s;
+    GroupElem<G> h;
+    Set<Int> S;
+
+    Void Initialize() {
+        s = 0;
+        h = G.generator;
+    }
+
+    Void Add(Int z) {
+        S = S union {z};
+    }
+
+    GroupElem<G> Get(ModInt<q> r) {
+        ModInt<q> x = H(s) + |S|;
+        s = s + r;
+        h = h ^ s;
+        return h ^ x;
+    }
+}
+
+export as StaleType;

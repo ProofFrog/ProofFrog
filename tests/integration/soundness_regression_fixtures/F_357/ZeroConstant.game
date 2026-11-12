@@ -1,0 +1,27 @@
+// Positive control for the F-357 rejects: a ModInt<q> expression whose
+// value is the constant 0 is still rebuilt as the literal 0, which is
+// 0 mod q for every q. Left's comparison cancels to 0 == 0 and its exponent
+// to 0, so Left's canonical form is Right's.
+// Expected: Proof Succeeded.
+
+Game Left(Int q, Group G) {
+    Bool Probe(ModInt<q> x, ModInt<q> y) {
+        return (x + x ^ 0) - (x ^ 0 + x) == y - y;
+    }
+
+    GroupElem<G> Power(ModInt<q> x) {
+        return G.generator ^ ((x + x ^ 0) - (x ^ 0 + x));
+    }
+}
+
+Game Right(Int q, Group G) {
+    Bool Probe(ModInt<q> x, ModInt<q> y) {
+        return true;
+    }
+
+    GroupElem<G> Power(ModInt<q> x) {
+        return G.identity;
+    }
+}
+
+export as ZeroConstant;

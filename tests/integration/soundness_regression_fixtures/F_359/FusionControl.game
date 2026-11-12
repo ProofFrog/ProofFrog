@@ -1,0 +1,48 @@
+// Positive control for fusion_initializer.proof. Left keeps a fixed key
+// P = g^e and an offset D read only as P * g^D; Right keeps one evolving
+// secret s; P * g^D == g^s at every call boundary, so the games are
+// interchangeable. The other field Q starts at the parameter pub, not at P,
+// so Offset Fusion still fuses P and D.
+// Expected: Proof Succeeded.
+Game Left(Group G, GroupElem<G> pub) {
+    GroupElem<G> P;
+    ModInt<G.order> D;
+    GroupElem<G> Q = pub;
+
+    Void Initialize() {
+        ModInt<G.order> e <- ModInt<G.order>;
+        P = G.generator ^ e;
+        D = 0;
+    }
+
+    GroupElem<G> Shift(ModInt<G.order> r) {
+        D = D + r;
+        Q = Q * G.generator;
+        return P * G.generator ^ D;
+    }
+
+    GroupElem<G> GetQ() {
+        return Q;
+    }
+}
+
+Game Right(Group G, GroupElem<G> pub) {
+    ModInt<G.order> s;
+    GroupElem<G> Q = pub;
+
+    Void Initialize() {
+        s <- ModInt<G.order>;
+    }
+
+    GroupElem<G> Shift(ModInt<G.order> r) {
+        s = s + r;
+        Q = Q * G.generator;
+        return G.generator ^ s;
+    }
+
+    GroupElem<G> GetQ() {
+        return Q;
+    }
+}
+
+export as FusionControl;

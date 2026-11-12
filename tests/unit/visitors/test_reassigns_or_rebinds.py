@@ -114,3 +114,25 @@ def test_f370c_tuple_literal_lvalue_counts_as_write() -> None:
     )
     assert reassigns_or_rebinds({"g"}, write) is True
     assert reassigns_or_rebinds({"h"}, write) is False
+
+
+def test_f370c_forward_literal_field_write_stops_at_destructuring() -> None:
+    """F-370(c) end to end at pass level: Forward Literal Field Write must not
+    carry ``f = false`` past the binding that sets ``f`` to true."""
+    # pylint: disable=import-outside-toplevel
+    from proof_frog.transforms._base import PipelineContext
+    from proof_frog.transforms.state_relations import ForwardLiteralFieldWrite
+    from proof_frog.visitors import NameTypeMap
+
+    game = frog_parser.parse_game_file(_DESTRUCTURING_GAME, desugar=False).games[0]
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    out = ForwardLiteralFieldWrite().apply(game, ctx)
+    flip = next(m for m in out.methods if m.signature.name == "Flip")
+    returned = flip.block.statements[-1]
+    assert isinstance(returned, frog_ast.ReturnStatement)
+    assert returned.expression == frog_ast.Variable("f")

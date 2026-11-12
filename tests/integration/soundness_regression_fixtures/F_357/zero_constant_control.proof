@@ -1,0 +1,16 @@
+// Positive control for the F-357 rejects. See ZeroConstant.game.
+// Expected: Proof Succeeded.
+import 'ZeroConstant.game';
+
+proof:
+
+let:
+    Int q;
+    Group G;
+
+theorem:
+    ZeroConstant(q, G);
+
+games:
+    ZeroConstant(q, G).Left against ZeroConstant(q, G).Adversary;
+    ZeroConstant(q, G).Right against ZeroConstant(q, G).Adversary;

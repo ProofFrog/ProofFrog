@@ -1,0 +1,16 @@
+// Attack proof for ZeroPowerBaseVarExp.game (see its header for the
+// expected outcome).
+import 'ZeroPowerBaseVarExp.game';
+
+proof:
+
+let:
+    Int q;
+    Int p;
+
+theorem:
+    ZeroPowerBaseVarExp(q, p);
+
+games:
+    ZeroPowerBaseVarExp(q, p).Left against ZeroPowerBaseVarExp(q, p).Adversary;
+    ZeroPowerBaseVarExp(q, p).Right against ZeroPowerBaseVarExp(q, p).Adversary;

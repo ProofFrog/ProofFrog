@@ -1,0 +1,13 @@
+import 'FalseInvariant.game';
+
+proof:
+
+let:
+    Group G;
+
+theorem:
+    FalseInvariant(G);
+
+games:
+    FalseInvariant(G).Left against FalseInvariant(G).Adversary;
+    FalseInvariant(G).Right against FalseInvariant(G).Adversary;

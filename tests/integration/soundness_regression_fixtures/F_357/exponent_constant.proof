@@ -1,0 +1,17 @@
+// Target: the algebra normalizer via ModInt Cancellation. See
+// ExponentConstant.game.
+// Expected: Proof Failed.
+import 'ExponentConstant.game';
+
+proof:
+
+let:
+    Int q;
+    Group G;
+
+theorem:
+    ExponentConstant(q, G);
+
+games:
+    ExponentConstant(q, G).Left against ExponentConstant(q, G).Adversary;
+    ExponentConstant(q, G).Right against ExponentConstant(q, G).Adversary;

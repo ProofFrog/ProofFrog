@@ -1,0 +1,19 @@
+// As ZeroPowerBase, with the base D + D: forwarding the Int literal 0 for
+// both reads makes the base the Int 0 + 0.
+Game Left(Int q, Int p) {
+    ModInt<q> D;
+    Bool Probe(Int n) {
+        D = 0;
+        return (D + D) ^ n + (D + D) ^ n == D;
+    }
+}
+
+Game Right(Int q, Int p) {
+    ModInt<p> D;
+    Bool Probe(Int n) {
+        D = 0;
+        return (D + D) ^ n + (D + D) ^ n == D;
+    }
+}
+
+export as ZeroSumPowerBase;

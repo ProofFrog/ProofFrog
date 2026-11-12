@@ -4505,3 +4505,690 @@ def test_sink_uniform_sample_near_miss_possibly_empty_domain() -> None:
     assert len(misses) == 1
     assert misses[0].variable == "x"
     assert "may be empty" in misses[0].reason
+
+
+# ---------------------------------------------------------------------------
+# State relations, ModInt cancellation and group power distribution
+# ---------------------------------------------------------------------------
+
+
+def _group_ctx() -> PipelineContext:
+    lets = NameTypeMap()
+    group = frog_ast.Variable("G")
+    lets.set("G", frog_ast.GroupType())
+    lets.set(
+        "H",
+        frog_ast.FunctionType(
+            frog_ast.GroupElemType(group),
+            frog_ast.ModIntType(frog_ast.FieldAccess(group, "order")),
+        ),
+    )
+    return PipelineContext(
+        variables={}, proof_let_types=lets, proof_namespace={}, subsets_pairs=[]
+    )
+
+
+def _names(ctx: PipelineContext) -> set[str]:
+    return {nm.transform_name for nm in ctx.near_misses}
+
+
+def test_near_miss_group_power_with_call_in_exponent() -> None:
+    from proof_frog.transforms.algebraic import GroupElemSimplification
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> f(GroupElem<G> pk, GroupElem<G> m) {
+                return (pk * m) ^ F.Sample();
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    GroupElemSimplification().apply(game, ctx)
+    assert "GroupElem Simplification" in _names(ctx)
+
+
+def test_near_miss_field_invariant_not_preserved() -> None:
+    from proof_frog.transforms.state_relations import FieldInvariantElimination
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> pk;
+            ModInt<G.order> sk;
+            GroupElem<G> Initialize() {
+                ModInt<G.order> x <- ModInt<G.order>;
+                pk = G.generator ^ x;
+                sk = x;
+                return pk;
+            }
+            GroupElem<G> Upd(ModInt<G.order> d) {
+                pk = pk * G.generator ^ d;
+                sk = sk + d + d;
+                return pk;
+            }
+            ModInt<G.order> Reveal() {
+                return sk;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    FieldInvariantElimination().apply(game, ctx)
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == "Field Invariant Elimination"]
+    assert misses and misses[0].method == "Upd"
+
+
+def test_near_miss_group_field_not_generator_power() -> None:
+    from proof_frog.transforms.state_relations import GeneratorPowerFieldToExponent
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> pk;
+            GroupElem<G> Initialize() {
+                ModInt<G.order> x <- ModInt<G.order>;
+                pk = G.generator ^ x;
+                return pk;
+            }
+            GroupElem<G> Upd(GroupElem<G> c) {
+                pk = pk * c;
+                return pk;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    GeneratorPowerFieldToExponent().apply(game, ctx)
+    assert "Generator Power Field To Exponent" in _names(ctx)
+
+
+def test_near_miss_offset_read_on_its_own() -> None:
+    from proof_frog.transforms.state_relations import OffsetFusion
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> P;
+            ModInt<G.order> D;
+            GroupElem<G> Initialize() {
+                D = 0;
+                ModInt<G.order> a <- ModInt<G.order>;
+                P = G.generator ^ a;
+                return P;
+            }
+            [GroupElem<G>, ModInt<G.order>] Shift(ModInt<G.order> d) {
+                D = D + d;
+                return [P * G.generator ^ D, D];
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert OffsetFusion().apply(game, ctx) == game
+    assert "Offset Fusion" in _names(ctx)
+
+
+def _removed_field_misses(ctx: PipelineContext, transform: str) -> list[NearMiss]:
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == transform and "Removing field" in nm.reason
+    ]
+
+
+def test_near_miss_invariant_field_named_by_another_field() -> None:
+    from proof_frog.transforms.state_relations import FieldInvariantElimination
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            Int a;
+            Int b;
+            Int q = a;
+            Void Initialize(Int s) {
+                b = s;
+                a = s + 1;
+            }
+            Int Step() {
+                a = a + 1;
+                b = b + 1;
+                return a + q;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert FieldInvariantElimination().apply(game, ctx) == game
+    (miss,) = _removed_field_misses(ctx, "Field Invariant Elimination")
+    assert miss.variable == "a" and "field 'q'" in miss.reason
+
+
+def test_near_miss_invariant_field_named_in_a_type_before_its_local() -> None:
+    from proof_frog.transforms.state_relations import FieldInvariantElimination
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            Int a;
+            Int b;
+            Void Initialize(Int s) {
+                b = s;
+                a = s + 1;
+            }
+            Int Samp() {
+                BitString<a> x <- BitString<a>;
+                a = a + 1;
+                b = b + 1;
+                return |x|;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert FieldInvariantElimination().apply(game, ctx) == game
+    (miss,) = _removed_field_misses(ctx, "Field Invariant Elimination")
+    assert miss.variable == "a" and miss.method == "Samp"
+
+
+def test_near_miss_group_field_named_by_another_field() -> None:
+    from proof_frog.transforms.state_relations import GeneratorPowerFieldToExponent
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> P;
+            GroupElem<G> Q = P;
+            Void Initialize() {
+                ModInt<G.order> e <- ModInt<G.order>;
+                P = G.generator ^ e;
+            }
+            GroupElem<G> Upd(ModInt<G.order> d) {
+                P = P * G.generator ^ d;
+                return Q;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert GeneratorPowerFieldToExponent().apply(game, ctx) == game
+    (miss,) = _removed_field_misses(ctx, "Generator Power Field To Exponent")
+    assert miss.variable == "P" and "field 'Q'" in miss.reason
+
+
+def test_near_miss_fixed_key_named_by_another_field() -> None:
+    from proof_frog.transforms.state_relations import OffsetFusion
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> P;
+            ModInt<G.order> D;
+            GroupElem<G> Q = P;
+            Void Initialize() {
+                ModInt<G.order> e <- ModInt<G.order>;
+                P = G.generator ^ e;
+                D = 0;
+            }
+            GroupElem<G> Shift(ModInt<G.order> r) {
+                D = D + r;
+                return P * G.generator ^ D;
+            }
+            GroupElem<G> GetQ() {
+                return Q;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert OffsetFusion().apply(game, ctx) == game
+    misses = _removed_field_misses(ctx, "Offset Fusion")
+    assert misses and all(
+        nm.variable == "P" and "field 'Q'" in nm.reason for nm in misses
+    )
+
+
+def test_near_miss_modint_cancellation_blocked_by_nondeterminism() -> None:
+    from proof_frog.transforms.algebraic import ModIntCancellation
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            ModInt<G.order> f(ModInt<G.order> d) {
+                return (d + F.Sample()) - F.Sample();
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    ctx.proof_namespace["F"] = frog_parser.parse_primitive_file(
+        "Primitive P(Group G) { ModInt<G.order> Sample(); }"
+    )
+    assert ModIntCancellation().apply(game, ctx) == game
+    assert "ModInt Cancellation" in _names(ctx)
+
+
+def _kept_constant_reasons(ctx: PipelineContext, transform: str) -> list[str]:
+    return [
+        nm.reason
+        for nm in ctx.near_misses
+        if nm.transform_name == transform and "kept as written" in nm.reason
+    ]
+
+
+def test_near_miss_modint_cancellation_keeps_nonzero_constant() -> None:
+    # F-357: (x + 1 + 1) - x is 2 mod q; the Int literal 2 would drop the
+    # reduction, so the whole expression is not rewritten to it.
+    from proof_frog.transforms.algebraic import ModIntCancellation
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Int q) {
+            Bool f(ModInt<q> x, ModInt<q> y) {
+                return ((x + 1) + 1) - x == y;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    result = ModIntCancellation().apply(game, ctx)
+    assert "2 ==" not in str(result)
+    reasons = _kept_constant_reasons(ctx, "ModInt Cancellation")
+    assert reasons and "constant 2 in ModInt<q>" in reasons[0]
+
+
+def test_near_miss_express_after_update_keeps_nonzero_constant() -> None:
+    # F-357: the moved value's exponent (y + 1) - y is 1 mod q.
+    from proof_frog.transforms.algebraic import ExpressAfterUpdate
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G, Int q) {
+            ModInt<q> f;
+            GroupElem<G> Get(ModInt<q> d, ModInt<q> y) {
+                GroupElem<G> pk = G.generator ^ ((y + 1) - y) * G.generator ^ (f + d);
+                f = f + d;
+                return pk;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    result = ExpressAfterUpdate().apply(game, ctx)
+    assert "G.generator ^ 1" not in str(result)
+    reasons = _kept_constant_reasons(ctx, "Express After Update")
+    assert reasons and "constant 1 in ModInt<q>" in reasons[0]
+
+
+def test_near_miss_cancel_through_local_keeps_nonzero_constant() -> None:
+    # F-357: substituting v = x + 5 makes the exponent (x + 5) - x, which is
+    # 5 mod q; the rewrite to g ^ 5 is refused. Before it, (x + 5) * (x + 5)
+    # is kept for its constant term (F-370(h)).
+    from proof_frog.transforms.algebraic import CancelThroughLocal
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G, Int q, Function<GroupElem<G>, ModInt<q>> H) {
+            ModInt<q> w;
+            ModInt<q> Get(ModInt<q> x) {
+                ModInt<q> v = x + 5;
+                w = v * v;
+                return x + H(G.generator ^ (v - x));
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert CancelThroughLocal().apply(game, ctx) == game
+    reasons = _kept_constant_reasons(ctx, "Cancel Through Local")
+    assert len(reasons) == 2
+    assert "'(x + 5) * (x + 5)'" in reasons[0] and "constant term" in reasons[0]
+    assert "constant 5 in ModInt<q>" in reasons[1]
+
+
+def test_near_miss_modint_cancellation_keeps_zero_power_base() -> None:
+    # F-378: x - x is 0 mod q, but as the base of a power the Int literal 0
+    # would make (x - x) ^ 0 the Int power 0 ^ 0.
+    from proof_frog.transforms.algebraic import ModIntCancellation
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Int q) {
+            Bool f(ModInt<q> x, ModInt<q> y) {
+                return (x - x) ^ 0 + (x - x) ^ 0 == y;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert ModIntCancellation().apply(game, ctx) == game
+    reasons = _kept_constant_reasons(ctx, "ModInt Cancellation")
+    assert any(
+        "is 0 in ModInt<q>" in r and "the base of a power" in r for r in reasons
+    )
+
+
+def test_near_miss_cancel_through_local_keeps_zero_division_operand() -> None:
+    # F-378: substituting v = x makes the operands (x - x) and (y - y), both
+    # 0 mod q; the rewrite to the Int division 0 / 0 is refused.
+    from proof_frog.transforms.algebraic import CancelThroughLocal
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Int q) {
+            ModInt<q> w;
+            ModInt<q> Get(ModInt<q> x, ModInt<q> y) {
+                ModInt<q> v = x;
+                w = v * v;
+                return (v - x) / (y - y);
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert CancelThroughLocal().apply(game, ctx) == game
+    reasons = _kept_constant_reasons(ctx, "Cancel Through Local")
+    assert any(
+        "is 0 in ModInt<q>" in r and "an operand of a division" in r
+        for r in reasons
+    )
+
+
+def test_near_miss_repeated_mask_with_different_partners() -> None:
+    from proof_frog.transforms.algebraic import UniformModIntRepeatedMask
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            ModInt<G.order> s;
+            [GroupElem<G>, ModInt<G.order>] f(ModInt<G.order> e) {
+                ModInt<G.order> u <- ModInt<G.order>;
+                return [G.generator ^ (s + u), e + u];
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert UniformModIntRepeatedMask().apply(game, ctx) == game
+    assert "Uniform ModInt Repeated Mask" in _names(ctx)
+
+
+def _redeclared_reasons(ctx: PipelineContext, transform: str) -> list[NearMiss]:
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == transform and "more than once" in nm.reason
+    ]
+
+
+def test_near_miss_blocked_local_absorption_redeclared_local() -> None:
+    # F-370(a): x is declared again (bare) between the blocker and the use.
+    from proof_frog.transforms.algebraic import BlockedLocalAbsorption
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            ModInt<G.order> sk;
+            [GroupElem<G>, ModInt<G.order>] f(ModInt<G.order> d) {
+                ModInt<G.order> x = sk;
+                sk = sk + d;
+                ModInt<G.order> x;
+                return [G.generator ^ sk, x + d];
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert BlockedLocalAbsorption().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "Blocked Local Absorption")
+    assert misses and misses[0].variable == "x" and misses[0].method == "f"
+
+
+def test_near_miss_repeated_mask_redeclared_uniform() -> None:
+    # F-370(a): u is declared again (bare) after the draw.
+    from proof_frog.transforms.algebraic import UniformModIntRepeatedMask
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            ModInt<G.order> s;
+            [GroupElem<G>, ModInt<G.order>] f() {
+                ModInt<G.order> u <- ModInt<G.order>;
+                ModInt<G.order> u;
+                return [G.generator ^ (s + u), s + u];
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert UniformModIntRepeatedMask().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "Uniform ModInt Repeated Mask")
+    assert misses and misses[0].variable == "u"
+
+
+def test_near_miss_express_after_update_redeclared_local() -> None:
+    # F-370(a): v is declared again (bare) between the value and the update.
+    from proof_frog.transforms.algebraic import ExpressAfterUpdate
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Int q) {
+            ModInt<q> f;
+            ModInt<q> Get(ModInt<q> d) {
+                ModInt<q> v = f + d;
+                ModInt<q> v;
+                f = f + d;
+                return v;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert ExpressAfterUpdate().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "Express After Update")
+    assert misses and misses[0].variable == "v"
+
+
+def test_near_miss_cancel_through_local_local_shadows_field() -> None:
+    # F-370(a): the local v shadows the field v its initializer reads.
+    from proof_frog.transforms.algebraic import CancelThroughLocal
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Int q) {
+            ModInt<q> v;
+            ModInt<q> Get(ModInt<q> d) {
+                ModInt<q> v = v + d;
+                return v - d;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert CancelThroughLocal().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "Cancel Through Local")
+    assert misses and misses[0].variable == "v"
+
+
+def test_near_miss_modint_cancellation_redeclared_operand() -> None:
+    # F-370(a): a and e are ModInt locals in the if block and group elements
+    # after it; typed as group elements, (a / e) * e cancelled to a.
+    from proof_frog.transforms.algebraic import ModIntCancellation
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G, Int q) {
+            ModInt<q> f(Bool c, ModInt<q> b, ModInt<q> d, GroupElem<G> h) {
+                if (c) {
+                    ModInt<q> a = d * d;
+                    ModInt<q> e = d + d;
+                    return b + ((a / e) * e);
+                }
+                GroupElem<G> a = h;
+                GroupElem<G> e = h;
+                return d;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert ModIntCancellation().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "ModInt Cancellation")
+    assert misses and misses[0].variable == "a"
+
+
+def test_near_miss_modint_cancellation_keeps_large_coefficient() -> None:
+    # F-370(h): (5u + s) - s is 5u; with no Int literal next to a ModInt the
+    # rebuild would be five copies of u added up, past the cap, so the
+    # expression is kept as written.
+    from proof_frog.transforms.algebraic import ModIntCancellation
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Int q) {
+            ModInt<q> f(ModInt<q> u, ModInt<q> s) {
+                return ((((u + u) + u) + u) + u + s) - s;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    result = ModIntCancellation().apply(game, ctx)
+    assert "5 *" not in str(result)
+    reasons = _kept_constant_reasons(ctx, "ModInt Cancellation")
+    assert reasons and "large coefficient" in reasons[0]
+
+
+def test_near_miss_gpfe_redeclared_exponent_local() -> None:
+    # F-370(j): d is declared in both branches; typed by the method's
+    # last-write-wins map, its type may not be the one each write reads.
+    from proof_frog.transforms.state_relations import GeneratorPowerFieldToExponent
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> h;
+            Void Initialize() {
+                ModInt<G.order> e <- ModInt<G.order>;
+                h = G.generator ^ e;
+            }
+            GroupElem<G> Upd(Bool c, ModInt<G.order> r) {
+                if (c) { ModInt<G.order> d = r; h = h * G.generator ^ d; }
+                else { ModInt<G.order> d = r + r; h = h * G.generator ^ d; }
+                return h;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert GeneratorPowerFieldToExponent().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "Generator Power Field To Exponent")
+    assert misses and misses[0].variable == "d"
+
+
+def test_near_miss_offset_fusion_redeclared_exponent_local() -> None:
+    # F-370(j): Initialize declares e twice, and P's write reads e.
+    from proof_frog.transforms.state_relations import OffsetFusion
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> P;
+            ModInt<G.order> D;
+            Void Initialize(Bool c) {
+                ModInt<G.order> e <- ModInt<G.order>;
+                P = G.generator ^ e;
+                D = 0;
+                if (c) { ModInt<G.order> e <- ModInt<G.order>; D = e; }
+            }
+            GroupElem<G> Shift(ModInt<G.order> r) {
+                D = D + r;
+                return P * G.generator ^ D;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert OffsetFusion().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "Offset Fusion")
+    assert misses and misses[0].variable == "e"
+
+
+# ---------------------------------------------------------------------------
+# Merge Bare Declaration
+# ---------------------------------------------------------------------------
+
+
+def _merge_bare_declaration_misses(body: str) -> list[NearMiss]:
+    from proof_frog.transforms.inlining import MergeBareDeclaration
+
+    game = frog_parser.parse_game(
+        f"Game T() {{\n Int f(Int a, Bool b) {{\n{body}\n}}\n}}"
+    )
+    ctx = _make_ctx()
+    assert MergeBareDeclaration().apply(game, ctx) == game
+    return [
+        nm for nm in ctx.near_misses if nm.transform_name == "Merge Bare Declaration"
+    ]
+
+
+def test_near_miss_merge_bare_declaration_value_reads_default() -> None:
+    misses = _merge_bare_declaration_misses("Int v;\nv = v + a;\nreturn v;")
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert "reads the variable" in misses[0].reason
+
+
+def test_near_miss_merge_bare_declaration_mentioned_in_between() -> None:
+    misses = _merge_bare_declaration_misses(
+        "Int v;\nInt w = v + 1;\nv = a;\nreturn v + w;"
+    )
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert "between the declaration and the assignment" in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # No top-level assignment to merge with.
+        "Int v;\nif (b) {\nv = a;\n} else {\nv = 0;\n}\nreturn v;",
+        # The branches are the first write; the later assignment an update.
+        "Int v;\nif (b) {\nv = a;\n} else {\nv = 0;\n}\nv = v + 1;\nreturn v;",
+        # A draw is the first write.
+        "BitString<8> v;\nv <- BitString<8>;\nv = v + 0^8;\nreturn a;",
+    ],
+)
+def test_no_near_miss_merge_bare_declaration_when_no_merge_was_close(
+    body: str,
+) -> None:
+    assert not _merge_bare_declaration_misses(body)
+
+
+def test_near_miss_forward_literal_field_write_keeps_modint_zero() -> None:
+    # F-379: the Int literal 0 for a ModInt field is not put into a power's
+    # base, where it would make an Int power.
+    from proof_frog.transforms.state_relations import ForwardLiteralFieldWrite
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Int q) {
+            ModInt<q> D;
+            ModInt<q> Probe(Int n) {
+                D = 0;
+                return D ^ n;
+            }
+        }
+        """
+    )
+    ctx = _make_ctx()
+    assert ForwardLiteralFieldWrite().apply(game, ctx) == game
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Forward Literal Field Write"
+    ]
+    assert len(misses) == 1
+    assert misses[0].variable == "D" and misses[0].method == "Probe"
+    assert "the literal 0 is an Int" in misses[0].reason

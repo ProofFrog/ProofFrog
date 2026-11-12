@@ -1,0 +1,13 @@
+import 'TrueInvariant.game';
+
+proof:
+
+let:
+    Group G;
+
+theorem:
+    TrueInvariant(G);
+
+games:
+    TrueInvariant(G).Left against TrueInvariant(G).Adversary;
+    TrueInvariant(G).Right against TrueInvariant(G).Adversary;

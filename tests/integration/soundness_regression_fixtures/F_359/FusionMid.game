@@ -1,0 +1,51 @@
+// Middle game for fusion_initializer.proof. Both sides are the same game: a
+// fixed key h = g^e, an offset D read only as h * g^D, and a field Q
+// initialized from h before Initialize runs, so Q starts at h's default
+// value. Offset Fusion replaces h and D by one evolving secret; it copied
+// Q's initializer verbatim, so it still named h, which then read the proof's
+// let entry h.
+Game Left(Group G) {
+    GroupElem<G> h;
+    ModInt<G.order> D;
+    GroupElem<G> Q = h;
+
+    Void Initialize() {
+        ModInt<G.order> e <- ModInt<G.order>;
+        h = G.generator ^ e;
+        D = 0;
+    }
+
+    GroupElem<G> Shift(ModInt<G.order> r) {
+        D = D + r;
+        Q = Q * G.generator;
+        return h * G.generator ^ D;
+    }
+
+    GroupElem<G> GetQ() {
+        return Q;
+    }
+}
+
+Game Right(Group G) {
+    GroupElem<G> h;
+    ModInt<G.order> D;
+    GroupElem<G> Q = h;
+
+    Void Initialize() {
+        ModInt<G.order> e <- ModInt<G.order>;
+        h = G.generator ^ e;
+        D = 0;
+    }
+
+    GroupElem<G> Shift(ModInt<G.order> r) {
+        D = D + r;
+        Q = Q * G.generator;
+        return h * G.generator ^ D;
+    }
+
+    GroupElem<G> GetQ() {
+        return Q;
+    }
+}
+
+export as FusionMid;

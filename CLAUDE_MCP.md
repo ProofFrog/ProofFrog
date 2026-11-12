@@ -14,7 +14,7 @@ The MCP server requires the `mcp` Python package. Install it alongside ProofFrog
 pip install -e ".[mcp]"
 
 # Or install the extra into an existing environment:
-pip install "mcp[cli]>=1.0"
+pip install "mcp[cli]>=2.3,<3"
 ```
 
 ---

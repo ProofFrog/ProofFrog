@@ -1,6 +1,8 @@
 """Names a pass creates are fresh (F-369, F-370 part (b)).
 
-Split Product Sample (``v@i``) adds new locals to a game. Such a name
+Split Product Sample (``v@i``), Generator Power Field To Exponent (``P@exp``),
+Offset Fusion (``P@fused``, ``P@exp``, ``D@next<k>``) and Field Invariant
+Elimination (``a@entry``) add new fields or locals to a game. Such a name
 must not already be bound or mentioned in the game: a new local named like
 an existing field captures the field's reads, and an existing local named
 like the new one captures the rewritten reads. The parser cannot produce
@@ -10,9 +12,17 @@ tests build such games by renaming a parsed name. On a clash the pass picks
 another name (``fresh_name``) and the game keeps its meaning.
 """
 
+import copy
+
 from proof_frog import frog_ast, frog_parser
 from proof_frog.transforms._base import PipelineContext, fresh_name, game_names
 from proof_frog.transforms.sampling import SplitProductSample
+from proof_frog.transforms.state_relations import (
+    FieldInvariantElimination,
+    GeneratorPowerFieldToExponent,
+    _fuse,
+    _initialize,
+)
 from proof_frog.visitors import NameTypeMap, SearchVisitor
 
 
@@ -190,3 +200,158 @@ def test_f369_split_keeps_the_usual_names_without_a_clash() -> None:
     q = _method(result, "Q")
     assert _declared(q.block) == ["v@0", "v@1"]
     assert str(_return_value(q)) == "v@0 + v@1"
+
+
+# --- Generator Power Field To Exponent (F-370 (b)) --------------------------
+
+_GPFE_SOURCE = """
+Game T(Group G) {
+    GroupElem<G> P;
+    Void Initialize() {
+        ModInt<G.order> e <- ModInt<G.order>;
+        P = G.generator ^ e;
+    }
+    [GroupElem<G>, GroupElem<G>] Upd(ModInt<G.order> d) {
+        ModInt<G.order> Pexp = 5;
+        P = P * G.generator ^ d;
+        return [P, G.generator ^ Pexp];
+    }
+}
+"""
+
+
+def test_f370b_gpfe_new_field_is_not_named_like_a_local() -> None:
+    # Upd declares a local P@exp. The exponent field replacing P must get
+    # another name, or Upd's rewritten update and read of P would use the
+    # local (returning [g^(5 + d), g^(5 + d)] for [g^(e + d), g^5]).
+    game = _game(_GPFE_SOURCE, {"Pexp": "P@exp"})
+    result = GeneratorPowerFieldToExponent().apply(game, _ctx())
+    assert result != game
+    ((exponent, field_type),) = [(f.name, f.type) for f in result.fields]
+    assert exponent != "P@exp"
+    assert isinstance(field_type, frog_ast.ModIntType)
+    upd = _method(result, "Upd")
+    assert _declared(upd.block) == ["P@exp"]
+    assert str(upd.block.statements[0]) == "ModInt<G.order> P@exp = 5;"
+    assert str(upd.block.statements[1]) == f"{exponent} = {exponent} + d;"
+    assert str(_return_value(upd)) == (
+        f"[G.generator ^ {exponent}, G.generator ^ P@exp]"
+    )
+
+
+def test_f370b_gpfe_keeps_the_usual_name_without_a_clash() -> None:
+    game = _game(_GPFE_SOURCE, {})
+    result = GeneratorPowerFieldToExponent().apply(game, _ctx())
+    assert [f.name for f in result.fields] == ["P@exp"]
+
+
+# --- Offset Fusion (F-370 (b)) ----------------------------------------------
+
+_FUSION_SOURCE = """
+Game T(Group G) {
+    GroupElem<G> P;
+    ModInt<G.order> D;
+    Void Initialize() {
+        ModInt<G.order> e <- ModInt<G.order>;
+        P = G.generator ^ e;
+        D = 0;
+    }
+    [GroupElem<G>, GroupElem<G>] Shift(ModInt<G.order> r) {
+        ModInt<G.order> mine = 7;
+        D = D + r;
+        return [P * G.generator ^ D, G.generator ^ mine];
+    }
+}
+"""
+
+
+def _fused(game: frog_ast.Game) -> frog_ast.Game:
+    init = _initialize(game)
+    assert init is not None
+    fixed = next(f for f in game.fields if f.name == "P")
+    offset = next(f for f in game.fields if f.name == "D")
+    fused = _fuse(game, init, fixed, offset, _ctx())
+    assert fused is not None
+    return fused
+
+
+def test_f370b_offset_temporary_is_not_named_like_a_local() -> None:
+    # Shift declares a local D@next0, the name of the temporary for Shift's
+    # first write of D. A second declaration of it would make the local's
+    # read return D + r instead of 7.
+    game = _game(_FUSION_SOURCE, {"mine": "D@next0"})
+    fused = _fused(copy.deepcopy(game))
+    shift = _method(fused, "Shift")
+    declared = _declared(shift.block)
+    assert declared.count("D@next0") == 1
+    assert str(shift.block.statements[0]) == "ModInt<G.order> D@next0 = 7;"
+    (temporary,) = [n for n in declared if n != "D@next0"]
+    assert str(shift.block.statements[1]) == f"ModInt<G.order> {temporary} = D + r;"
+    assert str(_return_value(shift)).endswith(", G.generator ^ D@next0]")
+
+
+def test_f370b_offset_fusion_renames_a_taken_fused_or_exponent_name() -> None:
+    # Locals named P@fused and P@exp: the new field and Initialize's
+    # exponent local get other names, and the user's locals stay as they are.
+    for taken in ("P@fused", "P@exp"):
+        game = _game(_FUSION_SOURCE, {"mine": taken})
+        fused = _fused(copy.deepcopy(game))
+        new_field = next(f.name for f in fused.fields if f.name != "D")
+        exponent = _declared(_method(fused, "Initialize").block)[1]
+        assert taken not in (new_field, exponent)
+        shift = _method(fused, "Shift")
+        assert str(shift.block.statements[0]) == f"ModInt<G.order> {taken} = 7;"
+        assert str(_return_value(shift)).endswith(f", G.generator ^ {taken}]")
+
+
+def test_f370b_offset_fusion_keeps_the_usual_names_without_a_clash() -> None:
+    fused = _fused(_game(_FUSION_SOURCE, {}))
+    assert [f.name for f in fused.fields] == ["D", "P@fused"]
+    assert _declared(_method(fused, "Initialize").block) == ["e", "P@exp"]
+    assert _declared(_method(fused, "Shift").block) == ["mine", "D@next0"]
+
+
+# --- Field Invariant Elimination (same class) -------------------------------
+
+_FIE_SOURCE = """
+Game T(Group G) {
+    GroupElem<G> pk;
+    ModInt<G.order> sk;
+    GroupElem<G> Initialize() {
+        ModInt<G.order> x <- ModInt<G.order>;
+        pk = G.generator ^ x;
+        sk = x;
+        return pk;
+    }
+    [GroupElem<G>, GroupElem<G>] Upd(ModInt<G.order> d) {
+        GroupElem<G> mine = G.generator;
+        sk = sk + d;
+        pk = pk * G.generator ^ d;
+        return [pk, mine];
+    }
+}
+"""
+
+
+def test_fie_entry_local_is_not_named_like_a_local() -> None:
+    # pk is removed (pk == g ^ sk). Upd reads pk's entry value after sk has
+    # moved, through a local pk@entry = g ^ sk. A local of that name already
+    # in Upd must not be redeclared, or pk's new value would be computed
+    # from it (g * g^d instead of g^(sk + d)).
+    game = _game(_FIE_SOURCE, {"mine": "pk@entry"})
+    result = FieldInvariantElimination().apply(game, _ctx())
+    assert [f.name for f in result.fields] == ["sk"]
+    upd = _method(result, "Upd")
+    declared = _declared(upd.block)
+    assert declared.count("pk@entry") == 1
+    (entry,) = [n for n in declared if n not in ("pk@entry", "pk")]
+    statements = [str(s) for s in upd.block.statements]
+    assert f"GroupElem<G> {entry} = G.generator ^ sk;" in statements
+    assert "GroupElem<G> pk@entry = G.generator;" in statements
+    assert f"GroupElem<G> pk = {entry} * G.generator ^ d;" in statements
+    assert str(_return_value(upd)) == "[pk, pk@entry]"
+
+
+def test_fie_keeps_the_usual_entry_name_without_a_clash() -> None:
+    result = FieldInvariantElimination().apply(_game(_FIE_SOURCE, {}), _ctx())
+    assert "pk@entry" in _declared(_method(result, "Upd").block)

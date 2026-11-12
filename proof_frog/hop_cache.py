@@ -83,6 +83,14 @@ def _digest_of(obj: object) -> bytes:
     return sub.digest()
 
 
+def structural_digest(obj: object) -> str:
+    """A SHA-256 hex digest of the structural encoding of *obj* (see
+    :func:`_feed`): two values with the same digest are equal ASTs, strings,
+    numbers and containers of them, unlike their printed forms. Raises
+    :class:`Uncacheable` for a value of an unknown type."""
+    return _digest_of(obj).hex()
+
+
 def _feed_str(h: Any, tag: bytes, text: str) -> None:
     data = text.encode("utf-8")
     h.update(tag + str(len(data)).encode() + b":")

@@ -18,6 +18,7 @@ from proof_frog.transforms._definedness import (
     initialize_assigned_fields,
     initialized_binder,
     method_binder_counts,
+    redeclared_names,
 )
 from proof_frog.visitors import NameTypeMap
 
@@ -556,3 +557,44 @@ def test_method_binders() -> None:
     assert initialized_binder(method.block.statements[0]) == "b"
     assert initialized_binder(method.block.statements[1]) is None
     assert initialized_binder(method.block.statements[-1]) is None
+
+
+_REDECLARED_GAME = """
+    Game T(Int q) {
+        Int s;
+        Int v;
+        Int pk;
+        Int f(Int pk, Int d) {
+            Int x = s;
+            Int x;
+            Int v = v + d;
+            Int w = d;
+            Int d = w;
+            for (Int i = 0 to 3) {
+                s = s + i;
+            }
+            for (Int i = 0 to 3) {
+                s = s - i;
+            }
+            Int q = s;
+            return x + v + pk + d + q;
+        }
+    }
+    """
+
+
+def test_f370_redeclared_names() -> None:
+    # A local declared twice (x, once with a bare declaration), a local
+    # shadowing a field (v), a local re-using a parameter's name (d), two
+    # loops binding i and a local shadowing a game parameter (q) all have
+    # several bindings. A parameter shadowing a field (pk) is one binding for
+    # the whole body, and a local declared once (w) is one.
+    game = frog_parser.parse_game(_REDECLARED_GAME)
+    method = game.methods[0]
+    assert redeclared_names(game, method) == {"x", "v", "d", "i", "q"}
+
+
+def test_f370_redeclared_names_without_game() -> None:
+    # Without the game, fields and game parameters are not counted.
+    game = frog_parser.parse_game(_REDECLARED_GAME)
+    assert redeclared_names(None, game.methods[0]) == {"x", "d", "i"}

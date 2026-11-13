@@ -1,6 +1,7 @@
 import pytest
-from proof_frog import proof_engine, frog_parser
+from proof_frog import proof_engine, frog_ast, frog_parser
 from proof_frog.proof_engine import ProofEngine
+from proof_frog.transforms.control_flow import RemoveStatementTransformer
 from proof_frog.transforms.structural import remove_duplicate_fields
 
 
@@ -608,6 +609,104 @@ class TestWritesBetweenPairedWrites:
     )
     def test_write_to_unread_variable_merged(self, value: str, write: str) -> None:
         assert self._merges_f_and_g(self._game(value, write))
+
+
+class TestDeletesOnlyPairedWrites:
+    """F-382: the merge deletes the second write of each pair it found, and
+    no other statement, however equal it looks."""
+
+    _MERGED = """
+        Game G() {
+            Int d;
+            Void Initialize() {
+                d = 0;
+            }
+            Void A0(Int z) {
+                d = d + z;
+            }
+            Void A1(Int z) {
+                d = d + z;
+            }
+            Int Get() {
+                return d;
+            }
+        }
+        """
+
+    @staticmethod
+    def _game(a0: str, a1: str) -> str:
+        return f"""
+            Game G() {{
+                Int d;
+                Int r;
+                Void Initialize() {{
+                    d = 0;
+                    r = 0;
+                }}
+                Void A0(Int z) {{
+                    {a0}
+                }}
+                Void A1(Int z) {{
+                    {a1}
+                }}
+                Int Get() {{
+                    return d;
+                }}
+            }}
+            """
+
+    @pytest.mark.parametrize(
+        "a0, a1",
+        [
+            # Opposite orders: A0's second write `d = d + z;` equals A1's
+            # first, and A1's second `r = r + z;` equals A0's first. A
+            # structural match deleted all four and left both oracles empty.
+            ("r = r + z; d = d + z;", "d = d + z; r = r + z;"),
+            ("d = d + z; r = r + z;", "r = r + z; d = d + z;"),
+            # Same order everywhere: the equal second writes are each paired
+            # in their own oracle, so both go.
+            ("r = r + z; d = d + z;", "r = r + z; d = d + z;"),
+            ("d = d + z; r = r + z;", "d = d + z; r = r + z;"),
+        ],
+        ids=["opposite_r_first", "opposite_d_first", "same_r_first", "same_d_first"],
+    )
+    def test_each_method_keeps_one_write(self, a0: str, a1: str) -> None:
+        source = self._game(a0, a1)
+        game = frog_parser.parse_game(source)
+        merged = remove_duplicate_fields(game)
+        assert merged == frog_parser.parse_game(self._MERGED)
+        assert game == frog_parser.parse_game(source)
+
+    def test_remove_statement_transformer_matches_by_identity(self) -> None:
+        game = frog_parser.parse_game("""
+            Game G() {
+                Int d;
+                Void A0(Int z) {
+                    d = d + z;
+                }
+                Void A1(Int z) {
+                    d = d + z;
+                    if (z == 0) {
+                        d = d + z;
+                    }
+                }
+            }
+            """)
+        a0_write = game.methods[0].block.statements[0]
+        branch = game.methods[1].block.statements[1]
+        assert isinstance(branch, frog_ast.IfStatement)
+        nested_write = branch.blocks[0].statements[0]
+        assert a0_write == nested_write and a0_write is not nested_write
+
+        result = RemoveStatementTransformer([nested_write]).transform(game)
+
+        assert result.methods[0].block.statements == [a0_write]
+        assert result.methods[1].block.statements[0] == a0_write
+        result_branch = result.methods[1].block.statements[1]
+        assert isinstance(result_branch, frog_ast.IfStatement)
+        assert not result_branch.blocks[0].statements
+        # Copy-on-write: the input keeps the removed statement.
+        assert branch.blocks[0].statements == [nested_write]
 
 
 class TestEndToEnd:

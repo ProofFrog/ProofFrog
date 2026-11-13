@@ -1,0 +1,15 @@
+// Proof for SameOrder.game (the positive control; expected outcome in its
+// header).
+import 'SameOrder.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    SameOrder(q);
+
+games:
+    SameOrder(q).Left against SameOrder(q).Adversary;
+    SameOrder(q).Right against SameOrder(q).Adversary;

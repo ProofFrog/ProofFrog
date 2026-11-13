@@ -1,0 +1,15 @@
+// Proof for OppositeOrder.game (the positive control; expected outcome in
+// its header).
+import 'OppositeOrder.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    OppositeOrder(q);
+
+games:
+    OppositeOrder(q).Left against OppositeOrder(q).Adversary;
+    OppositeOrder(q).Right against OppositeOrder(q).Adversary;

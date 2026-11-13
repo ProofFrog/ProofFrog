@@ -1,0 +1,15 @@
+// F-384: claims WrittenCopy().Left and WrittenCopy().Right are
+// interchangeable. They are not (see WrittenCopy.game). Sound engine:
+// Proof Failed!
+import 'WrittenCopy.game';
+
+proof:
+
+let:
+
+theorem:
+    WrittenCopy();
+
+games:
+    WrittenCopy().Left against WrittenCopy().Adversary;
+    WrittenCopy().Right against WrittenCopy().Adversary;

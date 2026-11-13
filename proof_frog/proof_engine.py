@@ -2168,6 +2168,11 @@ class ProofEngine:
         game = instantiate(
             root, args, self.proof_namespace, True, self._argument_types(args)
         )
+        # No initializer may read a field a method writes once the passes
+        # run (F-384): such a read gets a snapshot of the starting value.
+        # A reduction's fields get theirs here too, since the reduction is
+        # resolved by this method (below) before it is composed.
+        game = visitors.snapshot_starting_values(game)
 
         lookup = dict(self.method_lookup)
         if reduction:
@@ -2188,6 +2193,25 @@ class ProofEngine:
                 game.methods[index] = visitors.rename_value_references(
                     method, field_prefix
                 )
+            # A field the instantiation kept (written, F-045; converting,
+            # F-356; or initialized by a method call, F-384) may have an
+            # initializer naming another challenger field, one no method
+            # writes, and a length in a field's type may name one: they follow
+            # the rename, or they would name nothing, or a reduction field of
+            # the same name (F-384). A ``Set`` field's initializer is a type,
+            # renamed only in its lengths.
+            game.fields = [
+                frog_ast.Field(
+                    visitors.rename_value_references(field.type, field_prefix, True),
+                    field.name,
+                    visitors.rename_value_references(
+                        field.value,
+                        field_prefix,
+                        isinstance(field.type, frog_ast.SetType),
+                    ),
+                )
+                for field in game.fields
+            ]
             lookup.update(get_challenger_method_lookup(game))
             game = self.apply_reduction(game, reduction_ast)
 
@@ -2807,16 +2831,6 @@ def instantiate(
     root = _avoid_instantiation_capture(
         root, args, namespace, rename_namespace_fields, bound_names
     )
-    # A field initialized from a written parameter holds the parameter's
-    # starting value, so it stays a field: read as its initializer, it would
-    # follow the later writes to the parameter.
-    written_names = {root.parameters[index].name for index in written}
-    kept_fields = frozenset(
-        field.name
-        for field in root.fields
-        if field.value is not None
-        and visitors.referenced_variable_names(field.value) & written_names
-    )
     arg_names: set[str] = set()
     for arg in args:
         arg_names |= visitors.referenced_variable_names(arg)
@@ -2843,7 +2857,8 @@ def instantiate(
         # InstantiationTransformer keeps as a field (a written field is state,
         # F-045; a converting one's initializer type is not recorded, so it
         # counts as converting) and which the forwarding passes do not
-        # forward.
+        # forward. A field whose initializer reads a written one holds its
+        # starting value, so InstantiationTransformer keeps it too (F-384).
         bound_fields: list[frog_ast.Field] = []
         for index in bound:
             parameter = root.parameters[index]
@@ -2862,9 +2877,9 @@ def instantiate(
                     "arguments, so the argument would be read as the field. "
                     "Rename the field or the argument."
                 )
-    return visitors.InstantiationTransformer(
-        namespace, field_value_types, kept_fields
-    ).transform(new_root)
+    return visitors.InstantiationTransformer(namespace, field_value_types).transform(
+        new_root
+    )
 
 
 def _field_initializer_types(

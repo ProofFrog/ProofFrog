@@ -1,0 +1,32 @@
+// F-384 (composition): Real's field C starts at the value of D, which is
+// never assigned and so holds the default of its type; Ideal's C starts at
+// that default directly. Put and GetC behave the same in both, so the
+// assumption Starting(S) is true.
+import 'Source.primitive';
+
+Game Real(Source S) {
+    BitString<S.lambda> D;
+    BitString<S.lambda> C = D;
+
+    Void Put(BitString<S.lambda> x) {
+        C = x;
+    }
+
+    BitString<S.lambda> GetC() {
+        return C;
+    }
+}
+
+Game Ideal(Source S) {
+    BitString<S.lambda> C;
+
+    Void Put(BitString<S.lambda> x) {
+        C = x;
+    }
+
+    BitString<S.lambda> GetC() {
+        return C;
+    }
+}
+
+export as Starting;

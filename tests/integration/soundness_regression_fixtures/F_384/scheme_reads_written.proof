@@ -1,0 +1,17 @@
+// F-384 (scheme): a scheme field initialized from a field the scheme's
+// method writes. Sound engine: a type error (see StartCounter.scheme).
+import 'Counter.primitive';
+import 'StartCounter.scheme';
+import 'Constant.game';
+
+proof:
+
+let:
+    StartCounter C = StartCounter();
+
+theorem:
+    Constant(C);
+
+games:
+    Constant(C).Left against Constant(C).Adversary;
+    Constant(C).Right against Constant(C).Adversary;

@@ -1,0 +1,44 @@
+// F-384 (composition): derives the false theorem Starting2(S) from the
+// true assumption Starting(S). Composed with R, the challenger's fields are
+// renamed challenger@D and challenger@C; the initializer of challenger@C
+// must read challenger@D, not R's own field D, which starts at a draw from
+// S and which Peek returns. Read as R's D, Starting(S).Real compose R
+// would be Starting2(S).Left.
+// Sound engine: Proof Failed! (step 1).
+import 'Source.primitive';
+import 'Starting.game';
+import 'Starting2.game';
+
+Reduction R(Source S) compose Starting(S) against Starting2(S).Adversary {
+    BitString<S.lambda> D = S.Draw();
+
+    BitString<S.lambda> Peek() {
+        return D;
+    }
+
+    Void Put(BitString<S.lambda> x) {
+        challenger.Put(x);
+    }
+
+    BitString<S.lambda> Get() {
+        return challenger.GetC();
+    }
+}
+
+proof:
+
+let:
+    Int lambda;
+    Source S = Source(lambda);
+
+assume:
+    Starting(S);
+
+theorem:
+    Starting2(S);
+
+games:
+    Starting2(S).Left against Starting2(S).Adversary;
+    Starting(S).Real compose R(S) against Starting2(S).Adversary;
+    Starting(S).Ideal compose R(S) against Starting2(S).Adversary;
+    Starting2(S).Right against Starting2(S).Adversary;

@@ -1,0 +1,16 @@
+// F-384: claims AliasRedraw(G).Left and AliasRedraw(G).Right are
+// interchangeable. They are not (see AliasRedraw.game). Sound engine:
+// Proof Failed!
+import 'AliasRedraw.game';
+
+proof:
+
+let:
+    Group G;
+
+theorem:
+    AliasRedraw(G);
+
+games:
+    AliasRedraw(G).Left against AliasRedraw(G).Adversary;
+    AliasRedraw(G).Right against AliasRedraw(G).Adversary;

@@ -1,0 +1,19 @@
+// F-384 (scheme): a scheme field initialized by a method call. Sound
+// engine: a type error (see KeyedSource.scheme).
+import 'Source.primitive';
+import 'KeyedSource.scheme';
+import 'CallOnce.game';
+
+proof:
+
+let:
+    Int lambda;
+    Source S = Source(lambda);
+    KeyedSource K = KeyedSource(S);
+
+theorem:
+    CallOnce(K);
+
+games:
+    CallOnce(K).Left against CallOnce(K).Adversary;
+    CallOnce(K).Right against CallOnce(K).Adversary;

@@ -1,0 +1,18 @@
+// F-384: claims CallOnce(S).Left and CallOnce(S).Right are
+// interchangeable. They are not (see CallOnce.game). Sound engine:
+// Proof Failed!
+import 'Source.primitive';
+import 'CallOnce.game';
+
+proof:
+
+let:
+    Int lambda;
+    Source S = Source(lambda);
+
+theorem:
+    CallOnce(S);
+
+games:
+    CallOnce(S).Left against CallOnce(S).Adversary;
+    CallOnce(S).Right against CallOnce(S).Adversary;

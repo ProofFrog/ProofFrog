@@ -1,0 +1,22 @@
+// F-384 (call): Left's field k is initialized by one call of S.Draw, so
+// every Get returns that one string. Right's Get calls S.Draw each time.
+// Get(), Get() gives equal answers always on the left, not on the right
+// for a source that draws. k must not be read as its initializer, which
+// would call S.Draw again at every read.
+import 'Source.primitive';
+
+Game Left(Source S) {
+    BitString<S.lambda> k = S.Draw();
+
+    BitString<S.lambda> Get() {
+        return k;
+    }
+}
+
+Game Right(Source S) {
+    BitString<S.lambda> Get() {
+        return S.Draw();
+    }
+}
+
+export as CallOnce;

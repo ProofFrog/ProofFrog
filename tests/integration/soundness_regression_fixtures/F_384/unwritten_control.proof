@@ -1,0 +1,16 @@
+// F-384 positive control: claims Unwritten(G).Left and Unwritten(G).Right
+// are interchangeable, which they are (see Unwritten.game). Sound engine:
+// Proof Succeeded!
+import 'Unwritten.game';
+
+proof:
+
+let:
+    Group G;
+
+theorem:
+    Unwritten(G);
+
+games:
+    Unwritten(G).Left against Unwritten(G).Adversary;
+    Unwritten(G).Right against Unwritten(G).Adversary;

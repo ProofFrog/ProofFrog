@@ -158,7 +158,7 @@ The standardization pipeline runs once after the core pipeline converges.
 | VariableStandardize | Renames explicit local binders (typed assignments and samples, bare declarations, loop binders) to v1, v2, ... per method, by a scope walk. Untyped writes follow their binder. Field, parameter, type and free names are reserved. |
 | StandardizeFieldNames | Normalizes field names to canonical ordering. Two-phase: rename by oracle first-read order, then regroup by type. |
 | NormalizeCommutativeChains | Re-sorts commutative chains after field/variable renaming. |
-| BubbleSortFieldAssignments | Sorts field assignments into canonical dependency order. |
+| BubbleSortFieldAssignments | Sorts field assignments into canonical dependency order: swaps two adjacent whole-field writes, lower field name first, when the later one has no edge to the earlier in the dependency graph. It permutes the graph's own nodes, which compare by identity, so two equal statements keep their own edges. |
 | StabilizeIndependentStatements | Sorts independent statements by value expression for deterministic ordering. Uses the TopologicalSort dependency graph, so a draw whose domain may be empty is never moved across an `if` that returns. |
 | FieldLexMinByRHS | Within each same-type field group, picks the lex-smallest slot index for the field whose Initialize-RHS sort key is smallest. |
 

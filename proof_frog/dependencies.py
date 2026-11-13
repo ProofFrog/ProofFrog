@@ -364,24 +364,39 @@ def generate_dependency_graph(
 
 
 class Node:
+    """One statement of a block in its dependency graph.
+
+    Nodes compare by identity (no ``__eq__``), so ``in`` and ``remove`` on a
+    list of nodes find that very node. Two structurally equal statements of
+    a block (`e = e + e; d = d + e; e = e + e;`) are two nodes with different
+    edges, and taking one for the other loses the edges that keep a statement
+    between them in place (F-381).
+    """
+
     def __init__(self, statement: frog_ast.Statement) -> None:
         self.in_neighbours: list[Node] = []
         self.statement = statement
 
-    def __eq__(self, __value: object) -> bool:
-        if not isinstance(__value, Node):
-            return False
-        return (
-            self.in_neighbours == __value.in_neighbours
-            and self.statement == __value.statement
-        )
-
     def add_neighbour(self, neighbour: Node) -> None:
-        # By identity, not ``==``: two distinct statements that happen to be
-        # structurally equal (`S.Touch(f); S.Touch(f);`) are two neighbours,
-        # and a write below both needs an edge to each.
-        if not any(existing is neighbour for existing in self.in_neighbours):
+        # Structurally equal statements (`S.Touch(f); S.Touch(f);`) are two
+        # neighbours, and a write below both needs an edge to each.
+        if neighbour not in self.in_neighbours:
             self.in_neighbours.append(neighbour)
+
+
+def _neighbour_positions(graph: DependencyGraph, node: Node) -> Optional[list[int]]:
+    """The positions in *graph* of *node*'s in-neighbours, in edge order, or
+    None when one of them is not a node of *graph*."""
+    positions: list[int] = []
+    for neighbour in node.in_neighbours:
+        position = next(
+            (index for index, own in enumerate(graph.nodes) if own is neighbour),
+            None,
+        )
+        if position is None:
+            return None
+        positions.append(position)
+    return positions
 
 
 class DependencyGraph:
@@ -392,15 +407,12 @@ class DependencyGraph:
         self.nodes.append(new_node)
 
     def get_node(self, statement: frog_ast.Statement) -> Node:
-        # Prefer identity match to avoid returning the wrong node when
-        # two structurally-equal statements exist (e.g. duplicate
-        # if-conditions).  Fall back to equality for callers that pass
-        # a copy.
+        """The node of *statement*, which must be one of the statement
+        objects the graph was built from. A structurally equal copy is not
+        accepted: it cannot tell two equal statements of the block apart, so
+        a lookup by equality may return the other one's node (F-381)."""
         for potential_node in self.nodes:
             if potential_node.statement is statement:
-                return potential_node
-        for potential_node in self.nodes:
-            if potential_node.statement == statement:
                 return potential_node
         raise ValueError("Statement not found in graph")
 
@@ -421,9 +433,21 @@ class DependencyGraph:
         return result
 
     def __eq__(self, __value: object) -> bool:
+        # The same statements, position by position, each with its edges to
+        # the same positions.
         if not isinstance(__value, DependencyGraph):
             return False
-        return self.nodes == __value.nodes
+        if len(self.nodes) != len(__value.nodes):
+            return False
+        for mine, theirs in zip(self.nodes, __value.nodes):
+            if mine.statement != theirs.statement:
+                return False
+            my_positions = _neighbour_positions(self, mine)
+            if my_positions is None or my_positions != _neighbour_positions(
+                __value, theirs
+            ):
+                return False
+        return True
 
 
 class BubbleSortFieldAssignment(visitors.BlockTransformer):
@@ -443,49 +467,57 @@ class BubbleSortFieldAssignment(visitors.BlockTransformer):
         field_names = {field.name for field in self.fields}
         field_assign_count = 0
         for stmt in block.statements:
-            if (
-                isinstance(
-                    stmt,
-                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
-                )
-                and isinstance(stmt.var, frog_ast.Variable)
-                and stmt.var.name in field_names
-            ):
+            if _field_write_name(stmt, field_names) is not None:
                 field_assign_count += 1
                 if field_assign_count >= 2:
                     break
         if field_assign_count < 2:
             return block
         graph = generate_dependency_graph(block, self.fields, {})
-        new_statements = list(copy.deepcopy(block.statements))
+        # Sort the graph's own nodes, not copies of the statements, so each
+        # statement keeps its own edges. Looking a copy up by structural
+        # equality gave the second of two equal statements the first one's
+        # node, whose edges miss the statements between them, and so moved a
+        # statement below a write it must stay above (F-381). A swap only
+        # exchanges two neighbours with no edge between them; the graph links
+        # every conflicting pair directly or through statements that stay
+        # between them, so no conflicting pair changes order.
+        order = list(graph.nodes)
         while True:
             swapped = False
-            for i in range(1, len(new_statements)):
-                first = new_statements[i - 1]
-                second = new_statements[i]
+            for i in range(1, len(order)):
+                first = order[i - 1]
+                second = order[i]
+                first_name = _field_write_name(first.statement, field_names)
+                second_name = _field_write_name(second.statement, field_names)
                 if (
-                    isinstance(
-                        first,
-                        (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
-                    )
-                    and isinstance(
-                        second,
-                        (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
-                    )
-                    and isinstance(first.var, frog_ast.Variable)
-                    and isinstance(second.var, frog_ast.Variable)
-                    and first.var.name in [field.name for field in self.fields]
-                    and second.var.name in [field.name for field in self.fields]
-                    and first.var.name > second.var.name
-                    and graph.get_node(first)
-                    not in graph.get_node(second).in_neighbours
+                    first_name is not None
+                    and second_name is not None
+                    and first_name > second_name
+                    and first not in second.in_neighbours
                 ):
-                    new_statements[i - 1] = second
-                    new_statements[i] = first
+                    order[i - 1] = second
+                    order[i] = first
                     swapped = True
             if not swapped:
                 break
-        return frog_ast.Block(new_statements)
+        return frog_ast.Block([copy.deepcopy(node.statement) for node in order])
+
+
+def _field_write_name(
+    statement: frog_ast.Statement, field_names: set[str]
+) -> Optional[str]:
+    """The field *statement* assigns or draws into as a whole, else None."""
+    if (
+        isinstance(
+            statement,
+            (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
+        )
+        and isinstance(statement.var, frog_ast.Variable)
+        and statement.var.name in field_names
+    ):
+        return statement.var.name
+    return None
 
 
 def _vars_of(node: frog_ast.ASTNode) -> list[frog_ast.Variable]:

@@ -2400,8 +2400,9 @@ class ProofEngine:
         )
 
         def is_return(node: frog_ast.ASTNode) -> bool:
-            return node in block.statements and isinstance(
-                node, frog_ast.ReturnStatement
+            # By identity: a top-level return of this very block.
+            return isinstance(node, frog_ast.ReturnStatement) and any(
+                node is statement for statement in block.statements
             )
 
         def contains_return(statement: frog_ast.Statement) -> bool:
@@ -2488,6 +2489,8 @@ class ProofEngine:
         while stack:
             node = stack.pop()
             sorted_statements.append(node.statement)
+            # Nodes compare by identity, so a placed statement releases only
+            # the edges to itself, not those to an equal statement elsewhere.
             for other_node in graph.nodes:
                 if node in other_node.in_neighbours:
                     other_node.in_neighbours.remove(node)

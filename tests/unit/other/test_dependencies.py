@@ -1,3 +1,5 @@
+import copy
+
 import pytest
 from proof_frog import frog_ast
 from proof_frog import frog_parser
@@ -439,6 +441,128 @@ def test_bubble_sort_still_sorts_independent_field_assignments() -> None:
     result = dependencies.BubbleSortFieldAssignment().transform_game(game)
     statements = [str(s) for s in result.methods[0].block.statements]
     assert statements == ["f = 1;", "y = p + 1;", "z = p;"]
+
+
+# ---------------------------------------------------------------------------
+# F-381: two equal statements are two graph nodes
+#
+# Bubble Sort Field Assignments swapped deep copies of the statements and
+# looked each copy's node up by structural equality, so the second of two
+# equal statements got the first one's node. That node has no edge from a
+# statement between them, which was then moved below a write it reads
+# before: `a = a + a; b = b + a; a = a + a;` became
+# `a = a + a; a = a + a; b = b + a;`.
+# ---------------------------------------------------------------------------
+
+
+def _bubble_sorted(body: str) -> list[str]:
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Int a;
+            Int b;
+            Void O() {{
+                {body}
+            }}
+        }}
+        """)
+    result = dependencies.BubbleSortFieldAssignment().transform_game(game)
+    return [str(s) for s in result.methods[0].block.statements]
+
+
+def test_f381_bubble_sort_keeps_reader_above_equal_later_write() -> None:
+    assert _bubble_sorted("a = a + a; b = b + a; a = a + a;") == [
+        "a = a + a;",
+        "b = b + a;",
+        "a = a + a;",
+    ]
+
+
+def test_f381_bubble_sort_keeps_writer_above_equal_later_reader() -> None:
+    # The second `a = a + b;` also reads the b that the middle statement
+    # writes, so it must stay below it for that reason too.
+    assert _bubble_sorted("a = a + b; b = b + a; a = a + b;") == [
+        "a = a + b;",
+        "b = b + a;",
+        "a = a + b;",
+    ]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # between the two equal statements
+        "a = a + a; b = b + b; a = a + a;",
+        # before both
+        "b = b + b; a = a + a; a = a + a;",
+    ],
+)
+def test_f381_bubble_sort_moves_independent_write_past_equal_statements(
+    body: str,
+) -> None:
+    assert _bubble_sorted(body) == ["a = a + a;", "a = a + a;", "b = b + b;"]
+
+
+def test_f381_graph_gives_equal_statements_their_own_nodes() -> None:
+    method = frog_parser.parse_method("""
+        Void f() {
+            a = a + a;
+            b = b + a;
+            a = a + a;
+        }
+        """)
+    statements = method.block.statements
+    graph = dependencies.generate_dependency_graph(
+        method.block,
+        [frog_ast.Field(frog_ast.IntType(), name, None) for name in ("a", "b")],
+        {},
+    )
+    first, middle, second = (graph.get_node(s) for s in statements)
+    assert first is not second
+    assert middle in second.in_neighbours
+    assert middle not in first.in_neighbours
+
+
+def test_f381_get_node_refuses_an_equal_copy() -> None:
+    method = frog_parser.parse_method("Void f() { a = a + a; b = b + a; a = a + a; }")
+    graph = dependencies.generate_dependency_graph(method.block, [], {})
+    with pytest.raises(ValueError):
+        graph.get_node(copy.deepcopy(method.block.statements[2]))
+
+
+def test_f381_graph_equality_tells_equal_statements_apart() -> None:
+    """Two graphs over `a = a + a; b = b + a; a = a + a;` whose middle node
+    has an edge to a different one of the two equal statements are different
+    graphs. Comparing nodes by structure took them for the same graph."""
+    method = frog_parser.parse_method("Void f() { a = a + a; b = b + a; a = a + a; }")
+    statements = method.block.statements
+
+    def graph(edges: list[list[int]]) -> dependencies.DependencyGraph:
+        nodes = [dependencies.Node(statement) for statement in statements]
+        for node, targets in zip(nodes, edges):
+            for target in targets:
+                node.add_neighbour(nodes[target])
+        return dependencies.DependencyGraph(nodes)
+
+    assert graph([[], [0], [1, 0]]) == graph([[], [0], [1, 0]])
+    assert graph([[], [0], []]) != graph([[], [2], []])
+
+
+def test_f381_topological_sort_keeps_reader_between_equal_writes() -> None:
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int a;
+            Int b;
+            Int O() {
+                a = a + a;
+                b = b + a;
+                a = a + a;
+                return a + b;
+            }
+        }
+        """)
+    sorted_game = proof_engine.ProofEngine().sort_game(game)
+    statements = [str(s) for s in sorted_game.methods[0].block.statements]
+    assert statements == ["a = a + a;", "b = b + a;", "a = a + a;", "return a + b;"]
 
 
 # ---------------------------------------------------------------------------

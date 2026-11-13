@@ -351,6 +351,53 @@ def test_inline_near_miss_free_var_modified():
     )
 
 
+def test_inline_near_miss_free_var_written_inside_use_statement():
+    """F-149: a write to a free variable earlier in the branch that holds
+    the use blocks the inline, and the near miss names the variable."""
+    game = frog_parser.parse_game(
+        "Game T() {\n"
+        "    Int ctr;\n"
+        "    Int O(Bool b) {\n"
+        "        Int v = ctr + 1;\n"
+        "        if (b) {\n"
+        "            ctr = 100;\n"
+        "            return v;\n"
+        "        }\n"
+        "        return 0;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    assert InlineSingleUseVariable().apply(game, ctx) == game
+    misses = [nm for nm in ctx.near_misses if nm.variable == "v"]
+    assert len(misses) == 1
+    assert misses[0].transform_name == "Inline Single-Use Variable"
+    assert "'ctr'" in misses[0].reason
+    assert "inside the statement" in misses[0].reason
+
+
+def test_inline_no_near_miss_when_branch_writes_other_variable():
+    """F-149 control: a write to another variable in the branch neither
+    blocks the inline nor reports a near miss."""
+    game = frog_parser.parse_game(
+        "Game T() {\n"
+        "    Int ctr;\n"
+        "    Int other;\n"
+        "    Int O(Bool b) {\n"
+        "        Int v = ctr + 1;\n"
+        "        if (b) {\n"
+        "            other = 100;\n"
+        "            return v;\n"
+        "        }\n"
+        "        return 0;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    assert InlineSingleUseVariable().apply(game, ctx) != game
+    assert not [nm for nm in ctx.near_misses if nm.variable == "v"]
+
+
 def test_extract_tuple_near_miss_shadowed_redeclaration():
     """ExtractRepeatedTupleAccess reports a near-miss (and terminates) when
     the only other occurrence of ``v[i]`` is inside an earlier branch block

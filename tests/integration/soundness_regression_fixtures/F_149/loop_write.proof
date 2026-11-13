@@ -1,0 +1,17 @@
+// Proof for loop_write.game (target, hypothesis and expected outcome in its
+// header).
+import 'dummy.primitive';
+import 'dummy.scheme';
+import 'loop_write.game';
+
+proof:
+
+let:
+    IdScheme D = IdScheme();
+
+theorem:
+    LoopWrite(D);
+
+games:
+    LoopWrite(D).Left against LoopWrite(D).Adversary;
+    LoopWrite(D).Right against LoopWrite(D).Adversary;

@@ -1,0 +1,16 @@
+// Proof for branch_control.game (a positive control; see its header).
+import 'dummy.primitive';
+import 'dummy.scheme';
+import 'branch_control.game';
+
+proof:
+
+let:
+    IdScheme D = IdScheme();
+
+theorem:
+    BranchControl(D);
+
+games:
+    BranchControl(D).Left against BranchControl(D).Adversary;
+    BranchControl(D).Right against BranchControl(D).Adversary;

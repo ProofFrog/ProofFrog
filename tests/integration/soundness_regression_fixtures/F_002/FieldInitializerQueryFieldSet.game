@@ -1,0 +1,43 @@
+// FreshInputRFToUniform, the query in a field initializer of
+// FieldInitializerQuery.game with v drawn from a field set S instead of
+// H.domain. S records no query of H either, so the same distinguisher
+// applies: Peek(), then Fresh(); in Real, Fresh's answer is always one of
+// Peek's two values.
+Game Real(Int m, Function<BitString<1>, BitString<m>> H) {
+    Set<BitString<1>> S;
+    BitString<m> y0 = H(0b0);
+    BitString<m> y1 = H(0b1);
+    Void Swap() {
+        BitString<m> t = y0;
+        y0 = y1;
+        y1 = t;
+    }
+    [BitString<m>, BitString<m>] Peek() {
+        return [y0, y1];
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[S] BitString<1>;
+        return H(v);
+    }
+}
+
+Game Random(Int m, Function<BitString<1>, BitString<m>> H) {
+    Set<BitString<1>> S;
+    BitString<m> y0 = H(0b0);
+    BitString<m> y1 = H(0b1);
+    Void Swap() {
+        BitString<m> t = y0;
+        y0 = y1;
+        y1 = t;
+    }
+    [BitString<m>, BitString<m>] Peek() {
+        return [y0, y1];
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[S] BitString<1>;
+        BitString<m> u <- BitString<m>;
+        return u;
+    }
+}
+
+export as FieldInitializerQueryFieldSet;

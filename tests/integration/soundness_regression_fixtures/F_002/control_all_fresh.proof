@@ -1,0 +1,14 @@
+import 'control_all_fresh.game';
+
+proof:
+
+let:
+    Int n;
+    Int m;
+
+theorem:
+    ControlAllFresh(n, m);
+
+games:
+    ControlAllFresh(n, m).Real against ControlAllFresh(n, m).Adversary;
+    ControlAllFresh(n, m).Random against ControlAllFresh(n, m).Adversary;

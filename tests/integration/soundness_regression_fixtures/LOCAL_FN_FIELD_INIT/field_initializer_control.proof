@@ -1,0 +1,14 @@
+import 'FieldInitializerControl.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+
+theorem:
+    FieldInitializerControl(m, H);
+
+games:
+    FieldInitializerControl(m, H).Real against FieldInitializerControl(m, H).Adversary;
+    FieldInitializerControl(m, H).Ideal against FieldInitializerControl(m, H).Adversary;

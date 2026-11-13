@@ -1,0 +1,37 @@
+// FreshInputRFToUniform (F-002), a copy of the random function in a field
+// initializer. H is sampled in the proof's let:; the field G is initialized
+// to H (Reset writes G, so it stays a field), and Probe queries H through G.
+// Distinguisher: call Probe(0b0), Probe(0b1), then Fresh(), and output
+// whether Fresh's answer equals one of Probe's. In Real it always does; in
+// Random only with probability at most 2 / 2^m. The pass looked for copies
+// of H in the methods but not in field initializers.
+Game Real(Int m, Function<BitString<1>, BitString<m>> H) {
+    Function<BitString<1>, BitString<m>> G = H;
+    Void Reset(Function<BitString<1>, BitString<m>> F) {
+        G = F;
+    }
+    BitString<m> Probe(BitString<1> x) {
+        return G(x);
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[H.domain] BitString<1>;
+        return H(v);
+    }
+}
+
+Game Random(Int m, Function<BitString<1>, BitString<m>> H) {
+    Function<BitString<1>, BitString<m>> G = H;
+    Void Reset(Function<BitString<1>, BitString<m>> F) {
+        G = F;
+    }
+    BitString<m> Probe(BitString<1> x) {
+        return G(x);
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[H.domain] BitString<1>;
+        BitString<m> u <- BitString<m>;
+        return u;
+    }
+}
+
+export as FieldInitializerCopy;

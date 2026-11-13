@@ -1,0 +1,14 @@
+import 'FieldInitializerReadsLet.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+
+theorem:
+    FieldInitializerReadsLet(m, H);
+
+games:
+    FieldInitializerReadsLet(m, H).Real against FieldInitializerReadsLet(m, H).Adversary;
+    FieldInitializerReadsLet(m, H).Ideal against FieldInitializerReadsLet(m, H).Adversary;

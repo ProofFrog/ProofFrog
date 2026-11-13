@@ -3216,6 +3216,40 @@ def test_local_fn_near_miss_sample_skippable_by_initialize_return() -> None:
     assert any("read before its sample" in nm.reason for nm in _local_fn_misses(ctx))
 
 
+@pytest.mark.parametrize(
+    "initializer, reason",
+    [
+        (
+            "H(0^8)",
+            "Candidate let binding 'H' is referenced in the initializer of "
+            "field 'y'",
+        ),
+        ("F(0^8)", "Field 'F' may be read before its sample: a field initializer"),
+    ],
+)
+def test_local_fn_near_miss_field_initializer(initializer: str, reason: str) -> None:
+    """Field initializers run before Initialize: one that queries H, or reads
+    F before its sample, blocks the rewrite."""
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Function<BitString<8>, BitString<16>> F;
+            BitString<16> y = {initializer};
+            Void Initialize() {{
+                F <- Function<BitString<8>, BitString<16>>;
+            }}
+            BitString<16> Peek() {{
+                return y;
+            }}
+            BitString<16> Hash(BitString<8> x) {{
+                return F(x);
+            }}
+        }}
+        """)
+    ctx = _local_fn_ctx(sampled={"H"})
+    assert LocalFunctionFieldToLet().apply(game, ctx) == game
+    assert any(reason in nm.reason for nm in _local_fn_misses(ctx))
+
+
 # ---------------------------------------------------------------------------
 # FoldLiteralConditions
 # ---------------------------------------------------------------------------
@@ -4083,6 +4117,13 @@ def test_fresh_input_near_miss_on_uninserted_call() -> None:
     )
     assert len(misses) == 1
     assert "does not add its argument" in misses[0].reason
+    # The fix is to record every query in seen, not to switch to
+    # <-uniq[H.domain], which holds no query either.
+    assert misses[0].suggestion == (
+        "Draw every point the random function is queried on (its matching "
+        "component) with <-uniq[seen], or insert it into 'seen' in Initialize "
+        "before the draw"
+    )
 
 
 def test_fresh_input_no_near_miss_on_recorded_value() -> None:
@@ -4115,6 +4156,219 @@ def test_fresh_input_near_miss_on_nondeterministic_insertion(
     assert misses[0].variable == "H"
     assert f"'Hash' inserts '{inserted}' into 'seen'" in misses[0].reason
     assert "not annotated deterministic" in misses[0].reason
+
+
+def _fresh_input_domain_misses(initialize: str, oracle: str = "") -> list[NearMiss]:
+    ctx = _make_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Function<BitString<2>, BitString<2>> H;
+            BitString<2> y;
+            Void Initialize() {{
+                H <- Function<BitString<2>, BitString<2>>;
+                {initialize}
+            }}
+            {oracle}
+            BitString<2> Fresh() {{
+                BitString<2> v <-uniq[H.domain] BitString<2>;
+                return H(v);
+            }}
+        }}
+        """)
+    FreshInputRFToUniform().apply(game, ctx)
+    return [
+        nm for nm in ctx.near_misses if nm.transform_name == "Fresh Input RF To Uniform"
+    ]
+
+
+@pytest.mark.parametrize(
+    "initialize, oracle, method, point",
+    [
+        ("", "BitString<2> Hash(BitString<2> x) { return H(x); }", "Hash", "x"),
+        ("y = H(0b00);", "", "Initialize", "0b00"),
+        # A draw overwritten before the query (this near miss used to go
+        # through the insertion branch, placed where diagnoses hide it).
+        (
+            "",
+            "BitString<2> Hash(BitString<2> a) { "
+            "BitString<2> x <-uniq[H.domain] BitString<2>; x = a; return H(x); }",
+            "Hash",
+            "x",
+        ),
+        # A draw the walk does not see: made in another method.
+        (
+            "y <-uniq[H.domain] BitString<2>;",
+            "BitString<2> Hash() { return H(y); }",
+            "Hash",
+            "y",
+        ),
+    ],
+)
+def test_fresh_input_near_miss_on_undrawn_rf_domain_query(
+    initialize: str, oracle: str, method: str, point: str
+) -> None:
+    """F-002: H.domain holds only the points <-uniq[H.domain] drew, so a query
+    of H on any point not drawn there earlier in the same method may be on
+    v, and Fresh keeps H(v)."""
+    misses = _fresh_input_domain_misses(initialize, oracle)
+    assert len(misses) == 1
+    assert (
+        f"'{method}' queries 'H' on '{point}', which no earlier "
+        f"<-uniq[H.domain] draw in '{method}' fixes" in misses[0].reason
+    )
+    assert f"'{point}' may be the point drawn here" in misses[0].reason
+    # Fields are renamed in canonical diffs: no variable filter.  The near
+    # miss sits where the rewrite was declined.
+    assert misses[0].variable is None
+    assert misses[0].method == "Fresh"
+    assert misses[0].suggestion is not None
+    assert "drawn with <-uniq[H.domain] earlier in the same method" in (
+        misses[0].suggestion
+    )
+
+
+@pytest.mark.parametrize(
+    "exclusion, initialize, suggestion",
+    [
+        ("H.domain", "", "Make the query in a method, on a point drawn there"),
+        # The insertion is there already; a field initializer's query still
+        # does not count, so the near miss must not suggest inserting it.
+        (
+            "seen",
+            "seen = seen union {0b00};",
+            "or in Initialize after inserting the point into 'seen', before "
+            "the draw",
+        ),
+    ],
+)
+def test_fresh_input_near_miss_on_query_in_field_initializer(
+    exclusion: str, initialize: str, suggestion: str
+) -> None:
+    """A sampled let: H is the random function in field initializers, and a
+    query there never counts, with either kind of exclusion set."""
+    ctx = _make_ctx()
+    ctx.proof_let_types.set(
+        "H",
+        frog_ast.FunctionType(
+            frog_ast.BitStringType(frog_ast.Integer(2)),
+            frog_ast.BitStringType(frog_ast.Integer(2)),
+        ),
+    )
+    ctx.sampled_let_names = {"H"}
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Set<BitString<2>> seen;
+            BitString<2> y = H(0b00);
+            Void Initialize() {{
+                {initialize}
+            }}
+            BitString<2> Peek() {{
+                return y;
+            }}
+            BitString<2> Fresh() {{
+                BitString<2> v <-uniq[{exclusion}] BitString<2>;
+                return H(v);
+            }}
+        }}
+        """)
+    FreshInputRFToUniform().apply(game, ctx)
+    misses = [
+        nm for nm in ctx.near_misses if nm.transform_name == "Fresh Input RF To Uniform"
+    ]
+    assert len(misses) == 1
+    assert misses[0].reason.startswith(
+        "the initializer of field 'y' queries 'H' on '0b00', and a query in a "
+        "field initializer never counts"
+    )
+    assert "does not add its argument" not in misses[0].reason
+    assert misses[0].suggestion is not None
+    assert suggestion in misses[0].suggestion
+    assert "insert it into" not in misses[0].suggestion
+    assert misses[0].variable is None
+    assert misses[0].method == "Fresh"
+
+
+def test_fresh_input_near_miss_does_not_quote_minted_names() -> None:
+    """An alpha-renamed local (__a0__) is not a name the user wrote, so the
+    near miss describes the point instead of quoting it."""
+    misses = _fresh_input_domain_misses(
+        "",
+        "BitString<2> Hash(BitString<2> a) { "
+        "BitString<2> __a0__ <-uniq[H.domain] BitString<2>; __a0__ = a; "
+        "return H(__a0__); }",
+    )
+    assert len(misses) == 1
+    assert "'Hash' queries 'H' on a point that no earlier <-uniq[H.domain] draw" in (
+        misses[0].reason
+    )
+    assert "that point may be the point drawn here" in misses[0].reason
+    assert "__a0__" not in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "exclusion, oracle, reason, suggestion",
+    [
+        # Another function's hidden set says nothing about H's queries.
+        (
+            "K.domain",
+            "",
+            "'K.domain' is neither 'H.domain' nor a game field",
+            "Draw the input with <-uniq[H.domain], or from a never-reset field set",
+        ),
+        # A method parameter is not kept between calls.
+        (
+            "S",
+            "",
+            "'S' is neither 'H.domain' nor a game field",
+            "Draw the input with <-uniq[H.domain], or from a never-reset field set",
+        ),
+        # A field set that an oracle resets.
+        (
+            "seen",
+            "Void Reset() { seen = {}; }",
+            "'seen' is assigned other than by 'seen = seen union {..}'",
+            "Only add to 'seen'",
+        ),
+    ],
+)
+def test_fresh_input_near_miss_on_unsuitable_exclusion_set(
+    exclusion: str, oracle: str, reason: str, suggestion: str
+) -> None:
+    """When the exclusion set itself is the problem, the near miss says so
+    rather than blaming a call site."""
+    ctx = _make_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Function<BitString<2>, BitString<2>> H;
+            Function<BitString<2>, BitString<2>> K;
+            Set<BitString<2>> seen;
+            Void Initialize() {{
+                H <- Function<BitString<2>, BitString<2>>;
+                K <- Function<BitString<2>, BitString<2>>;
+            }}
+            {oracle}
+            BitString<2> Fresh(Set<BitString<2>> S) {{
+                BitString<2> v <-uniq[{exclusion}] BitString<2>;
+                return H(v);
+            }}
+        }}
+        """)
+    FreshInputRFToUniform().apply(game, ctx)
+    misses = [
+        nm for nm in ctx.near_misses if nm.transform_name == "Fresh Input RF To Uniform"
+    ]
+    assert len(misses) == 1
+    assert reason in misses[0].reason
+    assert misses[0].suggestion is not None
+    assert suggestion in misses[0].suggestion
+
+
+def test_fresh_input_no_near_miss_when_every_rf_domain_query_is_drawn() -> None:
+    assert not _fresh_input_domain_misses(
+        "BitString<2> u <-uniq[H.domain] BitString<2>; y = H(u);",
+        "BitString<2> Hash() { BitString<2> x <-uniq[H.domain] BitString<2>; "
+        "return H(x); }",
+    )
 
 
 # ---------------------------------------------------------------------------

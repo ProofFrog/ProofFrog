@@ -457,6 +457,8 @@ The statement `Type x <-uniq[S] Type;` has the following semantics:
 3. Semantically, this is equivalent to rejection sampling: sample from `Type`, if the result is in `S` then resample, repeat until a fresh value is obtained.
 4. The probability of needing to resample (collision probability) is `|S| / |Type|` per trial.
 
+For a sampled `Function` `RF`, the exclusion set may be written `RF.domain`. It names a hidden set kept for that function: it starts empty and holds exactly the points drawn by `x <-uniq[RF.domain] T;`. Evaluating `RF(x)` does not add `x` to it, so such a draw avoids the earlier `<-uniq[RF.domain]` draws but not the points the game (or the adversary, through an oracle) queried `RF` on. `RF.domain` can be read but not assigned.
+
 This is used in contexts where freshness is important, such as ensuring nonces are never reused. The `UniqueSampling` helper game captures the assumption that sampling with replacement is indistinguishable from sampling without replacement (valid when the collision probability is negligible).
 
 ### 6.7 Map Semantics

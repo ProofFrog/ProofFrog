@@ -1,0 +1,27 @@
+// Positive control for F-002: every query of RF is on a fresh
+// <-uniq[RF.domain] draw, and those draws are pairwise distinct, so each
+// RF(v) is a fresh uniform value.
+Game Real(Int n, Int m) {
+    Function<BitString<n>, BitString<m>> RF;
+    Void Initialize() {
+        RF <- Function<BitString<n>, BitString<m>>;
+    }
+    BitString<m> Fresh() {
+        BitString<n> v <-uniq[RF.domain] BitString<n>;
+        return RF(v);
+    }
+}
+
+Game Random(Int n, Int m) {
+    Function<BitString<n>, BitString<m>> RF;
+    Void Initialize() {
+        RF <- Function<BitString<n>, BitString<m>>;
+    }
+    BitString<m> Fresh() {
+        BitString<n> v <-uniq[RF.domain] BitString<n>;
+        BitString<m> u <- BitString<m>;
+        return u;
+    }
+}
+
+export as ControlAllFresh;

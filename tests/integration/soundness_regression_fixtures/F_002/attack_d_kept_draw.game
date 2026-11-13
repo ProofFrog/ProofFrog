@@ -1,0 +1,39 @@
+// FreshInputRFToUniform (F-002). Fresh draws v <-uniq[RF.domain] and queries
+// RF(v); Probe lets the adversary query RF on any point. RF.domain holds only
+// the points <-uniq[RF.domain] has drawn, not Probe's queries, so in Real, v
+// may be a point Probe already queried, and Probe(v) after the draw repeats
+// the query; in Random, Fresh returns a fresh uniform value. Distinguisher
+// (n = 1): call Probe(0), Probe(1), then Fresh(), and output whether Fresh's
+// answer equals one of Probe's. In Real it always does; in Random only with
+// probability at most 2 / 2^m. The pass trusted RF.domain to hold every
+// query of RF and rewrote RF(v) to a fresh sample.
+Game Real(Int n, Int m) {
+    Function<BitString<n>, BitString<m>> RF;
+    Void Initialize() {
+        RF <- Function<BitString<n>, BitString<m>>;
+    }
+    BitString<m> Probe(BitString<n> x) {
+        return RF(x);
+    }
+    BitString<m> Fresh() {
+        BitString<n> v <-uniq[RF.domain] BitString<n>;
+        return RF(v);
+    }
+}
+
+Game Random(Int n, Int m) {
+    Function<BitString<n>, BitString<m>> RF;
+    Void Initialize() {
+        RF <- Function<BitString<n>, BitString<m>>;
+    }
+    BitString<m> Probe(BitString<n> x) {
+        return RF(x);
+    }
+    BitString<m> Fresh() {
+        BitString<n> v <-uniq[RF.domain] BitString<n>;
+        BitString<m> u <- BitString<m>;
+        return u;
+    }
+}
+
+export as AttackDKeptDraw;

@@ -1,0 +1,52 @@
+// Positive control for stale_type.proof: Left computes the Int H(x) of the
+// old s after the update of s; Right computes the same Int in a local typed
+// Int before the update. Both return the same value on every call, and
+// Blocked Local Absorption, which re-declares Left's x as Int, still makes
+// them agree.
+// Expected: Proof Succeeded.
+
+Game Left(Group G, Int q, Function<ModInt<q>, Int> H) {
+    ModInt<q> s;
+    GroupElem<G> h;
+    Set<Int> S;
+
+    Void Initialize() {
+        s = 0;
+        h = G.generator;
+    }
+
+    Void Add(Int z) {
+        S = S union {z};
+    }
+
+    GroupElem<G> Get(ModInt<q> r) {
+        ModInt<q> x = s;
+        s = s + r;
+        h = h ^ s;
+        return h ^ H(x);
+    }
+}
+
+Game Right(Group G, Int q, Function<ModInt<q>, Int> H) {
+    ModInt<q> s;
+    GroupElem<G> h;
+    Set<Int> S;
+
+    Void Initialize() {
+        s = 0;
+        h = G.generator;
+    }
+
+    Void Add(Int z) {
+        S = S union {z};
+    }
+
+    GroupElem<G> Get(ModInt<q> r) {
+        Int x = H(s);
+        s = s + r;
+        h = h ^ s;
+        return h ^ x;
+    }
+}
+
+export as StaleTypeControl;

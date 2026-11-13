@@ -1,0 +1,21 @@
+// D is a ModInt field set to 0, so D ^ 0 is the ModInt one: for n = 0,
+// Left (q = 2) computes 1 + 1 == 0 in ModInt<2>, which is true, and Right
+// (p = 3) computes it in ModInt<3>, which is false. Forwarding the Int
+// literal 0 for D turns both into the Int expression 0 ^ n + 0 ^ n == 0.
+Game Left(Int q, Int p) {
+    ModInt<q> D;
+    Bool Probe(Int n) {
+        D = 0;
+        return D ^ n + D ^ n == D;
+    }
+}
+
+Game Right(Int q, Int p) {
+    ModInt<p> D;
+    Bool Probe(Int n) {
+        D = 0;
+        return D ^ n + D ^ n == D;
+    }
+}
+
+export as ZeroPowerBase;

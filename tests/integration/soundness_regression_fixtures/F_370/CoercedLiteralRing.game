@@ -1,0 +1,26 @@
+// f is a ModInt<2> field set to the Int literal 1, so it holds 1 mod 2 and
+// f + f == f - f is true (0 == 0). Forwarding the literal (an Int) would
+// make it 1 + 1 == 1 - 1, which is false, so Left would match Right.
+Game Left() {
+    ModInt<2> f;
+    Bool Get() {
+        f = 1;
+        return f + f == f - f;
+    }
+    ModInt<2> Read() {
+        return f;
+    }
+}
+
+Game Right() {
+    ModInt<2> f;
+    Bool Get() {
+        f = 1;
+        return false;
+    }
+    ModInt<2> Read() {
+        return f;
+    }
+}
+
+export as CoercedLiteralRing;

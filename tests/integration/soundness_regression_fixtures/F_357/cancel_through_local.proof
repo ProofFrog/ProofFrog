@@ -1,0 +1,18 @@
+// Target: the algebra normalizer via Cancel Through Local. See
+// CancelThroughLocal.game.
+// Expected: Proof Failed.
+import 'CancelThroughLocal.game';
+
+proof:
+
+let:
+    Group G;
+    Int q;
+    Function<GroupElem<G>, ModInt<q>> H;
+
+theorem:
+    CancelThroughLocalConstant(G, q, H);
+
+games:
+    CancelThroughLocalConstant(G, q, H).Left against CancelThroughLocalConstant(G, q, H).Adversary;
+    CancelThroughLocalConstant(G, q, H).Right against CancelThroughLocalConstant(G, q, H).Adversary;

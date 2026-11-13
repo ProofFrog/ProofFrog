@@ -1,0 +1,14 @@
+import 'CoercedInvariant.game';
+
+proof:
+
+let:
+    Int q;
+    Group G;
+
+theorem:
+    CoercedInvariant(q, G);
+
+games:
+    CoercedInvariant(q, G).Left against CoercedInvariant(q, G).Adversary;
+    CoercedInvariant(q, G).Right against CoercedInvariant(q, G).Adversary;

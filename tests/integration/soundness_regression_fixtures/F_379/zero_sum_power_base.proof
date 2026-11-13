@@ -1,0 +1,16 @@
+// Forward Literal Field Write must not make a sum of two reads of a ModInt
+// field the Int 0 + 0: the two games differ for q = 2, p = 3.
+import 'ZeroSumPowerBase.game';
+
+proof:
+
+let:
+    Int q;
+    Int p;
+
+theorem:
+    ZeroSumPowerBase(q, p);
+
+games:
+    ZeroSumPowerBase(q, p).Left against ZeroSumPowerBase(q, p).Adversary;
+    ZeroSumPowerBase(q, p).Right against ZeroSumPowerBase(q, p).Adversary;

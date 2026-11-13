@@ -1,0 +1,16 @@
+// Forward Literal Field Write must not put the Int literal 0 for a ModInt
+// field into the base of a power: the two games differ for q = 2, p = 3.
+import 'ZeroPowerBase.game';
+
+proof:
+
+let:
+    Int q;
+    Int p;
+
+theorem:
+    ZeroPowerBase(q, p);
+
+games:
+    ZeroPowerBase(q, p).Left against ZeroPowerBase(q, p).Adversary;
+    ZeroPowerBase(q, p).Right against ZeroPowerBase(q, p).Adversary;

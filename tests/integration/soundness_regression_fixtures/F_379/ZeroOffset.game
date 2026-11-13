@@ -1,0 +1,17 @@
+// D is a ModInt field reset to 0 before each read, so a + D is a: both
+// games return a.
+Game Left(Int q) {
+    ModInt<q> D;
+    ModInt<q> Get(ModInt<q> a) {
+        D = 0;
+        return a + D;
+    }
+}
+
+Game Right(Int q) {
+    ModInt<q> Get(ModInt<q> a) {
+        return a;
+    }
+}
+
+export as ZeroOffset;

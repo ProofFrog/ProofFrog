@@ -1,0 +1,14 @@
+import 'CoercedLiteral.game';
+
+proof:
+
+let:
+    Int q;
+    Group G;
+
+theorem:
+    CoercedLiteral(q, G);
+
+games:
+    CoercedLiteral(q, G).Left against CoercedLiteral(q, G).Adversary;
+    CoercedLiteral(q, G).Right against CoercedLiteral(q, G).Adversary;

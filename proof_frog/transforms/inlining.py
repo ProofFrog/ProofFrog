@@ -6551,3 +6551,91 @@ class SplitOpaqueTupleField(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return SplitOpaqueTupleFieldTransformer(ctx=ctx).transform(game)
+
+
+class MergeBareDeclaration(TransformPass):
+    """``T v; ... v = e;`` becomes ``... T v = e;``.
+
+    The bare declaration's default value is never read when nothing between
+    it and the first assignment (in the same block, at the top level)
+    mentions ``v`` and ``e`` does not read ``v``; the two forms are then the
+    same program. Inlining a method with an early return leaves exactly this
+    shape once all but one of the result variable's assignments have been
+    removed, and the merged form is what the rest of the pipeline expects.
+    """
+
+    name = "Merge Bare Declaration"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return _MergeBareDeclarationTransformer(ctx).transform(game)
+
+
+def _is_plain_assignment_to(statement: frog_ast.Statement, name: str) -> bool:
+    return (
+        isinstance(statement, frog_ast.Assignment)
+        and statement.the_type is None
+        and statement.var == frog_ast.Variable(name)
+    )
+
+
+class _MergeBareDeclarationTransformer(BlockTransformer):
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
+    def _note_not_merged(self, name: str, reason: str) -> None:
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Merge Bare Declaration",
+                reason=f"Bare declaration not merged with its assignment: {reason}",
+                location=None,
+                suggestion=None,
+                variable=name,
+                method=None,
+            )
+        )
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        statements = list(block.statements)
+        for index, statement in enumerate(statements):
+            if not isinstance(statement, frog_ast.VariableDeclaration):
+                continue
+            name = statement.name
+            for later in range(index + 1, len(statements)):
+                candidate = statements[later]
+                if _is_plain_assignment_to(candidate, name):
+                    assert isinstance(candidate, frog_ast.Assignment)
+                    if name in referenced_variable_names(candidate.value):
+                        self._note_not_merged(
+                            name,
+                            "the assigned value reads the variable, i.e. the "
+                            "declaration's default value",
+                        )
+                        break
+                    merged = frog_ast.Assignment(
+                        copy.deepcopy(statement.type),
+                        frog_ast.Variable(name),
+                        candidate.value,
+                    )
+                    return frog_ast.Block(
+                        statements[:index]
+                        + statements[index + 1 : later]
+                        + [merged]
+                        + statements[later + 1 :]
+                    )
+                if name in referenced_variable_names(candidate):
+                    # Near miss only for a read of the default value before
+                    # the assignment; a statement that writes the variable
+                    # is its first write, and a later assignment an update.
+                    if not reassigns_or_rebinds({name}, candidate) and any(
+                        _is_plain_assignment_to(rest, name)
+                        for rest in statements[later + 1 :]
+                    ):
+                        self._note_not_merged(
+                            name,
+                            "a statement between the declaration and the "
+                            "assignment reads the variable",
+                        )
+                    break
+        return block

@@ -1,0 +1,17 @@
+// Target: the algebra normalizer via Express After Update. See
+// ExpressAfterUpdate.game.
+// Expected: Proof Failed.
+import 'ExpressAfterUpdate.game';
+
+proof:
+
+let:
+    Group G;
+    Int q;
+
+theorem:
+    ExpressAfterUpdateConstant(G, q);
+
+games:
+    ExpressAfterUpdateConstant(G, q).Left against ExpressAfterUpdateConstant(G, q).Adversary;
+    ExpressAfterUpdateConstant(G, q).Right against ExpressAfterUpdateConstant(G, q).Adversary;

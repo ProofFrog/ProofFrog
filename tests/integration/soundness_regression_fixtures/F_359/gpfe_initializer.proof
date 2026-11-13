@@ -1,0 +1,22 @@
+// Target: Generator Power Field To Exponent. See GpfeMid.game.
+// The middle game's Q starts at the default value of a field, the endpoints'
+// Q at the let element h. Distinguisher for hop 1: call GetQ() first and
+// output 1 iff it returns h. Endpoint: always 1; middle game: only if h
+// equals that default value.
+// Expected: Proof Failed.
+import 'GpfeEnds.game';
+import 'GpfeMid.game';
+
+proof:
+
+let:
+    Group G;
+    GroupElem<G> h;
+
+theorem:
+    GpfeEnds(G, h);
+
+games:
+    GpfeEnds(G, h).Left against GpfeEnds(G, h).Adversary;
+    GpfeMid(G).Left against GpfeEnds(G, h).Adversary;
+    GpfeEnds(G, h).Right against GpfeEnds(G, h).Adversary;

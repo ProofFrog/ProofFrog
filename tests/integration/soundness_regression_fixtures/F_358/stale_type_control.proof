@@ -1,0 +1,17 @@
+// Positive control for stale_type.proof. See StaleTypeControl.game.
+// Expected: Proof Succeeded.
+import 'StaleTypeControl.game';
+
+proof:
+
+let:
+    Group G;
+    Int q;
+    Function<ModInt<q>, Int> H;
+
+theorem:
+    StaleTypeControl(G, q, H);
+
+games:
+    StaleTypeControl(G, q, H).Left against StaleTypeControl(G, q, H).Adversary;
+    StaleTypeControl(G, q, H).Right against StaleTypeControl(G, q, H).Adversary;

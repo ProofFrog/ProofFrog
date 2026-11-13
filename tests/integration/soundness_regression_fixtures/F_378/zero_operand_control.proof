@@ -1,0 +1,15 @@
+// Control proof for ZeroOperandControl.game (see its header for the expected
+// outcome).
+import 'ZeroOperandControl.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    ZeroOperandControl(q);
+
+games:
+    ZeroOperandControl(q).Left against ZeroOperandControl(q).Adversary;
+    ZeroOperandControl(q).Right against ZeroOperandControl(q).Adversary;

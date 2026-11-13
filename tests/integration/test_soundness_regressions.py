@@ -187,10 +187,43 @@ CASES = [
      "(x - x) ^ 0 became the Int 0 ^ 0, which Symbolic Computation folded to 1"),
     ("F-364", "power_of_zero_control.proof", "accept", "ModIntSimplification",
      "positive control: x^0 * y, and x ^ 0 returned or stored as ModInt<q>"),
+    ("F-357", "exponent_constant.proof", "type_error", "ModIntCancellation",
+     "a ModInt<q> exponent equal to the constant 2 was rebuilt as the Int 2"),
+    ("F-357", "express_after_update.proof", "type_error", "ExpressAfterUpdate",
+     "the moved value's ModInt<q> constant exponent was rebuilt as an Int"),
+    ("F-357", "cancel_through_local.proof", "type_error", "CancelThroughLocal",
+     "the substituted value's ModInt<q> constant exponent was rebuilt as an Int"),
+    ("F-357", "zero_constant_control.proof", "type_error", "ModIntCancellation",
+     "former positive control (a ModInt<q> zero cancels to 0); the type"
+     " checker now refuses its ModInt<q> group exponent"),
+    ("F-358", "stale_type.proof", "type_error", "BlockedLocalAbsorption",
+     "a second round typed the re-declared local by the stale type map"),
+    ("F-358", "stale_type_control.proof", "type_error", "BlockedLocalAbsorption",
+     "former positive control (the Int re-declaring round fires); the type"
+     " checker now refuses its ModInt<q> group exponent"),
+    ("F-359", "gpfe_initializer.proof", "reject", "GeneratorPowerFieldToExponent",
+     "another field's initializer kept naming the removed field, read as a let"),
+    ("F-359", "gpfe_control.proof", "accept", "GeneratorPowerFieldToExponent",
+     "positive control: no other field names the removed field; the pass fires"),
+    ("F-359", "fusion_initializer.proof", "reject", "OffsetFusion",
+     "another field's initializer kept naming the removed key, read as a let"),
+    ("F-359", "fusion_control.proof", "accept", "OffsetFusion",
+     "positive control: no other field names the removed key; the pass fires"),
     ("F-365", "untranslated_comparison.proof", "reject", "Z3 residual check",
      "an opaque ModInt comparison met a Bool literal; Z3 raised and the proof aborted"),
     ("F-365", "int_returned_as_modint.proof", "reject", "Z3 residual check",
      "a Z3 integer met an opaque ModInt value; Z3 raised and the proof aborted"),
+    ("F-370", "coerced_literal_ring.proof", "reject",
+     "ForwardLiteralFieldWrite",
+     "the Int literal 1 forwarded for a ModInt<2> field holding 1 mod 2"),
+    ("F-379", "zero_power_base.proof", "reject", "ForwardLiteralFieldWrite",
+     "the Int literal 0 forwarded for a ModInt field into a power's base"),
+    ("F-379", "zero_sum_power_base.proof", "reject",
+     "ForwardLiteralFieldWrite",
+     "the Int literal 0 forwarded for both reads of a ModInt sum, D + D"),
+    ("F-379", "zero_offset_control.proof", "accept",
+     "ForwardLiteralFieldWrite",
+     "positive control: 0 still forwarded next to a ModInt operand of +"),
     ("F-371", "dup.proof", "reject", "method inliner",
      "an argument that draws, read twice by the callee, was drawn twice"),
     ("F-371", "dropped_arg.proof", "reject", "method inliner",
@@ -250,6 +283,10 @@ CASES = [
     ("F-377", "modint_division_by_zero_control.proof", "accept",
      "SymbolicComputation",
      "positive control: the equivalences above with ModInt<q> division"),
+    ("F-378", "zero_power_base_var_exp.proof", "reject", "ModIntCancellation",
+     "a ModInt zero power base was rebuilt as the Int 0, dropping the modulus"),
+    ("F-378", "zero_operand_control.proof", "accept", "ModIntCancellation",
+     "positive control: a ModInt zero under +, * and == still cancels to 0"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),
@@ -378,6 +415,34 @@ CASES = [
      "division on Int, which the numeric back ends read three ways"),
     ("INT-DIVISION", "modint_division_control.proof", "accept",
      "type checker", "positive control: division on ModInt<q>"),
+    ("STATE-RELATIONS", "mask_third_use.proof", "reject",
+     "UniformModIntRepeatedMask",
+     "a capped use count let a third, bare use of the uniform slip through"),
+    ("STATE-RELATIONS", "false_invariant.proof", "reject",
+     "FieldInvariantElimination",
+     "pk == g^sk holds after Initialize but an oracle breaks it"),
+    ("STATE-RELATIONS", "branch_invariant.proof", "reject",
+     "FieldInvariantElimination",
+     "pk == g^sk is preserved on one branch of an oracle only"),
+    ("STATE-RELATIONS", "true_invariant_control.proof", "accept",
+     "FieldInvariantElimination", "positive control: a preserved pk == g^sk"),
+    ("STATE-RELATIONS", "coerced_invariant.proof", "type_error",
+     "FieldInvariantElimination",
+     "a ModInt field holding an Int reduced mod q was related to the raw Int"),
+    ("STATE-RELATIONS", "coerced_absorption.proof", "type_error",
+     "BlockedLocalAbsorption",
+     "moving a ModInt local's Int initializer dropped its reduction mod q"),
+    ("STATE-RELATIONS", "coerced_literal.proof", "type_error",
+     "ForwardLiteralFieldWrite",
+     "the literal 7 was forwarded for a ModInt field holding 7 mod q"),
+    ("STATE-RELATIONS", "absorbed_key.proof", "reject",
+     "BlockedLocalAbsorption",
+     "a read of the local in the use's l-value M[x] was not counted"),
+    ("STATE-RELATIONS", "drawn_exponent.proof", "reject",
+     "GeneratorPowerFieldToExponent",
+     "two non-deterministic calls in the written exponent cancelled"),
+    ("STATE-RELATIONS", "drawn_fixed_key.proof", "reject", "OffsetFusion",
+     "two non-deterministic calls in the fixed key's exponent cancelled"),
 ]
 # fmt: on
 
@@ -459,6 +524,42 @@ TYPE_ERROR = {
     ),
     ("ARITH-PRECEDENCE", "same_level_control.proof"): (
         "error: Cannot use operator / on Int"
+    ),
+    ("F-357", "exponent_constant.proof"): (
+        "error: Exponent of a GroupElem<G> must have type Int or"
+        " ModInt<G.order>, got ModInt<q>"
+    ),
+    ("F-357", "express_after_update.proof"): (
+        "error: Exponent of a GroupElem<G> must have type Int or"
+        " ModInt<G.order>, got ModInt<q>"
+    ),
+    ("F-357", "cancel_through_local.proof"): (
+        "error: Exponent of a GroupElem<G> must have type Int or"
+        " ModInt<G.order>, got ModInt<q>"
+    ),
+    ("F-357", "zero_constant_control.proof"): (
+        "error: Exponent of a GroupElem<G> must have type Int or"
+        " ModInt<G.order>, got ModInt<q>"
+    ),
+    ("F-358", "stale_type.proof"): (
+        "error: Exponent of a GroupElem<G> must have type Int or"
+        " ModInt<G.order>, got ModInt<q>"
+    ),
+    ("F-358", "stale_type_control.proof"): (
+        "error: Exponent of a GroupElem<G> must have type Int or"
+        " ModInt<G.order>, got ModInt<q>"
+    ),
+    ("STATE-RELATIONS", "coerced_invariant.proof"): (
+        "error: Exponent of a GroupElem<G> must have type Int or"
+        " ModInt<G.order>, got ModInt<q>"
+    ),
+    ("STATE-RELATIONS", "coerced_absorption.proof"): (
+        "error: Exponent of a GroupElem<G> must have type Int or"
+        " ModInt<G.order>, got ModInt<q>"
+    ),
+    ("STATE-RELATIONS", "coerced_literal.proof"): (
+        "error: Exponent of a GroupElem<G> must have type Int or"
+        " ModInt<G.order>, got ModInt<q>"
     ),
 }
 

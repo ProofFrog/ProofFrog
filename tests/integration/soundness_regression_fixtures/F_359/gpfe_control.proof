@@ -1,0 +1,16 @@
+// Positive control: see GpfeControl.game.
+// Expected: Proof Succeeded.
+import 'GpfeControl.game';
+
+proof:
+
+let:
+    Group G;
+    GroupElem<G> h;
+
+theorem:
+    GpfeControl(G, h);
+
+games:
+    GpfeControl(G, h).Left against GpfeControl(G, h).Adversary;
+    GpfeControl(G, h).Right against GpfeControl(G, h).Adversary;

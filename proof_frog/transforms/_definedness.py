@@ -46,7 +46,7 @@ from typing import Optional
 
 from .. import frog_ast
 from ..visitors import Visitor
-from ._base import PipelineContext, may_return_before
+from ._base import NearMiss, PipelineContext, may_return_before
 
 _Loop = frog_ast.NumericFor | frog_ast.GenericFor
 
@@ -110,6 +110,61 @@ def method_binder_counts(method: frog_ast.Method) -> dict[str, int]:
         if name is not None:
             names.append(name)
     return {name: names.count(name) for name in names}
+
+
+def redeclared_names(
+    game: Optional[frog_ast.Game], method: frog_ast.Method
+) -> set[str]:
+    """The names with more than one binding in *method* of *game*.
+
+    Every binding :func:`method_binder_counts` counts is one: a parameter, a
+    typed declaration with or without a value, a loop binder. A game field
+    or game parameter is one more, unless a method parameter of the same
+    name shadows it for the whole body. With *game* None, fields and game
+    parameters are not counted.
+
+    For such a name, :func:`~proof_frog.visitors.build_method_type_map`
+    (last write wins) gives one type for every occurrence, and a name-based
+    scan cannot tell which binding an occurrence reads: before a local
+    declaration the name is the outer variable or an earlier local, after it
+    the new local. A pass that types a name with that map, or moves or
+    substitutes code by name, declines when the code it rewrites reads or
+    binds one of these names. In the pipeline ``AlphaRename`` runs first and
+    renames local binders apart, so these passes rarely meet such a name.
+    """
+    counts = method_binder_counts(method)
+    parameters = {p.name for p in method.signature.parameters}
+    outer: set[str] = set()
+    if game is not None:
+        outer = {f.name for f in game.fields} | {p.name for p in game.parameters}
+    return {
+        name
+        for name, count in counts.items()
+        if count + (1 if name in outer and name not in parameters else 0) > 1
+    }
+
+
+def note_redeclared_name(
+    ctx: Optional[PipelineContext],
+    transform_name: str,
+    name: str,
+    method: Optional[str] = None,
+) -> None:
+    """Record that *transform_name* declined a rewrite that reads or binds
+    *name*, which has more than one binding in the method (see
+    :func:`redeclared_names`)."""
+    miss = NearMiss(
+        transform_name,
+        f"The rewrite reads or binds '{name}', which this method declares "
+        f"more than once or which shadows a field, so the type and binding "
+        f"of each occurrence are not known by name",
+        None,
+        f"Give each declaration of '{name}' its own name",
+        name,
+        method,
+    )
+    if ctx is not None:
+        ctx.near_misses.append(miss)
 
 
 def calls_game_method(game: frog_ast.Game, node: frog_ast.ASTNode) -> bool:

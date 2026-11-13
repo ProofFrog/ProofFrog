@@ -1,0 +1,15 @@
+// Proof for CancelDup.game (target, hypothesis and expected outcome in its
+// header).
+import 'CancelDup.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    CancelDup(q);
+
+games:
+    CancelDup(q).Left against CancelDup(q).Adversary;
+    CancelDup(q).Right against CancelDup(q).Adversary;

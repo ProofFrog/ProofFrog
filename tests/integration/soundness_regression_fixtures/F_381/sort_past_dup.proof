@@ -1,0 +1,15 @@
+// Proof for SortPastDup.game (the positive control; expected outcome in
+// its header).
+import 'SortPastDup.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    SortPastDup(q);
+
+games:
+    SortPastDup(q).Left against SortPastDup(q).Adversary;
+    SortPastDup(q).Right against SortPastDup(q).Adversary;

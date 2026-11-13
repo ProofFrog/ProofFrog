@@ -1,0 +1,60 @@
+// Target: Remove Duplicate Fields, reached through a pass that turns a
+// group field always equal to `g^d` into a ModInt<G.order> exponent field
+// (`R = R * g^z;` becomes `e = e + z;`, with the type and value of d). The
+// engine at this fixture's commit has no such pass, so this proof is
+// refused already; it guards a branch that adds one.
+// R == g^d at every call boundary. A0 multiplies R by g^z and then adds z
+// to d; A1 does the same in the opposite order. Initialize branches, so the
+// relation is not settled by Initialize alone. Once R is an exponent field,
+// Remove Duplicate Fields pairs it with d and deletes the SECOND write of
+// each pair (A0's `d = d + z;`, A1's update of the exponent). Deleting them
+// by structural equality also deleted the equal FIRST writes in the other
+// oracle: neither oracle changed d any more, which is Right.
+// Distinguisher: [P0, d0] = Get(); A0(1); [P1, d1] = Get(); output 1 iff
+// d1 == d0. Left: d1 = d0 + 1, so 0 whenever G.order >= 2. Right: always 1.
+// Advantage 1 for any group of order >= 2.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+Game Left(Group G) {
+    GroupElem<G> R;
+    ModInt<G.order> d;
+    Void Initialize() {
+        d <- ModInt<G.order>;
+        R = G.generator ^ d;
+        Bool c <- Bool;
+        if (c) {
+            R = R * G.generator ^ d;
+            d = d + d;
+        }
+    }
+    Void A0(ModInt<G.order> z) {
+        R = R * G.generator ^ z;
+        d = d + z;
+    }
+    Void A1(ModInt<G.order> z) {
+        d = d + z;
+        R = R * G.generator ^ z;
+    }
+    [GroupElem<G>, ModInt<G.order>] Get() {
+        return [R, d];
+    }
+}
+
+Game Right(Group G) {
+    ModInt<G.order> d;
+    Void Initialize() {
+        d <- ModInt<G.order>;
+        Bool c <- Bool;
+        if (c) {
+            d = d + d;
+        }
+    }
+    Void A0(ModInt<G.order> z) {
+    }
+    Void A1(ModInt<G.order> z) {
+    }
+    [GroupElem<G>, ModInt<G.order>] Get() {
+        return [G.generator ^ d, d];
+    }
+}
+
+export as ExpDup;

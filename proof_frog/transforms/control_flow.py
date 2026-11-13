@@ -1111,17 +1111,28 @@ class SimplifyReturnTransformer(BlockTransformer):
 
 
 class RemoveStatementTransformer(BlockTransformer):
-    """Filters out specific statement instances (matched by identity) from all blocks."""
+    """Filters out specific statement instances from all blocks.
+
+    Statements are matched by identity, so apply it to the very tree the
+    statements were taken from (it is copy-on-write: that tree is left
+    unchanged).  A statement structurally equal to one in *to_remove* but
+    a different object stays: a structural match also deleted an equal
+    write elsewhere in the game that the caller never meant (F-382).
+    """
 
     def __init__(self, to_remove: list[frog_ast.Statement]):
+        # The list keeps the statements alive, so their ids stay theirs.
         self.to_remove = to_remove
+        self._to_remove_ids = {id(statement) for statement in to_remove}
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        new_statements = []
-        for statement in block.statements:
-            if statement not in self.to_remove:
-                new_statements.append(statement)
-        return frog_ast.Block(new_statements)
+        return frog_ast.Block(
+            [
+                statement
+                for statement in block.statements
+                if id(statement) not in self._to_remove_ids
+            ]
+        )
 
 
 class FlagSetToAssignmentTransformer(BlockTransformer):

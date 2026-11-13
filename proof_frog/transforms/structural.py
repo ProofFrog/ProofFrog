@@ -214,7 +214,18 @@ def remove_duplicate_fields(
                     # (canonicalisation, so declining is always sound).
                     if field.name in visitors.type_position_names(game):
                         continue
-                    new_game = copy.deepcopy(game)
+                    # F-382: delete the paired writes from the game the
+                    # visitor examined, by identity. A deep copy holds only
+                    # structurally equal statements, and deleting those also
+                    # deleted an equal write the visitor never paired (the
+                    # first write of a pair in another method, when two
+                    # methods update the fields in opposite orders). The
+                    # transformer is copy-on-write, so `game` is unchanged.
+                    new_game = copy.copy(
+                        RemoveStatementTransformer(duplicated_statements).transform(
+                            game
+                        )
+                    )
                     new_game.fields = [
                         the_field
                         for the_field in game.fields
@@ -223,10 +234,7 @@ def remove_duplicate_fields(
                     return cast(
                         frog_ast.Game,
                         visitors.rename_value_references(
-                            RemoveStatementTransformer(duplicated_statements).transform(
-                                new_game
-                            ),
-                            {other_field.name: field.name},
+                            new_game, {other_field.name: field.name}
                         ),
                     )
     return game

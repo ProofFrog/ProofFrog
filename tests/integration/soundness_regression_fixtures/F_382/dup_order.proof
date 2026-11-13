@@ -1,0 +1,15 @@
+// Proof for DupOrder.game (target, hypothesis and expected outcome in its
+// header).
+import 'DupOrder.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    DupOrder(q);
+
+games:
+    DupOrder(q).Left against DupOrder(q).Adversary;
+    DupOrder(q).Right against DupOrder(q).Adversary;

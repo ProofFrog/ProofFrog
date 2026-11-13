@@ -1,0 +1,16 @@
+// F-383 positive control: a game that writes its parameter is
+// interchangeable with the same game counting in an explicit field. Sound
+// engine: Proof Succeeded!
+import 'FieldCounter.game';
+
+proof:
+
+let:
+    Int n;
+
+theorem:
+    FieldCounter(n);
+
+games:
+    FieldCounter(n).Left against FieldCounter(n).Adversary;
+    FieldCounter(n).Right against FieldCounter(n).Adversary;

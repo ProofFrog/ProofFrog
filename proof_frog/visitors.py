@@ -657,8 +657,15 @@ class InstantiationTransformer(Transformer):
         self,
         namespace: frog_ast.Namespace,
         field_value_types: Optional[dict[str, Optional[frog_ast.Type]]] = None,
+        kept_fields: frozenset[str] = frozenset(),
     ) -> None:
         self.namespace = dict(namespace)
+        # Fields that must stay fields even though no method writes them,
+        # because their initializer reads a value that changes later: a game
+        # parameter the game writes (F-383), which instantiation binds as a
+        # field. ``Int a = n;`` holds n's starting value, so a read of ``a``
+        # must not become a read of the current ``n``.
+        self._kept_fields = kept_fields
         # Field names that are reassigned somewhere in the module currently being
         # transformed. Their initializer must NOT be substituted into method
         # bodies: a field `Int c = 0` that is later mutated (`c = c + 1`) is
@@ -736,7 +743,7 @@ class InstantiationTransformer(Transformer):
         # A reassigned field is genuine state, not a constant alias: do not
         # register its initializer for substitution into reads (audit F-045).
         # A pre-existing namespace binding (a proof-let constant) is left intact.
-        if field.name in self._mutable_fields:
+        if field.name in self._mutable_fields or field.name in self._kept_fields:
             self.namespace.pop(field.name, None)
         elif new_field.value is not None and not self._initializer_keeps_value(
             new_field

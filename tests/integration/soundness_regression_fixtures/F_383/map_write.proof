@@ -1,0 +1,15 @@
+// F-383: claims MapWrite(M).Left and MapWrite(M).Right are interchangeable.
+// They are not (see MapWrite.game). Sound engine: Proof Failed!
+import 'MapWrite.game';
+
+proof:
+
+let:
+    Map<Int, Int> M;
+
+theorem:
+    MapWrite(M);
+
+games:
+    MapWrite(M).Left against MapWrite(M).Adversary;
+    MapWrite(M).Right against MapWrite(M).Adversary;

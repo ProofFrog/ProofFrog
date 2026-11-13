@@ -1,0 +1,16 @@
+import 'Counter.primitive';
+
+// Left returns the counter's next value; Right returns n + 1 every time.
+Game Left(Int n, Counter C) {
+    Int Ask() {
+        return C.Next();
+    }
+}
+
+Game Right(Int n, Counter C) {
+    Int Ask() {
+        return n + 1;
+    }
+}
+
+export as NextValue;

@@ -1,0 +1,3 @@
+Primitive Counter(Int n) {
+    Int Next();
+}

@@ -1,0 +1,15 @@
+// F-383 positive control: a write to a local that shadows a game parameter
+// is not a write to the parameter. Sound engine: Proof Succeeded!
+import 'ShadowLocal.game';
+
+proof:
+
+let:
+    Int n;
+
+theorem:
+    ShadowLocal(n);
+
+games:
+    ShadowLocal(n).Left against ShadowLocal(n).Adversary;
+    ShadowLocal(n).Right against ShadowLocal(n).Adversary;

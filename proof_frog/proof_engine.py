@@ -2556,8 +2556,8 @@ def _avoid_instantiation_capture(
       after substitution by :func:`instantiate`.
     * a game parameter in *bound_parameters*, which :func:`instantiate`
       binds as a game field instead of substituting (an argument the
-      parameter's type would convert), is renamed by the field rule above,
-      since it becomes a field.
+      parameter's type would convert, or a parameter the game writes), is
+      renamed by the field rule above, since it becomes a field.
     """
     arg_names: set[str] = set()
     for arg in args:
@@ -2698,6 +2698,52 @@ def _converting_parameters(
     return converting
 
 
+class WrittenParameterError(visitors.InstantiationError):
+    """A scheme writes one of its own parameters in a method body, so its
+    reads cannot be replaced by the argument (F-383)."""
+
+
+def _written_parameters(
+    root: frog_ast.Game | frog_ast.Scheme | frog_ast.Primitive,
+    args: list[frog_ast.Expression],
+    namespace: frog_ast.Namespace,
+) -> list[int]:
+    """The parameters of *root* that one of its methods writes, by index.
+
+    A parameter receives its argument by value (F-383): inside a game it is
+    a variable of the game's own that starts out holding the argument, so a
+    write to it (an assignment, a draw, an element write, a ``<-uniq``
+    insertion) changes what later reads of it see, and those reads cannot
+    all be replaced by the argument. A method parameter, local or ``for``
+    binder of the same name shadows the parameter, so a write to it does not
+    count: the writes are looked for after :func:`_avoid_instantiation_capture`
+    has renamed such binders.
+    """
+    if not isinstance(root, (frog_ast.Game, frog_ast.Scheme)):
+        return []
+    parameters = root.parameters[: len(args)]
+    candidates = {
+        parameter.name
+        for parameter in parameters
+        if any(
+            visitors.reassigns_or_rebinds({parameter.name}, method)
+            for method in root.methods
+        )
+    }
+    if not candidates:
+        return []
+    renamed = _avoid_instantiation_capture(root, args, namespace)
+    return [
+        index
+        for index, parameter in enumerate(parameters)
+        if parameter.name in candidates
+        and any(
+            visitors.reassigns_or_rebinds({parameter.name}, method)
+            for method in renamed.methods
+        )
+    ]
+
+
 def instantiate(
     root: T,
     args: list[frog_ast.Expression],
@@ -2722,6 +2768,11 @@ def instantiate(
     the game's own fields, and a scheme or primitive parameter is refused
     (:class:`ConvertingParameterError`), because its methods would carry the
     parameter's name into the games they are inlined into.
+
+    A parameter that one of *root*'s methods writes (:func:`_written_parameters`)
+    is not replaced by the argument either, since the write must reach the
+    later reads: a game or reduction parameter becomes a game field the same
+    way, and a scheme is refused (:class:`WrittenParameterError`).
     """
     converting = _converting_parameters(root, args, namespace, arg_types)
     if converting and not isinstance(root, frog_ast.Game):
@@ -2739,16 +2790,39 @@ def instantiate(
             "or primitive parameter as its argument. Pass an argument of the "
             "parameter's type."
         )
-    bound_names = frozenset(root.parameters[index].name for index in converting)
+    written = _written_parameters(root, args, namespace)
+    if written and not isinstance(root, frog_ast.Game):
+        raise WrittenParameterError(
+            f"Cannot instantiate {root.name}: one of its methods writes its "
+            f"parameter '{root.parameters[written[0]].name}'. A parameter "
+            "holds the value it is given, and the engine can only read a "
+            "scheme parameter as its argument, so a scheme may not assign, "
+            "draw into, write an element of or insert with <-uniq into its own "
+            "parameter. Declare a local copy in the method that changes it."
+        )
+    # The game parameters that stay names: each becomes a game field
+    # initialized with its argument.
+    bound = sorted(set(converting) | set(written))
+    bound_names = frozenset(root.parameters[index].name for index in bound)
     root = _avoid_instantiation_capture(
         root, args, namespace, rename_namespace_fields, bound_names
+    )
+    # A field initialized from a written parameter holds the parameter's
+    # starting value, so it stays a field: read as its initializer, it would
+    # follow the later writes to the parameter.
+    written_names = {root.parameters[index].name for index in written}
+    kept_fields = frozenset(
+        field.name
+        for field in root.fields
+        if field.value is not None
+        and visitors.referenced_variable_names(field.value) & written_names
     )
     arg_names: set[str] = set()
     for arg in args:
         arg_names |= visitors.referenced_variable_names(arg)
     ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
     for index, parameter in enumerate(root.parameters):
-        if index in converting:
+        if index in bound:
             continue
         ast_map.set(frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
     substitution = visitors.SubstitutionTransformer(ast_map)
@@ -2762,14 +2836,16 @@ def instantiate(
     # Ensure independent copy before mutation — transform may share lists
     new_root = copy.copy(new_root)
     new_root.parameters = []
-    if converting:
+    if bound:
         # A converting game parameter holds its argument converted to its
-        # type, so it stays a name: a field initialized with the argument,
-        # which InstantiationTransformer keeps as a field (its initializer's
-        # type is not recorded, so it counts as converting) and which the
-        # forwarding passes do not forward.
+        # type, and a written one holds what was last written to it, so each
+        # stays a name: a field initialized with the argument, which
+        # InstantiationTransformer keeps as a field (a written field is state,
+        # F-045; a converting one's initializer type is not recorded, so it
+        # counts as converting) and which the forwarding passes do not
+        # forward.
         bound_fields: list[frog_ast.Field] = []
-        for index in sorted(converting):
+        for index in bound:
             parameter = root.parameters[index]
             bound_type = substitution.transform(copy.deepcopy(parameter.type))
             assert isinstance(bound_type, frog_ast.Type)
@@ -2786,9 +2862,9 @@ def instantiate(
                     "arguments, so the argument would be read as the field. "
                     "Rename the field or the argument."
                 )
-    return visitors.InstantiationTransformer(namespace, field_value_types).transform(
-        new_root
-    )
+    return visitors.InstantiationTransformer(
+        namespace, field_value_types, kept_fields
+    ).transform(new_root)
 
 
 def _field_initializer_types(

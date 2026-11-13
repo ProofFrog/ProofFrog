@@ -1,0 +1,34 @@
+// F-383: Bump writes the game parameter n, which is the game's own variable
+// (a parameter receives its argument by value). Left's Get returns n's
+// starting value (copied into a in Initialize), Right's returns the current
+// n. Distinguisher: Get(), Bump(), Get(); the two answers are equal only on
+// the left. Instantiation used to replace n by the argument everywhere, so
+// the write went to the caller's name and was dropped as dead, and Right's
+// Get kept returning the argument.
+Game Left(Int n) {
+    Int a;
+    Void Initialize() {
+        a = n;
+    }
+    Void Bump() {
+        n = n + 1;
+    }
+    Int Get() {
+        return a;
+    }
+}
+
+Game Right(Int n) {
+    Int a;
+    Void Initialize() {
+        a = n;
+    }
+    Void Bump() {
+        n = n + 1;
+    }
+    Int Get() {
+        return n;
+    }
+}
+
+export as ParamWrite;

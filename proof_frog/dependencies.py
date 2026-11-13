@@ -765,11 +765,33 @@ def remove_unnecessary_fields(
             break
         necessary_field_names = harvested
 
+    # A field's initializer runs once, before any method, reading the
+    # starting values of the fields it names: a field kept for its starting
+    # value (``Int a = n;`` with ``n`` written later, F-383) needs the fields
+    # its initializer reads to stay declared, or the initializer would name
+    # an undeclared field. Their method writes come after every initializer,
+    # so a field needed only there keeps its declaration, not its writes.
+    declared_field_names = set(necessary_field_names)
+    pending = sorted(necessary_field_names)
+    initializers = {
+        field.name: field.value for field in game.fields if field.value is not None
+    }
+    while pending:
+        value = initializers.get(pending.pop())
+        if value is None:
+            continue
+        for read in visitors.referenced_variable_names(value) & all_field_names:
+            if read not in declared_field_names:
+                declared_field_names.add(read)
+                pending.append(read)
+
     new_game = copy.deepcopy(game)
     new_game.fields = [
-        field for field in game.fields if field.name in necessary_field_names
+        field for field in game.fields if field.name in declared_field_names
     ]
-    actually_necessary_field_names = [field.name for field in new_game.fields]
+    actually_necessary_field_names = [
+        field.name for field in new_game.fields if field.name in necessary_field_names
+    ]
     # Names bound outside any method body: every field (a method local may
     # shadow even a field that this pass is about to drop) plus the method's
     # own parameters.  A bare local declaration shadowing one of these must not

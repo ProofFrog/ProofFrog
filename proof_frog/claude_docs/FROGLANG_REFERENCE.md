@@ -503,6 +503,8 @@ A scheme field with an initializer (`Int lambda = lambda;`) is read as its initi
 
 A parameter of a game, reduction, scheme or primitive receives its argument the same way: an `Int` argument for a `ModInt<q>` parameter (or a parameter with a `ModInt<q>` part) is reduced modulo `q`, an integer literal included. The engine replaces a parameter by its argument only when the argument already has the parameter's type there. Otherwise a game or reduction keeps the parameter as a field holding the converted argument, and a scheme or primitive is refused with a type error, for the same reason as a converted scheme field.
 
+Inside a game or reduction, a parameter is the game's own variable, starting out at its argument's value (arguments are passed by value, section 7.3). A game may assign it, draw into it, write an element of it or insert into it with `<-uniq`; later reads see the new value, and the caller's variable is unchanged. The engine keeps such a parameter as a field initialized with the argument (a method parameter, local or `for` binder of the same name shadows it and does not count), and a field whose initializer reads it holds its starting value. A scheme that writes its own parameter is refused with a type error, since a scheme's methods are inlined into the games that call them.
+
 ### 7.2 Game Composition with Reductions
 
 When a game is composed with a reduction, the resulting system is a new game whose oracles are the reduction's methods. The reduction's `challenger` variable is bound to the composed security game.

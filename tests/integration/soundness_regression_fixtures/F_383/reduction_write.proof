@@ -1,0 +1,38 @@
+// F-383 (reduction parameter): R writes its own parameter n in Bump, so
+// played against Echo it answers Get with the current n, as
+// ParamWrite(n).Right does, not with the starting value, as Left does.
+// Instantiation used to drop R's write, which made step 1 pass and derived
+// the false theorem ParamWrite(n) from the true assumption Echo(n). Sound
+// engine: step 1 fails; steps 2 and 3 are true.
+import 'ParamWrite.game';
+import 'Echo.game';
+
+Reduction R(Int n) compose Echo(n) against ParamWrite(n).Adversary {
+    Int a;
+    Void Initialize() {
+        a = challenger.Val();
+    }
+    Void Bump() {
+        n = n + 1;
+    }
+    Int Get() {
+        return n;
+    }
+}
+
+proof:
+
+let:
+    Int n;
+
+assume:
+    Echo(n);
+
+theorem:
+    ParamWrite(n);
+
+games:
+    ParamWrite(n).Left against ParamWrite(n).Adversary;
+    Echo(n).Real compose R(n) against ParamWrite(n).Adversary;
+    Echo(n).Ideal compose R(n) against ParamWrite(n).Adversary;
+    ParamWrite(n).Right against ParamWrite(n).Adversary;

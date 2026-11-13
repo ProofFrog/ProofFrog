@@ -274,6 +274,22 @@ CASES = [
      "positive control: fields updated in the same order everywhere merge"),
     ("F-382", "opposite_order_control.proof", "accept", "RemoveDuplicateFields",
      "positive control: opposite orders merge, each method keeping one write"),
+    ("F-383", "param_write.proof", "reject", "instantiation",
+     "a game's write to its own parameter went to the argument and was dropped"),
+    ("F-383", "map_write.proof", "reject", "instantiation",
+     "an element write to a game's Map parameter wrote the caller's map"),
+    ("F-383", "reduction_write.proof", "reject", "instantiation",
+     "a reduction's write to its own parameter was dropped"),
+    ("F-383", "scheme_write.proof", "type_error", "instantiation",
+     "a scheme's write to its own parameter was dropped, each call starting over"),
+    ("F-383", "copy_start.proof", "reject", "instantiation",
+     "a field copying a written parameter's starting value must not follow it"),
+    ("F-383", "copy_start_unread.proof", "reject", "RemoveUnnecessaryFields",
+     "a field read only by another field's initializer must stay declared"),
+    ("F-383", "field_control.proof", "accept", "instantiation",
+     "positive control: a written parameter counts like an explicit field"),
+    ("F-383", "shadow_local_control.proof", "accept", "instantiation",
+     "positive control: a write to a shadowing local leaves the parameter alone"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),
@@ -425,6 +441,10 @@ TYPE_ERROR = {
         "error: Cannot instantiate ParamModTest: its parameter 'x' of type "
         "ModInt<q> is given q (of type Int)"
     ),
+    ("F-383", "scheme_write.proof"): (
+        "error: Cannot instantiate BumpCounter: one of its methods writes its "
+        "parameter 'n'"
+    ),
     ("GAME-SELF-CALL", "self_call.proof"): (
         "error: Game 'Calls' may not call its own method 'Inc'"
     ),
@@ -491,6 +511,9 @@ TYPE_ERROR = {
 FAILED_STEP = {
     ("F-373", "challenger_write.proof"): (
         "Step 1 failed: Probe(n).Left -> Echo(n).Left compose R(n)"
+    ),
+    ("F-383", "reduction_write.proof"): (
+        "Step 1 failed: ParamWrite(n).Left -> Echo(n).Real compose R(n)"
     ),
     ("Z3-FIELD-ACCESS", "group_equality.proof"): (
         "Step 2 failed: Swapped(G) -> GroupEquality(G).Right"

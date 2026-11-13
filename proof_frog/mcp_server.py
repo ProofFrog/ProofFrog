@@ -20,13 +20,28 @@ Then register it in .claude/settings.json:
 
 # pylint: disable=duplicate-code  # mcp_server shares return-dict patterns with web_server by design
 from __future__ import annotations
+import functools
 import os
 import tempfile
+import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, ParamSpec, TypeVar
 
-from mcp.server.mcpserver import MCPServer  # pylint: disable=import-error
-from mcp.server.mcpserver.exceptions import ToolError  # pylint: disable=import-error
+# mcp 2.x renamed 1.x's FastMCP to MCPServer and kept the API this module uses
+# (constructor, tool(), resource(), run()); support both major versions.
+try:
+    from mcp.server.mcpserver import MCPServer  # pylint: disable=import-error
+    from mcp.server.mcpserver.exceptions import (  # pylint: disable=import-error
+        ToolError,
+    )
+except ImportError:  # mcp 1.x
+    from mcp.server.fastmcp import (  # type: ignore[no-redef, attr-defined]  # pylint: disable=import-error
+        FastMCP as MCPServer,
+    )
+    from mcp.server.fastmcp.exceptions import (  # type: ignore[no-redef]  # pylint: disable=import-error
+        ToolError,
+    )
 
 from . import frog_parser
 from . import describe as describe_module
@@ -58,12 +73,44 @@ mcp: MCPServer = MCPServer(
 # Working directory set by run_server(); resolved to an absolute path.
 _directory: str = "."  # pylint: disable=invalid-name
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+# The tools share process-wide state: the engine is not thread-safe, and the
+# output capture swaps sys.stdout and sys.stderr for the whole process. mcp 2.x
+# runs each sync tool on a worker thread, so two calls can overlap (1.x ran them
+# one at a time on the event loop). Overlapping captures leave sys.stdout and
+# sys.stderr pointing at a finished call's buffer. This lock runs the tools one
+# at a time under both versions (reentrant, in case a tool ever calls another).
+_TOOL_LOCK = threading.RLock()
+
+
+def _tool(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+    """Register fn as an MCP tool that runs alone and reports why it failed.
+
+    mcp 2.x sends a ToolError's message to the client but reports any other
+    exception only as "Error executing tool <name>" (1.x sent every message), so
+    any other exception is re-raised as a ToolError carrying its type and message.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        with _TOOL_LOCK:
+            try:
+                return fn(*args, **kwargs)
+            except ToolError:
+                raise
+            except Exception as e:  # pylint: disable=broad-exception-caught
+                raise ToolError(f"{type(e).__name__}: {e}") from e
+
+    mcp.tool()(wrapper)
+    return wrapper
+
 
 class _PathOutsideDirectory(ToolError):  # type: ignore[misc]
     """Raised when a resolved path escapes the server's working directory.
 
-    A ToolError, so the MCP SDK returns its message to the client (other
-    exceptions reach the client only as "Error executing tool <name>").
+    A ToolError, so the client receives its message.
     """
 
 
@@ -90,7 +137,7 @@ def _safe_resolve(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()  # type: ignore[misc, untyped-decorator]
+@_tool
 def version() -> str:
     """Return the ProofFrog version."""
     # pylint: disable=import-outside-toplevel
@@ -104,7 +151,7 @@ def version() -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()  # type: ignore[misc, untyped-decorator]
+@_tool
 def list_files(subdirectory: str = "") -> dict[str, Any]:
     """List all ProofFrog files in a directory tree.
 
@@ -112,29 +159,23 @@ def list_files(subdirectory: str = "") -> dict[str, Any]:
     Files include .primitive, .game, .scheme, and .proof extensions.
     Leave subdirectory empty to list the server's root working directory.
     """
-    try:
-        target = _safe_resolve(subdirectory) if subdirectory else _directory
-    except _PathOutsideDirectory as e:
-        return {"error": str(e)}
-    base = Path(_directory)
-    return _build_tree(Path(target), base)
+    # Resolved like the paths _safe_resolve returns, so relative_to works when
+    # the working directory's path goes through a symlink (e.g. /tmp on macOS).
+    base = Path(_directory).resolve()
+    target = Path(_safe_resolve(subdirectory)) if subdirectory else base
+    return _build_tree(target, base)
 
 
-@mcp.tool()  # type: ignore[misc, untyped-decorator]
+@_tool
 def read_file(path: str) -> str:
     """Read the text content of a ProofFrog file.
 
     Path is relative to the server's working directory.
     """
-    try:
-        return Path(_safe_resolve(path)).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
-        raise ToolError(
-            f"Cannot read '{path}': {getattr(e, 'strerror', None) or e}"
-        ) from e
+    return Path(_safe_resolve(path)).read_text(encoding="utf-8")
 
 
-@mcp.tool()  # type: ignore[misc, untyped-decorator]
+@_tool
 def write_file(path: str, content: str) -> dict[str, Any]:
     """Write (create or overwrite) a ProofFrog file.
 
@@ -143,11 +184,8 @@ def write_file(path: str, content: str) -> dict[str, Any]:
     Returns {"success": true, "path": "<absolute path>"}.
     """
     abs_path = Path(_safe_resolve(path))
-    try:
-        abs_path.parent.mkdir(parents=True, exist_ok=True)
-        abs_path.write_text(content, encoding="utf-8")
-    except OSError as e:
-        raise ToolError(f"Cannot write '{path}': {e.strerror or e}") from e
+    abs_path.parent.mkdir(parents=True, exist_ok=True)
+    abs_path.write_text(content, encoding="utf-8")
     return {"success": True, "path": str(abs_path)}
 
 
@@ -156,7 +194,7 @@ def write_file(path: str, content: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()  # type: ignore[misc, untyped-decorator]
+@_tool
 def describe(path: str) -> str:
     """Get a concise interface description of a ProofFrog file.
 
@@ -177,7 +215,7 @@ def describe(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()  # type: ignore[misc, untyped-decorator]
+@_tool
 def parse(path: str) -> dict[str, Any]:
     """Parse a ProofFrog file and return its AST representation.
 
@@ -189,7 +227,7 @@ def parse(path: str) -> dict[str, Any]:
     return {"output": output, "success": success}
 
 
-@mcp.tool()  # type: ignore[misc, untyped-decorator]
+@_tool
 def check(path: str) -> dict[str, Any]:
     """Run semantic type-checking on a ProofFrog file.
 
@@ -203,7 +241,7 @@ def check(path: str) -> dict[str, Any]:
     return {"output": output, "success": success}
 
 
-@mcp.tool()  # type: ignore[misc, untyped-decorator]
+@_tool
 def prove(proof_path: str, skip_lemmas: bool = False) -> dict[str, Any]:
     """Run proof verification on a .proof file.
 
@@ -240,7 +278,7 @@ def prove(proof_path: str, skip_lemmas: bool = False) -> dict[str, Any]:
     }
 
 
-@mcp.tool()  # type: ignore[misc, untyped-decorator]
+@_tool
 def get_step_detail(proof_path: str, step_index: int) -> dict[str, Any]:
     """Get the canonical (fully simplified) form of one proof step.
 
@@ -278,7 +316,7 @@ def get_step_detail(proof_path: str, step_index: int) -> dict[str, Any]:
     }
 
 
-@mcp.tool()  # type: ignore[misc, untyped-decorator]
+@_tool
 def get_inlined_game(proof_path: str, step_text: str) -> dict[str, Any]:
     """Get the canonical form of a game step without needing the full proof to parse.
 
@@ -331,7 +369,7 @@ def get_inlined_game(proof_path: str, step_text: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()  # type: ignore[misc, untyped-decorator]
+@_tool
 def get_canonicalization_trace(proof_path: str, step_index: int) -> Any:
     """Get a trace of which transforms fired at each fixed-point iteration.
 
@@ -349,7 +387,7 @@ def get_canonicalization_trace(proof_path: str, step_index: int) -> Any:
     )
 
 
-@mcp.tool()  # type: ignore[misc, untyped-decorator]
+@_tool
 def get_step_after_transform(
     proof_path: str, step_index: int, transform_name: str
 ) -> Any:

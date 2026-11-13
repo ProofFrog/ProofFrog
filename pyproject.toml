@@ -40,8 +40,9 @@ dependencies = [
 # The three checkers are pinned to a minor series so that a new release cannot
 # turn CI red on an unrelated change. Upgrade them in a PR of their own.
 dev = ["mypy ~= 2.4.0", "pylint ~= 4.1.1", "types-colorama", "pytest", "pytest-xdist", "black ~= 26.5", "flit", "twine"]
-# mcp_server.py uses mcp.server.mcpserver.MCPServer (the 2.x name of 1.x's FastMCP).
-mcp = ["mcp[cli] >= 2.3, < 3"]
+# mcp_server.py supports both majors: 1.x's FastMCP and its 2.x name, MCPServer.
+# Releases before 1.22 fail to import with current pydantic.
+mcp = ["mcp[cli] >= 1.22, < 3"]
 
 [project.urls]
 Source = "https://github.com/ProofFrog/ProofFrog"

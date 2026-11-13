@@ -1,0 +1,31 @@
+// F-384 positive control: no method writes P, so Q = P holds P's value for
+// the whole game and may still be read as P (and P as the generator). The
+// two games are the same.
+Game Left(Group G) {
+    GroupElem<G> P = G.generator;
+    GroupElem<G> Q = P;
+    GroupElem<G> R;
+    GroupElem<G> S = R;
+
+    GroupElem<G> GetQ() {
+        return Q;
+    }
+
+    GroupElem<G> GetS() {
+        return S;
+    }
+}
+
+Game Right(Group G) {
+    GroupElem<G> R;
+
+    GroupElem<G> GetQ() {
+        return G.generator;
+    }
+
+    GroupElem<G> GetS() {
+        return R;
+    }
+}
+
+export as Unwritten;

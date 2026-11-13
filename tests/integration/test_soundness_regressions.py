@@ -290,6 +290,34 @@ CASES = [
      "positive control: a written parameter counts like an explicit field"),
     ("F-383", "shadow_local_control.proof", "accept", "instantiation",
      "positive control: a write to a shadowing local leaves the parameter alone"),
+    ("F-384", "alias_redraw.proof", "reject", "instantiation",
+     "a field copying another field's starting value followed its later draws"),
+    ("F-384", "count_start.proof", "reject", "instantiation",
+     "a field copying an initialized counter's start followed the count"),
+    ("F-384", "call_once.proof", "reject", "instantiation",
+     "a field initialized by one method call called it again at every read"),
+    ("F-384", "challenger_initializer.proof", "reject", "instantiation",
+     "a challenger field's initializer read a reduction field of the same name"),
+    ("F-384", "copy_source.proof", "reject", "InlineSingleUseField",
+     "a field read only by a kept initializer was dropped, the initializer dangling"),
+    ("F-384", "written_copy.proof", "reject", "InlineSingleUseField",
+     "a written field's initializer read a written field that was then dropped"),
+    ("F-384", "parameter_copy.proof", "reject", "InlineSingleUseField",
+     "a copy of a written parameter's start lost the parameter's field"),
+    ("F-384", "reduction_copy_source.proof", "reject", "InlineSingleUseField",
+     "copy_source in a reduction: its fields need the snapshot too"),
+    ("F-384", "reduction_written_copy.proof", "reject", "InlineSingleUseField",
+     "written_copy in a reduction: its fields need the snapshot too"),
+    ("F-384", "scheme_reads_written.proof", "type_error", "instantiation",
+     "a scheme field copying a written field's start cannot stay a field"),
+    ("F-384", "scheme_method_call.proof", "type_error", "instantiation",
+     "a scheme field initialized by a method call cannot stay a field"),
+    ("F-384", "unwritten_control.proof", "accept", "instantiation",
+     "positive control: a field copying an unwritten field is read as it"),
+    ("F-384", "function_value_control.proof", "accept", "instantiation",
+     "positive control: a field initialized by a Function call is read as it"),
+    ("F-384", "start_value_control.proof", "accept", "instantiation",
+     "positive control: a copy of a written field's start is read as that start"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),
@@ -445,6 +473,16 @@ TYPE_ERROR = {
         "error: Cannot instantiate BumpCounter: one of its methods writes its "
         "parameter 'n'"
     ),
+    ("F-384", "scheme_reads_written.proof"): (
+        "error: Cannot instantiate StartCounter: the initializer of its field "
+        "'start', c, calls a method or reads a field one of the scheme's "
+        "methods writes"
+    ),
+    ("F-384", "scheme_method_call.proof"): (
+        "error: Cannot instantiate KeyedSource: the initializer of its field "
+        "'k', S.Draw(), calls a method or reads a field one of the scheme's "
+        "methods writes"
+    ),
     ("GAME-SELF-CALL", "self_call.proof"): (
         "error: Game 'Calls' may not call its own method 'Inc'"
     ),
@@ -514,6 +552,14 @@ FAILED_STEP = {
     ),
     ("F-383", "reduction_write.proof"): (
         "Step 1 failed: ParamWrite(n).Left -> Echo(n).Real compose R(n)"
+    ),
+    # Without the snapshot on the reduction, step 2 verifies, and steps 1 and
+    # 3 fail in its place (the games' own fields get the snapshot).
+    ("F-384", "reduction_copy_source.proof"): (
+        "Step 2 failed: Ping().Real compose R7() -> Ping().Real compose R9()"
+    ),
+    ("F-384", "reduction_written_copy.proof"): (
+        "Step 2 failed: Ping().Real compose R7() -> Ping().Real compose R9()"
     ),
     ("Z3-FIELD-ACCESS", "group_equality.proof"): (
         "Step 2 failed: Swapped(G) -> GroupEquality(G).Right"

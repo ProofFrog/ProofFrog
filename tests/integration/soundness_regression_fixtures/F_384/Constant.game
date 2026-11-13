@@ -1,0 +1,16 @@
+// Left asks the counter for its next value; Right always returns 0.
+import 'Counter.primitive';
+
+Game Left(Counter C) {
+    Int Get() {
+        return C.Next();
+    }
+}
+
+Game Right(Counter C) {
+    Int Get() {
+        return 0;
+    }
+}
+
+export as Constant;

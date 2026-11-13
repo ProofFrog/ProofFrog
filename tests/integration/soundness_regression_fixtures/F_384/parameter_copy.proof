@@ -1,0 +1,17 @@
+// F-384: claims ParameterCopy(m1, m2).Left and ParameterCopy(m1, m2).Right
+// are interchangeable. They are not when m1 != m2 (see ParameterCopy.game).
+// Sound engine: Proof Failed!
+import 'ParameterCopy.game';
+
+proof:
+
+let:
+    Int m1;
+    Int m2;
+
+theorem:
+    ParameterCopy(m1, m2);
+
+games:
+    ParameterCopy(m1, m2).Left against ParameterCopy(m1, m2).Adversary;
+    ParameterCopy(m1, m2).Right against ParameterCopy(m1, m2).Adversary;

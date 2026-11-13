@@ -1,0 +1,16 @@
+// F-384 positive control: claims StartValue(G).Left and StartValue(G).Right
+// are interchangeable, which they are (see StartValue.game). Sound engine:
+// Proof Succeeded!
+import 'StartValue.game';
+
+proof:
+
+let:
+    Group G;
+
+theorem:
+    StartValue(G);
+
+games:
+    StartValue(G).Left against StartValue(G).Adversary;
+    StartValue(G).Right against StartValue(G).Adversary;

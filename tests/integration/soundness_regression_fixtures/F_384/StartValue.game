@@ -1,0 +1,60 @@
+// F-384 positive control: start holds the counter c's starting value 0,
+// and Q holds P's starting value, which is the default of GroupElem<G>, as
+// the never-written field D is. Left reads the copies, Right the values
+// they hold. The two games are the same.
+Game Left(Group G) {
+    Int c = 0;
+    Int start = c;
+    GroupElem<G> P;
+    GroupElem<G> Q = P;
+
+    Void Bump() {
+        c = c + 1;
+        P <- GroupElem<G>;
+    }
+
+    Int GetStart() {
+        return start;
+    }
+
+    Int GetC() {
+        return c;
+    }
+
+    GroupElem<G> GetQ() {
+        return Q;
+    }
+
+    GroupElem<G> GetP() {
+        return P;
+    }
+}
+
+Game Right(Group G) {
+    Int c = 0;
+    GroupElem<G> P;
+    GroupElem<G> D;
+
+    Void Bump() {
+        c = c + 1;
+        P <- GroupElem<G>;
+    }
+
+    Int GetStart() {
+        return 0;
+    }
+
+    Int GetC() {
+        return c;
+    }
+
+    GroupElem<G> GetQ() {
+        return D;
+    }
+
+    GroupElem<G> GetP() {
+        return P;
+    }
+}
+
+export as StartValue;

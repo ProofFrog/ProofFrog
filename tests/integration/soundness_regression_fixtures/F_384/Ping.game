@@ -1,0 +1,15 @@
+// Two identical games: a challenger for the reduction-side fixtures, which
+// never call it.
+Game Real() {
+    Int Ping() {
+        return 0;
+    }
+}
+
+Game Ideal() {
+    Int Ping() {
+        return 0;
+    }
+}
+
+export as Ping;

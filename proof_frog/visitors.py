@@ -624,17 +624,62 @@ def rename_value_references(
     return node_copy
 
 
+def written_field_names(module: frog_ast.ASTNode) -> set[str]:
+    """The names of *module*'s fields that one of its methods writes or
+    rebinds (:func:`reassigns_or_rebinds`), with or without an initializer."""
+    return {
+        field.name
+        for field in getattr(module, "fields", [])
+        if reassigns_or_rebinds({field.name}, module)
+    }
+
+
+def initializer_may_change(
+    initializer: frog_ast.ASTNode, written_fields: set[str]
+) -> bool:
+    """True if evaluating a field's *initializer* again after the fields are
+    initialized may not give the value the field was given, so the field
+    cannot be read as its initializer (F-384).
+
+    An initializer runs once, before any method, reading the current values
+    of the fields it names. A field that a method writes (in *written_fields*)
+    may hold another value by the time the field is read, and a method call
+    (``obj.m(...)``) may draw, so it can give another value each time it is
+    evaluated. A call of a ``Function`` value is deterministic, and one held
+    in a field a method writes (a random function drawn in ``Initialize``)
+    is a read of that field; a call naming a scheme or primitive
+    instantiates it (``UG(K, NG).EncapsKey`` once a parameter is replaced by
+    its argument), which evaluates nothing. Otherwise the initializer gives
+    the same value wherever it is evaluated, because a field initializer may
+    read only the fields declared before it.
+    """
+    calls_a_method = (
+        SearchVisitor[frog_ast.ASTNode](
+            lambda node: isinstance(node, frog_ast.FuncCall)
+            and isinstance(node.func, frog_ast.FieldAccess)
+        ).visit(initializer)
+        is not None
+    )
+    return calls_a_method or bool(
+        referenced_variable_names(initializer) & written_fields
+    )
+
+
 def _field_alias_value(
     module: frog_ast.Scheme | frog_ast.Primitive, name: str
 ) -> Optional[frog_ast.ASTNode]:
     """The initializer of *module*'s field *name*, when ``module.name`` may
-    be read as it; None if there is no such field or initializer, or if the
+    be read as it; None if there is no such field or initializer, if the
     initializer may be stored with a change of value (an ``Int`` reduced
-    into a ``ModInt`` field, F-356; its type is not known here)."""
+    into a ``ModInt`` field, F-356; its type is not known here), or if
+    evaluating it again may give another value (a method call, or a read of
+    a field the module writes, F-384)."""
     for field in module.fields:
         if field.name == name:
-            if field.value is None or not store_keeps_value_of_type(
-                field.type, field.value, lambda: None
+            if (
+                field.value is None
+                or not store_keeps_value_of_type(field.type, field.value, lambda: None)
+                or initializer_may_change(field.value, written_field_names(module))
             ):
                 return None
             return field.value
@@ -652,26 +697,34 @@ class ConvertingFieldInitializerError(InstantiationError):
     (F-356)."""
 
 
+class ChangingFieldInitializerError(InstantiationError):
+    """A scheme field's initializer calls a method or reads a field one of
+    the scheme's methods writes, so evaluating it at a read may not give the
+    value the field was given (F-384)."""
+
+
 class InstantiationTransformer(Transformer):
     def __init__(
         self,
         namespace: frog_ast.Namespace,
         field_value_types: Optional[dict[str, Optional[frog_ast.Type]]] = None,
-        kept_fields: frozenset[str] = frozenset(),
     ) -> None:
         self.namespace = dict(namespace)
-        # Fields that must stay fields even though no method writes them,
-        # because their initializer reads a value that changes later: a game
-        # parameter the game writes (F-383), which instantiation binds as a
-        # field. ``Int a = n;`` holds n's starting value, so a read of ``a``
-        # must not become a read of the current ``n``.
-        self._kept_fields = kept_fields
         # Field names that are reassigned somewhere in the module currently being
         # transformed. Their initializer must NOT be substituted into method
         # bodies: a field `Int c = 0` that is later mutated (`c = c + 1`) is
         # genuine state, not a constant alias, so replacing reads of `c` with `0`
         # would silently drop the mutation (see audit F-045).
         self._mutable_fields: set[str] = set()
+        # Every field a method of the current module writes, with or without
+        # an initializer. A field whose initializer reads one of them holds
+        # that field's value at initialization (F-384): ``GroupElem<G> Q =
+        # P;`` with ``P`` drawn later keeps P's starting value, so a read of
+        # ``Q`` must not become a read of the current ``P``: a game or
+        # reduction keeps such a field as a field, and a scheme with one is
+        # refused. That includes a game parameter the game writes, which
+        # instantiation binds as a written field (F-383).
+        self._written_fields: set[str] = set()
         # The type of each field initializer where it is declared (None if
         # unknown), with the module's parameters already substituted
         # (:func:`proof_engine.instantiate` supplies it). A field whose
@@ -680,17 +733,18 @@ class InstantiationTransformer(Transformer):
         self._module: Optional[frog_ast.ASTNode] = None
 
     def _instantiate_module(self, node: T) -> T:
-        saved = (self._mutable_fields, self._module)
-        written: set[str] = set()
-        for field in getattr(node, "fields", []):
-            if field.value is not None and reassigns_or_rebinds({field.name}, node):
-                written.add(field.name)
-        self._mutable_fields = written
+        saved = (self._mutable_fields, self._written_fields, self._module)
+        self._written_fields = written_field_names(node)
+        self._mutable_fields = {
+            field.name
+            for field in getattr(node, "fields", [])
+            if field.value is not None and field.name in self._written_fields
+        }
         self._module = node
         try:
             return self._transform_children(node)
         finally:
-            self._mutable_fields, self._module = saved
+            self._mutable_fields, self._written_fields, self._module = saved
 
     def _initializer_keeps_value(self, field: frog_ast.Field) -> bool:
         """True if *field*'s initializer is stored unchanged, so the field
@@ -743,7 +797,29 @@ class InstantiationTransformer(Transformer):
         # A reassigned field is genuine state, not a constant alias: do not
         # register its initializer for substitution into reads (audit F-045).
         # A pre-existing namespace binding (a proof-let constant) is left intact.
-        if field.name in self._mutable_fields or field.name in self._kept_fields:
+        if field.name in self._mutable_fields:
+            self.namespace.pop(field.name, None)
+        elif field.value is not None and initializer_may_change(
+            field.value, self._written_fields
+        ):
+            # The initializer ran once, before any method: evaluated again at
+            # a read, it would draw again, or see the current value of a field
+            # a method has written since (F-384). A game field stays a field
+            # holding the value it was given (:func:`snapshot_starting_values`
+            # later gives such a read its own field). A scheme's methods
+            # would carry the field's name into the games they are inlined
+            # into, so refuse.
+            if isinstance(self._module, frog_ast.Scheme):
+                raise ChangingFieldInitializerError(
+                    f"Cannot instantiate {self._module.name}: the initializer "
+                    f"of its field '{field.name}', {field.value}, calls a "
+                    "method or reads a field one of the scheme's methods "
+                    "writes. A field initializer runs once, before any "
+                    "method, and the engine can only read a scheme field as "
+                    "its initializer, which would evaluate it again at every "
+                    "read. Declare the value as a local in the methods that "
+                    "use it."
+                )
             self.namespace.pop(field.name, None)
         elif new_field.value is not None and not self._initializer_keeps_value(
             new_field
@@ -860,6 +936,74 @@ class InstantiationTransformer(Transformer):
                         )
                     return result
         return field_access
+
+
+def snapshot_starting_values(game: frog_ast.Game) -> frog_ast.Game:
+    """*game* (instantiated) with each field that a method writes and some
+    field initializer reads given a snapshot: a field ``P@start`` that no
+    method writes, declared just before ``P`` and holding P's starting value
+    (P's initializer, or, with none, the default of its type, one fixed
+    value of the type). Every initializer then reads ``P@start`` instead of
+    ``P``, P starts out as ``P@start``, and the fields that now read only
+    values fixed for the whole game are read as their initializers
+    (:class:`InstantiationTransformer` once more).
+
+    An initializer reads the fields declared before it at their values then
+    (F-384), and the snapshot holds exactly those values for the whole game.
+    Afterwards no initializer reads a field a method writes: a shape that the
+    passes, which decide a field's fate from the method bodies, mishandle
+    (Inline Single-Use Field dropped a written field read only by another
+    field's initializer, leaving that initializer naming an undeclared
+    field). A ``Set`` field's initializer is a type, renamed only in its
+    lengths. *game* is returned unchanged when no initializer reads a
+    written field.
+    """
+    written = written_field_names(game)
+    read_by_initializers: set[str] = set()
+    for field in game.fields:
+        if field.value is not None:
+            read_by_initializers |= referenced_variable_names(field.value)
+    targets = [
+        field.name
+        for field in game.fields
+        if field.name in written and field.name in read_by_initializers
+    ]
+    if not targets:
+        return game
+    taken = {field.name for field in game.fields} | referenced_variable_names(game)
+    snapshot: dict[str, str] = {}
+    for name in targets:
+        fresh = f"{name}@start"
+        suffix = 0
+        while fresh in taken:
+            suffix += 1
+            fresh = f"{name}@start{suffix}"
+        taken.add(fresh)
+        snapshot[name] = fresh
+    fields: list[frog_ast.Field] = []
+    for field in game.fields:
+        value = rename_value_references(
+            field.value, snapshot, isinstance(field.type, frog_ast.SetType)
+        )
+        if field.name not in snapshot:
+            fields.append(frog_ast.Field(field.type, field.name, value))
+            continue
+        start = snapshot[field.name]
+        fields.append(frog_ast.Field(copy.deepcopy(field.type), start, value))
+        fields.append(
+            frog_ast.Field(
+                field.type,
+                field.name,
+                None if value is None else frog_ast.Variable(start),
+            )
+        )
+    new_game = copy.copy(game)
+    new_game.fields = fields
+    # The field initializer types are not recorded here, so a field of a
+    # ModInt type counts as converting and stays a field.
+    result = InstantiationTransformer({}).transform(new_game)
+    assert isinstance(result, frog_ast.Game)
+    return result
 
 
 def block_unconditionally_returns(block: frog_ast.Block) -> bool:

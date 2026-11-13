@@ -1,0 +1,18 @@
+// F-384 positive control: claims FunctionValue(n, H, x).Left and
+// FunctionValue(n, H, x).Right are interchangeable, which they are (see
+// FunctionValue.game). Sound engine: Proof Succeeded!
+import 'FunctionValue.game';
+
+proof:
+
+let:
+    Int n;
+    Function<BitString<n>, BitString<n>> H;
+    BitString<n> x;
+
+theorem:
+    FunctionValue(n, H, x);
+
+games:
+    FunctionValue(n, H, x).Left against FunctionValue(n, H, x).Adversary;
+    FunctionValue(n, H, x).Right against FunctionValue(n, H, x).Adversary;

@@ -1,0 +1,41 @@
+// F-384 (composition): both games draw D once from S, and Peek returns
+// it. Left's C starts at D; Right's C starts at the default of its type.
+// Before any Put, Peek and Get agree always on the left, and on the right
+// only when the draw happens to be the default.
+import 'Source.primitive';
+
+Game Left(Source S) {
+    BitString<S.lambda> D = S.Draw();
+    BitString<S.lambda> C = D;
+
+    BitString<S.lambda> Peek() {
+        return D;
+    }
+
+    Void Put(BitString<S.lambda> x) {
+        C = x;
+    }
+
+    BitString<S.lambda> Get() {
+        return C;
+    }
+}
+
+Game Right(Source S) {
+    BitString<S.lambda> D = S.Draw();
+    BitString<S.lambda> C;
+
+    BitString<S.lambda> Peek() {
+        return D;
+    }
+
+    Void Put(BitString<S.lambda> x) {
+        C = x;
+    }
+
+    BitString<S.lambda> Get() {
+        return C;
+    }
+}
+
+export as Starting2;

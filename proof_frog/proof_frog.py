@@ -568,9 +568,10 @@ def mcp(directory: str) -> None:
     # pylint: disable=import-outside-toplevel
     try:
         from proof_frog.mcp_server import run_server
-    except ImportError:
+    except ImportError as e:
         click.echo(
-            "The 'mcp' package is required for the MCP server.\n"
+            f"Cannot load the MCP server: {e}\n"
+            "It needs the 'mcp' package (1.x or 2.x). "
             "Install it with: pip install 'proof_frog[mcp]'",
             err=True,
         )

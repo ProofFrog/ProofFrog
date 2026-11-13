@@ -33,3 +33,28 @@ jobs:
       - name: run tests
         run: |
           pytest
+
+  # The MCP server tests skip without the optional mcp extra, which the job above
+  # does not install. Run them under both supported mcp major versions.
+  mcp:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        mcp: ["mcp[cli]>=1.22,<2", "mcp[cli]>=2.3,<3"]
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v3
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]" "${{ matrix.mcp }}"
+      - name: Generate examples pin
+        run: make examples-pin
+      - name: run MCP tests
+        run: |
+          pytest tests/unit/other/test_mcp_server.py tests/unit/other/test_path_security.py

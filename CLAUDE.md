@@ -36,6 +36,7 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - `mypy proof_frog --no-warn-unused-ignores` — strict type checking
 - `pylint proof_frog` — style/quality linting (target: 10.00/10)
 - `cd vscode-extension && npx tsc --noEmit` — TypeScript type checking for the VSCode extension
+- `test.yml`'s `mcp` job installs the optional `mcp` extra (once with 1.x, once with 2.x) and runs the MCP server tests, which skip in the main test job
 
 `black`, `mypy` and `pylint` are pinned to a minor series in the `dev` extra of `pyproject.toml`, so CI and a fresh `pip install -e ".[dev]"` use the same checkers. Upgrade them in a PR of their own, fixing whatever the new release flags.
 
@@ -66,7 +67,7 @@ The CI runs three checks on every push/PR to `main`. Always run `make lint` loca
 - `proof_frog/diagnostics.py` — Diagnostic engine for proof hop failures (diff classification, near-miss matching, explanation generation, engine limitation detection)
 - `proof_frog/describe.py` — Human-readable descriptions of primitives/schemes/games
 - `proof_frog/dependencies.py` — Dependency resolution for proof files
-- `proof_frog/mcp_server.py` — MCP server for tool-based proof interaction
+- `proof_frog/mcp_server.py` — MCP server for tool-based proof interaction. Works with mcp 1.x (`FastMCP`) and 2.x (`MCPServer`). Register tools with `@_tool`, not `@mcp.tool()`: it runs one tool call at a time (2.x runs sync tools on worker threads, and the engine and output capture are not thread-safe) and re-raises any exception as a `ToolError`, whose message 2.x passes to the client (it hides other exceptions' messages)
 - `proof_frog/web_server.py` — Flask web server (`web` command, branch `ds-web`). Exposes `/api/file-metadata` (GET + POST), `/api/parse`, `/api/check`, `/api/prove`, `/api/inline`, `/api/describe`, `/api/inlined-game`, and `/api/scaffold/{intermediate-game,reduction,reduction-hop}` for the toolbar Insert dropdown
 - `proof_frog/scaffolding.py` — AST-based code-generation helpers used by the web wizard scaffold endpoints. Uses `visitors.SubstitutionTransformer` to do formal-parameter substitution when cloning game/reduction stubs (avoids `proof_engine.instantiate` because that inlines field-level type aliases too eagerly)
 - `proof_frog/web/` — Vanilla ES module web client. The toolbar exposes file actions, an Insert ▾ dropdown listing wizards applicable to the active file, Parse / Type Check / Run Proof, and engine introspection actions (Describe, Inlined Game). `wizard.js` registers all wizards in `wizardConfig` and provides modal HTML helpers; modal HTML lives in `index.html`; `insertion.js` has line-scanning helpers for client-side structural insertion points

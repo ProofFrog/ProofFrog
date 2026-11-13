@@ -1,0 +1,54 @@
+// Target: Inline Single-Use Variables, with a ModInt product.
+// Hypothesis: Left computes v = s * t from the old s and t, then (when c
+// holds) updates t and s inside the branch and returns v. The pass inlines
+// v into the return inside the branch, after those writes, which is Right:
+// it returns the product of the new s and t.
+// Distinguisher: [s0, t0] = Get(); r = Upd(1, true); output 1 iff
+// r == s0 * t0. Left: always 1. Right: r = (s0 + t0 + 1) * (t0 + 1)
+// = s0 * t0 + s0 + (t0 + 1)^2, equal to s0 * t0 only when
+// s0 = -(t0 + 1)^2, probability 1/q over the uniform s0. Advantage 1 - 1/q.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+Game Left(Int q) {
+    ModInt<q> s;
+    ModInt<q> t;
+    Void Initialize() {
+        s <- ModInt<q>;
+        t <- ModInt<q>;
+    }
+    ModInt<q> Upd(ModInt<q> x, Bool c) {
+        ModInt<q> v = s * t;
+        if (c) {
+            ModInt<q> w = t + x;
+            t = t + x;
+            s = s + w;
+            return v;
+        }
+        return s;
+    }
+    [ModInt<q>, ModInt<q>] Get() {
+        return [s, t];
+    }
+}
+
+Game Right(Int q) {
+    ModInt<q> s;
+    ModInt<q> t;
+    Void Initialize() {
+        s <- ModInt<q>;
+        t <- ModInt<q>;
+    }
+    ModInt<q> Upd(ModInt<q> x, Bool c) {
+        if (c) {
+            ModInt<q> w = t + x;
+            t = t + x;
+            s = s + w;
+            return s * t;
+        }
+        return s;
+    }
+    [ModInt<q>, ModInt<q>] Get() {
+        return [s, t];
+    }
+}
+
+export as Inl3;

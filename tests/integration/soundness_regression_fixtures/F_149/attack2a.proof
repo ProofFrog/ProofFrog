@@ -1,0 +1,17 @@
+// Proof for attack2a_property.game (target, hypothesis and expected outcome
+// in its header).
+import 'dummy.primitive';
+import 'dummy.scheme';
+import 'attack2a_property.game';
+
+proof:
+
+let:
+    IdScheme D = IdScheme();
+
+theorem:
+    Attack2aProp(D);
+
+games:
+    Attack2aProp(D).Left against Attack2aProp(D).Adversary;
+    Attack2aProp(D).Right against Attack2aProp(D).Adversary;

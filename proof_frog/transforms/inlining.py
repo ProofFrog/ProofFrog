@@ -142,6 +142,55 @@ def _binder_captures_free_var(
     return SearchVisitor(_check).visit(use_stmt) is not None
 
 
+def _holds_variable(node: frog_ast.ASTNode, name: str) -> bool:
+    """True if *node* contains a reference to the variable *name*."""
+    return (
+        SearchVisitor(
+            lambda n: isinstance(n, frog_ast.Variable) and n.name == name
+        ).visit(node)
+        is not None
+    )
+
+
+def written_before_use_within(
+    statement: frog_ast.Statement, var_name: str, names: set[str]
+) -> bool:
+    """True if a write to a name in *names* can run, inside *statement*,
+    before the read of *var_name* that *statement* holds.
+
+    A scan of the statements strictly between a definition and the statement
+    holding its use stops before that statement, but a compound statement
+    can itself run a write before the use (F-149):
+
+    - in a block, a statement before the one holding the use;
+    - in an ``if``, a statement earlier in the branch that holds the use
+      (evaluating a condition writes nothing, and only one branch runs);
+    - in a loop that holds the use, a write anywhere in the body (or a
+      binder of the name), since an iteration's writes run before the next
+      iteration's read. A use in the loop header counts too: the reference
+      does not say that a bound or the iterated collection is evaluated
+      only once.
+
+    Writes are found by :func:`reassigns_or_rebinds` (element and field
+    writes, ``<-uniq`` insertions, rebinding declarations and binders).
+    """
+    if isinstance(statement, frog_ast.Block):
+        for inner in statement.statements:
+            if _holds_variable(inner, var_name):
+                return written_before_use_within(inner, var_name, names)
+            if reassigns_or_rebinds(names, inner):
+                return True
+        return False
+    if isinstance(statement, frog_ast.IfStatement):
+        for block in statement.blocks:
+            if _holds_variable(block, var_name):
+                return written_before_use_within(block, var_name, names)
+        return False
+    if isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
+        return reassigns_or_rebinds(names, statement)
+    return False
+
+
 def _is_loop_binder(node: frog_ast.ASTNode, name: str) -> bool:
     """True if *name* is bound by a ``for`` binder anywhere within *node*."""
 
@@ -406,8 +455,9 @@ def _copy_reads_before_overwrite(
 
 class InlineSingleUseVariableTransformer(BlockTransformer):
     """Inlines a declaration `Type v = expr` when v is used exactly once in
-    subsequent statements and no variable free in expr is modified between
-    the declaration and that single use site.
+    subsequent statements and no variable free in expr can be modified
+    between the declaration and that single use site, including inside the
+    branch or loop that holds the use (F-149).
 
     This is more general than RedundantCopyTransformer, which only handles
     simple variable copies (where expr is a plain Variable).
@@ -582,6 +632,41 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
                             ),
                             location=statement.origin,
                             suggestion=None,
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+
+            # F-149: the scan above also stops before the statement holding
+            # the use. When that statement is a branch or a loop, a write to
+            # a free variable of expr inside it can run before the use: then
+            # the inlined expression would read the new value. Decline.
+            written_inside = [
+                name
+                for name in sorted(free_var_names)
+                if written_before_use_within(
+                    remaining_block.statements[first_use_idx], var_name, {name}
+                )
+            ]
+            if written_inside:
+                if self.ctx is not None:
+                    names_text = ", ".join(repr(v) for v in written_inside)
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Variable",
+                            reason=(
+                                f"Cannot inline '{var_name}': free variable(s) "
+                                f"{names_text} may be modified inside the "
+                                f"statement that uses '{var_name}', before the use "
+                                f"(earlier in its branch, or in the loop body "
+                                f"around it)"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Keep '{var_name}' as a local, or move the write "
+                                f"to {names_text} after the use of '{var_name}'"
+                            ),
                             variable=var_name,
                             method=None,
                         )

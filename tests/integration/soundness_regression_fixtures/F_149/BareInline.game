@@ -1,0 +1,56 @@
+// Target: Inline Single-Use Variables, reached through a pass that merges a
+// bare declaration with its first assignment (`ModInt<q> v; v = s * t;`
+// becomes `ModInt<q> v = s * t;`, the shape Inline Single-Use Variables
+// takes). The engine at this fixture's commit has no such pass, so this
+// proof is refused already; it guards a branch that adds one.
+// Hypothesis: as in Inl3.game, v is inlined into the return inside the
+// branch, after the writes to s and t, which is Right.
+// Distinguisher: [s0, t0] = Get(); r = Upd(1, true); output 1 iff
+// r == s0 * t0. Left: always 1. Right: 1 only when s0 = -(t0 + 1)^2,
+// probability 1/q over the uniform s0. Advantage 1 - 1/q.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+Game Left(Int q) {
+    ModInt<q> s;
+    ModInt<q> t;
+    Void Initialize() {
+        s <- ModInt<q>;
+        t <- ModInt<q>;
+    }
+    ModInt<q> Upd(ModInt<q> x, Bool c) {
+        ModInt<q> v;
+        v = s * t;
+        if (c) {
+            ModInt<q> w = t + x;
+            t = t + x;
+            s = s + w;
+            return v;
+        }
+        return s;
+    }
+    [ModInt<q>, ModInt<q>] Get() {
+        return [s, t];
+    }
+}
+
+Game Right(Int q) {
+    ModInt<q> s;
+    ModInt<q> t;
+    Void Initialize() {
+        s <- ModInt<q>;
+        t <- ModInt<q>;
+    }
+    ModInt<q> Upd(ModInt<q> x, Bool c) {
+        if (c) {
+            ModInt<q> w = t + x;
+            t = t + x;
+            s = s + w;
+            return s * t;
+        }
+        return s;
+    }
+    [ModInt<q>, ModInt<q>] Get() {
+        return [s, t];
+    }
+}
+
+export as BareInline;

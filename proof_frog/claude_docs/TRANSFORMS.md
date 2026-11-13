@@ -72,7 +72,7 @@ The field-level RF rewrites (UniqueRFSimplification, FreshInputRFToUniform, Chal
 |---|---|
 | RedundantCopy | Eliminates redundant variable copies (`Type v = w` where v replaces w). |
 | IfSplitBranchAssignment | Moves subsequent statements into if-else branches when all branches assign the same variable. |
-| InlineSingleUseVariable | Inlines `Type v = expr` when v is used exactly once. |
+| InlineSingleUseVariable | Inlines `Type v = expr` when v is used exactly once and nothing `expr` reads can be written before that use, including earlier in the branch or anywhere in the loop that holds it. |
 | DeduplicateDeterministicCalls | Extracts duplicate deterministic primitive calls into shared variables. |
 | ForwardExpressionAlias | Replaces repeated pure expressions with their named alias variable. |
 | HoistFieldPureAlias | Hoists field assignments of pure expressions before their first use. |

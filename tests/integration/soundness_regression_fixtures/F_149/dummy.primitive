@@ -1,0 +1,4 @@
+// Trivial primitive used only to anchor a scheme for the theorem statements.
+Primitive Dummy() {
+    deterministic Int id(Int x);
+}

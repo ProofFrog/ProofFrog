@@ -1,0 +1,7 @@
+// A source of random bit strings: Draw may return a different string on
+// each call.
+Primitive Source(Int lambda) {
+    Int lambda = lambda;
+
+    BitString<lambda> Draw();
+}

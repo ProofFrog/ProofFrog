@@ -1,0 +1,17 @@
+// F-383: claims CopyStartUnread(n, m).Left and CopyStartUnread(n, m).Right
+// are interchangeable. They are not (see CopyStartUnread.game). Sound
+// engine: Proof Failed!
+import 'CopyStartUnread.game';
+
+proof:
+
+let:
+    Int n;
+    Int m;
+
+theorem:
+    CopyStartUnread(n, m);
+
+games:
+    CopyStartUnread(n, m).Left against CopyStartUnread(n, m).Adversary;
+    CopyStartUnread(n, m).Right against CopyStartUnread(n, m).Adversary;

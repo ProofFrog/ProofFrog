@@ -1,0 +1,30 @@
+// F-384 (initialized field): Left's field start copies the counter c's
+// starting value 0, and Bump counts c up, so Left's Get always returns 0.
+// Right's Get returns the current count. Get(), Bump(), Get() gives equal
+// answers only on the left. start must not be read as its initializer c.
+Game Left() {
+    Int c = 0;
+    Int start = c;
+
+    Void Bump() {
+        c = c + 1;
+    }
+
+    Int Get() {
+        return start;
+    }
+}
+
+Game Right() {
+    Int c = 0;
+
+    Void Bump() {
+        c = c + 1;
+    }
+
+    Int Get() {
+        return c;
+    }
+}
+
+export as CountStart;

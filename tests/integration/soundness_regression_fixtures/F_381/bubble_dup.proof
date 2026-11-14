@@ -1,0 +1,15 @@
+// Proof for BubbleDup.game (target, hypothesis and expected outcome in its
+// header).
+import 'BubbleDup.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    BubbleDup(q);
+
+games:
+    BubbleDup(q).Left against BubbleDup(q).Adversary;
+    BubbleDup(q).Right against BubbleDup(q).Adversary;

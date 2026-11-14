@@ -1,0 +1,8 @@
+// Trivial scheme instantiating Dummy; carries no cryptographic content.
+import 'dummy.primitive';
+
+Scheme IdScheme() extends Dummy {
+    deterministic Int id(Int x) {
+        return x;
+    }
+}

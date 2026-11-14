@@ -1,0 +1,41 @@
+// F-384 (snapshot, written copy): a counter a starts at n's starting
+// value, 7 on the left and 9 on the right; SetN changes n afterwards. Get
+// returns 7 + (number of Bumps) on the left and 9 + (number of Bumps) on
+// the right. The field a is written, so it was always kept, with an
+// initializer naming n; no method reads n, and dropping it left a's
+// initializer naming nothing on both sides.
+Game Left() {
+    Int n = 7;
+    Int a = n;
+
+    Void SetN(Int x) {
+        n = x;
+    }
+
+    Void Bump() {
+        a = a + 1;
+    }
+
+    Int Get() {
+        return a;
+    }
+}
+
+Game Right() {
+    Int n = 9;
+    Int a = n;
+
+    Void SetN(Int x) {
+        n = x;
+    }
+
+    Void Bump() {
+        a = a + 1;
+    }
+
+    Int Get() {
+        return a;
+    }
+}
+
+export as WrittenCopy;

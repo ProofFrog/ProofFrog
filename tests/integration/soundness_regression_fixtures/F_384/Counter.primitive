@@ -1,0 +1,4 @@
+// A stateful counter interface: Next returns a value and may advance.
+Primitive Counter() {
+    Int Next();
+}

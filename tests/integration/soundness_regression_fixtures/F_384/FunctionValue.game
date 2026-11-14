@@ -1,0 +1,18 @@
+// F-384 positive control: a call of a Function value is deterministic, so
+// a field initialized with H(x) holds H(x) for the whole game and may still
+// be read as the call. The two games are the same.
+Game Left(Int n, Function<BitString<n>, BitString<n>> H, BitString<n> x) {
+    BitString<n> y = H(x);
+
+    BitString<n> Get() {
+        return y;
+    }
+}
+
+Game Right(Int n, Function<BitString<n>, BitString<n>> H, BitString<n> x) {
+    BitString<n> Get() {
+        return H(x);
+    }
+}
+
+export as FunctionValue;

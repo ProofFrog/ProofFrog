@@ -304,6 +304,37 @@ def test_f354_independent_readers_above_write_still_reorder() -> None:
     assert statements[:2] == ["Int a = f + 1;", "Int b = f + 2;"]
 
 
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        # F-381's shape: the write to b reads the a of the first doubling and
+        # must stay above the second, equal doubling.
+        (
+            "a = a + a; b = b + a; a = a + a;",
+            ["a = a + a;", "b = b + a;", "a = a + a;"],
+        ),
+        # Sound twin: an independent write to b still sorts below both.
+        (
+            "a = a + a; b = b + b; a = a + a;",
+            ["a = a + a;", "a = a + a;", "b = b + b;"],
+        ),
+    ],
+)
+def test_f381_equal_statements_keep_their_own_edges(
+    body: str, expected: list[str]
+) -> None:
+    statements = _stabilized_statements(f"""
+        Game Test() {{
+            Int a;
+            Int b;
+            Void O() {{
+                {body}
+            }}
+        }}
+        """)
+    assert statements == expected
+
+
 def test_write_not_moved_above_shadowing_declaration() -> None:
     """``f = p;`` below ``Int f;`` writes the local. The pass sorts field
     assignments first, and used to lift it above the declaration, where it

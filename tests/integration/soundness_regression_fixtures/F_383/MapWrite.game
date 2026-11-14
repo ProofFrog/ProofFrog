@@ -1,0 +1,22 @@
+// F-383 (element write): Left's Put inserts k into its Map parameter M,
+// Right's does nothing. M is finite, so some k is not in it; Has(k), Put(k),
+// Has(k) answers false, true on the left and false, false on the right.
+// Instantiation used to turn Left's write into a write to the caller's map.
+Game Left(Map<Int, Int> M) {
+    Void Put(Int k) {
+        M[k] = 1;
+    }
+    Bool Has(Int k) {
+        return k in M;
+    }
+}
+
+Game Right(Map<Int, Int> M) {
+    Void Put(Int k) {
+    }
+    Bool Has(Int k) {
+        return k in M;
+    }
+}
+
+export as MapWrite;

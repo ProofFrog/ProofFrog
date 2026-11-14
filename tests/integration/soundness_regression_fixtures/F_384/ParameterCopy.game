@@ -1,0 +1,31 @@
+// F-384 (snapshot, written parameter): a copies the starting value of the
+// parameter n, which SetN writes, so instantiation binds n as a field
+// initialized with its argument. The two games name their parameters in
+// opposite orders, so with the arguments (m1, m2) Left's Get returns m1
+// and Right's returns m2. No method reads n; dropping it left a's
+// initializer naming nothing on both sides.
+Game Left(Int n, Int k) {
+    Int a = n;
+
+    Void SetN(Int x) {
+        n = x;
+    }
+
+    Int Get() {
+        return a;
+    }
+}
+
+Game Right(Int k, Int n) {
+    Int a = n;
+
+    Void SetN(Int x) {
+        n = x;
+    }
+
+    Int Get() {
+        return a;
+    }
+}
+
+export as ParameterCopy;

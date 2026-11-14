@@ -1,0 +1,14 @@
+// F-384 (scheme): the field k is initialized by one call of S.Draw, so Draw
+// returns that one string every time. Read as its initializer, k would call
+// S.Draw again at every read; and a scheme field cannot stay a field. The
+// engine refuses the scheme.
+import 'Source.primitive';
+
+Scheme KeyedSource(Source S) extends Source {
+    Int lambda = S.lambda;
+    BitString<lambda> k = S.Draw();
+
+    BitString<lambda> Draw() {
+        return k;
+    }
+}

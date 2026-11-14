@@ -1,0 +1,58 @@
+// F-384 (snapshot, reduction, written copy): written_copy.proof with the
+// fields in a reduction. In R7 and R9 a counter a starts at n's starting
+// value, 7 and 9; SetN changes n afterwards, which no method reads; Get
+// returns a. Composed with Ping, R7 is WrittenCopy().Left and R9 is
+// WrittenCopy().Right, so step 2 claims that two games whose Get returns
+// 7 + (number of Bumps) and 9 + (number of Bumps) are interchangeable. The
+// written field a was always kept with its initializer; dropping n would
+// leave that initializer naming nothing in both.
+// Sound engine: step 2 fails; steps 1 and 3 are true.
+import 'WrittenCopy.game';
+import 'Ping.game';
+
+Reduction R7() compose Ping() against WrittenCopy().Adversary {
+    Int n = 7;
+    Int a = n;
+
+    Void SetN(Int x) {
+        n = x;
+    }
+
+    Void Bump() {
+        a = a + 1;
+    }
+
+    Int Get() {
+        return a;
+    }
+}
+
+Reduction R9() compose Ping() against WrittenCopy().Adversary {
+    Int n = 9;
+    Int a = n;
+
+    Void SetN(Int x) {
+        n = x;
+    }
+
+    Void Bump() {
+        a = a + 1;
+    }
+
+    Int Get() {
+        return a;
+    }
+}
+
+proof:
+
+let:
+
+theorem:
+    WrittenCopy();
+
+games:
+    WrittenCopy().Left against WrittenCopy().Adversary;
+    Ping().Real compose R7() against WrittenCopy().Adversary;
+    Ping().Real compose R9() against WrittenCopy().Adversary;
+    WrittenCopy().Right against WrittenCopy().Adversary;

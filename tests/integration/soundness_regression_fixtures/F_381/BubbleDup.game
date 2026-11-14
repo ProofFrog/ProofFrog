@@ -1,0 +1,47 @@
+// Target: Bubble Sort Field Assignments (dependencies.BubbleSortFieldAssignment).
+// Left's Upd adds the doubled e to d, then doubles e again; Right doubles e
+// twice and then adds it to d. The two `e = e + e;` statements are equal
+// ASTs. The sorter swapped deep copies of the statements and looked each
+// copy's graph node up by structural equality, so the second doubling got
+// the first one's node, which has no edge from `d = d + e;`, and
+// `d = d + e;` sank below the second doubling, turning Left into Right.
+// Distinguisher: [e0, d0] = Get(); Upd(); [e1, d1] = Get();
+// output 1 iff d1 == d0 + e0 + e0. Left: always 1. Right: d1 = d0 + 4*e0,
+// so 1 only when 2*e0 = 0 mod q (probability 1/q for odd prime q).
+// Advantage 1 - 1/q.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+Game Left(Int q) {
+    ModInt<q> e;
+    ModInt<q> d;
+    Void Initialize() {
+        e <- ModInt<q>;
+        d <- ModInt<q>;
+    }
+    Void Upd() {
+        e = e + e;
+        d = d + e;
+        e = e + e;
+    }
+    [ModInt<q>, ModInt<q>] Get() {
+        return [e, d];
+    }
+}
+
+Game Right(Int q) {
+    ModInt<q> e;
+    ModInt<q> d;
+    Void Initialize() {
+        e <- ModInt<q>;
+        d <- ModInt<q>;
+    }
+    Void Upd() {
+        e = e + e;
+        e = e + e;
+        d = d + e;
+    }
+    [ModInt<q>, ModInt<q>] Get() {
+        return [e, d];
+    }
+}
+
+export as BubbleDup;

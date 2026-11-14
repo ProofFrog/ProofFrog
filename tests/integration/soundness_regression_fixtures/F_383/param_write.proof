@@ -1,0 +1,16 @@
+// F-383: claims ParamWrite(n).Left and ParamWrite(n).Right are
+// interchangeable. They are not (see ParamWrite.game). Sound engine:
+// Proof Failed!
+import 'ParamWrite.game';
+
+proof:
+
+let:
+    Int n;
+
+theorem:
+    ParamWrite(n);
+
+games:
+    ParamWrite(n).Left against ParamWrite(n).Adversary;
+    ParamWrite(n).Right against ParamWrite(n).Adversary;

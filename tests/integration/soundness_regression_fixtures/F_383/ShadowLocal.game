@@ -1,0 +1,24 @@
+// F-383 positive control: Left's Get declares a local n that shadows the
+// parameter and writes the local; the parameter is never written, so it is
+// still read as the argument in Peek. The games are interchangeable.
+Game Left(Int n) {
+    Int Get() {
+        Int n = 5;
+        n = n + 1;
+        return n;
+    }
+    Int Peek() {
+        return n;
+    }
+}
+
+Game Right(Int n) {
+    Int Get() {
+        return 6;
+    }
+    Int Peek() {
+        return n;
+    }
+}
+
+export as ShadowLocal;

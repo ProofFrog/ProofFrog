@@ -1,0 +1,22 @@
+// F-383 positive control: Left counts in its parameter n, Right in a field c
+// that starts at n. The games are interchangeable.
+Game Left(Int n) {
+    Void Bump() {
+        n = n + 1;
+    }
+    Int Get() {
+        return n;
+    }
+}
+
+Game Right(Int n) {
+    Int c = n;
+    Void Bump() {
+        c = c + 1;
+    }
+    Int Get() {
+        return c;
+    }
+}
+
+export as FieldCounter;

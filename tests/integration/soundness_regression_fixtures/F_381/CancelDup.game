@@ -1,0 +1,49 @@
+// Target: Bubble Sort Field Assignments, reached through a pass that
+// cancels ModInt terms (`e + ((d + d) - d)` becomes `e + d`, an AST equal to
+// an earlier statement). The engine at this fixture's commit has no such
+// pass, so this proof is refused already; it guards a branch that adds one.
+// Left's Upd adds d to e, doubles d, then adds the NEW d to e. Right adds
+// the old d to e twice and then doubles d. Once the third statement reads
+// `e = e + d;`, a sorter that looks a statement's graph node up by
+// structural equality gives it the FIRST statement's node, misses the edge
+// from `d = d + d;`, and swaps the two, which turns Left into Right.
+// Distinguisher: [e0, d0] = Get(); Upd(); [e1, d1] = Get();
+// output 1 iff e1 == e0 + d0 + d0 + d0. Left: always 1 (e1 = e0 + 3*d0).
+// Right: e1 = e0 + 2*d0, so 1 only when d0 = 0 (probability 1/q for prime
+// q). Advantage 1 - 1/q.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+Game Left(Int q) {
+    ModInt<q> e;
+    ModInt<q> d;
+    Void Initialize() {
+        e <- ModInt<q>;
+        d <- ModInt<q>;
+    }
+    Void Upd() {
+        e = e + d;
+        d = d + d;
+        e = e + ((d + d) - d);
+    }
+    [ModInt<q>, ModInt<q>] Get() {
+        return [e, d];
+    }
+}
+
+Game Right(Int q) {
+    ModInt<q> e;
+    ModInt<q> d;
+    Void Initialize() {
+        e <- ModInt<q>;
+        d <- ModInt<q>;
+    }
+    Void Upd() {
+        e = e + d;
+        e = e + d;
+        d = d + d;
+    }
+    [ModInt<q>, ModInt<q>] Get() {
+        return [e, d];
+    }
+}
+
+export as CancelDup;

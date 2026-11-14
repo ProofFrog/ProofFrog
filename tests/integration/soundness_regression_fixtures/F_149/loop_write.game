@@ -1,0 +1,42 @@
+// Target: Inline Single-Use Variables, loop route.
+// Hypothesis: the loop body reads v and then writes ctr; the pass inlines
+// `ctr + 1` into the body because the write is inside the statement that
+// holds the use, so the second iteration reads the new ctr. Right is that
+// output.
+// Distinguisher: Initialize(); Probe(). Left returns 1 + 1 = 2, Right
+// returns 1 + 101 = 102. Advantage 1.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+import 'dummy.primitive';
+
+Game Left(Dummy D) {
+    Int ctr;
+    Void Initialize() {
+        ctr = 0;
+    }
+    Int Probe() {
+        Int total = 0;
+        Int v = ctr + 1;
+        for (Int j = 0 to 2) {
+            total = total + v;
+            ctr = 100;
+        }
+        return total;
+    }
+}
+
+Game Right(Dummy D) {
+    Int ctr;
+    Void Initialize() {
+        ctr = 0;
+    }
+    Int Probe() {
+        Int total = 0;
+        for (Int j = 0 to 2) {
+            total = total + (ctr + 1);
+            ctr = 100;
+        }
+        return total;
+    }
+}
+
+export as LoopWrite;

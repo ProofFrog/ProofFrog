@@ -55,6 +55,16 @@ CASES = [
      "a shadowed inner variable entailed a guard about the outer one"),
     ("F-101", "attack_a4_local.proof", "reject", "DeadGuardedAssignmentElimination",
      "a shadowing inner local entailed a guard about the outer local"),
+    ("F-149", "attack2a.proof", "reject", "InlineSingleUseVariable",
+     "a write earlier in the branch holding the use was missed"),
+    ("F-149", "loop_write.proof", "reject", "InlineSingleUseVariable",
+     "a write in the loop body around the use was missed"),
+    ("F-149", "inl3.proof", "reject", "InlineSingleUseVariable",
+     "a ModInt product was inlined past writes to its factors in the branch"),
+    ("F-149", "bare_inline.proof", "reject", "InlineSingleUseVariable",
+     "the same, after a bare declaration is merged with its assignment"),
+    ("F-149", "branch_control.proof", "accept", "InlineSingleUseVariable",
+     "positive control: the branch writes another field before the use"),
     ("F-152", "atk1b.proof", "reject", "InlineLocalTupleLiteral",
      "a tuple-element write v[k] = e was missed, so a stale literal was inlined"),
     ("F-153", "atk2.proof", "reject", "InlineLocalTupleLiteral",
@@ -261,6 +271,64 @@ CASES = [
     ("F-377", "modint_division_by_zero_control.proof", "accept",
      "SymbolicComputation",
      "positive control: the equivalences above with ModInt<q> division"),
+    ("F-381", "bubble_dup.proof", "reject", "BubbleSortFieldAssignment",
+     "the second of two equal statements got the first one's graph node"),
+    ("F-381", "cancel_dup.proof", "reject", "BubbleSortFieldAssignment",
+     "the same, once a ModInt cancellation makes the two statements equal"),
+    ("F-381", "sort_past_dup.proof", "accept", "BubbleSortFieldAssignment",
+     "positive control: an independent write still moves past equal statements"),
+    ("F-382", "dup_order.proof", "reject", "RemoveDuplicateFields",
+     "deleting a pair's second write also deleted an equal write elsewhere"),
+    ("F-382", "exp_dup.proof", "reject", "RemoveDuplicateFields",
+     "the same, once a group field is rewritten as an exponent field"),
+    ("F-382", "same_order_control.proof", "accept", "RemoveDuplicateFields",
+     "positive control: fields updated in the same order everywhere merge"),
+    ("F-382", "opposite_order_control.proof", "accept", "RemoveDuplicateFields",
+     "positive control: opposite orders merge, each method keeping one write"),
+    ("F-383", "param_write.proof", "reject", "instantiation",
+     "a game's write to its own parameter went to the argument and was dropped"),
+    ("F-383", "map_write.proof", "reject", "instantiation",
+     "an element write to a game's Map parameter wrote the caller's map"),
+    ("F-383", "reduction_write.proof", "reject", "instantiation",
+     "a reduction's write to its own parameter was dropped"),
+    ("F-383", "scheme_write.proof", "type_error", "instantiation",
+     "a scheme's write to its own parameter was dropped, each call starting over"),
+    ("F-383", "copy_start.proof", "reject", "instantiation",
+     "a field copying a written parameter's starting value must not follow it"),
+    ("F-383", "copy_start_unread.proof", "reject", "RemoveUnnecessaryFields",
+     "a field read only by another field's initializer must stay declared"),
+    ("F-383", "field_control.proof", "accept", "instantiation",
+     "positive control: a written parameter counts like an explicit field"),
+    ("F-383", "shadow_local_control.proof", "accept", "instantiation",
+     "positive control: a write to a shadowing local leaves the parameter alone"),
+    ("F-384", "alias_redraw.proof", "reject", "instantiation",
+     "a field copying another field's starting value followed its later draws"),
+    ("F-384", "count_start.proof", "reject", "instantiation",
+     "a field copying an initialized counter's start followed the count"),
+    ("F-384", "call_once.proof", "reject", "instantiation",
+     "a field initialized by one method call called it again at every read"),
+    ("F-384", "challenger_initializer.proof", "reject", "instantiation",
+     "a challenger field's initializer read a reduction field of the same name"),
+    ("F-384", "copy_source.proof", "reject", "InlineSingleUseField",
+     "a field read only by a kept initializer was dropped, the initializer dangling"),
+    ("F-384", "written_copy.proof", "reject", "InlineSingleUseField",
+     "a written field's initializer read a written field that was then dropped"),
+    ("F-384", "parameter_copy.proof", "reject", "InlineSingleUseField",
+     "a copy of a written parameter's start lost the parameter's field"),
+    ("F-384", "reduction_copy_source.proof", "reject", "InlineSingleUseField",
+     "copy_source in a reduction: its fields need the snapshot too"),
+    ("F-384", "reduction_written_copy.proof", "reject", "InlineSingleUseField",
+     "written_copy in a reduction: its fields need the snapshot too"),
+    ("F-384", "scheme_reads_written.proof", "type_error", "instantiation",
+     "a scheme field copying a written field's start cannot stay a field"),
+    ("F-384", "scheme_method_call.proof", "type_error", "instantiation",
+     "a scheme field initialized by a method call cannot stay a field"),
+    ("F-384", "unwritten_control.proof", "accept", "instantiation",
+     "positive control: a field copying an unwritten field is read as it"),
+    ("F-384", "function_value_control.proof", "accept", "instantiation",
+     "positive control: a field initialized by a Function call is read as it"),
+    ("F-384", "start_value_control.proof", "accept", "instantiation",
+     "positive control: a copy of a written field's start is read as that start"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),
@@ -418,6 +486,20 @@ TYPE_ERROR = {
         "error: Cannot instantiate ParamModTest: its parameter 'x' of type "
         "ModInt<q> is given q (of type Int)"
     ),
+    ("F-383", "scheme_write.proof"): (
+        "error: Cannot instantiate BumpCounter: one of its methods writes its "
+        "parameter 'n'"
+    ),
+    ("F-384", "scheme_reads_written.proof"): (
+        "error: Cannot instantiate StartCounter: the initializer of its field "
+        "'start', c, calls a method or reads a field one of the scheme's "
+        "methods writes"
+    ),
+    ("F-384", "scheme_method_call.proof"): (
+        "error: Cannot instantiate KeyedSource: the initializer of its field "
+        "'k', S.Draw(), calls a method or reads a field one of the scheme's "
+        "methods writes"
+    ),
     ("GAME-SELF-CALL", "self_call.proof"): (
         "error: Game 'Calls' may not call its own method 'Inc'"
     ),
@@ -484,6 +566,17 @@ TYPE_ERROR = {
 FAILED_STEP = {
     ("F-373", "challenger_write.proof"): (
         "Step 1 failed: Probe(n).Left -> Echo(n).Left compose R(n)"
+    ),
+    ("F-383", "reduction_write.proof"): (
+        "Step 1 failed: ParamWrite(n).Left -> Echo(n).Real compose R(n)"
+    ),
+    # Without the snapshot on the reduction, step 2 verifies, and steps 1 and
+    # 3 fail in its place (the games' own fields get the snapshot).
+    ("F-384", "reduction_copy_source.proof"): (
+        "Step 2 failed: Ping().Real compose R7() -> Ping().Real compose R9()"
+    ),
+    ("F-384", "reduction_written_copy.proof"): (
+        "Step 2 failed: Ping().Real compose R7() -> Ping().Real compose R9()"
     ),
     ("Z3-FIELD-ACCESS", "group_equality.proof"): (
         "Step 2 failed: Swapped(G) -> GroupEquality(G).Right"

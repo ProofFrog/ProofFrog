@@ -1,0 +1,19 @@
+// F-383: BumpCounter writes its own parameter n. Instantiation used to
+// replace n by the argument in Next, so each call returned n + 1 and this
+// proof verified. Sound engine: a type error naming the parameter.
+import 'Counter.primitive';
+import 'BumpCounter.scheme';
+import 'NextValue.game';
+
+proof:
+
+let:
+    Int n;
+    Counter C = BumpCounter(n);
+
+theorem:
+    NextValue(n, C);
+
+games:
+    NextValue(n, C).Left against NextValue(n, C).Adversary;
+    NextValue(n, C).Right against NextValue(n, C).Adversary;

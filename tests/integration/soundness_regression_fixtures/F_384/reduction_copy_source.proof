@@ -1,0 +1,49 @@
+// F-384 (snapshot, reduction): copy_source.proof with the fields in a
+// reduction. R7 and R9 copy n's starting value, 7 and 9, into a; SetN
+// changes n afterwards, which no method reads; Get returns a. Composed with
+// Ping, R7 is CopySource().Left and R9 is CopySource().Right, so step 2
+// claims that two games whose Get returns 7 and 9 are interchangeable. A
+// reduction's fields must get the same snapshot as a game's: dropping n
+// would leave a's initializer naming nothing in both.
+// Sound engine: step 2 fails; steps 1 and 3 are true.
+import 'CopySource.game';
+import 'Ping.game';
+
+Reduction R7() compose Ping() against CopySource().Adversary {
+    Int n = 7;
+    Int a = n;
+
+    Void SetN(Int x) {
+        n = x;
+    }
+
+    Int Get() {
+        return a;
+    }
+}
+
+Reduction R9() compose Ping() against CopySource().Adversary {
+    Int n = 9;
+    Int a = n;
+
+    Void SetN(Int x) {
+        n = x;
+    }
+
+    Int Get() {
+        return a;
+    }
+}
+
+proof:
+
+let:
+
+theorem:
+    CopySource();
+
+games:
+    CopySource().Left against CopySource().Adversary;
+    Ping().Real compose R7() against CopySource().Adversary;
+    Ping().Real compose R9() against CopySource().Adversary;
+    CopySource().Right against CopySource().Adversary;

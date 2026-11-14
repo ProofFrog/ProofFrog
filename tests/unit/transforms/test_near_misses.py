@@ -981,6 +981,53 @@ def test_dedup_near_miss_nondeterministic_argument():
     assert dedup_misses[0].suggestion is not None
 
 
+def _dedup_written_misses(body: str) -> list:
+    game_src = (
+        "Game TestGame() {\n"
+        "    [BitString<n>, BitString<n>] Compute(BitString<n> k) {\n"
+        f"        {body}\n"
+        "    }\n"
+        "}"
+    )
+    game = frog_parser.parse_game(game_src)
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace=_make_det_namespace(),
+        subsets_pairs=[],
+    )
+    DeduplicateDeterministicCalls().apply(game, ctx)
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Deduplicate Deterministic Calls"
+        and "may be written between the calls" in nm.reason
+    ]
+
+
+def test_dedup_near_miss_argument_written_in_loop():
+    """F-385: two equal deterministic calls in a loop that writes their
+    argument are not merged, and the pass says why."""
+    misses = _dedup_written_misses(
+        "BitString<n> a = k; BitString<n> b = k;"
+        " for (Int i = 0 to 1) { a = G.evaluate(k); k = a; b = G.evaluate(k); }"
+        " return [a, b];"
+    )
+    assert misses
+    assert "G.evaluate(k)" in misses[0].reason
+    assert misses[0].suggestion is not None
+
+
+def test_dedup_no_written_near_miss_when_argument_stable():
+    """No such near miss when the loop never writes the argument (the calls
+    merge)."""
+    assert not _dedup_written_misses(
+        "BitString<n> a = k; BitString<n> b = k;"
+        " for (Int i = 0 to 1) { a = G.evaluate(k); b = G.evaluate(k); }"
+        " return [a, b];"
+    )
+
+
 # --- Uniform Bijection Elimination near-miss tests ---
 
 

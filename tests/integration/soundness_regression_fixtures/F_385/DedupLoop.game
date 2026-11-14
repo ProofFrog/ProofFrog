@@ -1,0 +1,41 @@
+// Target: Deduplicate Deterministic Calls (the argument stability scan,
+// inlining.DeduplicateDeterministicCallsTransformer._args_stable_across_calls).
+// Both calls F.Eval(k) sit in one loop, which writes k between them. The scan
+// covered only the statements strictly between the statements holding the
+// calls, and none when one statement held them all, so the pass merged them
+// into one F.Eval(k) above the loop: Right. But Left's second call runs after
+// k = F.Eval(k) and computes F(F(k0)).
+// Distinguisher: call Probe(k0), output 1 iff the two components are equal.
+// Left returns [F(k0), F(F(k0))], Right [F(k0), F(k0)]. The theorem is over
+// every deterministic F; for one with F(F(x)) != F(x) the advantage is 1.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+import 'DetPrimS.primitive';
+
+Game Left(DetPrimS F) {
+    [F.Block, F.Block] Probe(F.Block k) {
+        F.Block a = k;
+        F.Block b = k;
+        for (Int i = 0 to 1) {
+            a = F.Eval(k);
+            k = a;
+            b = F.Eval(k);
+        }
+        return [a, b];
+    }
+}
+
+Game Right(DetPrimS F) {
+    [F.Block, F.Block] Probe(F.Block k) {
+        F.Block a = k;
+        F.Block b = k;
+        F.Block d = F.Eval(k);
+        for (Int i = 0 to 1) {
+            a = d;
+            k = a;
+            b = d;
+        }
+        return [a, b];
+    }
+}
+
+export as DedupLoop;

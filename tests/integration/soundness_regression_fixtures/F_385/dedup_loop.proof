@@ -1,0 +1,16 @@
+// Claims the two games of DedupLoop.game interchangeable; they are not (see its header). Sound engine: Proof Failed!
+import 'DetPrimS.primitive';
+import 'DedupLoop.game';
+
+proof:
+
+let:
+    Int n;
+    DetPrimS F = DetPrimS(BitString<n>);
+
+theorem:
+    DedupLoop(F);
+
+games:
+    DedupLoop(F).Left against DedupLoop(F).Adversary;
+    DedupLoop(F).Right against DedupLoop(F).Adversary;

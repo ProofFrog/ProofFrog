@@ -10,6 +10,7 @@ from proof_frog.transforms._base import PipelineContext
 from proof_frog.transforms.inlining import (
     DeduplicateDeterministicCalls,
     DeduplicateDeterministicCallsTransformer,
+    written_before_reached_within,
 )
 from proof_frog.visitors import NameTypeMap
 
@@ -580,3 +581,332 @@ class TestDedupNondeterministicArgument:
             proof_let_types=_let_function_types(),
         ).transform(frog_parser.parse_method(source))
         assert result == frog_parser.parse_method(source)
+
+
+def _make_det_int_namespace() -> frog_ast.Namespace:
+    """Namespace with primitive G: ``evaluate`` and ``evalInt`` deterministic."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive G(Int n) {
+            deterministic BitString<n> evaluate(BitString<n> x);
+            deterministic BitString<n> evalInt(Int c);
+        }
+        """)
+    return {"G": prim}
+
+
+def _dedup(source: str) -> frog_ast.Method:
+    return DeduplicateDeterministicCallsTransformer(
+        proof_namespace=_make_det_int_namespace()
+    ).transform(frog_parser.parse_method(source))
+
+
+class TestDedupWriteInsideHoldingStatement:
+    """F-385: the merged call is placed before the first statement holding a
+    call, so a write that can run between that place and any call breaks the
+    merge, including writes inside the statements that hold the calls."""
+
+    def test_f385_both_calls_in_loop_writing_argument_not_deduped(self) -> None:
+        """Both calls in one loop body that writes ``k`` between them: the
+        second call reads the new ``k``. Nothing is merged, at the loop's
+        level (above the loop) or inside its body (F-201)."""
+        source = """
+            [BitString<n>, BitString<n>] f(BitString<n> k) {
+                BitString<n> a = k;
+                BitString<n> b = k;
+                for (Int i = 0 to 1) {
+                    a = G.evaluate(k);
+                    k = a;
+                    b = G.evaluate(k);
+                }
+                return [a, b];
+            }
+            """
+        assert _dedup(source) == frog_parser.parse_method(source)
+
+    def test_f385_loop_writing_argument_after_both_calls_not_deduped(self) -> None:
+        """A write after both calls in the loop body still runs before the
+        next iteration's calls."""
+        source = """
+            [BitString<n>, BitString<n>] f(BitString<n> k) {
+                BitString<n> a = k;
+                BitString<n> b = k;
+                for (Int i = 0 to 2) {
+                    a = G.evaluate(k);
+                    b = G.evaluate(k);
+                    k = b;
+                }
+                return [a, b];
+            }
+            """
+        expected = frog_parser.parse_method("""
+            [BitString<n>, BitString<n>] f(BitString<n> k) {
+                BitString<n> a = k;
+                BitString<n> b = k;
+                for (Int i = 0 to 2) {
+                    BitString<n> __determ_0__ = G.evaluate(k);
+                    a = __determ_0__;
+                    b = __determ_0__;
+                    k = b;
+                }
+                return [a, b];
+            }
+            """)
+        # Not hoisted above the loop; merged inside the body, where k is
+        # stable between the two calls.
+        assert _dedup(source) == expected
+
+    def test_f385_last_statement_loop_writes_argument_not_deduped(self) -> None:
+        """The first call is before the loop, the second inside a loop that
+        writes ``k`` after it: the statement holding the last call is
+        scanned too."""
+        source = """
+            [BitString<n>, BitString<n>] f(BitString<n> k) {
+                BitString<n> a = G.evaluate(k);
+                BitString<n> b = k;
+                for (Int i = 0 to 2) {
+                    b = G.evaluate(k);
+                    k = b;
+                }
+                return [a, b];
+            }
+            """
+        assert _dedup(source) == frog_parser.parse_method(source)
+
+    def test_f385_uniq_insertion_between_calls_not_deduped(self) -> None:
+        """``x <-uniq[S] T;`` adds ``x`` to ``S``, so ``|S|`` changes between
+        the calls."""
+        source = """
+            [BitString<n>, BitString<n>] f(Set<BitString<n>> S) {
+                BitString<n> a = G.evalInt(|S|);
+                BitString<n> x <-uniq[S] BitString<n>;
+                BitString<n> b = G.evalInt(|S|);
+                return [a, b];
+            }
+            """
+        assert _dedup(source) == frog_parser.parse_method(source)
+
+    def test_f385_loop_binder_argument_not_hoisted(self) -> None:
+        """An argument naming the loop binder is not hoisted out of the loop
+        (it would leave the binder's scope); the calls merge inside the
+        body."""
+        expected = frog_parser.parse_method("""
+            [BitString<n>, BitString<n>] f(BitString<n> k) {
+                BitString<n> a = k;
+                BitString<n> b = k;
+                for (Int i = 0 to 1) {
+                    BitString<n> __determ_0__ = G.evalInt(i);
+                    a = __determ_0__;
+                    b = __determ_0__;
+                }
+                return [a, b];
+            }
+            """)
+        assert _dedup("""
+            [BitString<n>, BitString<n>] f(BitString<n> k) {
+                BitString<n> a = k;
+                BitString<n> b = k;
+                for (Int i = 0 to 1) {
+                    a = G.evalInt(i);
+                    b = G.evalInt(i);
+                }
+                return [a, b];
+            }
+            """) == expected
+
+    def test_f385_loop_local_argument_not_hoisted(self) -> None:
+        """An argument naming a local declared in the loop body is not hoisted
+        above the loop."""
+        expected = frog_parser.parse_method("""
+            [BitString<n>, BitString<n>] f(BitString<n> k) {
+                BitString<n> a = k;
+                BitString<n> b = k;
+                for (Int i = 0 to 1) {
+                    BitString<n> x = k + a;
+                    BitString<n> __determ_0__ = G.evaluate(x);
+                    a = __determ_0__;
+                    b = __determ_0__;
+                }
+                return [a, b];
+            }
+            """)
+        assert _dedup("""
+            [BitString<n>, BitString<n>] f(BitString<n> k) {
+                BitString<n> a = k;
+                BitString<n> b = k;
+                for (Int i = 0 to 1) {
+                    BitString<n> x = k + a;
+                    a = G.evaluate(x);
+                    b = G.evaluate(x);
+                }
+                return [a, b];
+            }
+            """) == expected
+
+    def test_f385_loop_without_write_still_deduped(self) -> None:
+        """Positive control: a loop that never writes ``k`` keeps both calls
+        on one value, so they merge above the loop."""
+        expected = frog_parser.parse_method("""
+            [BitString<n>, BitString<n>] f(BitString<n> k) {
+                BitString<n> a = k;
+                BitString<n> b = k;
+                BitString<n> __determ_0__ = G.evaluate(k);
+                for (Int i = 0 to 1) {
+                    a = __determ_0__;
+                    b = __determ_0__;
+                }
+                return [a, b];
+            }
+            """)
+        assert _dedup("""
+            [BitString<n>, BitString<n>] f(BitString<n> k) {
+                BitString<n> a = k;
+                BitString<n> b = k;
+                for (Int i = 0 to 1) {
+                    a = G.evaluate(k);
+                    b = G.evaluate(k);
+                }
+                return [a, b];
+            }
+            """) == expected
+
+    def test_f385_write_after_last_call_in_its_statement_still_deduped(
+        self,
+    ) -> None:
+        """Positive control: a simple statement evaluates its calls before its
+        own write, so ``k = G.evaluate(k) + G.evaluate(k);`` and a last call
+        in ``k = G.evaluate(k);`` still merge."""
+        expected = frog_parser.parse_method("""
+            BitString<n> f(BitString<n> k) {
+                BitString<n> __determ_0__ = G.evaluate(k);
+                k = __determ_0__ + __determ_0__;
+                return k;
+            }
+            """)
+        assert _dedup("""
+            BitString<n> f(BitString<n> k) {
+                k = G.evaluate(k) + G.evaluate(k);
+                return k;
+            }
+            """) == expected
+        expected = frog_parser.parse_method("""
+            [BitString<n>, BitString<n>] f(BitString<n> k) {
+                BitString<n> __determ_0__ = G.evaluate(k);
+                BitString<n> a = __determ_0__;
+                k = __determ_0__;
+                return [a, k];
+            }
+            """)
+        assert _dedup("""
+            [BitString<n>, BitString<n>] f(BitString<n> k) {
+                BitString<n> a = G.evaluate(k);
+                k = G.evaluate(k);
+                return [a, k];
+            }
+            """) == expected
+
+    def test_f385_branch_write_after_condition_call_still_deduped(self) -> None:
+        """Positive control: a branch body runs after its ``if`` condition, so
+        a write there does not reach the condition's call when the if is the
+        last statement holding a call."""
+        expected = frog_parser.parse_method("""
+            BitString<n> f(BitString<n> k, BitString<n> t) {
+                BitString<n> __determ_0__ = G.evaluate(k);
+                BitString<n> a = __determ_0__;
+                if (__determ_0__ == t) {
+                    k = t;
+                }
+                return a + k;
+            }
+            """)
+        assert _dedup("""
+            BitString<n> f(BitString<n> k, BitString<n> t) {
+                BitString<n> a = G.evaluate(k);
+                if (G.evaluate(k) == t) {
+                    k = t;
+                }
+                return a + k;
+            }
+            """) == expected
+
+
+def _first_statement(source: str) -> frog_ast.Statement:
+    return frog_parser.parse_method(source).block.statements[0]
+
+
+def _holds_eval(node: frog_ast.ASTNode) -> bool:
+    return "G.evaluate" in str(node)
+
+
+class TestWrittenBeforeReachedWithin:
+    """The region helper shared by Deduplicate Deterministic Calls (F-385)
+    and Inline Single-Use Variables (F-149)."""
+
+    def test_block_write_before_last_point(self) -> None:
+        """In a block, a write between two points runs before the second
+        (here ``k = a;``, and the declaration of ``a``); the last statement's
+        own write (``b``) runs after its point."""
+        stmt = _first_statement("""
+            Void f(BitString<n> k) {
+                if (true) {
+                    BitString<n> a = G.evaluate(k);
+                    k = a;
+                    BitString<n> b = G.evaluate(k);
+                }
+            }
+            """)
+        assert written_before_reached_within(stmt, _holds_eval, {"k"})
+        assert written_before_reached_within(stmt, _holds_eval, {"a"})
+        assert not written_before_reached_within(stmt, _holds_eval, {"b"})
+
+    def test_block_write_after_last_point(self) -> None:
+        """A write after every point in a block reaches none of them."""
+        stmt = _first_statement("""
+            Void f(BitString<n> k) {
+                if (true) {
+                    BitString<n> a = G.evaluate(k);
+                    BitString<n> b = G.evaluate(k);
+                    k = b;
+                }
+            }
+            """)
+        assert not written_before_reached_within(stmt, _holds_eval, {"k"})
+
+    def test_if_points_in_two_branches(self) -> None:
+        """Only one branch runs: a write in one branch reaches only the
+        points after it in that branch."""
+        stmt = _first_statement("""
+            Void f(Bool c, BitString<n> k) {
+                if (c) {
+                    k = 0^n;
+                } else {
+                    BitString<n> a = G.evaluate(k);
+                    k = a;
+                }
+            }
+            """)
+        assert not written_before_reached_within(stmt, _holds_eval, {"k"})
+        stmt = _first_statement("""
+            Void f(Bool c, BitString<n> k) {
+                if (c) {
+                    BitString<n> a = G.evaluate(k);
+                } else {
+                    k = 0^n;
+                    BitString<n> b = G.evaluate(k);
+                }
+            }
+            """)
+        assert written_before_reached_within(stmt, _holds_eval, {"k"})
+
+    def test_loop_write_anywhere(self) -> None:
+        """In a loop, a write after the point runs before the next
+        iteration's point."""
+        stmt = _first_statement("""
+            Void f(BitString<n> k) {
+                for (Int i = 0 to 2) {
+                    BitString<n> a = G.evaluate(k);
+                    k = a;
+                }
+            }
+            """)
+        assert written_before_reached_within(stmt, _holds_eval, {"k"})
+        assert written_before_reached_within(stmt, _holds_eval, {"i"})

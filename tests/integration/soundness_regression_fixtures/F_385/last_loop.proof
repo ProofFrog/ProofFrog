@@ -1,0 +1,16 @@
+// Claims the two games of LastLoop.game interchangeable; they are not (see its header). Sound engine: Proof Failed!
+import 'DetPrimS.primitive';
+import 'LastLoop.game';
+
+proof:
+
+let:
+    Int n;
+    DetPrimS F = DetPrimS(BitString<n>);
+
+theorem:
+    LastLoop(F);
+
+games:
+    LastLoop(F).Left against LastLoop(F).Adversary;
+    LastLoop(F).Right against LastLoop(F).Adversary;

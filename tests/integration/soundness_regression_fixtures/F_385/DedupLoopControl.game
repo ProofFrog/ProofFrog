@@ -1,0 +1,31 @@
+// Positive control for DedupLoop.game: the loop calls F.Eval(k) twice and
+// never writes k, so both calls return the same value and merging them into
+// one call above the loop is sound. Expected: Proof Succeeded!
+import 'DetPrimS.primitive';
+
+Game Left(DetPrimS F) {
+    [F.Block, F.Block] Probe(F.Block k) {
+        F.Block a = k;
+        F.Block b = k;
+        for (Int i = 0 to 1) {
+            a = F.Eval(k);
+            b = F.Eval(k);
+        }
+        return [a, b];
+    }
+}
+
+Game Right(DetPrimS F) {
+    [F.Block, F.Block] Probe(F.Block k) {
+        F.Block a = k;
+        F.Block b = k;
+        F.Block d = F.Eval(k);
+        for (Int i = 0 to 1) {
+            a = d;
+            b = d;
+        }
+        return [a, b];
+    }
+}
+
+export as DedupLoopControl;

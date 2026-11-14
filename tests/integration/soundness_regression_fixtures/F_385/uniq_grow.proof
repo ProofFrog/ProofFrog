@@ -1,0 +1,16 @@
+// Claims the two games of UniqGrow.game interchangeable; they are not (see its header). Sound engine: Proof Failed!
+import 'DetPrimS.primitive';
+import 'UniqGrow.game';
+
+proof:
+
+let:
+    Int n;
+    DetPrimS F = DetPrimS(BitString<n>);
+
+theorem:
+    UniqGrow(F);
+
+games:
+    UniqGrow(F).Left against UniqGrow(F).Adversary;
+    UniqGrow(F).Right against UniqGrow(F).Adversary;

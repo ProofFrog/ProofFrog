@@ -160,32 +160,55 @@ def written_before_use_within(
 
     A scan of the statements strictly between a definition and the statement
     holding its use stops before that statement, but a compound statement
-    can itself run a write before the use (F-149):
+    can itself run a write before the use (F-149). See
+    :func:`written_before_reached_within` for the region.
+    """
+    return written_before_reached_within(
+        statement, functools.partial(_holds_variable, name=var_name), names
+    )
 
-    - in a block, a statement before the one holding the use;
-    - in an ``if``, a statement earlier in the branch that holds the use
+
+def written_before_reached_within(
+    statement: frog_ast.Statement,
+    holds: Callable[[frog_ast.ASTNode], bool],
+    names: set[str],
+) -> bool:
+    """True if a write to a name in *names* can run, inside *statement*,
+    before one of the evaluation points that *statement* holds, where
+    ``holds(node)`` tells whether *node* holds such a point (a use of a
+    variable, or one of a group of calls):
+
+    - in a block, a statement before the last one holding a point (each runs
+      before that point);
+    - in an ``if``, a statement earlier in a branch that holds a point
       (evaluating a condition writes nothing, and only one branch runs);
-    - in a loop that holds the use, a write anywhere in the body (or a
-      binder of the name), since an iteration's writes run before the next
-      iteration's read. A use in the loop header counts too: the reference
-      does not say that a bound or the iterated collection is evaluated
-      only once.
+    - in a loop, a write anywhere in the loop (or a binder of the name),
+      since an iteration's writes run before the next iteration's points. A
+      point in the loop header counts too: the reference does not say that a
+      bound or the iterated collection is evaluated only once.
 
+    Any other statement evaluates everything it reads before its own write.
     Writes are found by :func:`reassigns_or_rebinds` (element and field
     writes, ``<-uniq`` insertions, rebinding declarations and binders).
     """
     if isinstance(statement, frog_ast.Block):
-        for inner in statement.statements:
-            if _holds_variable(inner, var_name):
-                return written_before_use_within(inner, var_name, names)
-            if reassigns_or_rebinds(names, inner):
-                return True
-        return False
+        holding = [
+            index for index, inner in enumerate(statement.statements) if holds(inner)
+        ]
+        last = holding[-1] if holding else len(statement.statements)
+        if any(
+            reassigns_or_rebinds(names, inner) for inner in statement.statements[:last]
+        ):
+            return True
+        return bool(holding) and written_before_reached_within(
+            statement.statements[last], holds, names
+        )
     if isinstance(statement, frog_ast.IfStatement):
-        for block in statement.blocks:
-            if _holds_variable(block, var_name):
-                return written_before_use_within(block, var_name, names)
-        return False
+        return any(
+            written_before_reached_within(block, holds, names)
+            for block in statement.blocks
+            if holds(block)
+        )
     if isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
         return reassigns_or_rebinds(names, statement)
     return False
@@ -4569,11 +4592,12 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
                 if self._has_nondeterministic_argument(group[0]):
                     self._note_nondeterministic_argument(group[0])
                     continue
-                # Verify no argument variable is reassigned between the
-                # first and last statement containing a call from this group.
+                # Verify no variable the calls read can be written between
+                # the merged call's place and any call of this group.
                 if self._args_stable_across_calls(block, group):
                     dup_group = group
                     break
+                self._note_argument_written(group[0])
 
         if dup_group is None:
             return block
@@ -4707,92 +4731,76 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         block: frog_ast.Block,
         call_group: list[frog_ast.FuncCall],
     ) -> bool:
-        """Check that no argument variable of the call group is reassigned
-        between the first and last statement containing a call."""
-        # Collect all free variable names from call arguments
+        """True if every free variable of the calls in *call_group* keeps its
+        value from the merged call's place (just before the first statement
+        of *block* holding one of the calls) to every evaluation of every
+        call in the group.
+
+        Each statement from the first one holding a call up to the last one
+        holding a call runs before that last call, so a write anywhere in
+        them breaks stability: the first statement's own write
+        (``k = F.Eval(k);``, F-201), and a branch body after a call in its
+        ``if`` condition. Inside the last statement holding a call, a write
+        breaks it when it can run before one of the calls there
+        (:func:`written_before_reached_within`): an earlier statement of its
+        branch, or anywhere in a loop around a call, since an iteration's
+        writes run before the next iteration's calls (F-385: both calls in
+        one loop that writes the argument). Writes are found by
+        :func:`reassigns_or_rebinds`, so an element write (F-203), a
+        ``<-uniq[S]`` draw growing a set the argument reads, and a loop
+        binder or declaration of the name (whose scope the merged call would
+        leave) count too.
+        """
         representative = call_group[0]
         # F-204: use `referenced_variable_names` (not VariableCollectionVisitor,
         # which suppresses variables under a FieldAccess), so an argument like
         # `|M.keys|` contributes `M` and a later `M[w]=v` write is detected.
-        arg_vars: set[str] = set()
+        # The callee's names count as well (a local Function variable).
+        names = referenced_variable_names(representative.func)
         for arg in representative.args:
-            arg_vars |= referenced_variable_names(arg)
-        if not arg_vars:
+            names |= referenced_variable_names(arg)
+        if not names:
             return True
 
-        # Find first and last statement indices containing a call from the
-        # group. Scan top-level statements and if-conditions.
-        first_idx: int | None = None
-        last_idx: int | None = None
-        for idx, stmt in enumerate(block.statements):
-            collector = _DeterministicCallCollector(
-                self.proof_namespace, self._function_var_names
-            )
-            if isinstance(stmt, frog_ast.IfStatement):
-                for cond in stmt.conditions:
-                    collector.visit(cond)
-            else:
-                collector.visit(stmt)
-            if any(c == representative for c in collector.result()):
-                if first_idx is None:
-                    first_idx = idx
-                last_idx = idx
-        if first_idx is None or last_idx is None or first_idx == last_idx:
-            return True
-
-        # Check that no argument variable is reassigned or element-mutated
-        def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
-            # F-203: peel the full l-value via `lvalue_base_name` so a nested
-            # element write (`M[a][b] = v`) between two deduplicated calls is
-            # seen -- the manual depth-1 ArrayAccess check missed it.
-            if not isinstance(
-                node,
-                (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample),
-            ):
-                return False
-            return lvalue_base_name(node.var) == name
-
-        # The intermediate region (between the first and last call's evaluation
-        # points) excludes the call statements themselves. When the first
-        # statement is an IfStatement with the call in its condition, the
-        # if-body executes *after* the condition's call but *before* any
-        # subsequent call, so include those branch blocks in the scan.
-        intermediate_stmts: list[frog_ast.Statement] = list(
-            block.statements[first_idx + 1 : last_idx]
-        )
-        first_stmt = block.statements[first_idx]
-        if isinstance(first_stmt, frog_ast.IfStatement):
-            for branch in first_stmt.blocks:
-                intermediate_stmts.extend(branch.statements)
-        intermediate = frog_ast.Block(intermediate_stmts)
-        for var_name in arg_vars:
-            if (
-                SearchVisitor(functools.partial(is_written_to, var_name)).visit(
-                    intermediate
-                )
+        def holds_call(node: frog_ast.ASTNode) -> bool:
+            return (
+                SearchVisitor(
+                    lambda inner: any(inner is call for call in call_group)
+                ).visit(node)
                 is not None
-            ):
-                return False
+            )
 
-        # F-201: the first occurrence's OWN statement is excluded from the
-        # intermediate region, but when it writes an argument variable
-        # (`k = F.Eval(k);`) the write happens AFTER the first call is evaluated
-        # and BEFORE the second, so the two calls read different argument values
-        # (`F(k0)` vs `F(F(k0))`) and must not be merged. An IfStatement first
-        # statement carries the call in its CONDITION (evaluated before any
-        # branch write), and its branch writes are already folded into the
-        # intermediate region above; a plain assignment/sample/uniq is not, so
-        # scan it here.
-        if not isinstance(first_stmt, frog_ast.IfStatement):
-            for var_name in arg_vars:
-                if (
-                    SearchVisitor(functools.partial(is_written_to, var_name)).visit(
-                        first_stmt
-                    )
-                    is not None
-                ):
-                    return False
-        return True
+        holding = [
+            index
+            for index, statement in enumerate(block.statements)
+            if holds_call(statement)
+        ]
+        if not holding:
+            return True
+        region = frog_ast.Block(list(block.statements[holding[0] : holding[-1] + 1]))
+        return not written_before_reached_within(region, holds_call, names)
+
+    def _note_argument_written(self, call: frog_ast.FuncCall) -> None:
+        if self._ctx is None:
+            return
+        self._ctx.near_misses.append(
+            NearMiss(
+                transform_name="Deduplicate Deterministic Calls",
+                reason=(
+                    f"Duplicate deterministic call {call} not merged: a "
+                    "variable it reads may be written between the calls "
+                    "(between the statements holding them, earlier in the "
+                    "branch holding one, or in a loop around one)"
+                ),
+                location=None,
+                suggestion=(
+                    "If both calls are meant to read the same value, compute "
+                    "the call once into a local variable before the write"
+                ),
+                variable=None,
+                method=None,
+            )
+        )
 
     def _report_nondet_near_misses(self, block: frog_ast.Block) -> None:
         """Report near-misses for duplicate non-deterministic calls."""

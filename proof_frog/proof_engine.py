@@ -273,9 +273,6 @@ def _z3_check_expression_pair(  # pylint: disable=too-many-arguments,too-many-po
     `kind` is a short label ("if-condition", "return") used in error
     messages.
     """
-    # pylint: disable=import-outside-toplevel
-    from .transforms._base import has_nondeterministic_call
-
     if has_nondeterministic_call(
         current_expr, proof_namespace, proof_let_types
     ) or has_nondeterministic_call(next_expr, proof_namespace, proof_let_types):

@@ -1107,7 +1107,7 @@ def _export_group_only(  # pylint: disable=too-many-locals
     # never a value type, so they are skipped.
     game_file_by_id = {_ec_ident(gf.name): gf for gf in game_files}
     carrier_aliases: dict[str, frog_ast.Type] = {}
-    refs: list[frog_ast.ParameterizedGame] = list(proof.assumptions)
+    refs: list[frog_ast.ParameterizedGame] = _game_assumptions(proof)
     if isinstance(proof.theorem, frog_ast.ParameterizedGame):
         refs.append(proof.theorem)
     for ref in refs:
@@ -1208,7 +1208,7 @@ def _export_group_only(  # pylint: disable=too-many-locals
             "steps (out of scope -- see principle 5)."
         )
     ch_type = top_types.translate_type(_init_method(thm_gf).signature.return_type).text
-    assm_ids = {_ec_ident(a.name) for a in proof.assumptions}
+    assm_ids = {_ec_ident(a.name) for a in _game_assumptions(proof)}
     scaffold = _group_only_scaffold(steps, thm_adv, ch_type, assm_ids)
 
     decls: list[ec_ast.EcTopDecl] = [
@@ -1491,6 +1491,52 @@ def _shared_source_field_pairs(
 
 
 # pylint: disable=too-many-locals,too-many-statements,too-many-branches
+def _decline_event_theorems(proof: frog_ast.ProofFile) -> None:
+    """Refuse a proof that uses an event theorem, as its theorem, an
+    assumption or a lemma. The exporter has no translation for
+    identical-until-bad hops or event bounds yet; every later stage may
+    assume the theorem and the assumptions are games."""
+    entries = [proof.theorem, *proof.assumptions, *(lem.game for lem in proof.lemmas)]
+    if any(isinstance(entry, frog_ast.EventTheorem) for entry in entries):
+        raise NotImplementedError(
+            "EasyCrypt export of a proof that uses an event theorem "
+            "(identical-until-bad hops, event bounds) is not supported yet."
+        )
+
+
+def _game_assumptions(proof: frog_ast.ProofFile) -> list[frog_ast.ParameterizedGame]:
+    """The proof's assumptions; all of them are games once
+    :func:`_decline_event_theorems` has accepted the proof."""
+    return [a for a in proof.assumptions if isinstance(a, frog_ast.ParameterizedGame)]
+
+
+def _theorem_game(proof: frog_ast.ProofFile) -> frog_ast.ParameterizedGame:
+    """The proof's theorem, a game once :func:`_decline_event_theorems` has
+    accepted the proof."""
+    assert isinstance(proof.theorem, frog_ast.ParameterizedGame)
+    return proof.theorem
+
+
+@dataclass
+class _ForeignScope:
+    """Per-foreign-primitive scope: TypeCollector + game/oracle decls, plus
+    the abstract-types map and theory_types reference needed later when the
+    corresponding instance is cloned. (Module level: classes defined inside
+    a function defeat the visitor dispatch caches.)"""
+
+    primitive: frog_ast.Primitive
+    theory_name: str
+    theory_types: tc.TypeCollector
+    theory_modules: mt.ModuleTranslator
+    abstract_types_map: dict[str, str]
+    game_files: list[frog_ast.GameFile]
+    theory_decls: list[ec_ast.EcTopDecl]
+    oracle_type_by_game_file: dict[str, str]
+    module_name_by_concrete_game: dict[tuple[str, str], str]
+    adv_type_by_game_file: dict[str, str]
+    assumption_wrapper_names: dict[tuple[str, str], str]
+
+
 def export_proof_file(proof_path: str) -> str:
     """Parse ``proof_path`` and return the EC source as a string.
 
@@ -1507,6 +1553,7 @@ def export_proof_file(proof_path: str) -> str:
     axiom appeals are emitted alongside.
     """
     proof = frog_parser.parse_proof_file(proof_path)
+    _decline_event_theorems(proof)
 
     # Collect ALL primitives and schemes by name (directly imported or
     # reached transitively through a Scheme's own imports). The primary
@@ -2394,7 +2441,7 @@ def export_proof_file(proof_path: str) -> str:
         theory_game_decls.append(adv)
 
     assumed_gf_names: set[str] = {
-        a.name for a in proof.assumptions if a.name in oracle_type_by_game_file
+        a.name for a in _game_assumptions(proof) if a.name in oracle_type_by_game_file
     }
 
     theory_assumption_decls: list[ec_ast.EcTopDecl] = []
@@ -2468,23 +2515,6 @@ def export_proof_file(proof_path: str) -> str:
         pn = primitive_name_by_game_file[gf.name]
         if pn != primitive.name and pn not in foreign_primitive_names:
             foreign_primitive_names.append(pn)
-
-    # Per-foreign-primitive scope: TypeCollector + game/oracle decls, plus
-    # the abstract-types map and theory_types reference needed later when
-    # the corresponding instance is cloned.
-    @dataclass
-    class _ForeignScope:
-        primitive: frog_ast.Primitive
-        theory_name: str
-        theory_types: tc.TypeCollector
-        theory_modules: mt.ModuleTranslator
-        abstract_types_map: dict[str, str]
-        game_files: list[frog_ast.GameFile]
-        theory_decls: list[ec_ast.EcTopDecl]
-        oracle_type_by_game_file: dict[str, str]
-        module_name_by_concrete_game: dict[tuple[str, str], str]
-        adv_type_by_game_file: dict[str, str]
-        assumption_wrapper_names: dict[tuple[str, str], str]
 
     foreign_scopes: dict[str, _ForeignScope] = {}
     for fp_name in foreign_primitive_names:
@@ -2561,7 +2591,9 @@ def export_proof_file(proof_path: str) -> str:
             fp_adv_by_gf[gf.name] = adv.name
             fp_decls.append(adv)
         # Assumption wrappers + axioms for each assumed foreign game file.
-        fp_assumed = {a.name for a in proof.assumptions if a.name in fp_oracle_by_gf}
+        fp_assumed = {
+            a.name for a in _game_assumptions(proof) if a.name in fp_oracle_by_gf
+        }
         fp_wrapper_names: dict[tuple[str, str], str] = {}
         for gf in fp_game_files:
             if gf.name not in fp_assumed:
@@ -3466,7 +3498,7 @@ def export_proof_file(proof_path: str) -> str:
         # hop 4 between INDOT$(P).Real ∘ R3 and PRGSecurity(G).Real ∘ R4),
         # using the inner-challenger's method name would call a non-
         # existent procedure on the composed module.
-        method_name = oracle_name_by_game_file[proof.theorem.name]
+        method_name = oracle_name_by_game_file[_theorem_game(proof).name]
         # pylint: disable=protected-access
         left_ast = engine._get_game_ast(step_a.challenger, step_a.reduction)
         right_ast = engine._get_game_ast(step_b.challenger, step_b.reduction)
@@ -3614,7 +3646,7 @@ def export_proof_file(proof_path: str) -> str:
         game's ``Initialize`` returns (its public value). For KEMPRF this is
         ``pk``. Cross-name correspondence between differently-named live fields
         on the two sides is a deferred generalization (this uses one name)."""
-        outer_gf = game_file_by_name.get(proof.theorem.name)
+        outer_gf = game_file_by_name.get(_theorem_game(proof).name)
         if outer_gf is None or not outer_gf.games:
             return ""
         game = outer_gf.games[0]
@@ -3738,7 +3770,7 @@ def export_proof_file(proof_path: str) -> str:
         reduction = _get_reduction(reduction_name)
         if reduction is None:
             return None
-        outer_gf = game_file_by_name.get(proof.theorem.name)
+        outer_gf = game_file_by_name.get(_theorem_game(proof).name)
         if outer_gf is None or not outer_gf.games:
             return None
         game = outer_gf.games[0]

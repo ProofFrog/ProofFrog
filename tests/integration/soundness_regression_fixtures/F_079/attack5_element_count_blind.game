@@ -1,0 +1,54 @@
+// F-079: a field copy read after an element write to its source. Two
+// routes made Real canonicalize to Random:
+// 1. Inline Single-Use Field inlined `A = B` into Test's `return A[0];`
+//    although Mut writes B[0] in between; its write count missed element
+//    writes.
+// 2. Remove Duplicate Fields merged the maps A and B, because it paired
+//    only whole-field writes and so did not see that Mut's `B[0] = 5;`
+//    changes B alone. Then Test's `y == B` let the branch return y[0].
+// Distinguisher: Setup({0: 1}); Mut(); Test({0: 5}). Real returns A[0] = 1
+// (A was copied before the write); Random returns 5. Advantage 1.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+Game Real() {
+    Map<Int, Int> A;
+    Map<Int, Int> B;
+
+    Void Setup(Map<Int, Int> b0) {
+        B = b0;
+        A = B;
+    }
+
+    Void Mut() {
+        B[0] = 5;
+    }
+
+    Int Test(Map<Int, Int> y) {
+        if (y == B) {
+            return A[0];
+        }
+        return 7;
+    }
+}
+
+Game Random() {
+    Map<Int, Int> A;
+    Map<Int, Int> B;
+
+    Void Setup(Map<Int, Int> b0) {
+        B = b0;
+        A = B;
+    }
+
+    Void Mut() {
+        B[0] = 5;
+    }
+
+    Int Test(Map<Int, Int> y) {
+        if (y == B) {
+            return y[0];
+        }
+        return 7;
+    }
+}
+
+export as AttackA5;

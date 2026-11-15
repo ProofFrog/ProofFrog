@@ -1,0 +1,55 @@
+// F-191 (Split Opaque Tuple Field), with p's initializers equal in their
+// second component, so keeping the split fields' initializers does not
+// tell the games apart.
+// SetQ writes q, so q stays a field holding its initializer's value. The
+// methods read only p[1], so the split kept p_1 alone, and q's initializer
+// `p[0]` was left naming the deleted p. Both games came out as
+// `Int field1 = p[0]; Int field2 = 2;` with the same methods.
+// Distinguisher: GetQ() before any SetQ. Real: q starts at p[0] = 1.
+// Random: q starts at 5. Advantage 1.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+import 'sampler.primitive';
+
+Game Real(Sampler S) {
+    [Int, Int] p = [1, 2];
+    Int q = p[0];
+
+    Void Initialize() {
+        p = S.Gen();
+    }
+
+    Int GetQ() {
+        return q;
+    }
+
+    Void SetQ(Int v) {
+        q = v;
+    }
+
+    Int GetP1() {
+        return p[1];
+    }
+}
+
+Game Random(Sampler S) {
+    [Int, Int] p = [5, 2];
+    Int q = p[0];
+
+    Void Initialize() {
+        p = S.Gen();
+    }
+
+    Int GetQ() {
+        return q;
+    }
+
+    Void SetQ(Int v) {
+        q = v;
+    }
+
+    Int GetP1() {
+        return p[1];
+    }
+}
+
+export as WrittenQProp;

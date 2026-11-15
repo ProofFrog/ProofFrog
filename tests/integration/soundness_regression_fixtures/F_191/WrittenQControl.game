@@ -1,0 +1,49 @@
+// Positive control for F-191: Real starts q at p[0] = 1, read from the
+// tuple field the split removes, and Random starts q at the literal 1. The
+// games are interchangeable, and the proof must verify: q's starting value
+// comes from p's initializer, so it survives the split.
+import 'sampler.primitive';
+
+Game Real(Sampler S) {
+    [Int, Int] p = [1, 2];
+    Int q = p[0];
+
+    Void Initialize() {
+        p = S.Gen();
+    }
+
+    Int GetQ() {
+        return q;
+    }
+
+    Void SetQ(Int v) {
+        q = v;
+    }
+
+    Int GetP1() {
+        return p[1];
+    }
+}
+
+Game Random(Sampler S) {
+    [Int, Int] p = [1, 2];
+    Int q = 1;
+
+    Void Initialize() {
+        p = S.Gen();
+    }
+
+    Int GetQ() {
+        return q;
+    }
+
+    Void SetQ(Int v) {
+        q = v;
+    }
+
+    Int GetP1() {
+        return p[1];
+    }
+}
+
+export as WrittenQControl;

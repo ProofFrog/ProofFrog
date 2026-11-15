@@ -1,0 +1,18 @@
+// F-301: Left and Right claimed interchangeable. They are not: for
+// x = DrawFresh(), Check(x) is false in Left and true in Right (see
+// attack_4.game).
+import 'setsrc.primitive';
+import 'attack_4.game';
+
+proof:
+
+let:
+    Int n;
+    SetSrc F = SetSrc(n);
+
+theorem:
+    Attack4RDF(F, n);
+
+games:
+    Attack4RDF(F, n).Left against Attack4RDF(F, n).Adversary;
+    Attack4RDF(F, n).Right against Attack4RDF(F, n).Adversary;

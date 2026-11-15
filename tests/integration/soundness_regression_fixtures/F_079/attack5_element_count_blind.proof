@@ -1,0 +1,13 @@
+// F-079: Real and Random claimed interchangeable. They are not: after
+// Setup({0: 1}); Mut(); Test({0: 5}), Real returns 1 and Random returns 5
+// (see attack5_element_count_blind.game).
+import 'attack5_element_count_blind.game';
+
+proof:
+
+theorem:
+    AttackA5();
+
+games:
+    AttackA5().Real against AttackA5().Adversary;
+    AttackA5().Random against AttackA5().Adversary;

@@ -1,0 +1,29 @@
+// Remove Duplicate Fields control: f2 = f1 in Initialize, and no method
+// writes either field, so they always hold the same value.
+Game Left() {
+    Int f1;
+    Int f2;
+
+    Void Initialize() {
+        f1 = 100;
+        f2 = f1;
+    }
+
+    Int Get() {
+        return f1 + f2;
+    }
+}
+
+Game Right() {
+    Int f1;
+
+    Void Initialize() {
+        f1 = 100;
+    }
+
+    Int Get() {
+        return f1 + f1;
+    }
+}
+
+export as ControlRDF;

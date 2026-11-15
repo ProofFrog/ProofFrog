@@ -1,0 +1,5 @@
+// Abstract primitive with an opaque tuple-returning call, so a field can be
+// assigned a value that is not a tuple literal.
+Primitive Sampler() {
+    [Int, Int] Gen();
+}

@@ -1,0 +1,11 @@
+// Positive control for F-079: the attack's games without the element write
+// Mut, so A and B always hold the same map and the two Test oracles agree.
+// The proof must still verify.
+import 'control_no_write.game';
+proof:
+let:
+theorem:
+    ControlNoWrite();
+games:
+    ControlNoWrite().Real against ControlNoWrite().Adversary;
+    ControlNoWrite().Random against ControlNoWrite().Adversary;

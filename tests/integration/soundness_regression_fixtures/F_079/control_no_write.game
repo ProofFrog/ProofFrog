@@ -1,0 +1,31 @@
+// F-079 control: the attack's games without the oracle Mut, which wrote
+// B[0] alone. A and B stay equal, so Real and Random are interchangeable.
+Game Real() {
+    Map<Int, Int> A;
+    Map<Int, Int> B;
+    Void Setup(Map<Int, Int> b0) {
+        B = b0;
+        A = B;
+    }
+    Int Test(Map<Int, Int> y) {
+        if (y == B) {
+            return A[0];
+        }
+        return 7;
+    }
+}
+Game Random() {
+    Map<Int, Int> A;
+    Map<Int, Int> B;
+    Void Setup(Map<Int, Int> b0) {
+        B = b0;
+        A = B;
+    }
+    Int Test(Map<Int, Int> y) {
+        if (y == B) {
+            return y[0];
+        }
+        return 7;
+    }
+}
+export as ControlNoWrite;

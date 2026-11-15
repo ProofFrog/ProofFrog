@@ -82,8 +82,9 @@ def test_entry_with_no_added_date_must_carry_a_record() -> None:
 
 def test_every_shipped_sidecar_entry_is_still_admissible() -> None:
     """The grandfather clause is only worth having if it actually keeps the
-    thirteen inherited entries: enforcing the rule literally would drop them
-    all and turn six currently-clean proofs into admitting ones."""
+    inherited entries (nine since the four whole-hop entries were retired on
+    2026-11-15): enforcing the rule literally would drop them all and turn
+    four currently-clean proofs into admitting ones."""
     root = pathlib.Path(__file__).parents[2].parent / "examples"
     sidecars = sorted(root.rglob("*.tactics.toml"))
     assert sidecars, "no sidecars found -- is the examples submodule checked out?"

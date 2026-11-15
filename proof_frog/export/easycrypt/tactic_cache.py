@@ -133,7 +133,7 @@ class CacheEntry:
     # mutation that EasyCrypt rejected, "the tactic closed" only says the
     # tactic ran. An entry added on or after RECORD_REQUIRED_FROM is REFUSED
     # by lookup without all four (see admissible); entries older than that
-    # are grandfathered, since the 13 inherited ones cannot satisfy the
+    # are grandfathered, since the inherited ones cannot satisfy the
     # requirement retroactively.
     derived_on: str | None = None
     negative_control: str | None = None

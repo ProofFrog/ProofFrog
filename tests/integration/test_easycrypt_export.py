@@ -829,8 +829,8 @@ def test_export_5_8_e_hoists_scheme_and_reduction_calls() -> None:
       statements, not ``return witness;``.
     * The reductions R1 and R2 render their nested primitive/challenger
       calls as ``<@`` statements before the return.
-    * Only the two cross-primitive bridge admits remain (out of scope
-      per the fourth-pass architectural limitation).
+    * Only the two cross-primitive deterministic-reorder hops admit
+      (hop_1 and hop_3).
     """
     output = exporter.export_proof_file(str(PRG_5_8_E_PROOF))
     # The scheme body must NOT fall back to ``return witness;``.
@@ -849,24 +849,22 @@ def test_export_5_8_e_hoists_scheme_and_reduction_calls() -> None:
     # Reduction R2 hoists the nested G.evaluate inside Challenger.ctxt.
     r2_section = output.split("module R2 ", 1)[1].split("}.", 1)[0]
     assert "<@ G.evaluate(zero_lambda)" in r2_section
-    # Both cross-primitive deterministic-reorder hops (hop_1, hop_3) close
-    # via the hop-level cascades cached in the proof's ``.tactics.toml``
-    # sidecar -- 0 admits (see test_export_5_8_e_concretizes_pseudootp).
-    assert output.count("admit.") == 0, (
-        f"Expected 0 admits (both hops closed from the sidecar cache). "
-        f"Got {output.count('admit.')}."
-    )
+    # The two cross-primitive deterministic-reorder hops (hop_1, hop_3)
+    # admit. They used to close from whole-hop cache entries, retired on
+    # 2026-11-15 under rule R6 (quoted in proof_frog/export/easycrypt/
+    # CLAUDE.md); they close again once the transforms they apply have
+    # registry entries.
+    assert (
+        output.count("admit.") == 2
+    ), f"Expected 2 admits (hop_1 and hop_3). Got {output.count('admit.')}."
 
 
 def test_export_5_8_e_concretizes_pseudootp() -> None:
     """5_8_e's foreign ``P = PseudoOTP(lambda, 2*lambda, G)`` is a non-ground
     scheme. The exporter concretizes it as an EC functor
     ``module PseudoOTP (G : G_c.Scheme) : P_c.Scheme`` applied as
-    ``PseudoOTP(G)`` (so ``inline *`` can unfold it), and its two
-    cross-primitive deterministic-reorder hops close via the hop-level
-    cascades cached in the proof's ``.tactics.toml`` sidecar (keyed on the
-    hops' canonical games). Result: 0 admits, and the export type-checks in
-    EC (covered by test_export_5_8_e_typechecks_in_easycrypt).
+    ``PseudoOTP(G)`` (so ``inline *`` can unfold it). The export
+    type-checks in EC (covered by test_export_5_8_e_typechecks_in_easycrypt).
     """
     output = exporter.export_proof_file(str(PRG_5_8_E_PROOF))
     # PseudoOTP emitted as a functor, applied to the declared module G,
@@ -876,9 +874,6 @@ def test_export_5_8_e_concretizes_pseudootp() -> None:
     assert "declare module P " not in output
     # The advantage axiom application parenthesizes the functor application.
     assert "advantage (PseudoOTP(G))" in output
-    # Hops closed from the sidecar cache: cascade tactics present, 0 admits.
-    assert "call{1} (G_evaluate_det" in output
-    assert output.count("admit.") == 0
 
 
 def test_export_emits_guided_template_for_uncached_det_reorder_hop(
@@ -887,10 +882,9 @@ def test_export_emits_guided_template_for_uncached_det_reorder_hop(
     """A cross-primitive deterministic-reorder hop with no sidecar entry
     falls back to a Layer-3 *guided-template* admit: a structured admit
     annotated with the reorder cascade strategy, the determinism axioms in
-    scope, and the canonical keys needed to author a sidecar entry. 5_8_f's
-    two cross-primitive hops are normally closed from its sidecar; here we
-    force the sidecar lookup empty so the export exhibits the guidance --
-    exactly the path that authored that sidecar.
+    scope, and the canonical keys. 5_8_f has no sidecar since its
+    whole-hop entries were retired (2026-11-15, R6); the lookup is forced
+    empty anyway so the test does not depend on the examples checkout.
     """
     from proof_frog.export.easycrypt import tactic_cache as _tc
 
@@ -2102,8 +2096,10 @@ def test_glob_ignores_declaration_order(tmp_path: Path) -> None:
     )
 
     head, _, tail = src.partition("module B = {")
-    mutated = head + "module B = {" + tail.replace(
-        "x <- x + n; y <- true;", "x <- x + n + 1; y <- true;", 1
+    mutated = (
+        head
+        + "module B = {"
+        + tail.replace("x <- x + n; y <- true;", "x <- x + n + 1; y <- true;", 1)
     )
     assert mutated != src, "the negative control did not mutate the template"
     neg_file = tmp_path / "glob_ignores_decl_order_negative.ec"

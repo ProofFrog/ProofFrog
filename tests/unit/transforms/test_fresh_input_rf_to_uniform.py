@@ -1221,3 +1221,46 @@ def test_field_initializer_without_h_still_simplified(exclusion: str) -> None:
     transformed = FreshInputRFToUniform().apply(game, _let_ctx())
     fresh = next(m for m in transformed.methods if m.signature.name == "Fresh")
     assert "__fresh_rf_v__" in str(fresh)
+
+
+def _held_ctx() -> PipelineContext:
+    ctx = _let_ctx()
+    ctx.primitive_held_functions = {"H": "L"}
+    return ctx
+
+
+@pytest.mark.parametrize("exclusion", ["H.domain", "seen"])
+def test_f387_let_function_held_by_primitive_not_fresh(exclusion: str) -> None:
+    """A primitive instantiation in the proof's let: block that receives H
+    (``HLeak L = HLeak(m, H);``) may query H in its opaque methods, so H(v)
+    on a fresh draw may be on a point the adversary already knows; the game
+    need not name H anywhere else (``return L.Leak();``)."""
+    game = frog_parser.parse_game(
+        _let_field_game(
+            "",
+            "[BitString<2>, BitString<2>] Peek() { return L.Leak(); }",
+            exclusion,
+        )
+    )
+    ctx = _held_ctx()
+    transformed = FreshInputRFToUniform().apply(game, ctx)
+    assert transformed == game
+    assert any(
+        "passes it to a primitive" in nm.reason and "'L'" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+@pytest.mark.parametrize("exclusion", ["H.domain", "seen"])
+def test_f387_let_function_no_primitive_still_simplified(exclusion: str) -> None:
+    """The same game, with no primitive receiving H, is still rewritten."""
+    game = frog_parser.parse_game(
+        _let_field_game(
+            "",
+            "[BitString<2>, BitString<2>] Peek() { return L.Leak(); }",
+            exclusion,
+        )
+    )
+    transformed = FreshInputRFToUniform().apply(game, _let_ctx())
+    fresh = next(m for m in transformed.methods if m.signature.name == "Fresh")
+    assert "__fresh_rf_v__" in str(fresh)

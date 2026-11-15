@@ -1,0 +1,15 @@
+import 'let_value_control.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+    BitString<m> c0 = H(0b0);
+
+theorem:
+    LV(m, H, c0);
+
+games:
+    LV(m, H, c0).Left against LV(m, H, c0).Adversary;
+    LV(m, H, c0).Right against LV(m, H, c0).Adversary;

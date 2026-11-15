@@ -1,0 +1,16 @@
+import 'Plain.primitive';
+import 'lffl_control.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+    Plain L = Plain(m);
+
+theorem:
+    LFFLC(m, H, L);
+
+games:
+    LFFLC(m, H, L).Real against LFFLC(m, H, L).Adversary;
+    LFFLC(m, H, L).Random against LFFLC(m, H, L).Adversary;

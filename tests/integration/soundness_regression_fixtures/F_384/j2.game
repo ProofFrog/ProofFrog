@@ -1,0 +1,29 @@
+// b copies a's initial value; Initialize then overwrites a; b is never written.
+Game Left() {
+    Int a = 1;
+    Int b = a;
+    Void Initialize() {
+        a = 5;
+    }
+    Int Peek() {
+        return b;
+    }
+    Int PeekA() {
+        return a;
+    }
+}
+
+Game Right() {
+    Int a = 1;
+    Void Initialize() {
+        a = 5;
+    }
+    Int Peek() {
+        return a;
+    }
+    Int PeekA() {
+        return a;
+    }
+}
+
+export as J2;

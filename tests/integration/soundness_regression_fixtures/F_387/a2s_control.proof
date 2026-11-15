@@ -1,0 +1,16 @@
+import 'Plain.primitive';
+import 'a2s_control.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+    Plain L = Plain(m);
+
+theorem:
+    A2SC(m, H, L);
+
+games:
+    A2SC(m, H, L).Real against A2SC(m, H, L).Adversary;
+    A2SC(m, H, L).Random against A2SC(m, H, L).Adversary;

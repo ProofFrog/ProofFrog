@@ -1,0 +1,10 @@
+import 'Leaker.primitive';
+
+Scheme HashLeaker(Int m, Function<BitString<1>, BitString<m>> H) extends Leaker {
+    Int outlen = m;
+    BitString<m> c0 = H(0b0);
+    BitString<m> c1 = H(0b1);
+    [BitString<m>, BitString<m>] Leak() {
+        return [c0, c1];
+    }
+}

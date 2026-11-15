@@ -1,0 +1,24 @@
+import 'HLeak.primitive';
+
+Game Real(Int m, Function<BitString<1>, BitString<m>> H, HLeak L) {
+    [BitString<m>, BitString<m>] Peek() {
+        return L.Leak();
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[H.domain] BitString<1>;
+        return H(v);
+    }
+}
+
+Game Random(Int m, Function<BitString<1>, BitString<m>> H, HLeak L) {
+    [BitString<m>, BitString<m>] Peek() {
+        return L.Leak();
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[H.domain] BitString<1>;
+        BitString<m> u <- BitString<m>;
+        return u;
+    }
+}
+
+export as A2;

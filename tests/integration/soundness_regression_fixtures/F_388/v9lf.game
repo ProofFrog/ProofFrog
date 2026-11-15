@@ -1,0 +1,38 @@
+// y0 holds H(0b0) until Initialize overwrites it; y1's initializer copies it.
+Game Real(Int m, Function<BitString<1>, BitString<m>> H) {
+    Function<BitString<1>, BitString<m>> F;
+    BitString<m> y0 = H(0b0);
+    BitString<m> y1 = y0;
+    Void Initialize() {
+        F <- Function<BitString<1>, BitString<m>>;
+        y0 = 0^m;
+    }
+    Void Write(BitString<m> a) {
+        y1 = a;
+    }
+    BitString<m> Peek() {
+        return y1;
+    }
+    BitString<m> Q() {
+        return F(0b0);
+    }
+}
+
+Game Ideal(Int m, Function<BitString<1>, BitString<m>> H) {
+    BitString<m> y0 = H(0b0);
+    BitString<m> y1 = y0;
+    Void Initialize() {
+        y0 = 0^m;
+    }
+    Void Write(BitString<m> a) {
+        y1 = a;
+    }
+    BitString<m> Peek() {
+        return y1;
+    }
+    BitString<m> Q() {
+        return H(0b0);
+    }
+}
+
+export as V9LF;

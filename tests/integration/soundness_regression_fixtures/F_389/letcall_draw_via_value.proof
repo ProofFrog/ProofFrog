@@ -1,0 +1,22 @@
+// The draw sits in a let: entry of its own, x, and c = H(x) is read as H at
+// that one named value, so Left's [c, c] stays two equal components and
+// differs from Right's two independent draws.
+import 'Drawer.primitive';
+import 'letcall_draw.game';
+
+proof:
+
+let:
+    Int n;
+    Int m;
+    Drawer R;
+    Function<BitString<n>, BitString<m>> H <- Function<BitString<n>, BitString<m>>;
+    BitString<n> x = R.Draw();
+    BitString<m> c = H(x);
+
+theorem:
+    LetCallDraw(n, m, R, H, c);
+
+games:
+    LetCallDraw(n, m, R, H, c).Left against LetCallDraw(n, m, R, H, c).Adversary;
+    LetCallDraw(n, m, R, H, c).Right against LetCallDraw(n, m, R, H, c).Adversary;

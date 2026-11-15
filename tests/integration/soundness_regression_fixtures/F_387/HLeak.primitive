@@ -1,0 +1,3 @@
+Primitive HLeak(Int m, Function<BitString<1>, BitString<m>> H) {
+    [BitString<m>, BitString<m>] Leak();
+}

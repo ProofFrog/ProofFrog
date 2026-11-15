@@ -1,0 +1,10 @@
+import 'dangle2.game';
+
+proof:
+
+theorem:
+    Dangle2();
+
+games:
+    Dangle2().Left against Dangle2().Adversary;
+    Dangle2().Right against Dangle2().Adversary;

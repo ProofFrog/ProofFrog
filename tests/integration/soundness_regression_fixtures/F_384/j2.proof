@@ -1,0 +1,10 @@
+import 'j2.game';
+
+proof:
+
+theorem:
+    J2();
+
+games:
+    J2().Left against J2().Adversary;
+    J2().Right against J2().Adversary;

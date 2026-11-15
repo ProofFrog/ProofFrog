@@ -1,0 +1,29 @@
+// G copies RF's value before Initialize samples RF; G is never written.
+Game Left(Int m) {
+    Function<BitString<1>, BitString<m>> RF;
+    Function<BitString<1>, BitString<m>> G = RF;
+    Void Initialize() {
+        RF <- Function<BitString<1>, BitString<m>>;
+    }
+    BitString<m> Probe(BitString<1> x) {
+        return G(x);
+    }
+    BitString<m> Eval(BitString<1> x) {
+        return RF(x);
+    }
+}
+
+Game Right(Int m) {
+    Function<BitString<1>, BitString<m>> RF;
+    Void Initialize() {
+        RF <- Function<BitString<1>, BitString<m>>;
+    }
+    BitString<m> Probe(BitString<1> x) {
+        return RF(x);
+    }
+    BitString<m> Eval(BitString<1> x) {
+        return RF(x);
+    }
+}
+
+export as J1;

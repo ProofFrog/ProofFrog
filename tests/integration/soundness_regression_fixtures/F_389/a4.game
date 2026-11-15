@@ -1,0 +1,23 @@
+// The proof passes H's values at both points of a 1-bit domain as parameters.
+Game Real(Int m, Function<BitString<1>, BitString<m>> H, BitString<m> c0, BitString<m> c1) {
+    [BitString<m>, BitString<m>] Peek() {
+        return [c0, c1];
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[H.domain] BitString<1>;
+        return H(v);
+    }
+}
+
+Game Random(Int m, Function<BitString<1>, BitString<m>> H, BitString<m> c0, BitString<m> c1) {
+    [BitString<m>, BitString<m>] Peek() {
+        return [c0, c1];
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[H.domain] BitString<1>;
+        BitString<m> u <- BitString<m>;
+        return u;
+    }
+}
+
+export as A4;

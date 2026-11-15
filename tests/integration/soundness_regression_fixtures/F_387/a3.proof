@@ -1,0 +1,17 @@
+import 'Leaker.primitive';
+import 'HashLeaker.scheme';
+import 'a3.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+    Leaker L = HashLeaker(m, H);
+
+theorem:
+    A3(m, L, H);
+
+games:
+    A3(m, L, H).Real against A3(m, L, H).Adversary;
+    A3(m, L, H).Random against A3(m, L, H).Adversary;

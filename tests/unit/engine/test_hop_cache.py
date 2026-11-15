@@ -152,6 +152,7 @@ def test_key_depends_on_every_context_input(cache: hop_cache.HopCache) -> None:
         "equality_pairs": {("A", "B")},
         "max_calls": 3,
         "sampled_let_names": {"H"},
+        "primitive_held_functions": {"H": "L"},
         "requirements": [requirement],
         "pinned_fields": {"field1"},
     }

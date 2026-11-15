@@ -1,0 +1,16 @@
+import 'HLeak.primitive';
+import 'a2s.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+    HLeak L = HLeak(m, H);
+
+theorem:
+    A2S(m, H, L);
+
+games:
+    A2S(m, H, L).Real against A2S(m, H, L).Adversary;
+    A2S(m, H, L).Random against A2S(m, H, L).Adversary;

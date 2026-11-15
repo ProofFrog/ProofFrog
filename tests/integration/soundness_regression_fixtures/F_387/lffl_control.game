@@ -1,0 +1,30 @@
+import 'Plain.primitive';
+
+// Real queries its own random function F; Random queries H, which no
+// primitive receives and the game queries nowhere else: F and H are
+// interchangeable.
+Game Real(Int m, Function<BitString<1>, BitString<m>> H, Plain L) {
+    Function<BitString<1>, BitString<m>> F;
+    Void Initialize() {
+        F <- Function<BitString<1>, BitString<m>>;
+    }
+    [BitString<m>, BitString<m>] Peek() {
+        return L.Leak();
+    }
+    BitString<m> Query() {
+        return F(0b0);
+    }
+}
+
+Game Random(Int m, Function<BitString<1>, BitString<m>> H, Plain L) {
+    Void Initialize() {
+    }
+    [BitString<m>, BitString<m>] Peek() {
+        return L.Leak();
+    }
+    BitString<m> Query() {
+        return H(0b0);
+    }
+}
+
+export as LFFLC;

@@ -1,0 +1,29 @@
+import 'HLeak.primitive';
+
+// Real queries its own random function F; Random queries H, which the
+// primitive L may reveal through Leak.
+Game Real(Int m, Function<BitString<1>, BitString<m>> H, HLeak L) {
+    Function<BitString<1>, BitString<m>> F;
+    Void Initialize() {
+        F <- Function<BitString<1>, BitString<m>>;
+    }
+    [BitString<m>, BitString<m>] Peek() {
+        return L.Leak();
+    }
+    BitString<m> Query() {
+        return F(0b0);
+    }
+}
+
+Game Random(Int m, Function<BitString<1>, BitString<m>> H, HLeak L) {
+    Void Initialize() {
+    }
+    [BitString<m>, BitString<m>] Peek() {
+        return L.Leak();
+    }
+    BitString<m> Query() {
+        return H(0b0);
+    }
+}
+
+export as LFFL;

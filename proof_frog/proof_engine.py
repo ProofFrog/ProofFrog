@@ -26,6 +26,7 @@ from .transforms._base import (
     NearMiss,
     PipelineContext,
     deduplicate_near_misses,
+    has_nondeterministic_call,
     run_pipeline,
     run_pipeline_until,
     run_pipeline_with_trace,
@@ -95,6 +96,26 @@ class HopResult:
 
 class FailedProof(Exception):
     pass
+
+
+class UnsupportedLetEntryError(Exception):
+    """A ``let:`` entry calls a function on an argument that makes a
+    non-deterministic call (``BitString<n> c = H(R.Draw());``).
+
+    The entry holds one value, but set-up reads a ``let:`` value as its
+    expression wherever the entry is used, and each use of
+    ``H(R.Draw())`` would make a draw of its own. ``prove`` reports it as a
+    failed proof (F-389)."""
+
+    def __init__(self, name: str, value: frog_ast.Expression) -> None:
+        super().__init__(
+            f"let: entry '{name}' = {value} calls a function on an argument "
+            "that makes a non-deterministic call. The entry holds one value, "
+            "but the engine reads a let: value as its expression at every use, "
+            "where each use would make a call of its own, so such an entry is "
+            "not supported."
+        )
+        self.name = name
 
 
 @dataclasses.dataclass
@@ -626,6 +647,9 @@ class ProofEngine:
         self.method_lookup: MethodLookup = {}
         self.max_calls: Optional[int] = None
         self.sampled_let_names: set[str] = set()
+        # Sampled let: functions a primitive instantiation receives (see
+        # :func:`_functions_held_by_primitives`).
+        self.primitive_held_functions: dict[str, str] = {}
         self.requirements: list[frog_ast.StructuralRequirement] = []
         self._total_steps = 0
         self._current_step = 0
@@ -763,8 +787,12 @@ class ProofEngine:
             if let.name in self.sampled_let_names:
                 self.proof_namespace[let.name] = None
                 continue
-            if isinstance(let.value, frog_ast.FuncCall) and isinstance(
-                let.value.func, frog_ast.Variable
+            # An entry such as `BitString<n> c = H(0b0);` (H a let: function)
+            # calls a function, not a primitive or scheme: it is a value.
+            if (
+                isinstance(let.value, frog_ast.FuncCall)
+                and isinstance(let.value.func, frog_ast.Variable)
+                and let.value.func.name in self.definition_namespace
             ):
                 definition = copy.deepcopy(
                     self.definition_namespace[let.value.func.name]
@@ -786,6 +814,18 @@ class ProofEngine:
                     )
                 else:
                     raise TypeError("Must instantiate either a Primitive or Scheme ")
+            elif (
+                isinstance(let.value, frog_ast.FuncCall)
+                and isinstance(let.value.func, frog_ast.Variable)
+                and has_nondeterministic_call(
+                    let.value, self.proof_namespace, self.proof_let_types
+                )
+            ):
+                # `c = H(0b0)` reads as H(0b0) at every use, which is exact
+                # because a Function is deterministic and its argument makes
+                # no call that is not; `c = H(R.Draw())` would read as a
+                # fresh draw at every use (F-389).
+                raise UnsupportedLetEntryError(let.name, let.value)
             else:
                 self.proof_namespace[let.name] = copy.deepcopy(let.value)
                 # For abstract primitive-typed lets (e.g. `TrapdoorTest T;`
@@ -803,6 +843,9 @@ class ProofEngine:
                     else:
                         sympy_symbol: Symbol = Symbol(let.name)  # type: ignore
                         self.variables[let.name] = sympy_symbol
+        self.primitive_held_functions = _functions_held_by_primitives(
+            proof_file.lets, self.sampled_let_names, self.definition_namespace
+        )
 
         if proof_file.max_calls is not None:
             if isinstance(proof_file.max_calls, frog_ast.Integer):
@@ -816,7 +859,16 @@ class ProofEngine:
         self._extract_subsets_pairs(proof_file)
 
     def prove(self, proof_file: frog_ast.ProofFile, proof_path: str = "") -> None:
-        self.set_up_proof_context(proof_file)
+        try:
+            self.set_up_proof_context(proof_file)
+        except UnsupportedLetEntryError as e:
+            print(Fore.RED + str(e) + Fore.RESET)
+            print(
+                Fore.RED
+                + f"Proof Failed! (let: entry '{e.name}' is not supported)"
+                + Fore.RESET
+            )
+            raise FailedProof(str(e)) from e
 
         theorem: frog_ast.ParameterizedGame
         steps: list[frog_ast.ProofStep]
@@ -1889,6 +1941,7 @@ class ProofEngine:
             sort_game_fn=self.sort_game,
             max_calls=self.max_calls,
             sampled_let_names=self.sampled_let_names,
+            primitive_held_functions=dict(self.primitive_held_functions),
             requirements=list(self.requirements),
         )
 
@@ -2766,6 +2819,64 @@ def _written_parameters(
             for method in renamed.methods
         )
     ]
+
+
+def _functions_held_by_primitives(
+    lets: list[frog_ast.Field],
+    sampled: set[str],
+    definitions: frog_ast.Namespace,
+) -> dict[str, str]:
+    """Each sampled ``let:`` function that a primitive instantiation in
+    *lets* receives, mapped to the name of the entry holding that
+    instantiation.
+
+    A primitive's methods are opaque: given ``HLeak L = HLeak(m, H);``, a
+    game calling ``L.Leak()`` may learn values of ``H`` that no call
+    ``H(...)`` in the game shows, so a pass that reasons about every query of
+    ``H`` must not take ``H`` for a random function only the game queries
+    (F-387). A scheme's methods are inlined into the game, so their queries
+    are calls the passes see. A function also reaches a primitive inside an
+    argument, through the ``let:`` entries that argument names (a scheme
+    instantiated with it, a value computed from it), at any depth.
+    """
+    carried: dict[str, set[str]] = {name: {name} for name in sampled}
+
+    def carried_by(node: frog_ast.ASTNode) -> set[str]:
+        names: set[str] = set()
+        for name in visitors.referenced_variable_names(node):
+            names |= carried.get(name, set())
+        return names
+
+    held: dict[str, str] = {}
+    for let in lets:
+        if let.name in sampled or let.value is None:
+            continue
+        carried[let.name] = carried_by(let.value)
+        for call in _primitive_instantiations(let.value, definitions):
+            for arg in call.args:
+                for name in sorted(carried_by(arg)):
+                    held.setdefault(name, let.name)
+    return held
+
+
+def _primitive_instantiations(
+    node: frog_ast.ASTNode, definitions: frog_ast.Namespace
+) -> list[frog_ast.FuncCall]:
+    """Every call in *node*, at any depth, that instantiates a primitive of
+    *definitions* (``HLeak(m, H)``)."""
+    calls: list[frog_ast.FuncCall] = []
+
+    def collect(inner: frog_ast.ASTNode) -> bool:
+        if (
+            isinstance(inner, frog_ast.FuncCall)
+            and isinstance(inner.func, frog_ast.Variable)
+            and isinstance(definitions.get(inner.func.name), frog_ast.Primitive)
+        ):
+            calls.append(inner)
+        return False
+
+    visitors.SearchVisitor(collect).visit(node)
+    return calls
 
 
 def instantiate(

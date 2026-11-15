@@ -1,0 +1,14 @@
+import 'v9.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+
+theorem:
+    V9(m, H);
+
+games:
+    V9(m, H).Real against V9(m, H).Adversary;
+    V9(m, H).Random against V9(m, H).Adversary;

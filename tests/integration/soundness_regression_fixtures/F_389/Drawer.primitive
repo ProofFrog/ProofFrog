@@ -1,0 +1,4 @@
+Primitive Drawer(Int n) {
+    BitString<n> Draw();
+    deterministic BitString<n> Fixed();
+}

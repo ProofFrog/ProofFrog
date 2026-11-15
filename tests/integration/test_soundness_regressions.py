@@ -49,8 +49,17 @@ CASES = [
     ("F-002", "field_initializer_query_field_set.proof", "reject",
      "FreshInputRFToUniform",
      "the same field-initializer queries, with a field exclusion set"),
+    ("F-048", "J2.proof", "type_error", "MergeUniformSamples",
+     "two draws were merged across a write to the local that is their length"),
+    ("F-048", "merge_control.proof", "accept", "MergeUniformSamples",
+     "positive control: draws whose length nothing writes are still merged"),
     ("F-062", "a2_probe.proof", "reject", "MergeProductSamples",
      "single-use scan blind to binders across a duplicate re-declaration"),
+    ("F-079", "attack5_element_count_blind.proof", "reject",
+     "RemoveDuplicateFields",
+     "a map copy read after an element write to its source was merged with it"),
+    ("F-079", "control_no_write.proof", "accept", "RemoveDuplicateFields",
+     "positive control: the same games without the element write"),
     ("F-101", "AttackA4.proof", "type_error", "DeadGuardedAssignmentElimination",
      "a shadowed inner variable entailed a guard about the outer one"),
     ("F-101", "attack_a4_local.proof", "reject", "DeadGuardedAssignmentElimination",
@@ -85,6 +94,12 @@ CASES = [
      "element, slice and field writes were missed on one rewrite path"),
     ("F-189", "init_drop.proof", "reject", "SplitOpaqueTupleField",
      "split per-index fields dropped the field's initializer"),
+    ("F-191", "field_init_read.proof", "reject", "SplitOpaqueTupleField",
+     "a read of the split field in another field's initializer was left dangling"),
+    ("F-191", "written_q.proof", "reject", "SplitOpaqueTupleField",
+     "the same, with the dropped component the only difference between the games"),
+    ("F-191", "written_q_control.proof", "accept", "SplitOpaqueTupleField",
+     "positive control: a field starting from the split field's initial value"),
     ("F-199", "A3.proof", "accept", "RedundantFieldCopy",
      "a declaration after the copy made the reconstruction diverge"),
     ("F-202", "attack3.proof", "reject", "DeduplicateDeterministicCalls",
@@ -115,6 +130,14 @@ CASES = [
      "a flat type map rewrote a group element x^0 to 1 and crashed"),
     ("F-290", "attack3_reserved.proof", "reject", "UniformXorSimplification",
      "a reserved-prefix shadow survived renaming and consumed a loop element"),
+    ("F-300", "attack_3.proof", "reject", "RemoveDuplicateFields",
+     "an element write was skipped, so two maps it drives apart were merged"),
+    ("F-300", "control.proof", "accept", "RemoveDuplicateFields",
+     "positive control: a copy neither field's writes change is still merged"),
+    ("F-301", "attack_4.proof", "reject", "RemoveDuplicateFields",
+     "a <-uniq[S] insertion into S alone was skipped, so S was merged away"),
+    ("F-302", "attack_5.proof", "reject", "RemoveDuplicateFields",
+     "two fields with different initializers were merged"),
     ("F-303", "attack_1.proof", "reject", "TopologicalSort",
      "a return was hoisted above a draw whose domain may be empty"),
     ("F-303", "type_draw_control.proof", "accept", "TopologicalSort",
@@ -483,6 +506,10 @@ CASES = [
 
 # (finding, proof file) -> the error a type_error case must fail with.
 TYPE_ERROR = {
+    ("F-048", "J2.proof"): (
+        "error: The size in BitString<n> names local 'n', which is assigned or"
+        " sampled"
+    ),
     ("F-356", "field_init_int_compare.proof"): (
         "error: Cannot compare different types ModInt<q> and Int"
     ),

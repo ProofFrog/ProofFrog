@@ -1,0 +1,44 @@
+// F-300 (Remove Duplicate Fields): an element write changes one field
+// alone.
+// The pass merges two fields of one type when every write updates both
+// alike. It paired only whole-field writes and skipped every other write,
+// so `M1[k] = v;` was not seen at all. With no write left to compare, M1
+// and M2 counted as always equal and were merged, which turns Left into
+// Right.
+// Distinguisher: SetOne(7, 5); GetTwo(7). Left: M2 stays empty, so 999.
+// Right: M1[7] = 5. Advantage 1.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+Game Left() {
+    Map<Int, Int> M1;
+    Map<Int, Int> M2;
+
+    Int SetOne(Int k, Int v) {
+        M1[k] = v;
+        return 0;
+    }
+
+    Int GetTwo(Int k) {
+        if (k in M2) {
+            return M2[k];
+        }
+        return 999;
+    }
+}
+
+Game Right() {
+    Map<Int, Int> M1;
+
+    Int SetOne(Int k, Int v) {
+        M1[k] = v;
+        return 0;
+    }
+
+    Int GetTwo(Int k) {
+        if (k in M1) {
+            return M1[k];
+        }
+        return 999;
+    }
+}
+
+export as Attack3RDF;

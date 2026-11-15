@@ -1,0 +1,48 @@
+// F-191 (Split Opaque Tuple Field): a read of the split field inside
+// another field's initializer.
+// p is assigned once, from the opaque call S.Gen() in Initialize, and its
+// methods read only p[1], so the pass splits p into per-index fields. It
+// rewrote reads of p[k] in method bodies only, so q's initializer `p[0]`
+// kept naming the deleted field p, and the split dropped p's initializer.
+// Both games then came out as the same fields with the same dangling
+// `Int q = p[0];`.
+// Distinguisher: GetQ(). Real: q = p[0] = 1 at the start. Random: q = 5.
+// Advantage 1.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+import 'sampler.primitive';
+
+Game Real(Sampler S) {
+    [Int, Int] p = [1, 2];
+    Int q = p[0];
+
+    Void Initialize() {
+        p = S.Gen();
+    }
+
+    Int GetQ() {
+        return q;
+    }
+
+    Int GetP1() {
+        return p[1];
+    }
+}
+
+Game Random(Sampler S) {
+    [Int, Int] p = [5, 6];
+    Int q = p[0];
+
+    Void Initialize() {
+        p = S.Gen();
+    }
+
+    Int GetQ() {
+        return q;
+    }
+
+    Int GetP1() {
+        return p[1];
+    }
+}
+
+export as FieldInitReadProp;

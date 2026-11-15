@@ -1,0 +1,18 @@
+// Two games whose Oracle returns one uniform BitString<2 * n> draw. J2.proof
+// and merge_control.proof compare an intermediate game G3 against them.
+
+Game Real(Int n) {
+    BitString<2 * n> Oracle() {
+        BitString<2 * n> w <- BitString<2 * n>;
+        return w;
+    }
+}
+
+Game Random(Int n) {
+    BitString<2 * n> Oracle() {
+        BitString<2 * n> w <- BitString<2 * n>;
+        return w;
+    }
+}
+
+export as J2Prop;

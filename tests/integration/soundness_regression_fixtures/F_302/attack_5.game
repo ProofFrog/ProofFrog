@@ -1,0 +1,45 @@
+// F-302 (Remove Duplicate Fields): two fields that start from different
+// values.
+// Bump updates f1 and f2 alike, so the pass paired them, but it never read
+// the fields' initializers: f1 = 0 and f2 = 5 were merged, and the starting
+// value 5 was lost, which turns Left into Right.
+// Distinguisher: GetTwo() as the first call. Left: 5. Right: 0.
+// Advantage 1.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+Game Left() {
+    Int f1 = 0;
+    Int f2 = 5;
+
+    Int Bump() {
+        f1 = f1 + 1;
+        f2 = f2 + 1;
+        return 0;
+    }
+
+    Int GetOne() {
+        return f1;
+    }
+
+    Int GetTwo() {
+        return f2;
+    }
+}
+
+Game Right() {
+    Int f1 = 0;
+
+    Int Bump() {
+        f1 = f1 + 1;
+        return 0;
+    }
+
+    Int GetOne() {
+        return f1;
+    }
+
+    Int GetTwo() {
+        return f1;
+    }
+}
+
+export as Attack5RDF;

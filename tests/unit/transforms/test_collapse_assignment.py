@@ -161,3 +161,19 @@ def test_f146_sample_call_initial_not_collapsed() -> None:
     )
     result = CollapseAssignmentTransformer().transform(method)
     assert result == method, "a Sample-call initial must not be collapsed away"
+
+
+def test_f147_unique_sample_initial_not_collapsed() -> None:
+    """F-147: a `<-uniq[S]` draw inserts its value into `S`, which the method
+    then reads. Folding the overwrite `x = 0^4` onto the draw would delete the
+    insertion, so `|S|` would no longer grow. The draw must survive whether or
+    not the pass treats a unique draw as a Sample."""
+    method = frog_parser.parse_method("""
+        Int f() {
+            BitString<4> x <-uniq[S] BitString<4>;
+            x = 0^4;
+            return |S|;
+        }
+        """)
+    result = CollapseAssignmentTransformer().transform(method)
+    assert result == method, "a <-uniq draw must not be collapsed away"

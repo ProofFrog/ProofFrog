@@ -2,752 +2,365 @@
 
 This file is auto-loaded when editing under `proof_frog/export/easycrypt/`.
 
-## Architecture (one screen)
+## What the exporter is
 
 The exporter translates a verified ProofFrog `.proof` into an EasyCrypt
-`.ec` file by walking each interchangeability hop and emitting a
-**per-transform canonicalization chain**: the same transforms that
-fired on the FrogLang side become micro-lemmas on the EC side, each
-discharging one step of the chain.
+`.ec` file that EasyCrypt re-checks. What it is, and how it must work, are
+set by the project's normative architecture document. Its rules and its
+enforcement contract are quoted below, verbatim (its R8 governs how it may
+be cited). When the document changes, this quote is replaced as a whole.
 
-Key modules:
+<!-- BEGIN ARCHITECTURE.md (verbatim) -->
+## The rules
+
+- **R1 — Unit of translation.** Each interchangeability hop exports as
+  a chain of micro-lemmas, one per engine transform application, each
+  labeled with the transform name it evidences.
+
+- **R2 — Tactic selection.** The tactic attached to a micro-lemma MUST
+  be obtained from the transform registry, looked up by that
+  application's transform name, and by nothing else. A registered
+  entry MAY inspect the AST or rendered bodies AFTER selection — that
+  is what "parametric" means. No code path may choose a micro-lemma
+  tactic from program shape without the transform name having selected
+  the entry first.
+
+- **R3 — Registry entries.** Preference order: canned (static tactic
+  text), parametric (deterministic synthesizer), cached (derived
+  interactively once, stored with a derivation record, keyed by
+  transform + masked local shape). One implementation MAY serve
+  several transforms — via one explicit registration per transform,
+  never by fallthrough.
+
+- **R4 — No entry applies means admit.** The leg emits an `admit.`
+  naming its transform (guided, when a fill template exists). Never a
+  tactic that might run without closing its goal; never another
+  transform's entry.
+
+- **R5 — Structural lemmas** (wrapper-to-flat bridges, chain
+  composition, hop lemmas, probability lemmas) are selected by hop
+  structure: oracle count, endpoint kinds. That is allowed. Nothing
+  anywhere is selected by what program text happens to look like.
+
+- **R6 — Fused closures are forbidden.** No whole-oracle or whole-hop
+  closure, except carve-outs registered below with Douglas's dated
+  sign-off. A carve-out closure MUST be tagged `per-hop` and scores
+  zero transform evidence.
+
+- **R7 — The headline metric is transform coverage**: how many of the
+  transforms firing in the corpus have registered tactics. Evidence
+  volume and clean-proof counts are secondary. A change that raises a
+  secondary number while lowering coverage is a regression.
+
+- **R8 — Change control.** This file changes only on Douglas's
+  explicit instruction. Agent sessions MUST NOT edit it, MUST NOT
+  summarize or restate its rules in other documents (link or quote
+  verbatim only), and MUST NOT treat any other document as overriding
+  it.
+
+- **R9 — The exporter knows languages, not cryptography.** The
+  exporter translates FrogLang to EasyCrypt. It may reason about
+  language concepts: types, fields, samples, calls, determinism and
+  injectivity declarations, oracle structure. No code path, function,
+  module, or constant may be named for or keyed to a cryptographic
+  construction (a KDF, a random-oracle pattern, a challenge shape,
+  seed splitting, a PRG/PRF seam). Construction-specific reasoning
+  enters only as data the exporter consumes: registered per-transform
+  entries, cached derivations with derivation records, and the proofs
+  themselves.
+
+
+## Enforcement contract
+
+The rules are enforced by machinery, not memory. The machinery MUST
+provide all of the following, and weakening any of them is a
+stop-and-ask item:
+
+- **E1 — Provenance tags.** Every emitted micro-lemma tactic carries
+  `(* resolution: <rung> transform="<name>" entry="<id>" *)`.
+- **E2 — Conformance test.** A test over corpus exports
+  (`tests/integration/test_ec_architecture_conformance.py`) FAILS on:
+  a micro-lemma tactic whose entry is not registered for that lemma's
+  transform; a fused closure not in the carve-out register; an emitted
+  tactic with no provenance tag.
+- **E3 — Single constructor.** Only the registry module constructs
+  micro-lemma tactic text; the chain emitter obtains tactics
+  exclusively through the registry lookup API.
+- **E4 — Coverage visibility.** Every dashboard view prints the R7
+  coverage number in its top line.
+<!-- END ARCHITECTURE.md -->
+
+In the quoted text, "this file" means the architecture document, and
+"below" and "the carve-out register" refer to a section of it that is not
+quoted here.
+
+## Key modules
 
 - `exporter.py` — top-level entry; orchestrates per-hop chain emission.
-- `chain_emitter.py` — emits the per-transform chain for one hop.
-- `canonical_form.py` — `canonical_text()` is the *normative* string
-  used as the cache key. Whitespace/naming drift between this and the
-  sidecar cache silently turns a hit into a miss.
-- `tactic_cache.py` — sidecar TOML cache (the *Cached* band of the
-  automation ladder; see below).
-- `transform_buckets.py` — groups transforms by EC tactic shape; holds
-  the static `CANNED_TACTIC` bodies and the `PARAMETRIC_TACTIC`
-  synthesizers (the *Synthesized* band of the ladder).
-- `resolution.py` — the automation ladder: rung tokens, display names,
-  and the `(* resolution: <rung> *)` tag the exporter emits at each
-  resolved transform/hop so the dashboard can tally exactly how each
-  closed.
-- `cache_report.py` — `make check-tactic-cache` driver.
-- **Scheme-statelessness foundation** (in `chain_emitter._synth_stateless_reorder`
-  + `module_translator` helpers + gated emission in `exporter.py`): when a
-  micro reorders two *abstract scheme calls* (e.g. `Inline Local Tuple
-  Literal` over `Enc(KeyGen())`), EC can't `swap` them. The exporter emits
-  per-method distribution ops + an `Ideal` sampling module + `declare axiom
-  <E>_<m>_sem` statelessness specs (the probabilistic analogue of the
-  `E_dec_det` determinism foundation), and routes the micro through a 4-hop
-  transitivity over the all-`Ideal` instantiation. Gated: only emitted for
-  schemes whose calls are actually reordered. Single declared module only so
-  far. Design + extensions:
-  `extras/docs/plans/in-progress/2026-06-01-scheme-statelessness-foundation.md`.
-- **BitWord bitstring foundation** (in `type_collector.emit` + `_derived_concat_laws`
-  / `_derived_split_law` / `_derived_concat3_laws`): a `BitString<w>` with a KNOWN
-  width emits as `clone BitWord as BW_bs_<w> with op n <- <w> proof gt0_n by
-  smt(...)` + `type bs_<w> = BW_bs_<w>.word` — a genuine sized bool-list subtype,
-  not an abstract type. Slice/concat/concat3 ops are then DEFINED through the
-  `ofword`/`mkword` bridge and `dbs_<w>` is DEFINED as `BW_bs_<w>.DWord.dunifin`,
-  which turns the whole bitstring family from AXIOMS into proved lemmas: the three
-  2-way round-trip laws, both 2-way distribution splits, the `dbs_*_ll/_fu/_full`
-  trio, and all five 3-way `concat3` facts. Statement text is byte-identical to the
-  axioms it replaces, so existing `smt(...)` hints and `have h := ...` references
-  keep resolving. Measured on `CG_seedbased_HON_BIND_K_PK`: emitted top-level
-  axioms **128 -> 17**. Load-bearing details, each earned by a failure:
-  - **`op [smt_opaque]` is mandatory, not cosmetic.** Defining a previously
-    uninterpreted op is a conservative change ONLY if the definition is withheld
-    from `smt`; otherwise every existing `smt` call over a nested `concat` unfolds
-    into `mkword`/`ofword`/`++` and blows its budget ("cannot prove goal (strict)"
-    in the binding challenge case-split). `smt_opaque` withholds the definitional
-    axiom while leaving delta-reduction intact, so `rewrite /<op>` still unfolds it
-    for the derivation proofs. `opaque` (no tag prefix) would block that reduction
-    too — do not use it here.
-  - **Gates, all failing CLOSED.** A width must be known; a type aliased to an
-    abstract carrier keeps the carrier's type; and every type of a concat triple
-    whose component widths do NOT sum to the result's is excluded wholesale,
-    because a defined concat would make that triple's round-trip laws FALSE. Such
-    a triple keeps the uninterpreted-op + axiom form, which is satisfiable.
-  - **Positivity is the whole residue.** Each clone owes `gt0_n : 0 < <width>`.
-    A concatenation width is a nonnegative-coefficient sum of atoms, so it is
-    DISCHARGED from per-atom `gt0_<atom>` axioms; a width that SUBTRACTS (the
-    partial split's gap, `prg_stretch - kem_t_nseed`) gets its own
-    `gt0_bs_<w>`. Never leave the obligation undischarged: an undischarged clone
-    axiom is real but INVISIBLE in the file text, so the axiom audit cannot see it.
-  - **EC's `++` is LEFT-associative**, so an emitted `A ++ B ++ C` is
-    `(A ++ B) ++ C`; the 3-way `p1`/`p2`/identity proofs need `-catA` first. A
-    right-nested reading fails with "nothing to rewrite", which reads like a
-    missing lemma rather than an associativity mistake.
-  - **One `rewrite /op` reaches every occurrence.** When a triple's components
-    share a type they share a slice op, so naming it twice is "nothing to rewrite".
-  - Tripwires: `ec_templates/bitword_slice_concat.ec` (round-trip),
-    `bitword_uniform_split.ec` (distribution family + splits),
-    `bitword_concat3.ec` (3-way), `bitword_split_couple.ec` (the CONSUMER shape —
-    with the distribution defined, EC discharges the split coupling's support
-    obligation itself, so the emitted tail is `(<witness>) || smt(<laws>)` and both
-    branches are pinned).
-- **ModInt additive-group foundation** (in `type_collector` +
-  `expr_translator` + `parametric_tactics.uniform_modint_tactic` +
-  `exporter.type_of` FieldAccess): **migrated to EC stdlib clones (2026-06-29)**,
-  replacing the former uninterpreted-ops+axioms backend. Group + ring laws are now
-  *derived* from `Group.ec`/`ZModP.ec`, not axiomatized (principle 4's ideal). The
-  one new assumed axiom is `ge2_p : 2 <= <modulus>` (ZModRing's own
-  well-definedness side-condition) — registered + justified in the axiom-soundness
-  plan.
-  - **`GroupElem<G>` -> `clone CyclicGroup as <G>`** (not `import`ed — every op is
-    qualified, since the group's `( * )` and the ring's `( * )` would otherwise
-    collide). Type `<G>.group`; `G.generator`/`G.identity` -> `<G>.g`/`<G>.e`;
-    `*`/`/` -> `<G>.( * )`/`<G>.( / )` (rendered prefix: `<G>.( * ) a b`).
-  - **Exponent ring, gated on the per-proof `requires <G>.order is prime;`**
-    (threaded as `prime_group_names` -> `TypeCollector.is_prime_group`):
-    *general path* (default) clones `ZModP.ZModRing as <G>_Exp with op p <- <G>.order`
-    (exp type `<G>_Exp.zmod`, power `<G>.( ^ ) base (<G>_Exp.asint exp)` via the base
-    integer power); *prime path* (declaring proofs only) emits
-    `axiom <G>_prime_order : IntDiv.prime <G>.order` + `clone <G>.PowZMod as <G>_P` +
-    `clone <G>_P.FDistr as <G>_FD` (exp type `<G>_P.ZModE.exp`, ergonomic field power
-    `<G>_P.( ^ ) base exp`). Only `HashedElGamalKEM_INDCCA` declares it today.
-  - **`ModInt<q>` dual role** (`type_collector._group_order_modulus_alias`): a
-    `ModInt<<G>.order>` *aliases* the group's exponent ring (no independent clone); a
-    standalone `ModInt<q>` gets its own `clone ZModP.ZModRing as ModInt_q with op p
-    <- <q>` (type `ModInt_q.zmod`) — the modulus is *bound* to the FrogLang
-    expression so the ring is genuinely Z_<q>, not over an unrelated abstract `p`. `+`/`-`/`*`/zero render to `<T>.( + )`/`( - )`/`( * )`/`zero`;
-    the uniform distr is `<T>.DZmodP.dunifin` (group element samples use a direct
-    `duniform <G>.elems`). `Uniform ModInt Simplification` closes via an `rnd`
-    bijection whose cancellation is now a derived `ring` fact (discharge
-    `... smt(<distr>_fu <distr>_funi @<ring-theory>)`), with the 3 former round-trip
-    axioms dissolved into `ring` lemmas.
-  - **Verified:** `ModOTP_INDOT` -> clean (0 admits) and `ElGamal_Correctness` ->
-    EC-accepted at 1 admit (⚠), both on the stdlib backend (`ec_compile` OK).
-    Op-name helpers (`group_*_name_for`, `add`/`sub`/`modint_mul`/`modint_zero_name_for`,
-    `ring_theory_of`, `group_power_for`) derive the qualified op by stripping the EC
-    type suffix (`.group`/`.zmod`/`.exp`). Non-group/modint proofs are byte-identical
-    (all emission gated on group/modint registration). The `requires Group ZModP List`
-    preamble is added only when `has_stdlib_group_or_modint()`. The no-scheme
-    DDH/CDH **implication** proofs now export via the group-only mode (next bullet);
-    the `Group`-parameterized **scheme** family (ElGamal/HashedElGamal MultiChal) is
-    the deferred Phase-C scheme-axis case. Three general
-    emission fixes that landed with the old GroupElem foundation remain: `==`/`!=` ->
-    `=`/`<>`; a `Sample` with no type annotation takes the sampled variable's type;
-    `type_of` types `G.generator`/`G.identity` as `GroupElem<G>`.
-- **Group-only export mode** (`exporter._group_only_let_name` + dispatch;
-  `exporter._export_group_only` + `_group_only_scaffold` + `_group_only_type_of_factory`):
-  a proof that imports **only game files** (no `.scheme`/`.primitive`) and attacks a
-  game parameterized by a `Group` math structure (`let: Group G; theorem: CDH(G);`,
-  e.g. `DDH_implies_CDH`) has no primitive theory. It is detected right after the
-  import loop (no scheme/primitive imported **and** the theorem-target let is a
-  `GroupType`) and routed to a **dedicated `_export_group_only` branch** that leaves
-  the entire `:683`->end primitive-theory orchestration untouched. The branch emits
-  the games **at top level over `clone CyclicGroup as <G>`** -- no `<primitive>_Theory`
-  wrapper, no `Em : Scheme` param -- reusing `translate_game_file_oracle` /
-  `translate_game` (the `Group G` module param **stripped** post-construction) /
-  `translate_adversary_type` (with the multi-oracle spec, so `distinguish` takes the
-  init result + `{O.<post>}`) / `translate_reduction`; a helper game's non-group param
-  is carrier-aliased to its instantiation arg (`RandomTargetGuessing(GroupElem<G>)` ->
-  `S = G.group`). The per-step wrappers, assumption `eps_<gf>` ops, **admit** hop
-  lemmas, and the main theorem are hand-built (`_group_only_scaffold`): a hop between
-  two steps of the same assumption game + reduction (differing only by side) is bounded
-  by `eps_<gf>`, every other hop is an admitted equality, and the main-theorem triangle
-  bound sums one epsilon **per assumption hop with repetition**. Two shared-translator
-  enablers are **gated to group-only** (existing exports byte-identical): a bare Void
-  module-call statement (`challenger.Initialize();`) translates via the new
-  `allow_void_call` flag (`translate_reduction` -> `_translate_method` ->
-  `StatementTranslator`, default off; otherwise such a statement raises
-  `NotImplementedError` -> `return witness`); and `ec_ast.Call` renders a result-less
-  call when its `var` is empty. **Verified:** `DDH_implies_CDH` +
-  `GapCDH_implies_GapCDH_NZ` export and `ec_compile` OK (admitted hops -- export-only
-  goal). The HashedDDH/MultiChal siblings still hit `translate_game`'s
-  single-module-param assertion (`module_translator.py:359`): their games carry
-  multiple math-structure params (Group+Int+`Function` random-oracle / Set+Set /
-  Set+Int multichal) -- deferred.
-- **Random-function foundation for `Function<A,B>`** (in `type_collector`
-  `translate_type`/`distr_for`/`emit` + `expr_translator` FuncCall +
-  `module_translator._ec_field_name`/`_field_renames_for`): a game field
-  `RF <- Function<A,B>` (sampled as a whole random function, applied as
-  `RF(x)`) translates to EC's native arrow type `A -> B`; the sample draws
-  from an abstract uniform distribution over the finite function space
-  (`op dfun_<dom>_to_<codom> : (A -> B) distr` + `_ll`/`_fu`/`_full` axioms,
-  emitted *after* the domain/codomain bitstring `type` decls so the arrow's
-  operands are in scope), and `RF(x)` renders as application `RF x`. The
-  three axioms are the standard facts about `dfun (fun _ => dB)` (EC's
-  `MUniFinFun`), so the foundation is sound and in principle derivable —
-  register it with the axiom-soundness audit. Because EC module-global
-  variables must be lowercase-initial, an uppercase field name like `RF` is
-  renamed (`RF` -> `rF`, first char only) at every decl + reference site via
-  a `field_renames` map threaded through `_translate_method` into the
-  expression translator; lowercase fields are unchanged, so every existing
-  export is byte-identical. Unblocks the 12 KDF-PRF track-A INDCCA proofs to
-  *export* (the 4 CG/UG `_T` variants then hit the separate `Variable: D`
-  ROM wall; the rest advance to a theory-mode `concat` structural blocker —
-  both out of scope here). Validated: foundation + rename parse and
-  typecheck in EC (`dfun` op accepted); export regression byte-identical.
-- **Subset-carrier concatenation** (in `type_collector.register_subset_carrier`
-  / `bitstring_carrier_type` + `expr_translator._bitstring_type_of` + an early
-  `exporter.py` pass): a scheme `requires X subsets/== BitString<n>` makes an
-  abstract carrier set `X` (e.g. GHP18's `KEM1.PublicKey` = `PK1Space`)
-  bitstring-like. The engine inlines the `BitString<n> b = x;` coercion into the
-  chain flat states, so a `||` operand surfaces *carrier-typed* — `pk1 :
-  PK1Space`, not `bs_pk1len` — and the old `||` path emitted EC's boolean `||`
-  ("no matching operator ||"). `_bitstring_type_of` now maps a carrier operand
-  to its `BitString<n>` and renders `concat_*`; nested `||` is summed
-  *structurally* (the engine's recorded type for an inlined concat node can be a
-  single carrier, not the summed bitstring). The carrier→bitstring map is seeded
-  on `top_types` *before* chain emission (an emission-neutral pass — it registers
-  no bitstring type, so `top_types.emit()` order is unchanged); the late
-  `requires` pass that emits `type bs_n = X.` runs *after* the flat states
-  render, too late for the translator. Cleared GHP18's §2.3 wall: the proof now
-  type-checks fully (boolean `||` gone). Regression: only the 3 KEMCombiner
-  proofs re-export.
-- **GHP18_Correctness → clean (three coordinated fixes; the last correctness
-  `⛔`).** After the subset-carrier wall fell, GHP18 EC-rejected; three fixes
-  take it to EC-accepted, 0 admits:
-  1. **`_calls_only_align_swaps` dependency validation.** Its coarse-signature
-     bubble (`_ec_perm_swaps`) over the *whole* exec list slid a call to the
-     front (valid) and then bubbled an independent assignment back across the
-     call's result write to "match" the target layout — a dependency-crossing
-     `swap{2}` EC rejects ("statements not independent"). The coarse swaps are
-     now dependency-validated (`_swaps_dep_valid`); on failure they are
-     recomputed by `_calls_only_move_swaps`, which slides *only the calls* left
-     to their slots (assignments stay; the walker's `wp` absorbs them) and
-     validates each move with `_ec_indep`. A clean proof's swaps already
-     validate, so it keeps the coarse result byte-identical. Fixed the
-     `R_KEM2` reduction-side ISUV micro `micro_2_right_2_fwd` (was emitting a
-     spurious second `swap{2} 3 -1`).
-  2. **`Inline Multi-Use Pure Expressions` + `Extract Repeated Tuple Access`
-     added to `_PLUMBING_REWRITE_TRANSFORMS`.** Both keep the abstract-call
-     sequence identical and differ only by deterministic assignment plumbing
-     (a pure `label <- concat ...` inlined into its two `F.evaluate` use sites;
-     a repeated `v.\`1` extracted to a `__cse_*` local). The functional-twin
-     identical-order `(wp; call)*` middle leg discharges them — `wp` collects
-     the dropped/added assignment and `skip => /#` equates the substituted
-     expressions. Closed 6 of GHP18's 7 admits.
-  3. **`type_of` handles `ArrayAccess` (tuple projection).** GHP18's `hop_0`
-     flat states inline a tuple projection (`sk[2]` where `sk : SK1Space *
-     SK2Space * PK1Space * PK2Space`) directly into a `||` concat operand, so
-     the concat detector (`_bitstring_type_of`) called `type_of` on an
-     `ArrayAccess` and hit `NotImplementedError` → the whole body fell back to
-     `return witness;` → the hop chain was unrenderable → `admit`. The
-     exporter's `type_of` factory now types `t[i]` as the i-th component of
-     `t`'s `ProductType`. Cleared the last admit (`hop_0`).
-
-  Regression: only `GHP18_Correctness` re-exports (byte-identical clean set);
-  `ec_compile` OK at 0 admits.
-- **Intermediate-game body emission** (in `exporter.py` intermediate-game loop
-  + `module_translator.translate_intermediate_game` + `proof_translator.
-  _resolve_intermediate_game`): a proof-local `Game` helper referenced as a
-  bare `ParameterizedGame` step (`Hyb(q)`, `G_RandKey(K, F)`) is emitted as a
-  concrete EC module implementing the *outer* theorem game's oracle type. Both
-  single- and multi-oracle helpers are emitted. Module-typed (scheme-instance)
-  params become EC functor params; non-module params (`Int q` compile-time
-  indices) are dropped from the signature *and* the module expression, so
-  `Hyb(q)` renders as a bare `Hyb`. The bare step's precondition is keyed off
-  the outer game file (`={mL, mR}`), not `true`.
-- **Concrete scheme for unconditional primitive-typed primaries** (in
-  `exporter.py` scheme determination): `SymEnc E = ModOTP(q)` (a primitive-
-  typed let bound to a concrete *scheme* ctor) with **no** `assume:` is emitted
-  as a concrete `module ModOTP`, not an abstract `declare module E` -- the
-  engine inlines the scheme into the flat states, so the wrapper-to-flat bridge
-  needs a module `inline *` can unfold. Gated on `not proof.assumptions`
-  (assumption proofs keep E abstract for the reduction). The scheme is resolved
-  from the RHS ctor, not the declared interface type; the primary instance is
-  keyed off the theorem-target let-name.
-- **Reorder swap synthesizers** (in `chain_emitter`): a micro lemma relates
-  two *rendered* flat-state modules, which are normalized differently from
-  the raw `app.game_before`/`app.game_after` (the engine stores a
-  separately-canonicalized `game_before`; `Inline Single-Use Variables`
-  leaves a nested `return` only the EC hoister flattens). `_permutation_swaps`
-  runs on the raw ASTs; `_rendered_state_swaps` (the fallback for the
-  multi-module `Bucket.CANNED` branch) recomputes the permutation from the
-  rendered EC bodies via `_ec_perm_swaps`, which is what catches an
-  abstract-call-past-independent-sample reorder (e.g. `E.keygen()` past
-  `mPrime <$ d`) that the raw-AST check misses. A sample is glob-independent,
-  so EC's `swap` accepts it (unlike two abstract calls, which need the
-  stateless `Ideal` machinery). Template:
-  `tests/integration/ec_templates/call_past_sample_swap.ec`.
-- **ISUV swap-aligned call-walker** (`chain_emitter._synth_isuv_walk`, wired in
-  `_tactic_for`'s `Inline Single-Use Variables` canned branch): the whole-
-  statement permutation checks (`_permutation_swaps`/`_rendered_state_swaps` ->
-  `_ec_perm_swaps`) decline on an ISUV micro because inlining removes single-use
-  assignments, so before/after differ in statement *count* (not a permutation).
-  When the inlining also exposed an independent *different-module* call reorder
-  (e.g. `KEM_PQ.encodesharedsecret` past `KEM_T.decaps`), the canned
-  `proc; sp; wp; sim` runs but silently leaves `={res}` open (a 0-admit file EC
-  rejects). This route aligns the right side's *calls only* to the left's call
-  order with `swap{2}` (`_calls_only_align_swaps`; the count-differing det
-  assigns stay for the walker's `wp`), then peels the calls bottom-up
-  (`(wp; call (_: true))*`) and closes `skip => /#`. It fires only when an
-  actual reorder exists (`swaps != []`), so it never preempts a working static
-  `sim`; clean proofs are unaffected (a clean ISUV micro with a real call
-  reorder would already be EC-rejected by the static `sim`, hence not clean).
-  Same-*module* reorders take the deterministic functional-twin route below.
-  Validated on `CK_expanded_Correctness` micro_0_left_2 (EC EXIT 0).
-- **Deterministic-reorder synthesizer** (`chain_emitter._synth_det_reorder`,
-  hooked at the head of `_tactic_for` so it preempts every swap-based route):
-  when before/after differ by a deterministic reorder EC's `swap` can't do, it
-  **functionalizes** every det call to its `ev_<m>` form (via the always-emitted
-  `<M>_<m>_det` axioms) and routes `left ~ right` through two `ev`-functional
-  **twin modules** `<state>_fdet` via 3-leg transitivity: `left ~ F_left`
-  (top-down `seq 1 1` peel, program order — dodges the `exists*` freeze on
-  ISUV-inlined call args), `F_left ~ F_right` (the *middle leg*,
-  `_det_reorder_leg`), `F_right ~ right` (top-down peel). The gate
-  `_needs_det_functional_reorder` (same call multiset + **each module's own
-  probabilistic-call order preserved**) fires when **(a)** some declared
-  module's own call order differs (same-module → EC rejects any `swap`, shared
-  `glob`; any transform), or **(b)** for non-tuple transforms, the cross-module
-  right→left calls-only alignment is **data-invalid**
-  (`_calls_only_alignment_invalid`: a reordered call pushed past an assignment
-  reading its result, e.g. `L.get` past the `kdf_in_d` concat — the
-  `_synth_isuv_walk` swap EC rejects as "statements not independent"). The
-  **middle leg** has two shapes: identical functionalized abstract-call order →
-  the `(wp; call (_: true))*` peel; *reordered* abstract calls (the
-  `Topological Sorting` shape — a same-module det reorder bundled with a
-  **cross-module probabilistic** reorder, e.g. `KEM_T.KeyGen` past
-  `KEM_PQ.Encaps`) → reorder `F_left`'s statements to exactly match `F_right`
-  with `swap{1}` (`_ec_full_perm_swaps`, full-signature bubble sort; sound
-  because both functionalized bodies are topological orderings of the same DAG,
-  so each left-to-right move crosses only not-yet-placed independent statements)
-  then `sim`. Tuple transforms (`allow_cross_module=False`) keep their
-  tuple-walk, which aligns to the *inlined tuple* side — a valid direction
-  (KEMPRF `K.decaps` past `F.evaluate`). Cross-module *valid* reorders and
-  non-reorders decline, so clean proofs stay byte-identical. Determinism is
-  threaded from the exporter as a per-declared-module `det_methods` map.
-  Validated end-to-end on `CK_expanded_Correctness` / `UK_expanded_Correctness`
-  (all 11 `Topological Sorting` micros close; `ec_compile` OK at 19 admits).
-  **Sample-aware peel (2026-06-13).** The middle leg, `_synth_isuv_walk`, and
-  `_synth_tuple_walk` no longer stall on `<$` samples: `_backbone_peel` walks the
-  call+sample backbone tail-to-front, coupling a sample with `rnd` and a call with
-  `call (_: true)` (sample-free micros stay byte-identical). The same-callee det
-  reorder (`NG.Encode(v8)`/`NG.Encode(v5)` — `Stabilize Independent Statements`) is
-  caught by `_det_call_sigs` (per-module `(callee,args)` order, det calls only).
-  `_det_topdown_leg` now seeds its `seq` invariant with the **proc parameters**
-  (`={pk,sk}`) — a det call consuming a parameter (`K.decaps(sk,ct)`) otherwise
-  leaves an undischarged `forall &1 &2`. `Inline Single-Use Variables` is in
-  `_PLUMBING_REWRITE_TRANSFORMS` so its count-differing inlined-tail shape routes
-  here instead of the canned `(sp;wp;sim)||sim` (which ran but left the goal open).
-  Verified: KEMPRF / CK_expanded / UK_expanded / GeneralDoubleSymEnc /
-  ChainedEncryptionSecure all still `ec_compile` OK. A same-distribution *sample
-  reorder* (two `<$` seeds swapped by `Topological Sorting`) must NOT take the
-  identity-`rnd` peel: `_call_sample_backbone` tags each sample by its bound
-  variable, so a reordered-sample backbone differs and the leg falls to the
-  `swap`+`sim` branch (samples are glob-independent, so EC `swap` reorders them
-  into position). This route is emitted but **its EC compilation is not yet
-  confirmed** (CG7 export not compiled) — the next thing to verify. **Dedup
-  extension** (`Deduplicate Deterministic
-  Calls`, the non-contiguous *rewire* shape — a duplicate det call like `L.get`
-  removed and its survivor hoisted): the gate also fires when the call multisets
-  *differ* by a deterministic deduplication (`_is_dedup_rewire`: prob calls
-  untouched, det multiset shrank by genuine duplicates, **not** the contiguous-tail
-  `_synth_dedup_det` shape — `_is_contiguous_dedup`). After functionalization the
-  dedup'd det call is an `ev_*` assignment, so both twins hold the same abstract
-  calls and the existing `(wp; call)*` middle leg closes them (the redundant
-  `ev_*` assignment is absorbed by `wp`). Gated on `allow_cross_module` and the
-  non-contiguous shape so clean `KEMPRF_Correctness` (contiguous-tail dedup via
-  `_synth_dedup_det`, plus its tuple-walk) stays byte-identical. Validated on
-  `CK`/`UK_expanded_Correctness` (19 -> 9 admits, `ec_compile` OK).
-  **Plumbing-rewrite extension** (`Collapse Single-Index Tuple Access`,
-  `Expand Tuples` — a deterministic tuple-projection/construction rewrite that
-  keeps the *whole* abstract-call sequence identical, e.g. `t <@ KeyGen(); x =
-  t[0]` <-> `r <@ KeyGen(); t = r[0]; x = t`): there is **no call reorder at
-  all** (`bc == ac`), so the swap routes have nothing to do and the
-  single-module tuple-walk / stateless route does not apply — in a
-  multi-declared-module body these fall through to `admit`. The gate also fires
-  when `allow_plumbing and bc == ac` and the bodies differ; after
-  functionalization both twins hold the same probabilistic calls in the same
-  order, so the **identical-order `(wp; call)*` middle leg** discharges the
-  plumbing difference (`wp` absorbs the extra projection assignments,
-  `skip => /#` closes the nested concat args). `allow_plumbing` is set only for
-  `_PLUMBING_REWRITE_TRANSFORMS` in a multi-module body (`len(flat_params) > 1`),
-  so single-module clean proofs keep their tuple-walk byte-identical. Validated
-  on `CK`/`UK_expanded_Correctness` (**9 -> 0 admits, `ec_compile` OK — both
-  flip to clean**).
-- **Pure cross-module reorder fallback in the `_REORDER_TRANSFORMS` branch**
-  (`_tactic_for`): `_permutation_swaps` runs on the raw `app.game_before/after`
-  ASTs, which are normalized differently from the rendered flat-state modules
-  the lemma relates, so it can miss a reorder EC actually sees. When it declines,
-  recompute from the rendered modules via `_rendered_state_swaps` →
-  `_ec_perm_swaps`, gated by `_reorder_cross_module_safe` (every module's own
-  call subsequence preserved → purely cross-module → EC-`swap`-safe; same-module
-  reorders take the det route above). Closes the `L.get`-past-`KeyGen`
-  `Topological Sorting` micros.
-- **Sample-reorder closes for the functional-twin and swap routes** (three
-  coordinated fixes; validated end-to-end on `UG_seedbased_Correctness` →
-  clean). When a reorder, after functionalizing every det call, leaves the two
-  twins differing *only* in the order of their `<$` samples (probabilistic-call
-  subsequence identical), the existing middle-leg routes break: `_ec_full_perm_swaps`
-  chokes on the `_rN` renaming a reorder drags in (two calls that swap program
-  order get their auto-numbered result vars reassigned), and the coarse swap
-  routes can't tell two same- or distinct-distribution samples apart.
-  - `_det_reorder_leg` (functional-twin middle leg) gains a fallback after
-    `_ec_full_perm_swaps` declines: `_sample_reorder_swaps` emits `swap{1}`s
-    reordering the samples (a sample is glob/data-independent of everything
-    before it, so hoisting it up is always EC-valid), then the existing
-    `_backbone_peel` discharges the now-common backbone — `wp` dissolves the
-    renamed deterministic locals, so the rename never surfaces. Gated on
-    `allow_sample_reorder` (set only when functionalization actually turned a det
-    call into an `ev` assignment), so pure-probabilistic bodies keep their
-    simpler swap close. Tripwire:
-    `tests/integration/ec_templates/sample_reorder_twin.ec`. Closes the
-    `micro_*_right_9` `Topological Sorting` micros where a same-module call order
-    also differs.
-  - `_needs_det_functional_reorder` gains a clause routing a *cross-module*
-    reorder through the twins when its only probabilistic-backbone difference is
-    sample order AND a rename is present (detected as `_ec_full_perm_swaps` on
-    the rendered bodies declining) AND there are det calls to functionalize.
-    Rename-free reorders keep their shorter swap close (EC `swap` aligns them and
-    `sim` finishes). Closes the `Stabilize Independent Statements` micro
-    (`derivekeypair` shifting across the `NG` calls with `_r0`/`_r1` swapped).
-  - The `_REORDER_TRANSFORMS` swap branch now *validates* its swaps against the
-    rendered bodies (`_swaps_align_rendered` / `_swaps_realign` via `_reorder_sig`
-    — samples by distribution, calls by callee, rename-tolerant) before trusting
-    them: the raw-AST `_permutation_swaps` can return non-empty-but-wrong swaps
-    (raw vs rendered normalization mismatch), and `_rendered_state_swaps`'s coarse
-    `_ec_perm_swaps` conflates distinct-distribution samples. Both now require the
-    swaps to actually realign; `_rendered_state_swaps` falls through to the
-    full-signature sort (which distinguishes the samples by var) when coarse
-    doesn't realign. Closes the no-rename `micro_12_right_9` sample swap.
-  - **Rename-masked assign shape in `_reorder_sig`** (the validation signature
-    `_swaps_realign` uses): it previously collapsed *every* `Assign` to
-    `("assign",)`, so a swap sequence that left two distinct assigns
-    (`ct2 <- _tup_2.\`2` vs `_tup_1 <- (...)` vs `ct1 <- _tup_1.\`1`) mis-ordered
-    still validated — `sim` was then left open (a 0-admit file EC rejects). Now
-    an assign's signature includes its **rename-masked RHS shape** (`_mask_idents`
-    replaces every identifier run with `ID`, keeping punctuation/indices/arity):
-    finer than before (distinguishes `ID.\`1` / `ID.\`2` / `(ID, ID, ID)`) yet
-    still `_rN`-rename-tolerant (both sides mask alike). Strictly safe — it can
-    only *reject* a genuinely-misaligned swap set, falling back to the exact
-    full-signature sort (`_ec_full_perm_swaps`, dep-validated); a correct swap set
-    still passes (moved == right ⇒ equal masked shapes). Fixed GHP18's
-    `Topological Sorting` `micro_2_left_3` (raw `_permutation_swaps` returned only
-    2 of the 3 needed swaps and coarse-validated). Regression: `UK_seedbased`
-    gains one extra dep-valid `swap` (its `micro_0_left_13` was similarly
-    under-swapped; still `ec_compile` OK).
-- **Marginal partial-split `Split Uniform Samples` synthesizer**
-  (`parametric_tactics._marginal_split_helpers`, reached from the
-  `_has_module_call_tail` branch of `split_uniform_samples_tactic`): the
-  PRG-stretch shape where one big sample `orig <$ d_RES` is consumed *only* via two
-  non-overlapping slices that feed a **complex downstream tail** (module calls +
-  assignments, not a return-concat), and `|L| + |R| < |RES|` (tail-gap). The simple
-  `_partial_split_helpers` Mid/Aug `query` templates can't capture the long tail.
-  Instead this route builds `Mid`/`Aug` as **surgical copies of the actual
-  flat-state modules** — the whole tail rendered verbatim by a `render_state`
-  callback `chain_emitter` passes in (a closure over `_render_flat_state`), with
-  only the sampling prefix patched: `Mid` = whole-side state with `orig <$ d_RES`
-  replaced by `a <$ d_L; b <$ d_R; _gap <$ d_GAP; orig <- concat3 a b _gap`;
-  `Aug` = two-sample state with a dead `_gap <$ d_GAP`. It chains
-  `whole ~ Mid ~ Aug ~ two-sample`: `left_to_mid` = `rndsem*{2}` + `rnd`-identity
-  bijection + `d_RES_split3` (couple the one big sample to the 3-sample form), then
-  `sim` the identical tail; `mid_to_aug` = `seq` establishing the `slice_concat3`
-  round-trips `slice_L orig{1} = a{2}` / `slice_R orig{1} = b{2}`, then peel the
-  whole tail call-by-call (`(wp; (call (_:true) || rnd))*` — `sim` can't use a
-  relational fact to equate the two slice-consuming head calls' args, but the
-  generic peel discharges them from the invariant); `aug_to_right` = drop the dead
-  gap via `rnd{1}` + `d_GAP_ll`, then `sim`. `reversed_dir` prepends `symmetry.`.
-  Common deterministic prefix (e.g. `L.get()`) is peeled with `seq c c; first sim`.
-  Only fires where the old code admitted, so clean proofs stay byte-identical;
-  mid-gap and reversed orientation (`swap_split`) fall back to admit. Validated:
-  `CK_seedbased` / `UK_seedbased` (EC OK, 0 admits → clean). Standalone skeleton
-  is the regression tripwire `tests/integration/ec_templates/marginal_split.ec`.
-- **Multi-oracle init-equiv synthesizer** (`chain_emitter._synth_init_backbone_peel`,
-  in the `is_init` branch of `_emit_one_oracle_chain`): the `Initialize`-lifted
-  hop equiv of an adaptive-oracle proof (KEM IND-CCA's `hop_N_initialize`) relates
-  two wrappers with identical *canonical* bodies but different `inline *`-generated
-  names. When the body has a deterministic cross-module call (an `F.evaluate`
-  challenge embedding whose args are tuple-projections of two abstract `encaps`
-  results), `proc; inline *; sim` silently leaves the goal open — a 0-admit file
-  EC rejects. Instead peel the shared probabilistic backbone tail-to-front
-  (`_backbone_peel`: `wp` clears each deterministic run incl. the `F.evaluate`
-  discharged by `skip => /#`; `call (_: true)` couples each abstract call
-  name-independently — `(_: ={glob K})` is rejected "module K can write K"; `rnd`
-  each sample). The PRF-random final hop carries a *dead* `F.evaluate` on one side
-  only (result overwritten by a fresh sample); the shorter backbone aligns as a
-  subsequence (`_dead_call_drop_tags`) and the gap deterministic call is dropped
-  one-sided via `call{i} (<M>_<m>_pres g)` (the existing glob-preservation axiom,
-  requested through `MultiOracleHopChainInfo.pres_methods` → `pres_method_requests`).
-  **Gated on the init backbone containing a deterministic call** (the exact case
-  `sim` fails), so keygen/sample-only correctness inits keep the historical
-  `proc; inline *; sim.` byte-identical. Fully AST-driven (backbone read off each
-  side's first flat state); no `inline`-name prediction. Verified: all four
-  `KEMPRF_INDCCA` inits close (`synth-param`; EC compiles through every init to
-  the pre-existing `hop_1_pr` reduction-adversary wall).
-- **Consume-pk reduction-adversary (`hop_1_pr` double-init wall)** (`module_translator.
-  _render_consumed_pk_init` + `reduction_repacks_challenger_init` gate; `proof_translator.
-  translate_assumption_hop_pr_lemma` `consume_pk_*` params). A **forward+repack** reduction —
-  `R.Initialize` destructures `challenger.Initialize()`, stores the leaked keys in its own
-  fields, and returns only a *reduced* view (the CFRG generic `LEAK⇒HON_BIND` `R`) — cannot be
-  lifted to the assumption adversary by re-running `R(K,C).initialize()`: the LEAK game already
-  ran `initialize` and passed the full result as `pk`, so re-running re-calls `C.initialize`
-  (EC "invalid module application" — the `{O.challenge}`-restricted adversary may not call
-  `O.initialize`) **and** double-initializes the challenger. `R_Adv.distinguish` instead
-  **consumes** `pk`: it renders `R.Initialize`'s body with the `challenger.Initialize()` call
-  replaced by the `pk` parameter, field writes qualified `R.<field>` (`R.dk0 <- pk.\`2; …`), and
-  the return bound to `pk0`. The matching `hL`/`hR` byequiv bridge replaces `proc; inline *; sim`
-  (which "cannot infer the set of equalities" — both sides run the same challenger-init backbone
-  but differ in deterministic repack plumbing) with a **backbone peel**: `proc; inline*; wp;
-  call (_: ={glob R, glob K, glob <challenger>}); [ proc; sim | … | wp; call (_: true); …;
-  skip => /# ]` — one `proc; sim` per post-init oracle + a peel sized to the inner challenger's
-  init call count (`init_module_call_count`); hL uses the Breakable challenger glob, hR the
-  Unbreakable. **Gate is a recursive** module-call count (`_count_module_calls` via `SearchVisitor`):
-  it fires only when the init holds fields, is not a pure forward, and its ONLY call is
-  `challenger.Initialize` — so KEMPRF's `R_KEM` (whose repack applies `F.evaluate`, a second
-  call `_render_consumed_pk_init` can't hoist) declines and stays byte-identical on the re-init
-  path. Verified: `generic_ct` EC-compiles cleanly at 1 admit (the wall-5 `hop_2_challenge`
-  dead-decaps drop remains). KEMPRF_INDCCA's own `hop_1_pr` is NOT closed by this — its computing
-  repack needs a consume-pk-that-hoists variant (deferred).
-- **Dead-call drop for constant-return oracles (`hop_2_challenge` wall 5)** (`chain_emitter.
-  _dead_call_drop_step`, wired as the last branch of `_oracle_step_tactic`; `_all_calls_dead`,
-  `_strip_decls`). A binding `Unbreakable` challenge returns `false`, so its two `K.decaps` calls
-  are **dead**; `Absorb Redundant Early Return` prunes them along the chain, leaving adjacent
-  flat states of *equal* `glob` cardinality whose bodies differ by dropped calls. `sim` cannot
-  relate them (one has the calls) and it is not a reorder, so the whole oracle chain used to
-  decline → guided admit (declining the *first*, a dead-name **rename** step, because the
-  canonicalizer cannot rename an unused result var by usage). The route now: (1) an **equal
-  backbone** with matching callees is a dead rename (`proc; sim` — sim ignores the dead names;
-  gated `_all_calls_dead` so a live embedding never takes it) or, call-free, a dead-var-decl
-  cleanup (`proc; sim` when `_strip_decls` bodies match); (2) an **unequal backbone** drops the
-  extra dead deterministic calls one-sided via `call{side} (<M>_<m>_pres g)` (the same
-  glob-preserving `_pres` axiom the init peel uses, requested through the oracle chain's
-  `pres_methods`) after `exists* (glob <M>){side}`. **DEAD-call gate** (`_all_calls_dead`: no
-  call result feeds a later operand or the return) is load-bearing — it declines KEMPRF's *live*
-  `F.evaluate` challenge (result used), so that oracle keeps its cached det-finisher tactic and
-  stays byte-identical. Verified: `generic_ct` (LEAK⇒HON_BIND_K_CT) EC-compiles **clean, 0
-  admits** — the first CFRG binding proof to reach clean EC. Tripwire:
-  `ec_templates/dead_call_drop.ec` (both drop directions + the rename).
-- **Subset-field composite reduction (`generic_pk` = LEAK⇒HON_BIND_K_PK)** — the wall-7 composite
-  machinery assumed the reduction holds *every* live field of the game; a PK binding game holds
-  ek0/ek1 (read by `Challenge`) AND dk0/dk1, but its decaps-only reduction `R` holds only the
-  decaps keys and forwards `Challenge` to the challenger. Four coordinated fixes take it to clean:
-  1. **Data-flow field correspondence** (`chain_emitter._chain_role_map` + `_init_source_map` +
-     `_dataflow_field_pairs`). A same-cardinality canonicalization step that RENAMES *and* REORDERS
-     the field declarations (PK sorts DecapsKeys ahead of EncapsKeys → `field1..4`) breaks the old
-     positional-zip role union, which pairs an EncapsKey field with a DecapsKey field → EC "no
-     matching operator `=`". Correspond adjacent-state fields by their `initialize` **source
-     expression** (`v1[1]` — stable across a field-only rename) when it forms a complete bijection;
-     fall back to the positional zip otherwise, so order-preserving renames stay byte-identical.
-  2. **Name-independent init-repack gate** (`exporter._reduction_holds_any_field`, replacing a
-     single guessed live-field name). The init backbone peel must fire when the reduction delegates
-     its `Initialize` AND holds any own field; the old name-guess fell back to `fields[0]` (an
-     EncapsKey R doesn't hold) when the game's `Initialize` returns a tuple, so the peel never fired.
-  3. **Forwarded-field Θ** (`exporter._live_state_coupling`). A live field the reduction does NOT
-     hold (ek, forwarded to the inner challenger) couples across the game↔challenger seam directly
-     (`HON.ek0{1}=LEAK.ek0{2}`), so the flat-bridge ek coupling is derivable from Θ.
-  4. **Post-init live-restriction** (`exporter._field_read_post_init`). Couple a forwarded field
-     only where a post-init oracle reads it: ek is live on the Breakable side (`Challenge` reads
-     `ek0!=ek1`) but dead on the Unbreakable side (`Challenge` → `false`). Coupling dead ek is both
-     unnecessary and *unprovable* — Remove-Redundant-Variables drops the dead ek field mid-chain,
-     so the transitivity can't thread its equality. (A `challenger_`-prefix role union was tried and
-     reverted — it injected un-threadable ek into the Unbreakable decaps chain.)
-  All four are byte-identical for clean proofs (role map only consulted for cardinality-differing /
-  composite couplings; the exporter gates only widen where a subset-field reduction delegates).
-  Verified: `generic_pk` EC-compiles **clean, 0 admits** — the second CFRG binding proof clean.
-- **Binding challenge case-split synthesizer** (`binding_challenge.py` + `chain_emitter.
-  _challenge_casesplit_route` + exporter val-lemma/inj emission): eliminates the two-KEM binding reduction's
-  `Challenge` case-split (forward a KDF-input collision to the inner KEM binding challenger, else recompute
-  the game boolean). The route (fired in `_emit_one_oracle_chain` after the `is_init` block, declines to
-  `None` for every non-matching oracle) derives a `ChallengeHopSpec` from the flat-state game+reduction ASTs
-  + the wrapper exprs, and `binding_challenge.challenge_tactic` emits: game `exists*`+`<Scheme>_decaps_val`
-  functionalization, `seq 0 <prefix_len>` with the packed-key decomposition-coupling invariant, reduction-
-  prefix functionalization (per-call `<M>_<m>_det`), `case` on the collision guard, collision branch
-  (`inline{2}` the challenger, functionalize its decaps, slice-peel the KDF concat with `slice_concat_left_*`,
-  collapse via the requested `<M>_<m>_inj` axiom), no-collision branch (functionalize the two `H.evaluate`).
-  The `<Scheme>_decaps_val` phoare lemma is synthesized by symbolic-evaluating the concrete scheme's
-  translated `decaps` proc (`decaps_val_lemma`) and emitted into `det_axiom_decls`. Both game and reduction
-  flat states are pre-inlined, so packed key fields come from `left_state0.fields` and the challenger from the
-  wrapper's last arg. Requests thread via new `MultiOracleHopChainInfo.inj_methods`/`decaps_val_schemes` →
-  `inj_method_requests`/`decaps_val_requests`. Gated tightly (only fires on the game~case-split-reduction
-  shape), so every other proof is byte-identical. Verified: `CK_expanded_LEAK_BIND_K_CT` `hop_0_challenge`
-  fires `synth-param` and ec_compiles OK (hop_2/hop_4 still admit). Tripwire:
-  `ec_templates/binding_challenge_2kem_packed.ec`.
-- **Correctness-`decaps` case-split synthesizer** (`chain_emitter.
-  _synth_correctness_decaps_casesplit`, last route in the non-init oracle chain):
-  the CONSUMING half of the packed-key correctness front (IND-CCA `_PQ`
-  `hop_0_decaps` / `hop_15_decaps`). The game runs its scheme's `decaps` straight
-  through; the correctness reduction re-derives the T scalar from its stored seed
-  and then CASE-SPLITS on the challenge PQ ciphertext, reusing the challenger's
-  stored `corr.`5` instead of decapsulating. The route introduces that split on
-  the game side (`case` + `rcondt{2}`/`rcondf{2}`) and, in the challenge branch,
-  drops the game's `decaps` through its `_det` axiom — the coupling's
-  `corr.`5 = ev_decaps corr.`2 corr.`3` then makes the two equal, which IS the
-  content of the hop.
-  - **A GAME-SIDE FLAT TWIN carries the leg** (`RawGame ~ FGdc_<hop> ~ RawRed`),
-    and that is what makes the route name-independent. The tactic must NAME the
-    local holding each intermediate; on the raw wrapper those come out of EC's
-    inline renaming (`EcMemory.bindall_fresh` appends the smallest fresh index, so
-    the scheme's `_r0` becomes `_r00` because the game oracle already binds one).
-    Against the twin every name is the exporter's own. The reduction needs no
-    twin: its `decaps` calls only abstract modules, so `inline *` leaves it
-    unchanged. The twin leg is the ordinary backbone peel and names nothing.
-  - **Proc PARAMETERS are in scope in a pre and NOT in a post**, so the
-    transitivity's `={ct}` belongs to `P1`/`P2` only — putting it in `Q1` is
-    "unknown variable or constant: `ct'".
-  - **ENABLING-COUPLING GATES, one per drop kind.** The reduction's leading
-    re-derivation needs the packed-scalar conjunct (`<game>.<packed>.`k =
-    ev_<m> <red>.<seed>`) and the game's extra decapsulation needs an `ev_` fact
-    about ITS method; both are checked on the coupling TEXT. Without them the
-    peel runs and leaves a goal — a BLOCKED export where an honest admit was
-    available (the same failure `_synth_forwarded_oracle_peel` guards against).
-  - **Alignment is greedy over CALLEES** (`_callee_align`), forward with `seq`
-    only as far as the last one-sided drop and backward-laddered after; the
-    ambiguous divergence (both heads justifiable) is REFUSED rather than guessed.
-  - Derivation record: `ec_templates/indcca_packed_key_decaps_TACTIC.txt`.
+- `chain_emitter.py` — emits the micro-lemma chain for one hop.
+- `tactic_registry.py` — the transform-keyed registry: each transform name
+  and the entry ids registered for it (`TACTIC_REGISTRY`, `is_registered`,
+  `is_conforming_tag`), plus the transform-set constants the gates share.
+  Today it owns selection legality only: the conformance test checks each
+  provenance tag against it, but the tactic bodies still live in
+  `transform_buckets.py` and in the chain emitter's gated routes.
+- `transform_buckets.py` — the canned tactic bodies (`CANNED_TACTIC`) and
+  the parametric synthesizer table (`PARAMETRIC_TACTIC`);
+  `parametric_tactics.py` holds the synthesizers.
+- `resolution.py` — the rung tokens and the provenance tag the exporter
+  emits at each closure.
+- `tactic_cache.py` and `canonical_form.py` — the sidecar tactic cache.
+  `canonical_text()` is the normative key string: whitespace or naming
+  drift between it and a sidecar silently turns a hit into a miss.
+- `cache_report.py` — the `make check-tactic-cache` driver.
+- `oracle_model.py` — the oracle-list data model for game files.
 - `proof_translator.py`, `module_translator.py`, `expr_translator.py`,
-  `stmt_translator.py`, `type_collector.py`, `scheme_instances.py`,
-  `ec_ast.py` — FrogLang→EC translation primitives.
+  `stmt_translator.py`, `expr_text.py`, `type_collector.py`,
+  `scheme_instances.py`, `ec_ast.py` — the FrogLang to EasyCrypt
+  translation.
 
-## Evidence-only micro emission (every return path pays evidence)
+**Not yet conforming, and not a pattern to copy.** Some single-oracle
+routes still select a tactic by program shape: `_try_det_reorder` runs
+before any registry lookup, and after an admit, `_try_stateless`,
+`_try_congruence`, `_try_dead_call_drop`, `_try_tuple_walk` and
+`_try_dedup_det` run and emit closures without a provenance tag. Whole-hop
+and whole-oracle cache paths still emit the `cached-guided` and
+`admit-guided` rungs (`<hop>` and `<oracle>` entries in `exporter.py`).
+These are the rebuild's worklist. Do not extend them.
 
-`_emit_one_oracle_chain` no longer abandons an oracle at the first leg
-`_oracle_step_tactic` declines. The leg scan (`_scan_legs`) is shared by two
-callers: the chain path runs it and, when every leg closed, goes on to build the
-bridge and chain lemmas; **every other return path** — an `Initialize` route, a
-whole-oracle endpoint route, an honest admit — runs it through
-`_evidence_only_chunks` purely to keep the legs that DID close as standalone
-lemmas, prefixed `(* evidence-only: this leg closed but its chain did not ... *)`.
-The route still closes the hop lemma exactly as before. A leg that declines emits
-**nothing** — never an `admit.` — so an admit-free proof stays admit-free and a
-clean proof stays clean; the flat states those lemmas name are kept by the
-existing referenced-state filter. The lemmas are unreferenced but EasyCrypt still
-has to prove them, so an accepted file is per-application evidence for exactly
-the transform applications they name (the dashboard's evidence coverage counts
-them via `_micro_leg`). Measured across the corpus: transform evidence 23.7% →
-49.6% with **no** proof's EC status changing and open admits unchanged at 73.
+The tests that hold the line:
+`tests/integration/test_ec_architecture_conformance.py` (the conformance
+test), `tests/integration/test_tactic_cache_orphan_check.py`, and
+`tests/integration/test_cfrg_hybrid_kems.py` (the CFRG correctness lock:
+a fast admit-free export check and a slow, Docker-gated EasyCrypt
+compile).
 
-An `Initialize` leg is dropped WHOLESALE from evidence-only emission: its
-precondition is `true` (there is no incoming state to relate) while its
-postcondition asserts the state coupling, so a single leg would have to
-establish that coupling out of nothing.
+## Foundations
 
-Two consequences to keep in mind when adding or changing a leg route:
+Language-level translations that hold whatever selects the tactics. Each
+is gated, so a proof that does not use the feature exports byte-identically.
 
-- **Every route's gate is now exercised on shapes no closing chain ever
-  reached.** A gate that emits a tactic it cannot GUARANTEE closes will now show
-  up as a rejected export. `_oracle_step_tactic`'s field-cardinality survivor
-  peel needed two applicability gates for this reason: `_peelable_tail_backbone`
-  (the call/sample backbone must be an unbroken tail, else EasyCrypt says
-  *invalid last instruction*) and `_bodies_equal_under_field_map` (the two bodies
-  must be the same program modulo the coupling's field renaming, else the closing
-  `auto` leaves the goal open — *cannot save an incomplete proof*).
-- **A broken chain's coupling may not even typecheck.** `_chain_role_map` is a
-  union-find over bare field names, so an unrelated state's identically-named
-  field can merge roles and produce `A.f{1} = B.g{2}` across different types.
-  `_micro_pre_well_typed` drops such evidence lemmas (evidence-only path only),
-  which is what makes the feature strictly additive.
-- **A WHOLE-GLOB precondition typechecks only if the two states' emitted glob
-  SIGNATURES agree**, and the signature is `_glob_signature`'s pair: the module
-  vars *and the functor parameters the body actually calls*. `glob F(A)` contains
-  `glob A` only when `F` calls `A` — EasyCrypt drops unused functor args — so two
-  states with identical field lists have different glob types as soon as one
-  stops calling a parameter, and EasyCrypt rejects the file with *no matching
-  operator, named `='* listing no parameter types at all (which reads like a
-  solver failure, not a typing one). The comparison must be made on the WHOLE
-  flat state, not the oracle projection: the difference usually lives in
-  `initialize`. Rejecting tripwire: `ec_templates/evidence_glob_param_usage_rejects.ec`
-  (control lemma first, so a drift in the control cannot be mistaken for the
-  rejection under test).
+- **Scheme statelessness** (helpers in `module_translator`, gated emission
+  in `exporter.py`). EasyCrypt cannot `swap` two abstract scheme calls. For
+  a scheme whose calls a micro-lemma reorders, the exporter emits
+  per-method distribution ops, an `Ideal` sampling module and
+  `declare axiom <module>_<m>_sem` statelessness specs, the probabilistic
+  analogue of the `declare axiom <module>_<m>_det` determinism specs. A
+  single declared module only so far. (Which micro-lemmas use these is
+  decided today by the `_try_stateless` route above.)
+- **BitWord bitstrings** (`type_collector.emit`, `_derived_concat_laws`,
+  `_derived_split_law`, `_derived_concat3_laws`). A `BitString<w>` of known
+  width emits as `clone BitWord as BW_bs_<w> with op n <- <w>` and
+  `type bs_<w> = BW_bs_<w>.word`; slice, concat and concat3 are defined
+  through the `ofword`/`mkword` bridge and `dbs_<w>` as
+  `BW_bs_<w>.DWord.dunifin`, so the round-trip laws, the distribution
+  splits and the `dbs_*_ll/_fu/_full` facts are proved lemmas rather than
+  axioms, with statements byte-identical to the axioms they replaced.
+  Earned the hard way:
+  - `op [smt_opaque]` is mandatory. A defined op left visible to `smt`
+    unfolds every nested `concat` into `mkword`/`ofword`/`++` and blows
+    the budget. `smt_opaque` withholds the definitional axiom but keeps
+    delta-reduction, so `rewrite /<op>` still unfolds it; plain `opaque`
+    blocks that too.
+  - The gates fail closed: the width must be known; a type aliased to an
+    abstract carrier keeps the carrier's type; a concat triple whose
+    component widths do not sum to the result's keeps the
+    uninterpreted-op-and-axiom form, because a defined concat would make
+    its round-trip laws false.
+  - Each clone owes `gt0_n : 0 < <width>`. A sum of atoms is discharged
+    from per-atom `gt0_<atom>` axioms; a width that subtracts gets its own
+    `gt0_bs_<w>`. Never leave it undischarged: an undischarged clone axiom
+    is real but invisible in the file text, so an axiom audit cannot see
+    it.
+  - EasyCrypt's `++` is left-associative: `A ++ B ++ C` is
+    `(A ++ B) ++ C`, and the three-way proofs need `-catA` first. A
+    right-nested reading fails with "nothing to rewrite".
+  - When a triple's components share a type they share a slice op, so
+    naming it twice in one `rewrite` is "nothing to rewrite".
+  - Tripwires (in `tests/integration/ec_templates/`):
+    `bitword_slice_concat.ec`,
+    `bitword_uniform_split.ec`, `bitword_concat3.ec`,
+    `bitword_split_couple.ec`.
+- **ModInt and groups on the EasyCrypt standard library** (`type_collector`,
+  `expr_translator`, `parametric_tactics.uniform_modint_tactic`). Group and
+  ring laws are derived from `Group.ec` and `ZModP.ec`, not axiomatized;
+  the one assumed axiom is ZModRing's side condition
+  `ge2_p : 2 <= <modulus>`.
+  - `GroupElem<G>` becomes `clone CyclicGroup as <G>`, cloned rather than
+    imported so that the group's and the ring's `( * )` cannot collide:
+    type `<G>.group`, `G.generator`/`G.identity` as `<G>.g`/`<G>.e`, every
+    op qualified.
+  - The exponent ring depends on the proof's `requires <G>.order is
+    prime;`. By default it is `clone ZModP.ZModRing as <G>_Exp with op p
+    <- <G>.order` with powers through `<G>_Exp.asint`. A proof declaring
+    the requirement gets `axiom <G>_prime_order`, `clone <G>.PowZMod as
+    <G>_P` and `clone <G>_P.FDistr as <G>_FD`.
+  - A `ModInt<<G>.order>` aliases the group's exponent ring
+    (`type_collector._group_order_modulus_alias`); any other `ModInt<q>`
+    gets its own `clone ZModP.ZModRing as ModInt_q with op p <- <q>`, bound
+    to the FrogLang modulus. Its uniform distribution is
+    `<T>.DZmodP.dunifin`; group elements sample from
+    `duniform <G>.elems`.
+  - The `Group`, `ZModP` and `List` theories are required only when a
+    group or ModInt is registered (`has_stdlib_group_or_modint`).
+- **Group-only export mode** (`exporter._group_only_let_name`,
+  `_export_group_only`, `_group_only_scaffold`). A proof that imports only
+  game files and attacks a game parameterized by a `Group` (for example
+  `DDH_implies_CDH`) has no primitive theory. It is routed to its own
+  branch, which emits the games at top level over `clone CyclicGroup as
+  <G>` and hand-builds the step wrappers, the assumption `eps_<gf>` ops,
+  the hop lemmas (admitted equalities, except a hop between the two sides
+  of one assumption game) and the main theorem. Games with several
+  math-structure parameters still hit `translate_game`'s single
+  module-parameter assertion.
+- **Random functions** (`type_collector`, `expr_translator`,
+  `module_translator`). A field `RF <- Function<A, B>` becomes EasyCrypt's
+  arrow type `A -> B`, sampled from an abstract uniform distribution over
+  the function space (`op dfun_<dom>_to_<codom>` with `_ll`, `_fu` and
+  `_full` axioms, the standard facts about `dfun (fun _ => dB)`), and
+  `RF(x)` renders as `RF x`. EasyCrypt module variables must start
+  lowercase, so an uppercase field is renamed at every declaration and use
+  (`RF` to `rF`) through a `field_renames` map.
+- **Subset carriers** (`type_collector.register_subset_carrier`,
+  `bitstring_carrier_type`, `expr_translator._bitstring_type_of`). A scheme
+  `requires X subsets BitString<n>` makes the carrier `X` bitstring-like.
+  The engine inlines the coercion into the chain's flat states, so a `||`
+  operand can surface carrier-typed; `_bitstring_type_of` maps it to its
+  `BitString<n>` and renders `concat_*`, summing nested `||` structurally.
+  The carrier map is seeded before chain emission; the late `requires`
+  pass that emits `type bs_n = X.` runs too late for the translator.
 
-## Automation ladder (how each resolution closes)
+- **Intermediate games** (`module_translator.translate_intermediate_game`,
+  `proof_translator._resolve_intermediate_game`). A proof-local `Game`
+  helper referenced as a bare step (`Hyb(q)`) is emitted as a concrete
+  module implementing the outer theorem game's oracle type, single- or
+  multi-oracle. Module-typed parameters become functor parameters;
+  non-module parameters (`Int q`) are dropped from the signature and the
+  module expression. The bare step's precondition comes from the outer
+  game file (`={mL, mR}`), not `true`.
+- **A concrete scheme for an unconditional primary** (`exporter.py`, scheme
+  determination). A primitive-typed `let:` bound to a concrete scheme
+  constructor, in a proof with no `assume:`, is emitted as a concrete
+  module, not an abstract `declare module`: the engine inlines the scheme
+  into the flat states, so the bridge needs a module `inline *` can
+  unfold. Proofs with assumptions keep it abstract for the reduction.
 
-Every closed transform micro-lemma or whole-hop body is labelled with
-one rung of a single ranked scale — *how much of the proof is
-attributable to the exporter's own machinery*. The exporter emits a
-machine-readable `(* resolution: <rung> *)` tag (see `resolution.py`)
-at each site so the dashboard tallies the ladder exactly. Best-automated
-first:
+## Evidence-only micro-lemmas
 
-1. **Synthesized — static** (`synth-static`): a fixed canned tactic from
-   `CANNED_TACTIC`; no per-instance logic. Promote a recipe here only
-   after ≥5 distinct proofs hit the same shape.
-2. **Synthesized — parametric** (`synth-param`): the tactic is *computed*
-   from the hop's AST (a `PARAMETRIC_TACTIC` synthesizer, a swap
-   sequence, a cascade). Still fully automatic — no human, no cache.
-3. **Cached — with guidance** (`cached-guided`): closed from a sidecar
-   entry that the exporter *scaffolded* (it emitted a `STRATEGY`/`TO
-   CACHE` guided template that a human filled and we stored). Currently
-   the whole-hop `transform = "<hop>"` entries.
-4. **Cached — without guidance** (`cached-unguided`): closed from a
-   sidecar entry the exporter did *not* scaffold — a human derived the
-   tactic from scratch and we captured it. The per-transform cache hits.
-5. **Admit — with guidance** (`admit-guided`): an open `admit.`, but the
-   exporter emitted a targeted fill template for this exact hop (the
-   unfilled form of rung 3 — cheap to promote).
-6. **Admit — without guidance** (`admit-unguided`): an open `admit.`
-   with only the generic `(* tactic-cache miss ... *)` comment.
+When an oracle's chain does not close, the legs that did close are still
+emitted as standalone lemmas (`_scan_legs`, `_evidence_only_chunks`),
+prefixed `(* evidence-only: ... *)`. A leg that declines emits nothing,
+never an `admit.`, so an admit-free proof stays admit-free. EasyCrypt
+still proves these lemmas, so an accepted file evidences exactly the
+transform applications they name. An `Initialize` leg is never emitted
+this way: its precondition is `true`, so it would have to establish the
+state coupling from nothing.
 
-Below the per-resolution ladder sits a seventh, **proof-level** state —
-**Blocked** (`blocked`): the proof exports to `.ec` but EasyCrypt rejects
-the result (a structural gap upstream of hop resolution, or a canned/synth
-tactic that doesn't actually close its goal). The *exporter* can't detect
-non-compilation, but the **dashboard measures it**: `easycrypt_dashboard.py`
-compiles every exported `.ec` in EasyCrypt, and a proof is `clean` only if
-EasyCrypt accepts it AND it is admit-free. "0 admits" alone is not clean —
-a canned tactic that silently fails to close its goal (without emitting
-`admit.`) yields a 0-admit file EasyCrypt still rejects (this is how
-`2_14_Forward`/`2_14_Backward` were once miscounted clean). The dashboard
-fails loudly if EasyCrypt/Docker is unavailable rather than emit unverified
-counts.
+What this exposes when adding or changing a registered entry:
 
-Resolution order in the emitter is rung 1 → 2 → (3/4 via the cache) →
-(5/6 admit). **Automated = rungs 1–4** (no open hole); **Open = rungs
-5–6**; **Blocked = rung 7**. The sub-splits (static-vs-parametric,
-guided-vs-unguided) sit in different closure bands, so this is one
-ladder rather than two axes.
+- **Every gate now runs on shapes no closing chain reached.** An entry
+  that emits a tactic it cannot guarantee closes shows up as a rejected
+  export, not a silent miss (`_peelable_tail_backbone` and
+  `_bodies_equal_under_field_map` exist for this reason).
+- **A broken chain's coupling may not typecheck.** `_chain_role_map` is a
+  union-find over bare field names, so identically named fields of
+  unrelated states can merge into `A.f{1} = B.g{2}` across types;
+  `_micro_pre_well_typed` drops such lemmas.
+- **A whole-glob precondition typechecks only if both states' glob
+  signatures agree** (`_glob_signature`: the module variables and the
+  functor parameters the body actually calls). `glob F(A)` contains
+  `glob A` only when `F` calls `A`, so two states with identical fields
+  can differ. EasyCrypt then reports "no matching operator, named `='"
+  with no parameter types, which reads like a solver failure. Compare
+  whole flat states, not oracle projections: the difference usually lives
+  in `initialize`. Tripwire:
+  `tests/integration/ec_templates/evidence_glob_param_usage_rejects.ec`.
 
-Workflow for adding cache entries — i.e. promoting a rung-5 *guided
-admit* to a rung-3 *cached-guided*, or filling a rung-6 admit into a
-rung-4 *cached-unguided* — is in
-[../../../docs/for_agents/EASYCRYPT_TACTICS.md](../../../docs/for_agents/EASYCRYPT_TACTICS.md).
+## The automation ladder
+
+Every closed micro-lemma or hop body carries one rung of a single ranked
+scale (`resolution.py`), best-automated first:
+
+1. **Synthesized, static** (`synth-static`): a canned tactic body.
+2. **Synthesized, parametric** (`synth-param`): a tactic computed by a
+   registered synthesizer.
+3. **Cached, with guidance** (`cached-guided`): a sidecar entry filled
+   from a template the exporter emitted.
+4. **Cached, without guidance** (`cached-unguided`): a sidecar entry a
+   human derived from scratch.
+5. **Admit, with guidance** (`admit-guided`): an open `admit.` with a
+   fill template for this hop.
+6. **Admit, without guidance** (`admit-unguided`): an open `admit.` with
+   only the generic cache-miss comment.
+
+Below them sits a proof-level state, **blocked**: the proof exports but
+EasyCrypt rejects the file. The exporter cannot see that; the dashboard
+measures it by compiling every export, and counts a proof clean only if
+EasyCrypt accepts it and it has no admit. A tactic that silently fails to
+close its goal gives a zero-admit file EasyCrypt still rejects.
+
+How rungs relate to the registry is set by R3, R4 and R6 above. Today the
+`cached-guided` and `admit-guided` rungs come only from the whole-hop and
+whole-oracle paths listed under "Not yet conforming": do not add entries
+there. A per-transform cache entry (rung 4) is filled as
+`docs/for_agents/EASYCRYPT_TACTICS.md` describes, but that file's advice to
+climb from whole-hop admits to whole-hop cache entries predates the
+architecture and must not be followed.
 
 ## Things to stop and ask before doing
 
-- **Bumping `schema_version`** in any sidecar or `tactic_cache.py`
-  invalidates every existing entry — maintainer-only decision.
-- **Modifying the canonicalization basis** (`canonical_text`,
+- **Bumping `schema_version`** in any sidecar or `tactic_cache.py`: it
+  invalidates every existing entry. A maintainer decision.
+- **Changing the canonicalization basis** (`canonical_text`,
   `_normalize_for_ec`, or anything in `proof_frog/transforms/` that
-  changes canonical output) silently invalidates cached entries.
-  Coordinate with the user before changing.
-- **Promoting a recurring cache shape (rung 3/4) to a `synth-static` /
-  `synth-param` tactic (rung 1/2)** — wait until at least 5 distinct
-  proofs hit the same recipe.
+  changes canonical output): it silently invalidates cached entries.
+- **Promoting a recurring cache recipe (rung 3 or 4) to a registered
+  synthesized entry (rung 1 or 2)**: wait until at least five distinct
+  proofs need the same recipe for the same transform.
+- **A new kind of `declare axiom`** in the emitted files.
+- **Any change to the registry API, the conformance test or the provenance
+  tag format**, and anything that weakens the enforcement contract above.
 
 ## Sanity check
 
 `make check-tactic-cache` reports per-proof `used / orphan / missing`
-counts for the whole `examples/` corpus. Use `--strict` to exit nonzero
-on missing entries. Run this after any change that affects which
-tactics fire or the canonical-text basis.
+counts for the whole `examples/` corpus (`--strict` exits nonzero on a
+missing entry). Run it after any change that affects which tactics fire
+or the canonical-text basis.
 
-## Iterating on a tactic — use the EC MCP interactively (not edit + full compile)
+## Iterating on a tactic: use the EasyCrypt MCP interactively
 
-When working out or debugging an EasyCrypt tactic, drive the proof **interactively**
-with the `easycrypt-mcp` tools: `cli_open` the `.ec`, `cli_step` one tactic at a
-time, inspect with `ec_print_goals`/`cli_print`, `cli_undo` to back up. Do **not**
-default to the edit-file-then-`ec_compile`-the-whole-thing loop — the real exported
-proofs are ~50k lines and take minutes to recheck, while stepping shows the live
-goal in seconds. Reserve `ec_compile` for a final whole-file confirmation or a small
-self-contained prototype. (The tools are deferred — `ToolSearch
-"select:mcp__easycrypt-mcp__cli_open,mcp__easycrypt-mcp__cli_step,..."` to load
-their schemas. See `docs/for_agents/MCP_GUIDE.md` for the full list.)
+Work a tactic out with the `easycrypt-mcp` tools: `cli_open` the `.ec`,
+`cli_step` one tactic at a time, inspect with `ec_print_goals` or
+`cli_print`, and `cli_undo` to back up. Exported proofs are long and take
+minutes to recheck, while stepping shows the live goal in seconds. Keep
+`ec_compile` for a final whole-file check or a small self-contained
+prototype. (The tools are deferred: load them with `ToolSearch
+"select:mcp__easycrypt-mcp__cli_open,mcp__easycrypt-mcp__cli_step,..."`.
+See `docs/for_agents/MCP_GUIDE.md` for the list.)
 
-## When changing the exporter, also
+## The fast regression loop
 
-**Fast regression loop (do this — don't run the full suite).** A change here can
-only affect proofs that *export*; the ~60 that fail before chain emission
-(type/skeleton/import, FailedProof engine runs — several are the slowest proofs
-in the corpus) are untouched. So:
+A change here can only affect proofs that export; the proofs that fail
+before chain emission are untouched. So, per change:
 
-- `scripts/ec_export_regression.sh` — re-exports just the ~44 exporting proofs
-  **in parallel** and diffs the working tree against the committed (HEAD)
-  baseline, printing exactly which `.ec` outputs changed. ~35s (cached baseline)
-  vs **minutes** for a sequential full-corpus sweep. It stashes/restores your
-  `proof_frog` changes to build the baseline; the baseline is cached per HEAD
-  SHA so iteration runs don't re-stash.
-- Compile **only the changed** proofs in EasyCrypt (`mcp ec_compile`, or
-  `scripts/easycrypt.sh`). Byte-identical exports are guaranteed to compile
-  identically, so unchanged ones need no EC run.
-- Targeted tests only — NOT `pytest` (the full suite runs `test_proofs.py`,
-  ~9 min of engine runs irrelevant to an export change):
-  `pytest tests/unit/export tests/integration/test_easycrypt_export.py
-  tests/integration/test_tactic_cache_orphan_check.py`. The
-  `test_easycrypt_export.py` cases skip if Docker isn't available but exercise
-  real EC compilation when it is.
-- See
-  [../../../docs/for_agents/EASYCRYPT_TACTICS.md](../../../docs/for_agents/EASYCRYPT_TACTICS.md)
-  for the `.ec-tmp/` sandbox-mount workaround on macOS.
+- `scripts/ec_export_regression.sh` re-exports the exporting proofs in
+  parallel and lists which `.ec` outputs differ from the committed (HEAD)
+  baseline. It builds the baseline by stashing your `proof_frog` changes,
+  cached per HEAD SHA.
+- EasyCrypt-compile only the changed exports (`ec_compile`, or
+  `scripts/easycrypt.sh`): byte-identical exports compile identically.
+- Run the targeted tests, not the whole suite (which spends minutes on
+  engine runs an export change cannot affect):
+  `pytest tests/unit/export --ignore=tests/unit/export/latex
+  tests/integration/test_easycrypt_export.py
+  tests/integration/test_tactic_cache_orphan_check.py
+  tests/integration/test_ec_architecture_conformance.py`. The
+  `test_easycrypt_export.py` cases skip without Docker; record whether
+  they ran.
+- [../../../docs/for_agents/EASYCRYPT_TACTICS.md](../../../docs/for_agents/EASYCRYPT_TACTICS.md)
+  has the `.ec-tmp/` sandbox-mount workaround for macOS.
 
-The full-corpus `make check-tactic-cache` (sequential, all 106) and the
-EasyCrypt **dashboard** (compiles every `.ec`) are the heavyweight,
-publish-the-numbers checks — run them before declaring a milestone, not on every
-edit.
+The full `make check-tactic-cache` and the EasyCrypt dashboard (which
+compiles every `.ec`) are the heavyweight checks: run them before
+declaring a milestone, not on every edit.

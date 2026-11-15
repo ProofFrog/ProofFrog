@@ -328,3 +328,44 @@ def test_f_reassigned_outside_initialize_is_noop() -> None:
         """,
         _ctx(sampled={"H": _BS8_TO_BS16}),
     )
+
+
+_F387_GAME = """
+Game G() {
+    Function<BitString<8>, BitString<16>> F;
+    Void Initialize() {
+        F <- Function<BitString<8>, BitString<16>>;
+    }
+    BitString<16> Peek() {
+        return L.Leak();
+    }
+    BitString<16> Hash(BitString<8> x) {
+        return F(x);
+    }
+}
+"""
+
+
+def test_f387_let_held_by_primitive_is_noop() -> None:
+    """A sampled let H that a primitive instantiation in the let: block
+    receives may be queried by the primitive's methods (``L.Leak()``), so
+    the game may already know values of H though it never names H: F, whose
+    values nothing has seen, is not H."""
+    ctx = _ctx(sampled={"H": _BS8_TO_BS16})
+    ctx.primitive_held_functions = {"H": "L"}
+    _apply_and_expect_unchanged(_F387_GAME, ctx)
+    assert any(
+        nm.variable == "F" and "primitive" in nm.reason and "'L'" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_f387_other_let_not_held_still_rewrites() -> None:
+    """With a second sampled let of the same type that no primitive holds,
+    F is unified with that one."""
+    ctx = _ctx(sampled={"H": _BS8_TO_BS16, "H2": _BS8_TO_BS16})
+    ctx.primitive_held_functions = {"H": "L"}
+    game = frog_parser.parse_game(_F387_GAME)
+    result = LocalFunctionFieldToLet().apply(game, ctx)
+    assert "H2(x)" in str(result)
+    assert "F" not in {f.name for f in result.fields}

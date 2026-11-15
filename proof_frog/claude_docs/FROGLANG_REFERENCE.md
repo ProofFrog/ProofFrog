@@ -562,7 +562,7 @@ games:
     Security(T).Random against Security(T).Adversary;
 ```
 
-- **`let:`** — Declares parameters and instantiates schemes. These definitions are in scope throughout the proof.
+- **`let:`** — Declares parameters and instantiates schemes. These definitions are in scope throughout the proof. An entry that calls a `let:` function (`BitString<n> c = H(0b0);`) holds that function's value at that input, so `c` reads as `H(0b0)`. The engine reads such an entry as the call at every use, so it refuses one whose arguments make a non-deterministic call (`c = H(R.Draw())` holds one value, but each use would draw again): `prove` fails with a message naming the entry.
 - **`assume:`** — Lists security properties assumed to hold for underlying primitives/schemes. These justify assumption hops.
 - **`theorem:`** — The target security property to be proven.
 - **`bound:`** (optional, between `theorem:` and `games:`) — the advantage bound the author claims the proof establishes. Numeric arithmetic over `advantage(<notion> compose <reduction>)` terms (the reduction named from the proof's own declarations; `advantage(<notion>)` for a directly-played hop), per-oracle counts `count_<Oracle>` of the theorem game, cardinalities `|Type|`, and `let:` parameters. After the proof verifies, the engine checks the claim is a valid upper bound on the bound it synthesizes from the hops and reports `verified` / `NOT verified` / `undecided`; a `NOT verified` claim fails `prove` unless `--skip-bound` is passed. "verified" means the claim is a valid (possibly loose) upper bound, not an independent security proof.
@@ -767,7 +767,7 @@ The proof engine considers the following transformations to be semantics-preserv
 
 - When all inputs to a `Function` field are guaranteed to be pairwise distinct (via unique sampling), each output `RF(x)` is equivalent to an independent uniform sample. Sound because a random function on distinct inputs produces independent uniform outputs.
 - **Guarded two-map lazy lookup**: Two `Map<K, V>` fields accessed only through the lazy-sample idiom, with every write guarded by membership checks excluding both maps, and matching `V`-sampling, are equivalent to a single sampled `Function<K, V>` with each lazy-path occurrence rewritten as `F(k)`. Sound because the pair defines a single lazily-populated lookup table (see §6.5) partitioned across two storage locations, and the partition is adversary-invisible (§6.3).
-- **Local vs. let-bound random function interchangeability**: A game field `F : Function<K, V>` sampled once in `Initialize` (`F <- Function<K, V>;`), never otherwise assigned, and used only via `F(arg)` calls, is interchangeable with a let-bound sampled `H : Function<K, V>` of identical type, provided `H` is not otherwise referenced in the game. Sound because uniform random functions with no correlated observations produce identical output distributions.
+- **Local vs. let-bound random function interchangeability**: A game field `F : Function<K, V>` sampled once in `Initialize` (`F <- Function<K, V>;`), never otherwise assigned, and used only via `F(arg)` calls, is interchangeable with a let-bound sampled `H : Function<K, V>` of identical type, provided `H` is not otherwise referenced in the game and no primitive instantiation in the proof's `let:` block receives `H` (a primitive's methods are opaque and may query it). Sound because uniform random functions with no correlated observations produce identical output distributions.
 
 ### 9.4 Code Simplifications
 

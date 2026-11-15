@@ -1,0 +1,17 @@
+import 'Drawer.primitive';
+
+// c is one value, H at one draw of R.Draw(), so Left returns two equal
+// components; Right queries H at two independent draws.
+Game Left(Int n, Int m, Drawer R, Function<BitString<n>, BitString<m>> H, BitString<m> c) {
+    [BitString<m>, BitString<m>] Get() {
+        return [c, c];
+    }
+}
+
+Game Right(Int n, Int m, Drawer R, Function<BitString<n>, BitString<m>> H, BitString<m> c) {
+    [BitString<m>, BitString<m>] Get() {
+        return [H(R.Draw()), H(R.Draw())];
+    }
+}
+
+export as LetCallDraw;

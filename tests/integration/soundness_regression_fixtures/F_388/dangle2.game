@@ -1,0 +1,30 @@
+// Field a is read only by b's initializer, before Initialize overwrites a.
+Game Left() {
+    Int a = 1;
+    Int b = a;
+    Void Initialize() {
+        a = 5;
+    }
+    Void Write(Int x) {
+        b = x;
+    }
+    Int Peek() {
+        return b;
+    }
+}
+
+Game Right() {
+    Int a = 2;
+    Int b = a;
+    Void Initialize() {
+        a = 5;
+    }
+    Void Write(Int x) {
+        b = x;
+    }
+    Int Peek() {
+        return b;
+    }
+}
+
+export as Dangle2;

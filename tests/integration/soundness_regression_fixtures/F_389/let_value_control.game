@@ -1,0 +1,14 @@
+// c0 is H's value at 0b0: reading it is querying H there.
+Game Left(Int m, Function<BitString<1>, BitString<m>> H, BitString<m> c0) {
+    BitString<m> Get() {
+        return c0;
+    }
+}
+
+Game Right(Int m, Function<BitString<1>, BitString<m>> H, BitString<m> c0) {
+    BitString<m> Get() {
+        return H(0b0);
+    }
+}
+
+export as LV;

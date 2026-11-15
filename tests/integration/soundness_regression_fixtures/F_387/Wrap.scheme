@@ -1,0 +1,10 @@
+import 'HLeak.primitive';
+import 'Plain.primitive';
+
+// A scheme that forwards a primitive's method: the primitive it is given
+// holds H.
+Scheme Wrap(Int m, HLeak L) extends Plain {
+    [BitString<m>, BitString<m>] Leak() {
+        return L.Leak();
+    }
+}

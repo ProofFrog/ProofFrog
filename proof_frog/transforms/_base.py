@@ -66,6 +66,13 @@ class PipelineContext:
     ] = None
     max_calls: Optional[int] = None
     sampled_let_names: set[str] = dataclasses.field(default_factory=set)
+    # Each sampled ``let:`` function that a primitive instantiation in the
+    # ``let:`` block receives (directly, or inside another entry it is
+    # given), mapped to that entry's name. The primitive's methods are
+    # opaque and may query the function where no call shows it, so a pass
+    # that must know every query of a random function does not take it for
+    # one (F-387).
+    primitive_held_functions: dict[str, str] = dataclasses.field(default_factory=dict)
     near_misses: list[NearMiss] = dataclasses.field(default_factory=list)
     requirements: list[frog_ast.StructuralRequirement] = dataclasses.field(
         default_factory=list

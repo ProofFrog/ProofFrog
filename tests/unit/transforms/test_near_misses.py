@@ -5577,3 +5577,59 @@ def test_near_miss_forward_literal_field_write_keeps_modint_zero() -> None:
     assert len(misses) == 1
     assert misses[0].variable == "D" and misses[0].method == "Probe"
     assert "the literal 0 is an Int" in misses[0].reason
+
+
+def test_fresh_rf_near_miss_let_function_held_by_primitive() -> None:
+    # F-387: a primitive instantiation in the let: block that receives H may
+    # query it in its opaque methods.
+    ctx = _make_ctx()
+    ctx.proof_let_types.set(
+        "H",
+        frog_ast.FunctionType(
+            frog_ast.BitStringType(frog_ast.Integer(2)),
+            frog_ast.BitStringType(frog_ast.Integer(2)),
+        ),
+    )
+    ctx.sampled_let_names = {"H"}
+    ctx.primitive_held_functions = {"H": "L"}
+    game = frog_parser.parse_game("""
+        Game G() {
+            Set<BitString<2>> seen;
+            BitString<2> Fresh() {
+                BitString<2> v <-uniq[seen] BitString<2>;
+                return H(v);
+            }
+        }
+        """)
+    assert FreshInputRFToUniform().apply(game, ctx) == game
+    misses = [
+        nm for nm in ctx.near_misses if nm.transform_name == "Fresh Input RF To Uniform"
+    ]
+    assert len(misses) == 1
+    assert misses[0].reason == (
+        "Random function 'H' not simplified: the let: entry 'L' passes it to a "
+        "primitive, whose methods may query 'H' where no call in the game shows it"
+    )
+    assert misses[0].suggestion is not None
+    assert "let: entry 'L'" in misses[0].suggestion
+    assert misses[0].method == "Fresh"
+
+
+def test_local_fn_near_miss_let_held_by_primitive() -> None:
+    # F-387: the only sampled let of F's type is held by a primitive.
+    game = frog_parser.parse_game("""
+        Game G() {
+            Function<BitString<8>, BitString<16>> F;
+            Void Initialize() {
+                F <- Function<BitString<8>, BitString<16>>;
+            }
+            BitString<16> Hash(BitString<8> x) { return F(x); }
+        }
+        """)
+    ctx = _local_fn_ctx(sampled={"H"})
+    ctx.primitive_held_functions = {"H": "L"}
+    assert LocalFunctionFieldToLet().apply(game, ctx) == game
+    misses = _local_fn_misses(ctx)
+    assert len(misses) == 1
+    assert misses[0].variable == "F"
+    assert "passes each to a primitive (entry 'L')" in misses[0].reason

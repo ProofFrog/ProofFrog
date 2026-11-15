@@ -1,0 +1,14 @@
+import 'v9lf.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+
+theorem:
+    V9LF(m, H);
+
+games:
+    V9LF(m, H).Real against V9LF(m, H).Adversary;
+    V9LF(m, H).Ideal against V9LF(m, H).Adversary;

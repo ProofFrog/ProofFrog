@@ -1,0 +1,28 @@
+import 'Plain.primitive';
+
+// W is a scheme that forwards a primitive holding H (see the proof's let:),
+// so Peek may reveal H's values though the game never names H there.
+Game Real(Int m, Function<BitString<1>, BitString<m>> H, Plain W) {
+    Set<BitString<1>> S;
+    [BitString<m>, BitString<m>] Peek() {
+        return W.Leak();
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[S] BitString<1>;
+        return H(v);
+    }
+}
+
+Game Random(Int m, Function<BitString<1>, BitString<m>> H, Plain W) {
+    Set<BitString<1>> S;
+    [BitString<m>, BitString<m>] Peek() {
+        return W.Leak();
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[S] BitString<1>;
+        BitString<m> u <- BitString<m>;
+        return u;
+    }
+}
+
+export as A2SW;

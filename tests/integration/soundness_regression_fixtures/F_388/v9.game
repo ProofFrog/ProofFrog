@@ -1,0 +1,50 @@
+// y0, z0 hold H(0b0), H(0b1); Initialize overwrites them, so only the
+// initializers of y1, z1 read them, before Initialize runs.
+Game Real(Int m, Function<BitString<1>, BitString<m>> H) {
+    BitString<m> y0 = H(0b0);
+    BitString<m> z0 = H(0b1);
+    BitString<m> y1 = y0;
+    BitString<m> z1 = z0;
+    Void Initialize() {
+        y0 = 0^m;
+        z0 = 0^m;
+    }
+    Void Swap() {
+        BitString<m> t = y1;
+        y1 = z1;
+        z1 = t;
+    }
+    [BitString<m>, BitString<m>] Peek() {
+        return [y1, z1];
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[H.domain] BitString<1>;
+        return H(v);
+    }
+}
+
+Game Random(Int m, Function<BitString<1>, BitString<m>> H) {
+    BitString<m> y0 = H(0b0);
+    BitString<m> z0 = H(0b1);
+    BitString<m> y1 = y0;
+    BitString<m> z1 = z0;
+    Void Initialize() {
+        y0 = 0^m;
+        z0 = 0^m;
+    }
+    Void Swap() {
+        BitString<m> t = y1;
+        y1 = z1;
+        z1 = t;
+    }
+    [BitString<m>, BitString<m>] Peek() {
+        return [y1, z1];
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[H.domain] BitString<1>;
+        BitString<m> u <- BitString<m>;
+        return u;
+    }
+}
+
+export as V9;

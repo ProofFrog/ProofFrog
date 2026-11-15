@@ -1,0 +1,3 @@
+Primitive Plain(Int m) {
+    [BitString<m>, BitString<m>] Leak();
+}

@@ -1,0 +1,20 @@
+// Control for letcall_draw.proof: the argument calls a deterministic
+// method, so reading c as H(R.Fixed()) at every use is exact.
+import 'Drawer.primitive';
+import 'letcall_fixed.game';
+
+proof:
+
+let:
+    Int n;
+    Int m;
+    Drawer R;
+    Function<BitString<n>, BitString<m>> H <- Function<BitString<n>, BitString<m>>;
+    BitString<m> c = H(R.Fixed());
+
+theorem:
+    LetCallFixed(n, m, R, H, c);
+
+games:
+    LetCallFixed(n, m, R, H, c).Left against LetCallFixed(n, m, R, H, c).Adversary;
+    LetCallFixed(n, m, R, H, c).Right against LetCallFixed(n, m, R, H, c).Adversary;

@@ -2392,7 +2392,7 @@ class FreshInputRFToUniform(TransformPass):
                 isinstance(entry.type, frog_ast.FunctionType)
                 and entry.name in ctx.sampled_let_names
             ):
-                problem = _rf_ineligibility(game, entry.name, None)
+                problem = _let_function_ineligibility(game, entry.name, ctx)
                 if problem is None:
                     rf_types[entry.name] = entry.type
                 else:
@@ -2868,10 +2868,13 @@ class _RFIneligibility:
     rewrites may reason about (see the eligibility rule above)."""
 
     # "written": a write other than its one sample; "escapes": the value is
-    # used other than by a direct call or ``.domain``.
+    # used other than by a direct call or ``.domain``; "primitive": a
+    # primitive instantiation in the proof's ``let:`` block receives it.
     kind: str
     method: str | None = None
     origin: frog_ast.SourceOrigin | None = None
+    # For "primitive": the ``let:`` entry holding the instantiation.
+    holder: str | None = None
 
     def reason(self, rf_name: str) -> str:
         """A near-miss reason naming *rf_name*."""
@@ -2882,6 +2885,12 @@ class _RFIneligibility:
                 f"rebinds '{rf_name}' besides its one '{rf_name} <- Function<...>' "
                 "sample, so after that write it need not be the sampled random "
                 "function the rewrite assumes"
+            )
+        if self.kind == "primitive":
+            return (
+                f"Random function '{rf_name}' not simplified: the let: entry "
+                f"'{self.holder}' passes it to a primitive, whose methods may "
+                f"query '{rf_name}' where no call in the game shows it"
             )
         return (
             f"Random function '{rf_name}' not simplified: its function value "
@@ -2897,6 +2906,12 @@ class _RFIneligibility:
                 f"Sample '{rf_name}' once in Initialize and never assign it "
                 "again; model a re-keyed or adversary-chosen function with a "
                 "separate field"
+            )
+        if self.kind == "primitive":
+            return (
+                f"In the let: entry '{self.holder}', give the primitive a "
+                f"function other than '{rf_name}', or model what its methods "
+                f"compute from '{rf_name}' with calls the game makes itself"
             )
         return (
             "Avoid copying or passing the random function value; call it "
@@ -2940,6 +2955,19 @@ def _rf_ineligibility(
     if _rf_value_escapes(game, rf_name):
         return _RFIneligibility("escapes")
     return None
+
+
+def _let_function_ineligibility(
+    game: frog_ast.Game, rf_name: str, ctx: PipelineContext
+) -> _RFIneligibility | None:
+    """:func:`_rf_ineligibility` for the sampled ``let:`` function *rf_name*,
+    which also fails when a primitive instantiation in the ``let:`` block
+    receives it: the primitive's methods may query it where no call in
+    *game* shows it (F-387)."""
+    holder = ctx.primitive_held_functions.get(rf_name)
+    if holder is not None:
+        return _RFIneligibility("primitive", holder=holder)
+    return _rf_ineligibility(game, rf_name, None)
 
 
 def _classify_sampled_function_fields(
@@ -4687,11 +4715,15 @@ class LocalFunctionFieldToLet(TransformPass):
         # declared as ``Function<T.Image, BitString<n>>`` matches a field
         # typed ``Function<ImageSet, BitString<n>>`` (where the primitive
         # ``T`` has ``Set Image = ImageSet``).
+        # A let function a primitive instantiation receives is not one: the
+        # primitive's methods may query it, so its values need not be unseen
+        # in this game even when the game never names it (F-387).
         let_candidates: dict[str, frog_ast.FunctionType] = {}
         for entry in ctx.proof_let_types.type_map:
             if (
                 isinstance(entry.type, frog_ast.FunctionType)
                 and entry.name in ctx.sampled_let_names
+                and entry.name not in ctx.primitive_held_functions
             ):
                 resolved = _resolve_fn_type(entry.type, ctx.proof_namespace)
                 let_candidates[entry.name] = resolved
@@ -4975,6 +5007,32 @@ class LocalFunctionFieldToLet(TransformPass):
             if _type_sym_equal(t, f_type, ctx.proof_namespace)
         ]
         if not matches:
+            held = [
+                entry.name
+                for entry in ctx.proof_let_types.type_map
+                if entry.name in ctx.primitive_held_functions
+                and entry.name in ctx.sampled_let_names
+                and isinstance(entry.type, frog_ast.FunctionType)
+                and _type_sym_equal(
+                    _resolve_fn_type(entry.type, ctx.proof_namespace),
+                    f_type,
+                    ctx.proof_namespace,
+                )
+            ]
+            if held:
+                self._emit_near_miss(
+                    ctx,
+                    (
+                        f"Sampled let binding(s) {held} match the type of field "
+                        f"'{f_name}' but the let: block passes each to a "
+                        "primitive (entry "
+                        f"'{ctx.primitive_held_functions[held[0]]}'), whose "
+                        "methods may query it where the game does not show it"
+                    ),
+                    None,
+                    f_name,
+                    None,
+                )
             # Record near-miss if a same-named let declared but not sampled.
             declared_but_not_sampled = [
                 entry.name

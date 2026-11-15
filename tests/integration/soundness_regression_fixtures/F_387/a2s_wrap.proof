@@ -1,0 +1,19 @@
+import 'HLeak.primitive';
+import 'Plain.primitive';
+import 'Wrap.scheme';
+import 'a2s_wrap.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+    HLeak L = HLeak(m, H);
+    Wrap W = Wrap(m, L);
+
+theorem:
+    A2SW(m, H, W);
+
+games:
+    A2SW(m, H, W).Real against A2SW(m, H, W).Adversary;
+    A2SW(m, H, W).Random against A2SW(m, H, W).Adversary;

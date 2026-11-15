@@ -1,0 +1,14 @@
+import 'a4.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+
+theorem:
+    A4(m, H, H(0b0), H(0b1));
+
+games:
+    A4(m, H, H(0b0), H(0b1)).Real against A4(m, H, H(0b0), H(0b1)).Adversary;
+    A4(m, H, H(0b0), H(0b1)).Random against A4(m, H, H(0b0), H(0b1)).Adversary;

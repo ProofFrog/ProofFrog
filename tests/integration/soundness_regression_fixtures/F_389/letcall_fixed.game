@@ -1,0 +1,17 @@
+import 'Drawer.primitive';
+
+// c is H at the deterministic Fixed()'s value: reading it twice is
+// querying H there twice.
+Game Left(Int n, Int m, Drawer R, Function<BitString<n>, BitString<m>> H, BitString<m> c) {
+    [BitString<m>, BitString<m>] Get() {
+        return [c, c];
+    }
+}
+
+Game Right(Int n, Int m, Drawer R, Function<BitString<n>, BitString<m>> H, BitString<m> c) {
+    [BitString<m>, BitString<m>] Get() {
+        return [H(R.Fixed()), H(R.Fixed())];
+    }
+}
+
+export as LetCallFixed;

@@ -1,0 +1,22 @@
+// The let: entry c calls H on a non-deterministic argument, so it holds H
+// at one draw of R.Draw(). Read as H(R.Draw()) at every use, Left's [c, c]
+// would become Right's two independent draws, and the distinguishable pair
+// would verify. The engine refuses such an entry.
+import 'Drawer.primitive';
+import 'letcall_draw.game';
+
+proof:
+
+let:
+    Int n;
+    Int m;
+    Drawer R;
+    Function<BitString<n>, BitString<m>> H <- Function<BitString<n>, BitString<m>>;
+    BitString<m> c = H(R.Draw());
+
+theorem:
+    LetCallDraw(n, m, R, H, c);
+
+games:
+    LetCallDraw(n, m, R, H, c).Left against LetCallDraw(n, m, R, H, c).Adversary;
+    LetCallDraw(n, m, R, H, c).Right against LetCallDraw(n, m, R, H, c).Adversary;

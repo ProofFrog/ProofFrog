@@ -1,0 +1,16 @@
+import 'HLeak.primitive';
+import 'lffl.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+    HLeak L = HLeak(m, H);
+
+theorem:
+    LFFL(m, H, L);
+
+games:
+    LFFL(m, H, L).Real against LFFL(m, H, L).Adversary;
+    LFFL(m, H, L).Random against LFFL(m, H, L).Adversary;

@@ -1,0 +1,28 @@
+import 'Plain.primitive';
+
+// The primitive does not receive H, so Fresh's query is on a point no one
+// else can query: H(v) is uniform.
+Game Real(Int m, Function<BitString<1>, BitString<m>> H, Plain L) {
+    Set<BitString<1>> S;
+    [BitString<m>, BitString<m>] Peek() {
+        return L.Leak();
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[S] BitString<1>;
+        return H(v);
+    }
+}
+
+Game Random(Int m, Function<BitString<1>, BitString<m>> H, Plain L) {
+    Set<BitString<1>> S;
+    [BitString<m>, BitString<m>] Peek() {
+        return L.Leak();
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[S] BitString<1>;
+        BitString<m> u <- BitString<m>;
+        return u;
+    }
+}
+
+export as A2SC;

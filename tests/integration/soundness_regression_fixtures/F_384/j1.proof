@@ -1,0 +1,13 @@
+import 'j1.game';
+
+proof:
+
+let:
+    Int m;
+
+theorem:
+    J1(m);
+
+games:
+    J1(m).Left against J1(m).Adversary;
+    J1(m).Right against J1(m).Adversary;

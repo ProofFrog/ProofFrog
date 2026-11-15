@@ -1,0 +1,49 @@
+// AUDIT ARTIFACT (ExpandTuple, Attack C2 SOUND CONTROL -- PROSECUTION.md).
+// Same element-write shape as attack_c2, but here Poke writes the FIELD on
+// BOTH sides (no shadowing local): the element writes are a GENUINE field
+// mutation, which ExpandTuple's branch 2 lowers correctly. Real (tuple field)
+// and Mutate (two plain Int fields) are GENUINELY interchangeable (both leave
+// Get() == [9,8] after Poke()), so a correct engine ACCEPTS. This confirms the
+// setup is not rigged: ExpandTuple's element-write lowering is sound when the
+// target really is the field -- the bug in attack_c2 is only the field/local
+// COLLISION, where a scoped local is mis-lowered into a field write.
+
+Game Real(Int n) {
+    [Int, Int] __v__;
+
+    Void Initialize() {
+        __v__ = [0, 0];
+    }
+
+    Int Poke() {
+        __v__[0] = 9;
+        __v__[1] = 8;
+        return __v__[0];
+    }
+
+    [Int, Int] Get() {
+        return __v__;
+    }
+}
+
+Game Mutate(Int n) {
+    Int a;
+    Int b;
+
+    Void Initialize() {
+        a = 0;
+        b = 0;
+    }
+
+    Int Poke() {
+        a = 9;
+        b = 8;
+        return a;
+    }
+
+    [Int, Int] Get() {
+        return [a, b];
+    }
+}
+
+export as C2Control;

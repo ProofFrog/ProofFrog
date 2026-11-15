@@ -1,0 +1,14 @@
+import 'FieldInitializerQuery.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+
+theorem:
+    FieldInitializerQuery(m, H);
+
+games:
+    FieldInitializerQuery(m, H).Real against FieldInitializerQuery(m, H).Adversary;
+    FieldInitializerQuery(m, H).Random against FieldInitializerQuery(m, H).Adversary;

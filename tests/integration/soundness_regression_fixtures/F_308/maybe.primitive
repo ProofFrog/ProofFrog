@@ -1,0 +1,7 @@
+// AUDIT ARTIFACT (SubsetTypeNormalization dir, Attack 4 -- DeadNullGuard).
+// A primitive whose deterministic method May returns a NULLABLE value.
+// Some instantiations have May(m) == None for some m, so a guard testing
+// `x == None` on `x = P.May(m)` is genuinely LIVE.
+Primitive Maybe(Int n) {
+    deterministic BitString<n>? May(BitString<n> x);
+}

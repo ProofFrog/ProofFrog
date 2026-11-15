@@ -1,0 +1,29 @@
+// Target: the method inliner (proof_frog/visitors.py InlineTransformer).
+// More ways for a method to write its own parameter than WriterImpl's:
+// sampling into it, inserting into it with <-uniq, writing a tuple element
+// of it, and assigning it when the caller passes an expression. Arguments
+// are passed by value (ruling Q11), so none of these writes reaches the
+// caller.
+import 'Writer2.primitive';
+
+Scheme Writer2Impl(Int n) extends Writer2 {
+    BitString<n> Redraw(BitString<n> y) {
+        y <- BitString<n>;
+        return y;
+    }
+
+    Bool Pick(Set<BitString<n>> S) {
+        BitString<n> x <-uniq[S] BitString<n>;
+        return true;
+    }
+
+    BitString<n> ZeroFirst([BitString<n>, BitString<n>] A) {
+        A[0] = 0^n;
+        return A[0];
+    }
+
+    BitString<n> Reset2(BitString<n> x) {
+        x = 0^n;
+        return x;
+    }
+}

@@ -1,0 +1,3 @@
+Primitive P() {
+    Bool E(Int x0);
+}

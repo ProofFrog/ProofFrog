@@ -254,3 +254,78 @@ def test_guard_var_reassigned_to_challenge_not_equivalent() -> None:
         }
         """)
     assert not engine.check_equivalent(real, random).valid
+
+
+def test_challenge_field_reassigned_in_initialize_not_equivalent() -> None:
+    """Initialize reassigns cf after the call.  Query excludes the new cf, so
+    Query(0^n) returns H(0^n) = field unless cf is 0^n."""
+    engine = _engine()
+    template = """
+        Game G(Int n) {{
+            Function<BitString<n>, BitString<n>> H;
+            BitString<n> cf;
+            BitString<n> field;
+            BitString<n> Initialize() {{
+                H <- Function<BitString<n>, BitString<n>>;
+                cf = 0^n;
+                {init_field}
+                cf <- BitString<n>;
+                return cf;
+            }}
+            BitString<n> Reveal() {{ return field; }}
+            BitString<n>? Query(BitString<n> param) {{
+                if (param == cf) {{ return None; }}
+                return H(param);
+            }}
+        }}
+        """
+    real = frog_parser.parse_game(template.format(init_field=_REAL_FIELD))
+    random = frog_parser.parse_game(template.format(init_field=_RANDOM_FIELD))
+    assert not engine.check_equivalent(real, random).valid
+
+
+_PRE_GUARD_TEMPLATE = """
+    Game G(Int n) {{
+        Function<BitString<n>, BitString<n>> H;
+        BitString<n> cf;
+        BitString<n> field;
+        BitString<n> Initialize() {{
+            H <- Function<BitString<n>, BitString<n>>;
+            cf <- BitString<n>;
+            {init_field}
+            return cf;
+        }}
+        BitString<n> Reveal() {{ return field; }}
+        BitString<n>? Query(BitString<n> param) {{
+            BitString<n> q = param;
+            {overwrite}
+            if (param == cf) {{ return None; }}
+            return H(q);
+        }}
+    }}
+    """
+
+
+def test_guard_var_overwritten_before_guard_not_equivalent() -> None:
+    """Query copies param, overwrites it, then guards the overwritten value.
+    Query(cf) returns H(cf) = field unless cf is 0^n."""
+    engine = _engine()
+    real = frog_parser.parse_game(
+        _PRE_GUARD_TEMPLATE.format(init_field=_REAL_FIELD, overwrite="param = 0^n;")
+    )
+    random = frog_parser.parse_game(
+        _PRE_GUARD_TEMPLATE.format(init_field=_RANDOM_FIELD, overwrite="param = 0^n;")
+    )
+    assert not engine.check_equivalent(real, random).valid
+
+
+def test_guard_var_copied_before_guard_control_equivalent() -> None:
+    """Positive control: the copy holds the guarded value, so the pass fires."""
+    engine = _engine()
+    real = frog_parser.parse_game(
+        _PRE_GUARD_TEMPLATE.format(init_field=_REAL_FIELD, overwrite="")
+    )
+    random = frog_parser.parse_game(
+        _PRE_GUARD_TEMPLATE.format(init_field=_RANDOM_FIELD, overwrite="")
+    )
+    assert engine.check_equivalent(real, random).valid

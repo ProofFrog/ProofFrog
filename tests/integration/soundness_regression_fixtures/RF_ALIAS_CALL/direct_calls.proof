@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'DirectCalls.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    DirectCalls(S);
+
+games:
+    DirectCalls(S).Left against DirectCalls(S).Adversary;
+    DirectCalls(S).Right against DirectCalls(S).Adversary;

@@ -1,0 +1,25 @@
+// AUDIT ATTACK FILE -- target pass: ForwardExpressionAlias (inlining.py L1261-1268)
+// ATK-2 proof-level probe: claims MapCopyAlias.Left and MapCopyAlias.Right
+// are interchangeable in a single hop, with NO assumptions. A written
+// distinguisher refutes this (call Oracle(1); Left returns 1, Right returns
+// 0; advantage 1).
+//
+// Expected if pass is SOUND: prove rejects the hop.
+// Expected if UNSOUND: "Proof Succeeded!".
+
+import 'atk2_mapcopy.game';
+
+proof:
+
+let:
+    Int lambda;
+
+assume:
+
+theorem:
+    MapCopyAlias(lambda);
+
+games:
+    MapCopyAlias(lambda).Left against MapCopyAlias(lambda).Adversary;
+
+    MapCopyAlias(lambda).Right against MapCopyAlias(lambda).Adversary;

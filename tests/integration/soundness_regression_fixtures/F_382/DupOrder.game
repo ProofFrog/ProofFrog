@@ -1,0 +1,48 @@
+// Target: Remove Duplicate Fields (structural.remove_duplicate_fields,
+// which deletes the writes control_flow.RemoveStatementTransformer is
+// given).
+// d and r always hold the same value: every oracle adds z to both. A0
+// writes r then d; A1 writes d then r. The pass pairs each oracle's two
+// writes and deletes the SECOND write of each pair (A0's `d = d + z;`, A1's
+// `r = r + z;`). It deleted them from a deep copy of the game by structural
+// equality, so each also deleted the equal FIRST write in the other oracle:
+// both updates vanished from both oracles, and d (renamed r) never changed.
+// Distinguisher: v0 = Get(); A0(1); v1 = Get(); output 1 iff v1 == v0.
+// Left: v1 = v0 + 1, so 1 only if q = 1. Right: always 1. Advantage 1 for
+// q >= 2.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+Game Left(Int q) {
+    ModInt<q> d;
+    ModInt<q> r;
+    Void Initialize() {
+        d <- ModInt<q>;
+        r = d;
+    }
+    Void A0(ModInt<q> z) {
+        r = r + z;
+        d = d + z;
+    }
+    Void A1(ModInt<q> z) {
+        d = d + z;
+        r = r + z;
+    }
+    ModInt<q> Get() {
+        return d;
+    }
+}
+
+Game Right(Int q) {
+    ModInt<q> d;
+    Void Initialize() {
+        d <- ModInt<q>;
+    }
+    Void A0(ModInt<q> z) {
+    }
+    Void A1(ModInt<q> z) {
+    }
+    ModInt<q> Get() {
+        return d;
+    }
+}
+
+export as DupOrder;

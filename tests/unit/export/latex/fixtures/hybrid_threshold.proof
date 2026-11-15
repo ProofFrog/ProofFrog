@@ -1,0 +1,27 @@
+// Export fixture: a hybrid over j whose assumption is indexed by j, with a
+// step assumption before the exit hop.
+
+import 'IndexedThreshold.game';
+import 'Threshold.game';
+
+proof:
+
+let:
+    Int q;
+    // The induction rebinds j, so each step matches the assume entry.
+    Int j;
+
+assume:
+    IndexedThreshold(j);
+
+theorem:
+    Threshold(q);
+
+games:
+    Threshold(q).Low against Threshold(q).Adversary;
+    induction(j from 1 to q) {
+        IndexedThreshold(j).Left against Threshold(q).Adversary;
+        IndexedThreshold(j).Right against Threshold(q).Adversary;
+    }
+    assume q >= 1;
+    Threshold(q).High against Threshold(q).Adversary;

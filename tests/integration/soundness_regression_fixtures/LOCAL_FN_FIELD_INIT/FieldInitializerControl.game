@@ -1,0 +1,36 @@
+// Positive control for FieldInitializerReadsLet.game: the field initializer
+// does not read H, so Real's own random function F and the let:-sampled H
+// are interchangeable.
+Game Real(Int m, Function<BitString<1>, BitString<m>> H) {
+    Function<BitString<1>, BitString<m>> F;
+    BitString<m> y0 = 0^m;
+    Void Initialize() {
+        F <- Function<BitString<1>, BitString<m>>;
+    }
+    Void Write(BitString<m> a) {
+        y0 = a;
+    }
+    BitString<m> Peek() {
+        return y0;
+    }
+    BitString<m> Q() {
+        return F(0b0);
+    }
+}
+
+Game Ideal(Int m, Function<BitString<1>, BitString<m>> H) {
+    BitString<m> y0 = 0^m;
+    Void Initialize() {
+    }
+    Void Write(BitString<m> a) {
+        y0 = a;
+    }
+    BitString<m> Peek() {
+        return y0;
+    }
+    BitString<m> Q() {
+        return H(0b0);
+    }
+}
+
+export as FieldInitializerControl;

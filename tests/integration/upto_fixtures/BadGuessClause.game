@@ -1,0 +1,41 @@
+// BadGuess with a declared bound on Pr[bad]: the flag is raised only when a
+// guess hits the hidden uniform target, so Pr[bad] <= count_Eq / |S|.
+Game Left(Set S) {
+    S target;
+    Bool bad;
+
+    Void Initialize() {
+        target <- S;
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (c == target) {
+            bad = true;
+            return true;
+        }
+        return false;
+    }
+}
+
+Game Right(Set S) {
+    S target;
+    Bool bad;
+
+    Void Initialize() {
+        target <- S;
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (c == target) {
+            bad = true;
+        }
+        return false;
+    }
+}
+
+// Pr[bad] <= count_Eq / |S| (a union bound over the guesses).
+advantage <= count_Eq / |S|;
+
+export as BadGuessClause;

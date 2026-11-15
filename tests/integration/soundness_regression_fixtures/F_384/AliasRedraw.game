@@ -1,0 +1,44 @@
+// F-384: Left's field Q is initialized from the field P before Initialize
+// runs, so Q holds P's starting value (its type's default) for the whole
+// game, while Upd redraws P. Right's GetQ returns the current P. GetQ(),
+// Upd(), GetQ() gives equal answers always on the left, with probability
+// 1/|G| on the right. Q must not be read as its initializer P: that read
+// would follow the later writes to P and make the two games the same.
+Game Left(Group G) {
+    GroupElem<G> P;
+    GroupElem<G> Q = P;
+
+    Void Initialize() {
+        ModInt<G.order> e <- ModInt<G.order>;
+        P = G.generator ^ e;
+    }
+
+    GroupElem<G> Upd() {
+        P <- GroupElem<G>;
+        return P;
+    }
+
+    GroupElem<G> GetQ() {
+        return Q;
+    }
+}
+
+Game Right(Group G) {
+    GroupElem<G> P;
+
+    Void Initialize() {
+        ModInt<G.order> e <- ModInt<G.order>;
+        P = G.generator ^ e;
+    }
+
+    GroupElem<G> Upd() {
+        P <- GroupElem<G>;
+        return P;
+    }
+
+    GroupElem<G> GetQ() {
+        return P;
+    }
+}
+
+export as AliasRedraw;

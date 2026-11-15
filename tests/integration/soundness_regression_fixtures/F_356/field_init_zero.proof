@@ -1,0 +1,15 @@
+// F-356: in a proof, the type checker must see the field g of
+// FieldInitZero.Left as the ModInt<2> it is declared as, and refuse g - 1,
+// as it does when it checks FieldInitZero.game on its own.
+import 'FieldInitZero.game';
+
+proof:
+
+let:
+
+theorem:
+    FieldInitZero();
+
+games:
+    FieldInitZero().Left against FieldInitZero().Adversary;
+    FieldInitZero().Right against FieldInitZero().Adversary;

@@ -135,17 +135,19 @@ def test_unnecessary_statements(method: str, expected: str, fields: list[str]) -
     assert expected_ast == new_method
 
 
-def test_dead_uniq_sample_survives_but_minus_form_removed() -> None:
+def test_dead_exclusion_draws_survive_unless_domain_known_non_empty() -> None:
     """A dead-target ``<-uniq[S]`` draw has an observable side effect (it
     inserts the drawn value into S, visible via |S|), so it must NOT be deleted
-    as dead code; the pure set-minus form ``<- T \\ S`` performs no insertion
-    and a dead-target draw of it IS removable (audit F-095, subsumed by the
-    RC2 F-004 dead-code fix)."""
+    as dead code (F-004). The set-minus form ``<- T \\ S`` performs no
+    insertion, but S may cover T, and then the draw does not complete, so it is
+    not dead either (F-318). Excluding a set literal smaller than T leaves a
+    non-empty domain, and that dead draw IS removable."""
     method = frog_parser.parse_method(
         """
-        Int f() {
+        Int f(BitString<8> y) {
             BitString<8> a <-uniq[S] BitString<8>;
             BitString<8> b <- BitString<8> \\ S;
+            BitString<8> c <- BitString<8> \\ {y};
             return 1;
         }
         """
@@ -153,4 +155,5 @@ def test_dead_uniq_sample_survives_but_minus_form_removed() -> None:
     transformed = dependencies.remove_unnecessary_statements(["S"], method.block)
     text = str(transformed)
     assert "<-uniq[S]" in text, f"dead uniq draw was wrongly removed:\n{text}"
-    assert "\\ S" not in text, f"pure set-minus dead draw should be removed:\n{text}"
+    assert "\\ S" in text, f"possibly-empty dead draw was wrongly removed:\n{text}"
+    assert "{y}" not in text, f"dead draw from a non-empty domain was kept:\n{text}"

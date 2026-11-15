@@ -1,0 +1,7 @@
+// Audit artifact: MergeProductSamples ATTACK-1 (sampling-domain drift), proof-level.
+// Trivial primitive so a scheme/theorem can be stated; the attack lives in drift.game.
+Primitive Drift(Int lambda) {
+    Int lambda = lambda;
+
+    deterministic BitString<lambda> id(BitString<lambda> x);
+}

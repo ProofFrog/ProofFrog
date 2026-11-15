@@ -1,0 +1,40 @@
+// F-303 (TopologicalSort): a return hoisted above a draw that may not
+// complete.
+//
+// Drawing from a domain that may be empty is an observable event: when the
+// domain is empty the draw does not complete, so the oracle call never
+// returns. Real's Draw samples from BitString<1> \ E, where the field E is
+// filled by Add. The dependency graph used to order a return only behind
+// field writes and other returns, so the sort hoisted `return 0;` above the
+// draw, which then looked dead and was dropped, leaving Ideal's Draw.
+//
+// Distinguisher: Add(0b0); Add(0b1); Draw(). Now E covers BitString<1>, so
+// in Real the draw does not complete and Draw never returns, while in Ideal
+// Draw returns 0. The hop must be refused.
+
+Game Real() {
+    Set<BitString<1>> E;
+
+    Void Add(BitString<1> x) {
+        E = E union {x};
+    }
+
+    Int Draw() {
+        BitString<1> junk <- BitString<1> \ E;
+        return 0;
+    }
+}
+
+Game Ideal() {
+    Set<BitString<1>> E;
+
+    Void Add(BitString<1> x) {
+        E = E union {x};
+    }
+
+    Int Draw() {
+        return 0;
+    }
+}
+
+export as Attack1;

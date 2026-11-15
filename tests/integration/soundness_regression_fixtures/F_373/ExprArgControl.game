@@ -1,0 +1,21 @@
+// Control (completeness): Reset2 assigns its parameter and returns it, so
+// both sides return 0^n whatever is passed. The caller passes an expression
+// without calls, y + w, which the inliner used to substitute into the
+// callee's write, leaving the assignment `y + w = 0^n;`. Sound engine:
+// Proof Succeeded! (Proof Failed! before the fix.)
+import 'Writer2.primitive';
+
+Game Left(Writer2 T, Int n) {
+    BitString<n> O(BitString<n> y, BitString<n> w) {
+        BitString<n> z = T.Reset2(y + w);
+        return z;
+    }
+}
+
+Game Right(Writer2 T, Int n) {
+    BitString<n> O(BitString<n> y, BitString<n> w) {
+        return 0^n;
+    }
+}
+
+export as ExprArgControl;

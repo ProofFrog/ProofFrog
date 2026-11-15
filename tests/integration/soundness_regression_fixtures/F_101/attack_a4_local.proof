@@ -1,0 +1,18 @@
+// Target pass: DeadGuardedAssignmentElimination. Proof-level probe for
+// AttackA4Local.game: the inner local x shadows an outer local x. Must be
+// rejected.
+import 'Trivial.primitive';
+import 'Trivial.scheme';
+import 'AttackA4Local.game';
+
+proof:
+
+let:
+    TrivialScheme S = TrivialScheme();
+
+theorem:
+    DistinguishA4L(S);
+
+games:
+    DistinguishA4L(S).Left against DistinguishA4L(S).Adversary;
+    DistinguishA4L(S).Right against DistinguishA4L(S).Adversary;

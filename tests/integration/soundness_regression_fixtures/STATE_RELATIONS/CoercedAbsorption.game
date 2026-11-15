@@ -1,0 +1,31 @@
+// x is a ModInt<q> holding the Int b reduced mod q; computing g^x in x's
+// place (to get past the update of b) must keep that reduction.
+Game Left(Int q, Group G) {
+    Int b;
+
+    Void Initialize(Int n) {
+        b = n;
+    }
+
+    GroupElem<G> Get() {
+        ModInt<q> x = b;
+        b = b + 1;
+        return G.generator ^ x;
+    }
+}
+
+Game Right(Int q, Group G) {
+    Int b;
+
+    Void Initialize(Int n) {
+        b = n;
+    }
+
+    GroupElem<G> Get() {
+        GroupElem<G> x = G.generator ^ b;
+        b = b + 1;
+        return x;
+    }
+}
+
+export as CoercedAbsorption;

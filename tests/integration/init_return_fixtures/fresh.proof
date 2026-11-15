@@ -1,0 +1,14 @@
+import 'Fresh.game';
+
+proof:
+
+let:
+    Int n;
+    Function<BitString<n>, BitString<n>> F0;
+
+theorem:
+    Fresh(n, F0);
+
+games:
+    Fresh(n, F0).Left against Fresh(n, F0).Adversary;
+    Fresh(n, F0).Right against Fresh(n, F0).Adversary;

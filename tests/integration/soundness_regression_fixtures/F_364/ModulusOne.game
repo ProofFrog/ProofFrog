@@ -1,0 +1,21 @@
+// Target: ModInt Simplification.
+// x ^ 0 on ModInt<q> was rewritten to the Int literal 1, so the comparison
+// became the Int comparison 1 == 0, which is false. But ModInt<1> has the
+// single element 0, so there the ModInt one is 0.
+// The games are distinguishable: Left computes x^0 == x - x in ModInt<q>,
+// true for q = 1, while Right is always false.
+// Expected: Proof Failed.
+
+Game Left(Int q) {
+    Bool Probe(ModInt<q> x) {
+        return x ^ 0 == x - x;
+    }
+}
+
+Game Right(Int q) {
+    Bool Probe(ModInt<q> x) {
+        return false;
+    }
+}
+
+export as ModulusOne;

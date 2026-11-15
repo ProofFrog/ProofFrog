@@ -1,0 +1,15 @@
+// Proof for BareInline.game (target, hypothesis and expected outcome in its
+// header).
+import 'BareInline.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    BareInline(q);
+
+games:
+    BareInline(q).Left against BareInline(q).Adversary;
+    BareInline(q).Right against BareInline(q).Adversary;

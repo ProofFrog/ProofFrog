@@ -1,0 +1,24 @@
+// F-305, second form: the same never-completing draw in a Void oracle, so
+// there is no return for it to sit above. The sort's pruning starts only
+// from returns, field references and statements containing a return; the
+// draw over the local set E is none of these, so it was dropped, and the
+// emptied oracle was removed, leaving Ideal.
+//
+// Distinguisher: call Probe(). In Real it never returns; in Ideal it does.
+// The hop must be refused.
+
+Game Real() {
+    Void Probe() {
+        Set<BitString<1>> E;
+        E = E union {0b0};
+        E = E union {0b1};
+        BitString<1> junk <- BitString<1> \ E;
+    }
+}
+
+Game Ideal() {
+    Void Probe() {
+    }
+}
+
+export as VoidProbe;

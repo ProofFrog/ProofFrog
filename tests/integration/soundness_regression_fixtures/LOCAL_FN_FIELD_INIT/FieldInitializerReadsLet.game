@@ -1,0 +1,40 @@
+// LocalFunctionFieldToLet, a field initializer that queries the let:
+// function. Real samples its own random function F, independent of the
+// let:-sampled H; y0 holds H(0b0) (Write writes y0, so it stays a field).
+// Ideal queries H itself. Distinguisher: call Peek(), then Q(), and output
+// whether the answers are equal. In Ideal they always are; in Real only
+// with probability 1 / 2^m. The pass replaced F by H after checking that
+// no method reads H, but not the field initializers.
+Game Real(Int m, Function<BitString<1>, BitString<m>> H) {
+    Function<BitString<1>, BitString<m>> F;
+    BitString<m> y0 = H(0b0);
+    Void Initialize() {
+        F <- Function<BitString<1>, BitString<m>>;
+    }
+    Void Write(BitString<m> a) {
+        y0 = a;
+    }
+    BitString<m> Peek() {
+        return y0;
+    }
+    BitString<m> Q() {
+        return F(0b0);
+    }
+}
+
+Game Ideal(Int m, Function<BitString<1>, BitString<m>> H) {
+    BitString<m> y0 = H(0b0);
+    Void Initialize() {
+    }
+    Void Write(BitString<m> a) {
+        y0 = a;
+    }
+    BitString<m> Peek() {
+        return y0;
+    }
+    BitString<m> Q() {
+        return H(0b0);
+    }
+}
+
+export as FieldInitializerReadsLet;

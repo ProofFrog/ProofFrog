@@ -1,0 +1,17 @@
+// Proof for TupleElementWrite.game (target, hypothesis and expected outcome in its header).
+import 'Writer2.primitive';
+import 'Writer2Impl.scheme';
+import 'TupleElementWrite.game';
+
+proof:
+
+let:
+    Int n;
+    Writer2 T = Writer2Impl(n);
+
+theorem:
+    TupleElementWrite(T, n);
+
+games:
+    TupleElementWrite(T, n).Left against TupleElementWrite(T, n).Adversary;
+    TupleElementWrite(T, n).Right against TupleElementWrite(T, n).Adversary;

@@ -1,26 +1,37 @@
+import pytest
 from sympy import Symbol
 from proof_frog.transforms._base import (
     NearMiss,
     PipelineContext,
+    TransformPass,
     deduplicate_near_misses,
 )
 from proof_frog import frog_parser, frog_ast
 from proof_frog.transforms.algebraic import (
+    InjectiveEqualitySimplify,
+    ModIntSimplification,
     UniformXorSimplification,
     UniformModIntSimplification,
     XorCancellation,
 )
 from proof_frog.transforms.control_flow import (
+    FoldEquivalentReturnBranch,
+    FoldLiteralConditions,
+    FlagSetToAssignment,
+    RemoveEmptyIf,
     BranchElimination,
     GuardConditionSimplification,
     IfToBooleanAssignment,
     IfFalseReturnToConjunction,
 )
 from proof_frog.transforms.inlining import (
+    RedundantCopy,
     InlineSingleUseVariable,
     InlineSingleUseField,
     DeduplicateDeterministicCalls,
+    ExtractRepeatedTupleAccess,
     HoistDeterministicCallToInitialize,
+    InlineMultiUsePureExpression,
 )
 from proof_frog.transforms.sampling import (
     MergeUniformSamples,
@@ -30,13 +41,23 @@ from proof_frog.transforms.sampling import (
     SingleCallFieldToLocal,
 )
 from proof_frog.transforms.random_functions import (
+    ExtractRFCalls,
     LocalRFToUniform,
     DistinctConstRFToUniform,
+    FreshInputRFToUniform,
     LazyMapPairToSampledFunction,
     LocalFunctionFieldToLet,
+    UniqueRFSimplification,
 )
-from proof_frog.transforms.structural import UniformBijectionElimination
+from proof_frog.transforms.structural import (
+    RemoveDuplicateFields,
+    UniformBijectionElimination,
+)
+from proof_frog.transforms.tuples import ExpandTuple, SplitBareTupleDeclarations
 from proof_frog.transforms.map_iteration import LazyMapScan
+from proof_frog.transforms.types import DeadNullGuardElimination
+from proof_frog.transforms.alpha_rename import AlphaRename
+from proof_frog.transforms.symbolic import SymbolicComputation
 from proof_frog.visitors import NameTypeMap
 
 
@@ -139,6 +160,156 @@ def test_xor_near_miss_variable_used_twice():
     assert nm.variable == "u"
 
 
+def test_inline_near_miss_on_int_stored_into_modint():
+    """F-356: a declaration that reduces an Int into a ModInt is not inlined,
+    and the near miss says why."""
+    game = frog_parser.parse_game(
+        "Game T(Int q) {\n"
+        "    Bool O(Int b, ModInt<q> a) {\n"
+        "        ModInt<q> x = b + 1;\n"
+        "        return x == a;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    assert InlineSingleUseVariable().apply(game, ctx) == game
+    misses = [nm for nm in ctx.near_misses if nm.variable == "x"]
+    assert len(misses) == 1
+    assert misses[0].transform_name == "Inline Single-Use Variable"
+    assert "ModInt" in misses[0].reason
+
+
+@pytest.mark.parametrize("decl", ["ModInt<2> x = 1;", "ModInt<q> x = 0;"])
+def test_inline_near_miss_on_int_literal_stored_into_modint(decl):
+    """F-375: an integer literal is an Int, even one the modulus represents
+    as itself, so a ModInt local holding it is not forwarded as the literal
+    (``x + x == x - x`` would become Int arithmetic), and the near miss says
+    why."""
+    game = frog_parser.parse_game(
+        "Game T(Int q) {\n"
+        "    Bool O() {\n"
+        f"        {decl}\n"
+        "        return x + x == x - x;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    assert InlineMultiUsePureExpression().apply(game, ctx) == game
+    misses = [nm for nm in ctx.near_misses if nm.variable == "x"]
+    assert len(misses) == 1
+    assert misses[0].transform_name == "Inline Multi-Use Pure Expressions"
+    assert "ModInt" in misses[0].reason
+
+
+def test_near_miss_modint_simplification_keeps_power_of_zero():
+    """F-364: a ModInt `x ^ 0` read as a value (here inside a comparison) is
+    not rewritten to the Int 1, and the near miss names the power."""
+    game = frog_parser.parse_game(
+        "Game T(Int q) {\n"
+        "    Bool O(ModInt<q> x, ModInt<q> y) {\n"
+        "        return x ^ 0 + x ^ 0 == y - y;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    result = ModIntSimplification().apply(game, ctx)
+    assert "x ^ 0 + x ^ 0 == 0" in str(result)
+    misses = [
+        nm for nm in ctx.near_misses if nm.transform_name == "ModInt Simplification"
+    ]
+    assert len(misses) == 2
+    assert all("x ^ 0" in nm.reason and nm.method == "O" for nm in misses)
+
+
+def test_no_near_miss_modint_simplification_power_of_zero_converted():
+    """F-364 controls: `x ^ 0` returned as its ModInt type, or multiplied
+    into a ModInt operand, is simplified and reports nothing."""
+    game = frog_parser.parse_game(
+        "Game T(Int q) {\n"
+        "    ModInt<q> One(ModInt<q> x) {\n"
+        "        return x ^ 0;\n"
+        "    }\n"
+        "    ModInt<q> Times(ModInt<q> x, ModInt<q> y) {\n"
+        "        return x ^ 0 * y;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    result = ModIntSimplification().apply(game, ctx)
+    assert "return 1;" in str(result)
+    assert "return y;" in str(result)
+    assert not [
+        nm for nm in ctx.near_misses if nm.transform_name == "ModInt Simplification"
+    ]
+
+
+def test_near_miss_modint_simplification_keeps_division_of_zeros():
+    """A ModInt division whose operands both reduce to the literal 0 keeps
+    them as written (the Int division 0 / 0 is another value), and the near
+    miss names the division."""
+    game = frog_parser.parse_game(
+        "Game T(Int q) {\n"
+        "    ModInt<q> O(ModInt<q> x, ModInt<q> y) {\n"
+        "        return (x - x) / (y - y);\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    assert ModIntSimplification().apply(game, ctx) == game
+    misses = [
+        nm for nm in ctx.near_misses if nm.transform_name == "ModInt Simplification"
+    ]
+    assert len(misses) == 1
+    assert misses[0].method == "O"
+    assert "'(x - x) / (y - y)' not simplified" in misses[0].reason
+    assert "Int division" in misses[0].reason
+    assert misses[0].suggestion is not None
+    assert "write the same division in the other game" in misses[0].suggestion
+
+
+def test_no_near_miss_modint_simplification_division_with_modint_operand():
+    game = frog_parser.parse_game(
+        "Game T(Int q) {\n"
+        "    ModInt<q> O(ModInt<q> x, ModInt<q> y) {\n"
+        "        return (x - x) / y;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    result = ModIntSimplification().apply(game, ctx)
+    assert "return 0 / y;" in str(result)
+    assert not [
+        nm for nm in ctx.near_misses if nm.transform_name == "ModInt Simplification"
+    ]
+
+
+def test_redundant_copy_near_miss_copy_read_after_overwrite():
+    """A copy read after its original is overwritten is kept, and the near
+    miss names the copy."""
+    game = _make_game(
+        "BitString<lambda> old = m;\n"
+        "        m = old + m;\n"
+        "        return old + m;"
+    )
+    ctx = _make_ctx()
+    assert RedundantCopy().apply(game, ctx) == game
+    misses = [nm for nm in ctx.near_misses if nm.variable == "old"]
+    assert len(misses) == 1
+    assert misses[0].transform_name == "Remove Redundant Copies"
+    assert "after 'm' is written" in misses[0].reason
+
+
+def test_redundant_copy_no_near_miss_when_read_only_in_overwrite():
+    """The copy is read only in the value that overwrites the original: the
+    pass fires and reports nothing."""
+    game = _make_game(
+        "BitString<lambda> old = m;\n        m = old + m;\n        return m;"
+    )
+    ctx = _make_ctx()
+    assert RedundantCopy().apply(game, ctx) != game
+    assert not ctx.near_misses
+
+
 def test_xor_no_near_miss_when_no_sample():
     """No near-miss when there's no uniform sample at all."""
     game = _make_game("return m;")
@@ -178,6 +349,119 @@ def test_inline_near_miss_free_var_modified():
     assert (
         "k" in ct_misses[0].reason.lower() or "modified" in ct_misses[0].reason.lower()
     )
+
+
+def test_inline_near_miss_free_var_written_inside_use_statement():
+    """F-149: a write to a free variable earlier in the branch that holds
+    the use blocks the inline, and the near miss names the variable."""
+    game = frog_parser.parse_game(
+        "Game T() {\n"
+        "    Int ctr;\n"
+        "    Int O(Bool b) {\n"
+        "        Int v = ctr + 1;\n"
+        "        if (b) {\n"
+        "            ctr = 100;\n"
+        "            return v;\n"
+        "        }\n"
+        "        return 0;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    assert InlineSingleUseVariable().apply(game, ctx) == game
+    misses = [nm for nm in ctx.near_misses if nm.variable == "v"]
+    assert len(misses) == 1
+    assert misses[0].transform_name == "Inline Single-Use Variable"
+    assert "'ctr'" in misses[0].reason
+    assert "inside the statement" in misses[0].reason
+
+
+def test_inline_no_near_miss_when_branch_writes_other_variable():
+    """F-149 control: a write to another variable in the branch neither
+    blocks the inline nor reports a near miss."""
+    game = frog_parser.parse_game(
+        "Game T() {\n"
+        "    Int ctr;\n"
+        "    Int other;\n"
+        "    Int O(Bool b) {\n"
+        "        Int v = ctr + 1;\n"
+        "        if (b) {\n"
+        "            other = 100;\n"
+        "            return v;\n"
+        "        }\n"
+        "        return 0;\n"
+        "    }\n"
+        "}"
+    )
+    ctx = _make_ctx()
+    assert InlineSingleUseVariable().apply(game, ctx) != game
+    assert not [nm for nm in ctx.near_misses if nm.variable == "v"]
+
+
+def test_extract_tuple_near_miss_shadowed_redeclaration():
+    """ExtractRepeatedTupleAccess reports a near-miss (and terminates) when
+    the only other occurrence of ``v[i]`` is inside an earlier branch block
+    that redeclares ``v``, so it cannot be replaced."""
+    game = frog_parser.parse_game(
+        """
+        Game TestGame() {
+            Int Run(Bool choice) {
+                if (choice) {
+                    [Int, Int] v = [1, 2];
+                    return v[1];
+                }
+                [Int, Int] v = [3, 4];
+                return v[1];
+            }
+        }
+        """
+    )
+    ctx = _make_ctx()
+    result = ExtractRepeatedTupleAccess().apply(game, ctx)
+
+    assert result == game  # transform should NOT have fired
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Extract Repeated Tuple Access"
+    ]
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert "v[1]" in misses[0].reason
+
+
+def test_extract_slice_near_miss_shadowed_redeclaration():
+    """The slice phase of the same pass reports a near-miss (and terminates)
+    when the only other occurrence of ``v[A:B]`` is inside an earlier branch
+    block that redeclares ``v``."""
+    game = frog_parser.parse_game(
+        """
+        Game TestGame() {
+            Int N;
+            Int K;
+            BitString<K> Run(Bool choice) {
+                if (choice) {
+                    BitString<N> m <- BitString<N>;
+                    return m[0 : K];
+                }
+                BitString<N> m <- BitString<N>;
+                return m[0 : K];
+            }
+        }
+        """
+    )
+    ctx = _make_ctx()
+    result = ExtractRepeatedTupleAccess().apply(game, ctx)
+
+    assert result == game  # transform should NOT have fired
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Extract Repeated Tuple Access"
+    ]
+    assert len(misses) == 1
+    assert misses[0].variable == "m"
+    assert "m[0 : K]" in misses[0].reason
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +707,165 @@ def test_distinct_const_rf_no_near_miss_when_fires():
 
 
 # ---------------------------------------------------------------------------
+# UniqueRFSimplification near-miss tests
+# ---------------------------------------------------------------------------
+
+
+def _unique_rf_game(body: str) -> frog_ast.Game:
+    return frog_parser.parse_game(f"""
+        Game G() {{
+            Set<BitString<8>> S;
+            Function<BitString<8>, BitString<16>> RF;
+            Void Initialize() {{
+                RF <- Function<BitString<8>, BitString<16>>;
+            }}
+            BitString<16> Query(BitString<8> c, Bool b, Set<BitString<8>> E) {{
+                {body}
+                BitString<16> z = RF(r);
+                return z;
+            }}
+        }}
+        """)
+
+
+def _unique_rf_misses(game: frog_ast.Game, ctx: PipelineContext) -> list[NearMiss]:
+    UniqueRFSimplification().apply(game, ctx)
+    return [
+        nm for nm in ctx.near_misses if nm.transform_name == "Unique RF Simplification"
+    ]
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        "if (b) { r = c; }",
+        "for (Int i = 0 to 2) { r = c; }",
+        "for (BitString<8> r in E) { c = r; }",
+        "BitString<8> r;",
+        "Set<BitString<8>> L; r <-uniq[L] BitString<8>;",
+    ],
+)
+def test_unique_rf_near_miss_on_written_draw(write: str) -> None:
+    game = _unique_rf_game(f"BitString<8> r <-uniq[S] BitString<8>; {write}")
+    misses = _unique_rf_misses(game, _make_ctx())
+    assert len(misses) == 1
+    assert misses[0].method == "Query"
+    assert "'RF'" in misses[0].reason and "<-uniq[S]" in misses[0].reason
+
+
+def test_unique_rf_near_miss_after_alpha_rename() -> None:
+    """The local has an `__aN__` name by the time the pass runs.  The
+    near-miss names the function and set instead, and leaves `variable` unset
+    because canonical diffs rename fields."""
+    ctx = _make_ctx()
+    game = _unique_rf_game("BitString<8> r <-uniq[S] BitString<8>; if (b) { r = c; }")
+    game = AlphaRename().apply(game, ctx)
+    misses = _unique_rf_misses(game, ctx)
+    assert len(misses) == 1
+    assert misses[0].variable is None
+    assert "__a" not in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "BitString<8> r <-uniq[S] BitString<8>;",
+        "BitString<8> r <-uniq[S] BitString<8>; if (b) { c = r; }",
+        "BitString<8> r <-uniq[S] BitString<8>; r = c; r <-uniq[S] BitString<8>;",
+    ],
+)
+def test_unique_rf_no_near_miss_when_fires(body: str) -> None:
+    assert not _unique_rf_misses(_unique_rf_game(body), _make_ctx())
+
+
+def test_unique_rf_no_near_miss_without_draw() -> None:
+    """A call on a plain sample was never a fresh query."""
+    game = _unique_rf_game("BitString<8> r <- BitString<8>; if (b) { r = c; }")
+    assert not _unique_rf_misses(game, _make_ctx())
+
+
+def test_unique_rf_no_near_miss_on_self_assignment() -> None:
+    """`r = RF(r)` reads the drawn `r` before it writes `r`, so the call is a
+    fresh query: the pass fires and reports no write."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Set<BitString<8>> S;
+            Function<BitString<8>, BitString<8>> RF;
+            Void Initialize() {
+                RF <- Function<BitString<8>, BitString<8>>;
+            }
+            BitString<8> Query() {
+                BitString<8> r <-uniq[S] BitString<8>;
+                r = RF(r);
+                return r;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    assert UniqueRFSimplification().apply(game, ctx) != game
+    assert not [
+        nm for nm in ctx.near_misses if nm.transform_name == "Unique RF Simplification"
+    ]
+
+
+# ---------------------------------------------------------------------------
+# ExtractRFCalls near-miss tests
+# ---------------------------------------------------------------------------
+
+
+def _extract_rf_misses(body: str) -> list[NearMiss]:
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Set<BitString<8>> S;
+            Function<BitString<8>, BitString<8>> RF;
+            Void Initialize() {{
+                RF <- Function<BitString<8>, BitString<8>>;
+            }}
+            BitString<8> Query(BitString<8> c, Bool b) {{
+                {body}
+            }}
+        }}
+        """)
+    ctx = _make_ctx()
+    ExtractRFCalls().apply(game, ctx)
+    return [nm for nm in ctx.near_misses if nm.transform_name == "Extract RF Calls"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "BitString<8> r <-uniq[S] BitString<8>; "
+        "if (b) { r = c; return c + RF(r); } return c;",
+        "BitString<8> r <-uniq[S] BitString<8>; "
+        "if (b) { return c + RF(r); } return c;",
+        "BitString<8> r <-uniq[S] BitString<8>; "
+        "for (Int i = 0 to 2) { c = c + RF(r); } return c;",
+    ],
+)
+def test_extract_rf_near_miss_on_unhoisted_call(body: str) -> None:
+    misses = _extract_rf_misses(body)
+    assert len(misses) == 1
+    assert misses[0].method == "Query"
+    assert misses[0].variable is None
+    assert "'RF'" in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # The call is in the statement itself and is hoisted.
+        "BitString<8> r <-uniq[S] BitString<8>; return c + RF(r);",
+        "BitString<8> r <-uniq[S] BitString<8>; "
+        "if (RF(r) == c) { return c; } return r;",
+        # No `<-uniq` draw for UniqueRFSimplification to pair the call with.
+        "if (b) { return c + RF(c); } return c;",
+    ],
+)
+def test_extract_rf_no_near_miss(body: str) -> None:
+    assert not _extract_rf_misses(body)
+
+
+# ---------------------------------------------------------------------------
 # DeduplicateDeterministicCalls near-miss tests
 # ---------------------------------------------------------------------------
 
@@ -499,6 +942,90 @@ def test_dedup_no_near_miss_when_deterministic():
         if nm.transform_name == "Deduplicate Deterministic Calls"
     ]
     assert len(dedup_misses) == 0
+
+
+def test_dedup_near_miss_nondeterministic_argument():
+    """F-363: equal deterministic calls whose argument draws fresh coins are
+    not merged, and the pass says why."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive R(Int q) {
+            ModInt<q> Draw();
+            deterministic ModInt<q> Det(ModInt<q> x);
+        }
+        """)
+    game_src = (
+        "Game TestGame(Int q) {\n"
+        "    [ModInt<q>, ModInt<q>] Compute() {\n"
+        "        return [R.Det(R.Draw()), R.Det(R.Draw())];\n"
+        "    }\n"
+        "}"
+    )
+    game = frog_parser.parse_game(game_src)
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"R": prim},
+        subsets_pairs=[],
+    )
+    result = DeduplicateDeterministicCalls().apply(game, ctx)
+
+    assert result == frog_parser.parse_game(game_src)
+    dedup_misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Deduplicate Deterministic Calls"
+    ]
+    assert len(dedup_misses) == 1
+    assert "R.Det(R.Draw())" in dedup_misses[0].reason
+    assert "not annotated deterministic" in dedup_misses[0].reason
+    assert dedup_misses[0].suggestion is not None
+
+
+def _dedup_written_misses(body: str) -> list:
+    game_src = (
+        "Game TestGame() {\n"
+        "    [BitString<n>, BitString<n>] Compute(BitString<n> k) {\n"
+        f"        {body}\n"
+        "    }\n"
+        "}"
+    )
+    game = frog_parser.parse_game(game_src)
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace=_make_det_namespace(),
+        subsets_pairs=[],
+    )
+    DeduplicateDeterministicCalls().apply(game, ctx)
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Deduplicate Deterministic Calls"
+        and "may be written between the calls" in nm.reason
+    ]
+
+
+def test_dedup_near_miss_argument_written_in_loop():
+    """F-385: two equal deterministic calls in a loop that writes their
+    argument are not merged, and the pass says why."""
+    misses = _dedup_written_misses(
+        "BitString<n> a = k; BitString<n> b = k;"
+        " for (Int i = 0 to 1) { a = G.evaluate(k); k = a; b = G.evaluate(k); }"
+        " return [a, b];"
+    )
+    assert misses
+    assert "G.evaluate(k)" in misses[0].reason
+    assert misses[0].suggestion is not None
+
+
+def test_dedup_no_written_near_miss_when_argument_stable():
+    """No such near miss when the loop never writes the argument (the calls
+    merge)."""
+    assert not _dedup_written_misses(
+        "BitString<n> a = k; BitString<n> b = k;"
+        " for (Int i = 0 to 1) { a = G.evaluate(k); b = G.evaluate(k); }"
+        " return [a, b];"
+    )
 
 
 # --- Uniform Bijection Elimination near-miss tests ---
@@ -1020,6 +1547,145 @@ def test_map_key_reindex_near_miss_bare_e0():
     misses = [nm for nm in ctx.near_misses if nm.transform_name == "Map Key Reindex"]
     assert misses, "expected a near-miss for bare e[0] use"
     assert any("e[0]" in nm.reason or "wrapper" in nm.reason for nm in misses)
+
+
+_MAP_REINDEX_SAME_TYPE_PRIMITIVE = """
+Primitive T() {
+    deterministic injective BitString<8> Eval(BitString<8> x);
+}
+"""
+
+
+_MAP_REINDEX_SCAN = """
+    Bool Scan(BitString<8> y) {
+        for ([BitString<8>, Int] e in M.entries) {
+            if (TT.Eval(e[0]) == y) { return true; }
+        }
+        return false;
+    }
+"""
+
+
+def _map_reindex_misses(*methods: str) -> list[NearMiss]:
+    body = "\n".join(methods)
+    game = frog_parser.parse_game(f"""
+        Game G(T TT) {{
+            Map<BitString<8>, Int> M;
+            {body}
+        }}
+        """)
+    ctx = _ctx_for_map_reindex(_MAP_REINDEX_SAME_TYPE_PRIMITIVE)
+    assert MapKeyReindex().apply(game, ctx) == game
+    return [nm for nm in ctx.near_misses if nm.transform_name == "Map Key Reindex"]
+
+
+def test_map_key_reindex_near_miss_raw_write_with_wrapped_read():
+    misses = _map_reindex_misses(
+        "Void Store(BitString<8> a) { M[a] = 0; }",
+        "Bool Has(BitString<8> b) { return TT.Eval(b) in M; }",
+    )
+    assert len(misses) == 1
+    assert misses[0].method == "Store"
+    assert misses[0].variable == "M"
+    assert "in 'Has' already applies the wrapper" in misses[0].reason
+
+
+def test_map_key_reindex_near_miss_scan_with_wrapped_write():
+    misses = _map_reindex_misses(
+        "Void Put(BitString<8> b) { M[TT.Eval(b)] = 0; }",
+        _MAP_REINDEX_SCAN,
+    )
+    assert len(misses) == 1
+    assert misses[0].method == "Scan"
+    assert "in 'Put' already applies the wrapper" in misses[0].reason
+
+
+def test_map_key_reindex_near_miss_map_used_whole():
+    misses = _map_reindex_misses(
+        "Void Store(BitString<8> a) { M[a] = 0; }",
+        "Map<BitString<8>, Int> Dump() { return M; }",
+        _MAP_REINDEX_SCAN,
+    )
+    assert len(misses) == 1
+    assert misses[0].method == "Dump"
+    assert misses[0].variable == "M"
+    assert "used other than through" in misses[0].reason
+
+
+def test_map_key_reindex_near_miss_loop_tuple_used_whole():
+    misses = _map_reindex_misses(
+        "Void Store(BitString<8> a) { M[a] = 0; }",
+        """
+        [BitString<8>, Int]? Leak() {
+            for ([BitString<8>, Int] e in M.entries) { return e; }
+            return None;
+        }
+        """,
+        _MAP_REINDEX_SCAN,
+    )
+    assert len(misses) == 1
+    assert misses[0].method == "Leak"
+    assert "loop tuple 'e'" in misses[0].reason
+
+
+_MAP_REINDEX_KEYED_PRIMITIVE = """
+Primitive T() {
+    deterministic injective BitString<8> Eval(BitString<8> k, BitString<8> x);
+}
+"""
+
+
+def _map_reindex_keyed_misses(*methods: str) -> list[NearMiss]:
+    body = "\n".join(methods)
+    game = frog_parser.parse_game(f"""
+        Game G(T TT) {{
+            BitString<8> k;
+            Map<BitString<8>, Int> M;
+            {body}
+            Bool Scan(BitString<8> y) {{
+                for ([BitString<8>, Int] e in M.entries) {{
+                    if (TT.Eval(k, e[0]) == y) {{ return true; }}
+                }}
+                return false;
+            }}
+        }}
+        """)
+    ctx = _ctx_for_map_reindex(_MAP_REINDEX_KEYED_PRIMITIVE)
+    assert MapKeyReindex().apply(game, ctx) == game
+    return [nm for nm in ctx.near_misses if nm.transform_name == "Map Key Reindex"]
+
+
+def test_map_key_reindex_near_miss_initialize_write_before_context_arg():
+    misses = _map_reindex_keyed_misses(
+        "Void Initialize() { BitString<8> z = 0^8; M[z] = 0; k <- BitString<8>; }"
+    )
+    assert len(misses) == 1
+    assert misses[0].method == "Initialize"
+    assert "'k'" in misses[0].reason
+    assert "before it is set" in misses[0].reason
+
+
+def test_map_key_reindex_near_miss_context_arg_shadowed():
+    misses = _map_reindex_keyed_misses(
+        "Void Initialize() { k <- BitString<8>; }",
+        "Void Store(BitString<8> a, BitString<8> k) { M[a] = 0; }",
+    )
+    assert len(misses) == 1
+    assert misses[0].method == "Store"
+    assert "binds a local named 'k'" in misses[0].reason
+
+
+def test_map_key_reindex_no_near_miss_when_reindexed():
+    game = frog_parser.parse_game(f"""
+        Game G(T TT) {{
+            Map<BitString<8>, Int> M;
+            Void Store(BitString<8> a) {{ M[a] = 0; }}
+            {_MAP_REINDEX_SCAN}
+        }}
+        """)
+    ctx = _ctx_for_map_reindex(_MAP_REINDEX_SAME_TYPE_PRIMITIVE)
+    assert MapKeyReindex().apply(game, ctx) != game
+    assert not [nm for nm in ctx.near_misses if nm.transform_name == "Map Key Reindex"]
 
 
 def _lazy_pair_ctx() -> PipelineContext:
@@ -1623,6 +2289,43 @@ def test_rgfe_no_near_miss_when_only_one_candidate_field() -> None:
     ctx = _rgfe_ctx()
     RefactorGroupElemFieldExp().apply(game, ctx)
     assert not [nm for nm in ctx.near_misses if nm.transform_name == _RGFE_NAME]
+
+
+def test_rgfe_near_miss_shared_factor_written_in_branch() -> None:
+    """F-386: ``a`` is redrawn inside an ``if`` between ``field1 = g ^ (a *
+    b)`` and ``field2 = g ^ a``, so the shared factor may differ at the two
+    assignments. The decline names the write, not a missing peer."""
+    game = frog_parser.parse_game("""
+        Game G(Group GG) {
+            GroupElem<GG> field1;
+            GroupElem<GG> field2;
+            Bool c;
+
+            Void Initialize() {
+                c <- Bool;
+                ModInt<GG.order> a <- ModInt<GG.order>;
+                ModInt<GG.order> b <- ModInt<GG.order>;
+                field1 = GG.generator ^ (a * b);
+                if (c) {
+                    a <- ModInt<GG.order>;
+                }
+                field2 = GG.generator ^ a;
+            }
+        }
+        """)
+    before = str(game)
+    ctx = _rgfe_ctx()
+    after = RefactorGroupElemFieldExp().apply(game, ctx)
+    assert str(after) == before
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == _RGFE_NAME]
+    assert any(
+        nm.variable == "field1"
+        and nm.method == "Initialize"
+        and "field2" in nm.reason
+        and "write a" in nm.reason
+        for nm in misses
+    )
+    assert not any("no peer" in nm.reason for nm in misses)
 
 
 _GCS_NAME = "Guard Condition Simplification"
@@ -2286,3 +2989,2591 @@ def test_single_call_field_to_local_near_miss_on_domain_write() -> None:
         nm.transform_name == "Single Call Field To Local" and nm.variable == "x"
         for nm in ctx.near_misses
     )
+
+
+def test_expand_tuples_near_miss_f321_swap_reassignment():
+    """Expand Tuples reports a near-miss when a whole-variable tuple
+    reassignment reads the variable in its own RHS (F-321): sequential
+    component assignments would overwrite components the RHS still needs."""
+    game = _make_game(
+        "[Int, Int] v = [1, 2];\n"
+        "        v = [v[1], v[0]];\n"
+        "        return m;"
+    )
+    ctx = _make_ctx()
+    result = ExpandTuple().apply(game, ctx)
+
+    assert result == game  # transform should NOT have fired
+    matching = [nm for nm in ctx.near_misses if nm.variable == "v"]
+    assert matching
+    nm = matching[0]
+    assert nm.transform_name == "Expand Tuples"
+    assert "right-hand side" in nm.reason
+    assert nm.method == "Encrypt"
+
+
+def test_split_bare_tuple_declarations_near_miss_non_constant_index():
+    """Split Bare Tuple Declarations reports a near-miss when a bare
+    product-typed local is accessed at a non-constant index."""
+    game = _make_game(
+        "[Int, Int] v;\n"
+        "        v = [1, 2];\n"
+        "        Int i = 0;\n"
+        "        Int x = v[i];\n"
+        "        return m;"
+    )
+    ctx = _make_ctx()
+    SplitBareTupleDeclarations().apply(game, ctx)
+
+    matching = [nm for nm in ctx.near_misses if nm.variable == "v"]
+    assert matching
+    nm = matching[0]
+    assert nm.transform_name == "Split Bare Tuple Declarations"
+    assert "constant" in nm.reason
+    assert nm.method == "Encrypt"
+
+
+def test_split_bare_tuple_declarations_no_near_miss_when_it_fires():
+    """No near-miss when the bare declaration splits cleanly."""
+    game = _make_game(
+        "[Int, Int] v;\n"
+        "        v = [1, 2];\n"
+        "        return m;"
+    )
+    ctx = _make_ctx()
+    SplitBareTupleDeclarations().apply(game, ctx)
+    assert not [nm for nm in ctx.near_misses if nm.variable == "v"]
+
+
+def test_cross_method_alias_near_miss_shadowed_match():
+    """CrossMethodFieldAlias reports a near-miss when a call matches the
+    Initialize-cached field structurally but a parameter rebinds its argument
+    (F-338)."""
+    from proof_frog.transforms.inlining import (  # pylint: disable=import-outside-toplevel
+        CrossMethodFieldAlias,
+    )
+
+    game = frog_parser.parse_game("""
+        Game Foo(G GG) {
+            BitString<n> seed;
+            BitString<n> c;
+            Void Initialize() {
+                seed <- BitString<n>;
+                c = GG.evaluate(seed);
+            }
+            BitString<n> Get(BitString<n> seed) {
+                return GG.evaluate(seed);
+            }
+        }
+        """)
+    ctx = _make_hoist_ctx()
+    out = CrossMethodFieldAlias().apply(game, ctx)
+
+    assert "return GG.evaluate(seed);" in str(out)
+    misses = [
+        nm for nm in ctx.near_misses if nm.transform_name == "Cross Method Field Alias"
+    ]
+    assert len(misses) == 1
+    assert misses[0].method == "Get"
+    assert "rebound" in misses[0].reason
+
+
+def test_hoist_near_miss_initialize_rebinds_arg():
+    """Hoist reports a near-miss when Initialize rebinds a name the call reads
+    (F-338)."""
+    game = frog_parser.parse_game("""
+        Game Foo(G GG) {
+            BitString<n> seed;
+            BitString<n> Initialize() {
+                seed <- BitString<n>;
+                BitString<n> seed = 0^n;
+                return seed;
+            }
+            BitString<n> Get1() {
+                return GG.evaluate(seed);
+            }
+        }
+        """)
+    ctx = _make_hoist_ctx()
+    out = HoistDeterministicCallToInitialize().apply(game, ctx)
+
+    assert "_hoisted" not in str(out)
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Hoist Deterministic Call to Initialize"
+    ]
+    assert len(misses) == 1
+    assert misses[0].method == "Initialize"
+
+
+def test_remove_empty_if_near_miss_on_indexed_condition():
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G() {
+            Map<Int, Bool> M;
+            Int O(Int x) {
+                if (M[x]) {
+                }
+                return x;
+            }
+        }
+        """)
+    RemoveEmptyIf().apply(game, ctx)
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == "Remove Empty If"]
+    assert misses and "M[x]" in misses[0].reason
+
+
+def test_flag_set_to_assignment_near_miss_on_intervening_mention():
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(Set S) {
+            S a; S b; Bool bad; Bool seen;
+            Void Initialize() {
+                bad = false;
+                seen = bad;
+                if (a == b) {
+                    bad = true;
+                }
+            }
+        }
+        """)
+    FlagSetToAssignment().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Flag Set To Assignment" and nm.variable == "bad"
+        for nm in ctx.near_misses
+    )
+
+
+def test_fold_equivalent_return_branch_near_miss_on_rebound_init_local():
+    """F-342: an Initialize local read by a field's RHS takes two values."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive D(Int n) { deterministic BitString<n> eval(BitString<n> x); }"
+    )
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"D": prim, "F": prim},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(D F, Int n) {
+            BitString<n> G1;
+            BitString<n> H1;
+            Void Initialize() {
+                BitString<n> x <- BitString<n>;
+                G1 = F.eval(x);
+                x <- BitString<n>;
+                H1 = F.eval(x);
+            }
+            BitString<n> O(Bool flag) {
+                if (flag) {
+                    return G1;
+                }
+                return H1;
+            }
+        }
+        """)
+    FoldEquivalentReturnBranch().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Fold Equivalent Return Branch"
+        and "Initialize local(s) x" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_fold_equivalent_return_branch_near_miss_on_rhs_field_written_later():
+    """F-345: a field the Init-only RHS reads is written after the definition."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive D(Int n) { deterministic BitString<n> eval(BitString<n> x); }"
+    )
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"D": prim, "F": prim},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(D F, Int n) {
+            BitString<n> k; BitString<n> G1;
+            Void Initialize() { G1 = F.eval(k); k <- BitString<n>; }
+            BitString<n> O(Bool flag) { if (flag) { return G1; } return F.eval(k); }
+        }
+        """)
+    FoldEquivalentReturnBranch().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Fold Equivalent Return Branch"
+        and "after the definition" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_injective_equality_near_miss_on_captured_definition():
+    """F-347: the comparison's method binds a name the definition reads."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive T(Int n) { deterministic injective BitString<n> eval(BitString<n> x); }"
+    )
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"T": prim, "F": prim},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(T F, Int n) {
+            BitString<n> K;
+            BitString<n> A;
+            Void Initialize() { K <- BitString<n>; A = F.eval(K); }
+            Bool Test(BitString<n> K) { return A == F.eval(K); }
+        }
+        """)
+    InjectiveEqualitySimplify().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Injective Equality Simplify" and "bound in this method" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_fold_equivalent_return_branch_near_miss_on_init_local_shadowing_field():
+    """An Initialize local shadows the field its definition's name refers to."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive E(Int n) { deterministic injective BitString<n> enc(BitString<n> x); }"
+    )
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"E": prim, "F": prim},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(E F, Int n) {
+            BitString<n> a;
+            BitString<n> f1;
+            Void Initialize() {
+                BitString<n> a <- BitString<n>;
+                f1 = F.enc(a);
+            }
+            BitString<n> O(Bool c) {
+                if (c) {
+                    return f1;
+                }
+                return F.enc(a);
+            }
+        }
+        """)
+    FoldEquivalentReturnBranch().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Fold Equivalent Return Branch"
+        and "shadow a field" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_injective_equality_near_miss_on_coerced_modint_argument():
+    """F-348: an Int argument for a ModInt<q> parameter is reduced mod q."""
+    prim = frog_parser.parse_primitive_file(
+        "Primitive M(Int q, Int n) { deterministic injective BitString<n> encm(ModInt<q> x); }"
+    )
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"M": prim, "E": prim},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G(M E, Int q, Int n) {
+            Void Initialize() { }
+            Bool O() { return E.encm(1) == E.encm(q + 1); }
+        }
+        """)
+    InjectiveEqualitySimplify().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Injective Equality Simplify" and "may not have its type" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_inline_single_use_field_near_miss_on_skippable_definition():
+    """F-349: Initialize may return before the field's definition."""
+    ctx = _make_ctx()
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int G = 0;
+            Bool Initialize() {
+                Bool c <- Bool;
+                if (c) { return true; }
+                G = 5;
+                return false;
+            }
+            Int O() { return G; }
+        }
+        """)
+    InlineSingleUseField().apply(game, ctx)
+    assert any(
+        nm.transform_name == "Inline Single-Use Field" and "may return before" in nm.reason
+        for nm in ctx.near_misses
+    )
+
+
+def test_local_fn_near_miss_sample_skippable_by_initialize_return() -> None:
+    """F-349: Initialize may return before sampling F."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Function<BitString<8>, BitString<16>> F;
+            Bool Initialize() {
+                Bool c <- Bool;
+                if (c) { return true; }
+                F <- Function<BitString<8>, BitString<16>>;
+                return false;
+            }
+            BitString<16> Hash(BitString<8> x) {
+                return F(x);
+            }
+        }
+        """)
+    ctx = _local_fn_ctx(sampled={"H"})
+    result = LocalFunctionFieldToLet().apply(game, ctx)
+    assert result == game
+    assert any("read before its sample" in nm.reason for nm in _local_fn_misses(ctx))
+
+
+@pytest.mark.parametrize(
+    "initializer, reason",
+    [
+        (
+            "H(0^8)",
+            "Candidate let binding 'H' is referenced in the initializer of "
+            "field 'y'",
+        ),
+        ("F(0^8)", "Field 'F' may be read before its sample: a field initializer"),
+    ],
+)
+def test_local_fn_near_miss_field_initializer(initializer: str, reason: str) -> None:
+    """Field initializers run before Initialize: one that queries H, or reads
+    F before its sample, blocks the rewrite."""
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Function<BitString<8>, BitString<16>> F;
+            BitString<16> y = {initializer};
+            Void Initialize() {{
+                F <- Function<BitString<8>, BitString<16>>;
+            }}
+            BitString<16> Peek() {{
+                return y;
+            }}
+            BitString<16> Hash(BitString<8> x) {{
+                return F(x);
+            }}
+        }}
+        """)
+    ctx = _local_fn_ctx(sampled={"H"})
+    assert LocalFunctionFieldToLet().apply(game, ctx) == game
+    assert any(reason in nm.reason for nm in _local_fn_misses(ctx))
+
+
+# ---------------------------------------------------------------------------
+# FoldLiteralConditions
+# ---------------------------------------------------------------------------
+
+
+def _fold_literal_misses(ctx: PipelineContext) -> list[NearMiss]:
+    return [
+        nm for nm in ctx.near_misses if nm.transform_name == "Fold Literal Conditions"
+    ]
+
+
+def test_fold_literal_near_miss_field_assigned_only_by_another_oracle() -> None:
+    """``None == [x, f]`` stays because Query may run before Store assigns f."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool f;
+            Void Store(Bool v) { f = v; }
+            Bool Query(Int x) { return None == [x, f]; }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) == game
+    misses = _fold_literal_misses(ctx)
+    assert [(nm.variable, nm.method) for nm in misses] == [("f", "Query")]
+    assert "'f' may be unassigned" in misses[0].reason
+    assert "Initialize does not assign" in misses[0].reason
+    assert misses[0].suggestion is not None and "Initialize" in misses[0].suggestion
+
+
+def test_fold_literal_near_miss_bare_declared_local() -> None:
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool Query(Int x, Bool c) {
+                Bool y;
+                if (c) { y = true; }
+                return [x, y] != None;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) == game
+    misses = _fold_literal_misses(ctx)
+    assert [(nm.variable, nm.method) for nm in misses] == [("y", "Query")]
+    assert "declared without a value" in misses[0].reason
+
+
+def test_fold_literal_near_miss_initialize_may_return_first() -> None:
+    """F-349: Initialize may return before assigning f."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool f;
+            Bool Initialize() {
+                Bool c <- Bool;
+                if (c) { return true; }
+                f = false;
+                return false;
+            }
+            Bool Query(Int x) { return None == [x, f]; }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) == game
+    misses = _fold_literal_misses(ctx)
+    assert [nm.variable for nm in misses] == ["f"]
+    assert "before any return" in misses[0].reason
+
+
+def test_fold_literal_near_miss_ambiguous_field_and_local() -> None:
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool f;
+            Bool Query(Int x) {
+                Bool f = true;
+                return None == [x, f];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) == game
+    misses = _fold_literal_misses(ctx)
+    assert [nm.variable for nm in misses] == ["f"]
+    assert "both a local and a game field" in misses[0].reason
+
+
+def test_fold_literal_no_near_miss_when_fold_fires() -> None:
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool f;
+            Void Initialize() { f = false; }
+            Bool Query(Int x) { return None == [x, f]; }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) != game
+    assert not _fold_literal_misses(ctx)
+
+
+def test_fold_literal_no_near_miss_for_none_against_variable() -> None:
+    """``None == v`` is not a literal comparison: nothing almost fired."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool Query(Int? v) { return None == v; }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) == game
+    assert not _fold_literal_misses(ctx)
+
+
+def test_fold_literal_near_miss_distinct_integer_literals() -> None:
+    """``0 == 1`` stays: at ModInt<q> the literals may be equal mod q."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int Query(Int x) {
+                if (0 == 1) { return 0; }
+                return x;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) == game
+    misses = _fold_literal_misses(ctx)
+    assert [(nm.variable, nm.method) for nm in misses] == [(None, "Query")]
+    assert "0 == 1" in misses[0].reason
+    assert "ModInt" in misses[0].reason
+
+
+def test_fold_literal_no_near_miss_for_equal_integer_literals() -> None:
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool Query(Int x) { return 1 == 1; }
+        }
+        """)
+    ctx = _make_ctx()
+    assert FoldLiteralConditions().apply(game, ctx) != game
+    assert not _fold_literal_misses(ctx)
+def _dead_null_guard_misses(body: str) -> list[NearMiss]:
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Int Test(Int x, Bool c) {{
+                Int? v = x;
+                {body}
+                return 1;
+            }}
+        }}
+        """)
+    DeadNullGuardElimination().apply(game, ctx)
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Dead Null Guard Elimination"
+    ]
+
+
+@pytest.mark.parametrize(
+    "write, kind",
+    [
+        ("if (c) { v = None; }", "an assignment"),
+        ("for (Int v = 0 to 2) { x = v; }", "a loop binder"),
+        ("Int? v;", "a redeclaration"),
+    ],
+)
+def test_dead_null_guard_near_miss_on_later_write(write: str, kind: str) -> None:
+    """The guard on a local initialised non-null is kept because a later
+    statement may write the local."""
+    misses = _dead_null_guard_misses(f"{write} if (v == None) {{ return 0; }}")
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert misses[0].method == "Test"
+    assert kind in misses[0].reason
+
+
+def test_dead_null_guard_near_miss_on_write_after_guard() -> None:
+    misses = _dead_null_guard_misses("if (v == None) { return 0; } v = None;")
+    assert len(misses) == 1 and "an assignment" in misses[0].reason
+
+
+def test_dead_null_guard_near_miss_describes_renamed_local() -> None:
+    """AlphaRename runs first, so the local usually has an `__aN__` name that
+    never appears in the canonical diff.  The near-miss then leaves
+    `variable` unset, so the diagnostic matcher keeps it, and describes the
+    local by its declaration."""
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int Test(Int x, Bool c) {
+                Int? v = x;
+                if (c) { v = None; }
+                if (v == None) { return 0; }
+                return 1;
+            }
+        }
+        """)
+    game = AlphaRename().apply(game, ctx)
+    DeadNullGuardElimination().apply(game, ctx)
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Dead Null Guard Elimination"
+    ]
+    assert len(misses) == 1
+    assert misses[0].variable is None
+    assert misses[0].method == "Test"
+    assert "'Int?'" in misses[0].reason and "'x'" in misses[0].reason
+    assert "__a" not in misses[0].reason
+
+
+def _dead_null_guard_tuple_misses(body: str, rename: bool = False) -> list[NearMiss]:
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Int Test(Int x, Int y, Bool c) {{
+                [Int, Int]? v = [x, y];
+                {body}
+                return 1;
+            }}
+        }}
+        """)
+    if rename:
+        game = AlphaRename().apply(game, ctx)
+    DeadNullGuardElimination().apply(game, ctx)
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Dead Null Guard Elimination"
+    ]
+
+
+@pytest.mark.parametrize(
+    "write, kind",
+    [
+        ("if (c) { v = None; }", "an assignment"),
+        ("if (c) { v = [y, x]; }", "an assignment"),
+        ("v[0] = 5;", "an element write"),
+    ],
+)
+def test_dead_null_guard_near_miss_on_written_tuple_literal(
+    write: str, kind: str
+) -> None:
+    """A tuple literal is non-null, so a guard kept on an optional local
+    initialised to one, because of a later write, is reported like any
+    other."""
+    misses = _dead_null_guard_tuple_misses(f"{write} if (v == None) {{ return 0; }}")
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert misses[0].method == "Test"
+    assert kind in misses[0].reason
+
+
+def test_dead_null_guard_near_miss_describes_renamed_tuple_local() -> None:
+    misses = _dead_null_guard_tuple_misses(
+        "if (c) { v = None; } if (v == None) { return 0; }", rename=True
+    )
+    assert len(misses) == 1
+    assert misses[0].variable is None
+    assert "'[Int, Int]?'" in misses[0].reason and "'[x, y]'" in misses[0].reason
+    assert "__a" not in misses[0].reason
+
+
+def test_dead_null_guard_no_near_miss_when_tuple_literal_guard_removed() -> None:
+    assert not _dead_null_guard_tuple_misses("if (v == None) { return 0; }")
+
+
+def test_dead_null_guard_no_near_miss_when_guard_removed() -> None:
+    assert not _dead_null_guard_misses("if (v == None) { return 0; }")
+
+
+def test_dead_null_guard_no_near_miss_without_guard() -> None:
+    """A written local with no guard on it is not a declined rewrite."""
+    assert not _dead_null_guard_misses("if (c) { v = None; }")
+
+
+def test_dead_null_guard_no_near_miss_for_local_initialised_none() -> None:
+    """A guard on a genuinely nullable local is not a near-miss."""
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int Test(Int x) {
+                Int? v = None;
+                v = x;
+                if (v == None) { return 0; }
+                return 1;
+            }
+        }
+        """)
+    DeadNullGuardElimination().apply(game, ctx)
+    assert not ctx.near_misses
+
+
+def _inline_tuple_literal_misses(body: str) -> list[NearMiss]:
+    # pylint: disable=import-outside-toplevel
+    from proof_frog.transforms.inlining import InlineLocalTupleLiteral
+
+    ctx = _make_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            [Int, Int] v;
+            [Int, Int] w;
+            Map<Int, Int> M;
+            Int Test(Int y, Bool c) {{
+                {body}
+            }}
+        }}
+        """)
+    InlineLocalTupleLiteral().apply(game, ctx)
+    return [
+        nm for nm in ctx.near_misses if nm.transform_name == "Inline Local Tuple Literal"
+    ]
+
+
+def test_inline_local_tuple_literal_near_miss_on_self_reference() -> None:
+    """An element that reads an outer `v` cannot be substituted for the
+    local's `v[k]`: the pass declines and says why."""
+    misses = _inline_tuple_literal_misses("[Int, Int] v = [v[0], y]; return v[0];")
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert "outer variable also named 'v'" in misses[0].reason
+
+
+def test_inline_local_tuple_literal_no_near_miss_without_self_reference() -> None:
+    assert not _inline_tuple_literal_misses("[Int, Int] v = [w[0], y]; return v[0];")
+
+
+@pytest.mark.parametrize(
+    "body, what",
+    [
+        ("[Int, Int] v = [M[y], 1]; return v[1];", "drop that read"),
+        ("[Int, Int]? v = [M[y], 1]; return v[1];", "drop that read"),
+        (
+            "[Int, Int] v = [M[y], 1]; if (c) { return v[0]; } return v[1];",
+            "move that read",
+        ),
+    ],
+)
+def test_inline_local_tuple_literal_near_miss_on_undefined_read(
+    body: str, what: str
+) -> None:
+    """F-157: an element that indexes a map is not dropped or moved."""
+    misses = _inline_tuple_literal_misses(body)
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert "element 0 indexes a map or array" in misses[0].reason
+    assert what in misses[0].reason
+
+
+def test_inline_local_tuple_literal_no_near_miss_when_read_stays_put() -> None:
+    assert not _inline_tuple_literal_misses(
+        "[Int, Int] v = [M[y], 1]; return v[0] + v[1];"
+    )
+
+
+def _dead_null_guard_unassigned_misses(initialize: str, body: str) -> list[NearMiss]:
+    ctx = _make_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Bool f;
+            {initialize}
+            Void Store(Bool v) {{ f = v; }}
+            Int Query(Int x) {{
+                {body}
+                return x;
+            }}
+        }}
+        """)
+    DeadNullGuardElimination().apply(game, ctx)
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Dead Null Guard Elimination"
+    ]
+
+
+@pytest.mark.parametrize(
+    "body, what",
+    [
+        ("if ([x, f] == None) { return 0; }", "the expression it tests"),
+        (
+            "[Int, Bool]? t = [x, f]; if (t == None) { return 0; }",
+            "the initialiser of the local it tests",
+        ),
+    ],
+)
+def test_dead_null_guard_near_miss_on_unassigned_read(body: str, what: str) -> None:
+    """A guard that can never fire is kept because removing it would drop
+    the read of a field only another oracle assigns."""
+    misses = _dead_null_guard_unassigned_misses("", body)
+    assert len(misses) == 1
+    assert misses[0].variable == "f"
+    assert misses[0].method == "Query"
+    assert what in misses[0].reason
+    assert "reads 'f', which may be unassigned" in misses[0].reason
+    assert "Initialize does not assign" in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "if ([x, f] == None) { return 0; }",
+        "[Int, Bool]? t = [x, f]; if (t == None) { return 0; }",
+    ],
+)
+def test_dead_null_guard_no_near_miss_when_read_assigned(body: str) -> None:
+    assert not _dead_null_guard_unassigned_misses(
+        "Void Initialize() { f = false; }", body
+    )
+
+
+def _symbolic_misses(expression: str) -> list[NearMiss]:
+    ctx = _make_ctx_with_n()
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Int Test(Int x) {{
+                return {expression};
+            }}
+        }}
+        """)
+    SymbolicComputation().apply(game, ctx)
+    return [nm for nm in ctx.near_misses if nm.transform_name == "Symbolic Computation"]
+
+
+@pytest.mark.parametrize(
+    "expression, operand",
+    [
+        ("5 - -3", "-3"),
+        ("-2 + 2", "-2"),
+        ("n + -n", "-n"),
+        ("-2 + -n", "-2"),
+    ],
+)
+def test_symbolic_near_miss_on_negated_operand(expression: str, operand: str) -> None:
+    """The pass does not evaluate a negation, so arithmetic on ``-c`` stays."""
+    misses = _symbolic_misses(expression)
+    assert len(misses) == 1
+    assert misses[0].variable is None
+    assert misses[0].method == "Test"
+    assert f"'{expression}' not folded" in misses[0].reason
+    assert f"operand '{operand}' is a negation" in misses[0].reason
+    # The negation may not be the author's, so the wording must not assume it.
+    assert "written in the game or left by an earlier fold" in misses[0].reason
+    assert misses[0].suggestion is not None
+    assert "Make both games reach the same arithmetic" in misses[0].suggestion
+
+
+def test_symbolic_near_miss_on_negation_from_earlier_fold() -> None:
+    """``3 - 5`` folds to ``-2``; once inlined, ``-2 + 2`` is blocked by a
+    negation the author never wrote, and the near miss still reports it."""
+    ctx = _make_ctx()
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int Test() {
+                Int y = 3 - 5;
+                return y + 2;
+            }
+        }
+        """)
+    game = SymbolicComputation().apply(game, ctx)
+    assert not ctx.near_misses
+    game = InlineSingleUseVariable().apply(game, ctx)
+    SymbolicComputation().apply(game, ctx)
+    misses = [
+        nm for nm in ctx.near_misses if nm.transform_name == "Symbolic Computation"
+    ]
+    assert len(misses) == 1
+    assert misses[0].method == "Test"
+    assert "'-2 + 2' not folded" in misses[0].reason
+    assert "operand '-2' is a negation" in misses[0].reason
+    assert "left by an earlier fold" in misses[0].reason
+    assert misses[0].suggestion is not None
+    assert "Make both games reach the same arithmetic" in misses[0].suggestion
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "5 - 3",
+        "x + -3",  # x has no value either way
+        "-x + 3",  # x is not a constant
+        "x == -3",  # not arithmetic
+        "|0b11| * 5",  # not a negation
+    ],
+)
+def test_symbolic_no_near_miss(expression: str) -> None:
+    assert not _symbolic_misses(expression)
+
+
+def test_symbolic_no_near_miss_on_bit_string_literal() -> None:
+    """XOR of bit-string literals is not arithmetic the pass skipped."""
+    ctx = _make_ctx()
+    game = frog_parser.parse_game("""
+        Game G() {
+            BitString<2> Test() {
+                return 1^2 + 0^2;
+            }
+        }
+        """)
+    SymbolicComputation().apply(game, ctx)
+    assert not ctx.near_misses
+
+
+@pytest.mark.parametrize("expression", ["0 / 0", "5 / 0", "(2 - 1) / 0"])
+def test_symbolic_near_miss_on_division_by_zero(expression: str) -> None:
+    """Division by zero has an unspecified value, so ``c / 0`` is not folded
+    (Python's floor division used to raise and abort the proof)."""
+    misses = _symbolic_misses(expression)
+    assert len(misses) == 1
+    assert misses[0].method == "Test"
+    assert misses[0].variable is None
+    reason = misses[0].reason
+    assert "not folded: division by zero has an unspecified value" in reason
+    assert misses[0].suggestion is not None
+    assert "write the same division in the other game" in misses[0].suggestion
+
+
+@pytest.mark.parametrize("expression", ["0 / 5", "6 / 3", "n / 0", "x / 0"])
+def test_symbolic_no_near_miss_on_division(expression: str) -> None:
+    """Folded divisions, and divisions the pass never evaluates (a symbolic
+    or unknown dividend), report nothing."""
+    assert not _symbolic_misses(expression)
+
+
+def _duplicate_fields_misses(source: str) -> list[NearMiss]:
+    ctx = _make_ctx()
+    RemoveDuplicateFields().apply(frog_parser.parse_game(source), ctx)
+    return [
+        nm for nm in ctx.near_misses if nm.transform_name == "Remove Duplicate Fields"
+    ]
+
+
+@pytest.mark.parametrize(
+    "fields, why",
+    [
+        (
+            "BitString<1> h = 0b0; BitString<1> n = 0b1;",
+            "they start from different initializers",
+        ),
+        ("BitString<1> h = 0b0; BitString<1> n;", "they start from different"),
+        (
+            "BitString<1> h = S.F(); BitString<1> n = S.F();",
+            "their initializers make calls",
+        ),
+    ],
+)
+def test_duplicate_fields_near_miss_on_initial_values(fields: str, why: str) -> None:
+    """Every write pairs, so only the initial values block the merge."""
+    misses = _duplicate_fields_misses(f"""
+        Game G() {{
+            {fields}
+            Void Flip() {{
+                h = h + 0b1;
+                n = n + 0b1;
+            }}
+            BitString<1> Get() {{
+                return n;
+            }}
+        }}
+        """)
+    assert len(misses) == 1
+    assert misses[0].variable is None
+    assert misses[0].method is None
+    assert "Fields 'h' and 'n' not merged: every write updates both alike" in (
+        misses[0].reason
+    )
+    assert why in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "fields, body, why",
+    [
+        ("Map<Int, Int> A; Map<Int, Int> B;", "A[k] = 1;", "an element write"),
+        (
+            "Map<Int, Int> A; Map<Int, Int> B;",
+            "A[k] = 1; B[k] = 1;",
+            "an element write changes 'A' alone",
+        ),
+        (
+            "Set<Int> S; BitString<8> A; BitString<8> B;",
+            "A <-uniq[S] BitString<8>;",
+            "an exclusion sample changes 'A' alone",
+        ),
+        (
+            "Set<BitString<8>> A; Set<BitString<8>> B;",
+            "BitString<8> x <-uniq[A] BitString<8>;",
+            "a '<-uniq' sample inserts into 'A' alone",
+        ),
+        (
+            "Int A; Int B;",
+            "for (Int A = 0 to 3) { k = k + B; }",
+            "a loop binder rebinds 'A'",
+        ),
+        ("Int A; Int B;", "Int B = 1;", "a local declaration rebinds 'B'"),
+    ],
+)
+def test_duplicate_fields_near_miss_on_unpaired_write(
+    fields: str, body: str, why: str
+) -> None:
+    """Every other write pairs, so this write alone blocks the merge."""
+    misses = _duplicate_fields_misses(f"""
+        Game G() {{
+            {fields}
+            Void Put(Int k) {{
+                {body}
+            }}
+        }}
+        """)
+    assert len(misses) == 1
+    assert misses[0].variable is None
+    assert misses[0].method == "Put"
+    assert misses[0].reason.startswith("Fields 'A' and 'B' not merged: ")
+    assert why in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "fields, body",
+    [
+        # Merged.
+        ("Int A = 0; Int B = 0;", "A = A + k; B = B + k;"),
+        # A write to one field only.
+        ("Int A = 0; Int B = 1;", "A = k;"),
+        ("Map<Int, Int> A; Map<Int, Int> B;", "A[k] = 1; B = A;"),
+    ],
+)
+def test_duplicate_fields_no_near_miss(fields: str, body: str) -> None:
+    assert not _duplicate_fields_misses(f"""
+        Game G() {{
+            {fields}
+            Void Put(Int k) {{
+                {body}
+            }}
+        }}
+        """)
+
+
+def test_duplicate_fields_no_near_miss_for_never_written_constants() -> None:
+    """No write pairs the fields: they are two different constants."""
+    assert not _duplicate_fields_misses("""
+        Game G() {
+            Int a = 1;
+            Int b = 2;
+            Int Get() {
+                return a + b;
+            }
+        }
+        """)
+
+
+def test_duplicate_fields_constants_do_not_hide_real_near_miss() -> None:
+    """Never-written constants `a`, `b` report nothing, so after dedupe the
+    surviving near miss is the one for `c`, `d`, which every write updates
+    alike."""
+    misses = deduplicate_near_misses(_duplicate_fields_misses("""
+        Game G() {
+            Int a = 1;
+            Int b = 2;
+            Int c = 0;
+            Int d = 5;
+            Void Flip() {
+                c = c + 1;
+                d = d + 1;
+            }
+            Int Get() {
+                return a + b + d;
+            }
+        }
+        """))
+    assert len(misses) == 1
+    assert "Fields 'c' and 'd' not merged" in misses[0].reason
+
+
+def _challenge_exclusion_misses(initialize: str) -> list[NearMiss]:
+    ctx = _rc3_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G(Bool c) {{
+            Function<BitString<2>, BitString<2>> e;
+            BitString<2> U;
+            BitString<2> p;
+            Void Initialize() {{
+                e <- Function<BitString<2>, BitString<2>>;
+                U = 0b00;
+                {initialize}
+            }}
+            BitString<2> Hash(BitString<2> pm) {{
+                if (pm == U) {{
+                    return 0^2;
+                }}
+                return e(pm);
+            }}
+        }}
+        """)
+    _RC3_ChalExcl().apply(game, ctx)
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Challenge Exclusion RF To Uniform"
+    ]
+
+
+@pytest.mark.parametrize(
+    "initialize, name",
+    [
+        ("p = e(U); U = 0b11;", "U"),
+        ("BitString<2> x = U; if (c) { x = 0b11; } p = e(x);", "x"),
+        ("BitString<2> x = U; U <- BitString<2>; p = e(x);", "U"),
+    ],
+)
+def test_challenge_exclusion_near_miss_on_rewritten_argument(
+    initialize: str, name: str
+) -> None:
+    """The Initialize call is kept because Initialize may write something its
+    argument depends on after reading it."""
+    misses = _challenge_exclusion_misses(initialize)
+    assert len(misses) == 1
+    assert misses[0].variable == "e"
+    assert misses[0].method == "Initialize"
+    assert f"may write '{name}' after the argument" in misses[0].reason
+
+
+def test_challenge_exclusion_no_near_miss_on_stable_argument() -> None:
+    assert not _challenge_exclusion_misses("BitString<2> x = U; p = e(x);")
+
+
+def _challenge_exclusion_oracle_misses(hash_body: str) -> list[NearMiss]:
+    ctx = _rc3_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G(Bool c) {{
+            Function<BitString<2>, BitString<2>> e;
+            BitString<2> U;
+            BitString<2> p;
+            Void Initialize() {{
+                e <- Function<BitString<2>, BitString<2>>;
+                U = 0b00;
+                p = e(U);
+            }}
+            BitString<2> Hash(BitString<2> pm) {{
+                {hash_body}
+            }}
+        }}
+        """)
+    _RC3_ChalExcl().apply(game, ctx)
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Challenge Exclusion RF To Uniform"
+    ]
+
+
+@pytest.mark.parametrize(
+    "hash_body, name",
+    [
+        (
+            "BitString<2> q = pm; pm = 0b11; "
+            "if (pm == U) { return 0^2; } return e(q);",
+            "pm",
+        ),
+        (
+            "BitString<2> q = pm; if (pm == U) { return 0^2; } "
+            "if (c) { q = U; } return e(q);",
+            "q",
+        ),
+    ],
+)
+def test_challenge_exclusion_near_miss_on_oracle_rewritten_value(
+    hash_body: str, name: str
+) -> None:
+    """The Initialize call is kept because the oracle may write something its
+    guard or its random-function argument reads."""
+    misses = _challenge_exclusion_oracle_misses(hash_body)
+    assert len(misses) == 1
+    assert misses[0].variable == "e"
+    assert misses[0].method == "Hash"
+    assert f"may write '{name}', which its exclusion guard" in misses[0].reason
+
+
+def test_challenge_exclusion_no_near_miss_on_stable_oracle_value() -> None:
+    assert not _challenge_exclusion_oracle_misses(
+        "BitString<2> q = pm; if (pm == U) { return 0^2; } return e(q);"
+    )
+
+
+def _fresh_input_misses(initialize: str, oracle: str = "") -> list[NearMiss]:
+    ctx = _make_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Function<BitString<2>, BitString<2>> H;
+            Set<BitString<2>> seen;
+            BitString<2> y;
+            Void Initialize() {{
+                H <- Function<BitString<2>, BitString<2>>;
+                {initialize}
+            }}
+            {oracle}
+            BitString<2> Fresh() {{
+                BitString<2> v <-uniq[seen] BitString<2>;
+                return H(v);
+            }}
+        }}
+        """)
+    FreshInputRFToUniform().apply(game, ctx)
+    return [
+        nm for nm in ctx.near_misses if nm.transform_name == "Fresh Input RF To Uniform"
+    ]
+
+
+@pytest.mark.parametrize(
+    "initialize, oracle, method, name",
+    [
+        (
+            "BitString<2> u = 0b00; seen = seen union {u}; u = 0b11; y = H(u);",
+            "",
+            "Initialize",
+            "u",
+        ),
+        (
+            "",
+            "BitString<2> Hash(BitString<2> x) "
+            "{ seen = seen union {x}; x = 0b00; return H(x); }",
+            "Hash",
+            "x",
+        ),
+        (
+            "",
+            "BitString<2> Hash(BitString<2> x) "
+            "{ BitString<2> w <-uniq[seen] BitString<2>; w = x; return H(w); }",
+            "Hash",
+            "w",
+        ),
+    ],
+)
+def test_fresh_input_near_miss_on_rewritten_insertion(
+    initialize: str, oracle: str, method: str, name: str
+) -> None:
+    """Fresh keeps H(v) because a method may change the value it inserted
+    into seen before querying H on it."""
+    misses = _fresh_input_misses(initialize, oracle)
+    assert len(misses) == 1
+    assert misses[0].variable == "H"
+    assert f"'{method}' inserts '{name}' into 'seen' but may change it" in (
+        misses[0].reason
+    )
+
+
+def test_fresh_input_near_miss_on_uninserted_call() -> None:
+    misses = _fresh_input_misses(
+        "", "BitString<2> Hash(BitString<2> x) { return H(x); }"
+    )
+    assert len(misses) == 1
+    assert "does not add its argument" in misses[0].reason
+    # The fix is to record every query in seen, not to switch to
+    # <-uniq[H.domain], which holds no query either.
+    assert misses[0].suggestion == (
+        "Draw every point the random function is queried on (its matching "
+        "component) with <-uniq[seen], or insert it into 'seen' in Initialize "
+        "before the draw"
+    )
+
+
+def test_fresh_input_no_near_miss_on_recorded_value() -> None:
+    assert not _fresh_input_misses(
+        "BitString<2> u = 0b00; seen = seen union {u}; y = H(u);"
+    )
+
+
+@pytest.mark.parametrize(
+    "oracle, inserted",
+    [
+        (
+            "BitString<2> Hash(BitString<2> x) "
+            "{ seen = seen union {S.f(x)}; return H(S.f(x)); }",
+            "S.f(x)",
+        ),
+        (
+            "BitString<2> Hash() { seen = seen union {S.G()}; return H(S.G()); }",
+            "S.G()",
+        ),
+    ],
+)
+def test_fresh_input_near_miss_on_nondeterministic_insertion(
+    oracle: str, inserted: str
+) -> None:
+    """Hash inserts one value of a non-deterministic call and queries H on
+    another evaluation, so Fresh keeps H(v)."""
+    misses = _fresh_input_misses("", oracle)
+    assert len(misses) == 1
+    assert misses[0].variable == "H"
+    assert f"'Hash' inserts '{inserted}' into 'seen'" in misses[0].reason
+    assert "not annotated deterministic" in misses[0].reason
+
+
+def _fresh_input_domain_misses(initialize: str, oracle: str = "") -> list[NearMiss]:
+    ctx = _make_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Function<BitString<2>, BitString<2>> H;
+            BitString<2> y;
+            Void Initialize() {{
+                H <- Function<BitString<2>, BitString<2>>;
+                {initialize}
+            }}
+            {oracle}
+            BitString<2> Fresh() {{
+                BitString<2> v <-uniq[H.domain] BitString<2>;
+                return H(v);
+            }}
+        }}
+        """)
+    FreshInputRFToUniform().apply(game, ctx)
+    return [
+        nm for nm in ctx.near_misses if nm.transform_name == "Fresh Input RF To Uniform"
+    ]
+
+
+@pytest.mark.parametrize(
+    "initialize, oracle, method, point",
+    [
+        ("", "BitString<2> Hash(BitString<2> x) { return H(x); }", "Hash", "x"),
+        ("y = H(0b00);", "", "Initialize", "0b00"),
+        # A draw overwritten before the query (this near miss used to go
+        # through the insertion branch, placed where diagnoses hide it).
+        (
+            "",
+            "BitString<2> Hash(BitString<2> a) { "
+            "BitString<2> x <-uniq[H.domain] BitString<2>; x = a; return H(x); }",
+            "Hash",
+            "x",
+        ),
+        # A draw the walk does not see: made in another method.
+        (
+            "y <-uniq[H.domain] BitString<2>;",
+            "BitString<2> Hash() { return H(y); }",
+            "Hash",
+            "y",
+        ),
+    ],
+)
+def test_fresh_input_near_miss_on_undrawn_rf_domain_query(
+    initialize: str, oracle: str, method: str, point: str
+) -> None:
+    """F-002: H.domain holds only the points <-uniq[H.domain] drew, so a query
+    of H on any point not drawn there earlier in the same method may be on
+    v, and Fresh keeps H(v)."""
+    misses = _fresh_input_domain_misses(initialize, oracle)
+    assert len(misses) == 1
+    assert (
+        f"'{method}' queries 'H' on '{point}', which no earlier "
+        f"<-uniq[H.domain] draw in '{method}' fixes" in misses[0].reason
+    )
+    assert f"'{point}' may be the point drawn here" in misses[0].reason
+    # Fields are renamed in canonical diffs: no variable filter.  The near
+    # miss sits where the rewrite was declined.
+    assert misses[0].variable is None
+    assert misses[0].method == "Fresh"
+    assert misses[0].suggestion is not None
+    assert "drawn with <-uniq[H.domain] earlier in the same method" in (
+        misses[0].suggestion
+    )
+
+
+@pytest.mark.parametrize(
+    "exclusion, initialize, suggestion",
+    [
+        ("H.domain", "", "Make the query in a method, on a point drawn there"),
+        # The insertion is there already; a field initializer's query still
+        # does not count, so the near miss must not suggest inserting it.
+        (
+            "seen",
+            "seen = seen union {0b00};",
+            "or in Initialize after inserting the point into 'seen', before "
+            "the draw",
+        ),
+    ],
+)
+def test_fresh_input_near_miss_on_query_in_field_initializer(
+    exclusion: str, initialize: str, suggestion: str
+) -> None:
+    """A sampled let: H is the random function in field initializers, and a
+    query there never counts, with either kind of exclusion set."""
+    ctx = _make_ctx()
+    ctx.proof_let_types.set(
+        "H",
+        frog_ast.FunctionType(
+            frog_ast.BitStringType(frog_ast.Integer(2)),
+            frog_ast.BitStringType(frog_ast.Integer(2)),
+        ),
+    )
+    ctx.sampled_let_names = {"H"}
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Set<BitString<2>> seen;
+            BitString<2> y = H(0b00);
+            Void Initialize() {{
+                {initialize}
+            }}
+            BitString<2> Peek() {{
+                return y;
+            }}
+            BitString<2> Fresh() {{
+                BitString<2> v <-uniq[{exclusion}] BitString<2>;
+                return H(v);
+            }}
+        }}
+        """)
+    FreshInputRFToUniform().apply(game, ctx)
+    misses = [
+        nm for nm in ctx.near_misses if nm.transform_name == "Fresh Input RF To Uniform"
+    ]
+    assert len(misses) == 1
+    assert misses[0].reason.startswith(
+        "the initializer of field 'y' queries 'H' on '0b00', and a query in a "
+        "field initializer never counts"
+    )
+    assert "does not add its argument" not in misses[0].reason
+    assert misses[0].suggestion is not None
+    assert suggestion in misses[0].suggestion
+    assert "insert it into" not in misses[0].suggestion
+    assert misses[0].variable is None
+    assert misses[0].method == "Fresh"
+
+
+def test_fresh_input_near_miss_does_not_quote_minted_names() -> None:
+    """An alpha-renamed local (__a0__) is not a name the user wrote, so the
+    near miss describes the point instead of quoting it."""
+    misses = _fresh_input_domain_misses(
+        "",
+        "BitString<2> Hash(BitString<2> a) { "
+        "BitString<2> __a0__ <-uniq[H.domain] BitString<2>; __a0__ = a; "
+        "return H(__a0__); }",
+    )
+    assert len(misses) == 1
+    assert "'Hash' queries 'H' on a point that no earlier <-uniq[H.domain] draw" in (
+        misses[0].reason
+    )
+    assert "that point may be the point drawn here" in misses[0].reason
+    assert "__a0__" not in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "exclusion, oracle, reason, suggestion",
+    [
+        # Another function's hidden set says nothing about H's queries.
+        (
+            "K.domain",
+            "",
+            "'K.domain' is neither 'H.domain' nor a game field",
+            "Draw the input with <-uniq[H.domain], or from a never-reset field set",
+        ),
+        # A method parameter is not kept between calls.
+        (
+            "S",
+            "",
+            "'S' is neither 'H.domain' nor a game field",
+            "Draw the input with <-uniq[H.domain], or from a never-reset field set",
+        ),
+        # A field set that an oracle resets.
+        (
+            "seen",
+            "Void Reset() { seen = {}; }",
+            "'seen' is assigned other than by 'seen = seen union {..}'",
+            "Only add to 'seen'",
+        ),
+    ],
+)
+def test_fresh_input_near_miss_on_unsuitable_exclusion_set(
+    exclusion: str, oracle: str, reason: str, suggestion: str
+) -> None:
+    """When the exclusion set itself is the problem, the near miss says so
+    rather than blaming a call site."""
+    ctx = _make_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            Function<BitString<2>, BitString<2>> H;
+            Function<BitString<2>, BitString<2>> K;
+            Set<BitString<2>> seen;
+            Void Initialize() {{
+                H <- Function<BitString<2>, BitString<2>>;
+                K <- Function<BitString<2>, BitString<2>>;
+            }}
+            {oracle}
+            BitString<2> Fresh(Set<BitString<2>> S) {{
+                BitString<2> v <-uniq[{exclusion}] BitString<2>;
+                return H(v);
+            }}
+        }}
+        """)
+    FreshInputRFToUniform().apply(game, ctx)
+    misses = [
+        nm for nm in ctx.near_misses if nm.transform_name == "Fresh Input RF To Uniform"
+    ]
+    assert len(misses) == 1
+    assert reason in misses[0].reason
+    assert misses[0].suggestion is not None
+    assert suggestion in misses[0].suggestion
+
+
+def test_fresh_input_no_near_miss_when_every_rf_domain_query_is_drawn() -> None:
+    assert not _fresh_input_domain_misses(
+        "BitString<2> u <-uniq[H.domain] BitString<2>; y = H(u);",
+        "BitString<2> Hash() { BitString<2> x <-uniq[H.domain] BitString<2>; "
+        "return H(x); }",
+    )
+
+
+# ---------------------------------------------------------------------------
+# ExtractRepeatedTupleAccess: tuple-typed field bases
+# ---------------------------------------------------------------------------
+
+
+def _extract_field_misses(methods: str, init: str) -> list[NearMiss]:
+    game = frog_parser.parse_game(
+        f"""
+        Game TestGame() {{
+            [Int, Int] f;
+            Void Initialize() {{ {init} }}
+            {methods}
+        }}
+        """
+    )
+    ctx = _make_ctx()
+    result = ExtractRepeatedTupleAccess().apply(game, ctx)
+    assert result == game  # transform should NOT have fired
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Extract Repeated Tuple Access"
+    ]
+
+
+@pytest.mark.parametrize(
+    "methods, init, reason",
+    [
+        (
+            "Void Store() { f = K.Get(); } Int Q() { return f[1] + f[1]; }",
+            "",
+            "may be unassigned when the oracle runs, because Initialize does"
+            " not assign it",
+        ),
+        (
+            "Int Q() { Int x = f[1]; f = K.Get(); return x + f[1]; }",
+            "f = K.Get();",
+            "writes or rebinds the field",
+        ),
+        (
+            "Void Reset() { f = K.Get(); }"
+            " Int Q() { Int x = f[1]; Reset(); return x + f[1]; }",
+            "f = K.Get();",
+            "calls a method of the game",
+        ),
+        # Initialize runs Q before it assigns f.
+        (
+            "Int Q(Bool c) { if (c) { return 0; } return f[1] + f[1]; }",
+            "Int r = TestGame.Q(true); f = K.Get();",
+            "because Initialize calls a method of the game before assigning it",
+        ),
+        # Initialize does assign f at top level, but a local of the same name
+        # may be what the assignment targets.
+        (
+            "Int Q() { return f[1] + f[1]; }",
+            "[Int, Int] f = K.Get(); f = K.Get();",
+            "because Initialize also binds a local named 'f'",
+        ),
+        # Q binds a local named f in a branch, so the pass leaves the field
+        # alone in the whole method, though the reads after the branch are of
+        # the field.
+        (
+            "Int Q(Bool c) { if (c) { [Int, Int] f = K.Get(); return f[0]; }"
+            " return f[1] + f[1]; }",
+            "f = K.Get();",
+            "the method also binds a local or loop binder named 'f'",
+        ),
+        (
+            "Int Q(Set<[Int, Int]> S) { for ([Int, Int] f in S) { }"
+            " return f[1] + f[1]; }",
+            "f = K.Get();",
+            "the method also binds a local or loop binder named 'f'",
+        ),
+    ],
+)
+def test_extract_field_near_miss(methods: str, init: str, reason: str) -> None:
+    """A repeated read of a tuple field that the pass declines to extract is
+    reported, naming the field, the oracle and the unmet condition."""
+    misses = _extract_field_misses(methods, init)
+    assert len(misses) == 1
+    assert misses[0].variable == "f"
+    assert misses[0].method == "Q"
+    assert "f[1]" in misses[0].reason
+    assert reason in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "methods, init",
+    [
+        # A parameter named f: every read of f in Q is of the parameter.
+        ("Int Q(Array<Int, 2> f) { return f[1] + f[1]; }", ""),
+        # The full reconstruction [f[0], f[1]] declines the extraction for
+        # any base, so the unassigned field is not what blocks it.
+        (
+            "Void Store() { f = K.Get(); }"
+            " [Int, Int] Q() { Int x = f[1] + f[1]; return [f[0], f[1]]; }",
+            "",
+        ),
+        # An index outside the tuple declines for any base as well.
+        (
+            "Void Store() { f = K.Get(); } Int Q() { return f[2] + f[2]; }",
+            "",
+        ),
+    ],
+)
+def test_extract_field_no_near_miss_when_another_rule_declines(
+    methods: str, init: str
+) -> None:
+    """A field condition is reported only when it is what blocks the
+    extraction."""
+    assert not _extract_field_misses(methods, init)
+@pytest.mark.parametrize(
+    "oracle, inserted",
+    [
+        (
+            "BitString<2> Hash(BitString<2> x) "
+            "{ seen = seen union {x}; return H(x); }",
+            "x",
+        ),
+        (
+            "BitString<2> Hash() { seen = seen union {0b00}; return H(0b00); }",
+            "0b00",
+        ),
+        # Sound because of the guard, but the gate does not read it.
+        (
+            "BitString<2> Hash(BitString<2> x) { if (x in seen) { return 0b00; } "
+            "seen = seen union {x}; return H(x); }",
+            "x",
+        ),
+    ],
+)
+def test_fresh_input_near_miss_on_oracle_recorded_query(
+    oracle: str, inserted: str
+) -> None:
+    """Hash records its query in seen, but the adversary may call Hash after
+    Fresh draws v, so Fresh keeps H(v) and the near miss names the site."""
+    misses = _fresh_input_misses("", oracle)
+    assert len(misses) == 1
+    assert misses[0].variable == "H"
+    assert (
+        f"'Hash' inserts '{inserted}' into 'seen' before calling 'H' on it, "
+        "but the adversary may call 'Hash' after 'v' is drawn"
+    ) in misses[0].reason
+    assert misses[0].suggestion is not None
+    assert "in Initialize before the draw" in misses[0].suggestion
+
+
+def test_fresh_input_near_miss_on_initialize_query_after_draw() -> None:
+    """Initialize draws w and then records and queries 0b00, which w may
+    equal.  Fresh's draw comes after all of Initialize and still fires."""
+    misses = _fresh_input_misses(
+        "BitString<2> w <-uniq[seen] BitString<2>; y = H(w); "
+        "seen = seen union {0b00}; y = y + H(0b00);"
+    )
+    assert len(misses) == 1
+    assert (
+        "'Initialize' inserts '0b00' into 'seen' before calling 'H' on it, "
+        "but Initialize calls it after drawing 'w'"
+    ) in misses[0].reason
+
+
+_RF_FN = "Function<BitString<2>, BitString<2>>"
+
+
+def _rf_eligibility_misses(
+    transform: TransformPass, oracles: str, fields: str = "", initialize: str = ""
+) -> list[NearMiss]:
+    """Near misses of *transform* on a game whose Q queries H on a fresh
+    <-uniq[seen] draw (UniqueRF / FreshInput shape) and whose Initialize may
+    evaluate H at the challenge cf (ChallengeExclusion shape)."""
+    ctx = _make_ctx()
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            {_RF_FN} H;
+            Set<BitString<2>> seen;
+            {fields}
+            Void Initialize() {{
+                H <- {_RF_FN};
+                {initialize}
+            }}
+            {oracles}
+            BitString<2> Q() {{
+                BitString<2> v <-uniq[seen] BitString<2>;
+                BitString<2> z = H(v);
+                return z;
+            }}
+        }}
+        """)
+    transform.apply(game, ctx)
+    return [nm for nm in ctx.near_misses if nm.transform_name == transform.name]
+
+
+@pytest.mark.parametrize(
+    "transform", [UniqueRFSimplification(), FreshInputRFToUniform()]
+)
+@pytest.mark.parametrize(
+    "oracles, fields, initialize, method",
+    [
+        (f"Void Reset({_RF_FN} F) {{ H = F; }}", "", "", "Reset"),
+        ("", f"{_RF_FN} K;", f"K <- {_RF_FN}; H = K;", "Initialize"),
+        (f"Void Reset() {{ H <- {_RF_FN}; }}", "", "", "Reset"),
+    ],
+)
+def test_rf_near_miss_on_write_outside_sample(
+    transform: TransformPass, oracles: str, fields: str, initialize: str, method: str
+) -> None:
+    """A write to H besides its sample makes H ineligible, and the near miss
+    names the writing method."""
+    misses = _rf_eligibility_misses(transform, oracles, fields, initialize)
+    written = [nm for nm in misses if "writes or rebinds 'H'" in nm.reason]
+    assert len(written) == 1
+    assert f"'{method}' writes or rebinds 'H'" in written[0].reason
+    # Fields are renamed in canonical diffs: no variable filter.  The near
+    # miss sits where the rewrite was declined.
+    assert written[0].variable is None
+    assert written[0].method == "Q"
+    assert written[0].suggestion is not None
+    assert "never assign it again" in written[0].suggestion
+
+
+@pytest.mark.parametrize(
+    "transform", [UniqueRFSimplification(), FreshInputRFToUniform()]
+)
+@pytest.mark.parametrize(
+    "oracles, fields, initialize",
+    [
+        (f"BitString<2> Hash(BitString<2> x) {{ {_RF_FN} K = H; return K(x); }}", "", ""),
+        ("BitString<2> Hash(BitString<2> x) { return K(x); }", f"{_RF_FN} K;", "K = H;"),
+        (f"{_RF_FN} Reveal() {{ return H; }}", "", ""),
+    ],
+)
+def test_rf_near_miss_on_escaping_value(
+    transform: TransformPass, oracles: str, fields: str, initialize: str
+) -> None:
+    misses = _rf_eligibility_misses(transform, oracles, fields, initialize)
+    escaped = [nm for nm in misses if "function value escapes" in nm.reason]
+    assert len(escaped) == 1
+    assert escaped[0].variable is None
+
+
+@pytest.mark.parametrize(
+    "transform", [UniqueRFSimplification(), FreshInputRFToUniform()]
+)
+def test_rf_no_eligibility_near_miss_on_direct_calls(transform: TransformPass) -> None:
+    """Writes to another Function field and direct calls to H report no
+    eligibility near miss."""
+    misses = _rf_eligibility_misses(
+        transform,
+        f"Void Reset({_RF_FN} F) {{ G = F; }} "
+        "BitString<2> Hash() { BitString<2> u <-uniq[seen] BitString<2>; "
+        "return H(u); }",
+        f"{_RF_FN} G;",
+    )
+    assert not [
+        nm
+        for nm in misses
+        if "writes or rebinds" in nm.reason or "function value escapes" in nm.reason
+    ]
+
+
+def test_unique_rf_near_miss_on_unanalyzed_call() -> None:
+    """A query to H left in an else-if condition is not checked against the
+    draws, so UniqueRF declines and names the call."""
+    misses = _rf_eligibility_misses(
+        UniqueRFSimplification(),
+        "Bool Probe(Bool b, BitString<2> x, BitString<2> y) "
+        "{ if (b) { return false; } else if (H(x) == y) { return true; } "
+        "return false; }",
+    )
+    assert len(misses) == 1
+    assert "the call 'H(x)' is not a standalone assignment" in misses[0].reason
+    assert misses[0].variable is None
+    assert misses[0].method == "Q"
+
+
+def test_challenge_exclusion_near_miss_on_rf_written_before_call() -> None:
+    misses = _rf_eligibility_misses(
+        _RC3_ChalExcl(),
+        "BitString<2>? Query(BitString<2> x) { if (x == cf) { return None; } "
+        "return H(x); }",
+        f"{_RF_FN} K; BitString<2> cf; BitString<2> y;",
+        f"K <- {_RF_FN}; cf <- BitString<2>; H = K; y = H(cf);",
+    )
+    written = [nm for nm in misses if "writes or rebinds 'H'" in nm.reason]
+    assert len(written) == 1
+    assert "'Initialize' writes or rebinds 'H'" in written[0].reason
+    assert written[0].method == "Initialize"
+# ---------------------------------------------------------------------------
+# Draws whose domain may be empty (F-303, F-305, F-318, F-327)
+# ---------------------------------------------------------------------------
+
+
+def _possibly_empty_draw_game(probe_body: str) -> frog_ast.Game:
+    return frog_parser.parse_game(f"""
+        Game G() {{
+            Set<BitString<1>> E;
+            Void Add(BitString<1> x) {{
+                E = E union {{x}};
+            }}
+            Int Size() {{
+                return |E|;
+            }}
+            Void Probe() {{
+                {probe_body}
+            }}
+        }}
+        """)
+
+
+def _structural_pass_misses(pass_name: str, probe_body: str) -> list[NearMiss]:
+    from proof_frog.proof_engine import ProofEngine
+    from proof_frog.transforms.structural import (
+        RemoveUnnecessaryFields,
+        TopologicalSort,
+    )
+
+    ctx = _make_ctx()
+    ctx.sort_game_fn = ProofEngine().sort_game
+    transform = {
+        "Topological Sorting": TopologicalSort(),
+        "Remove unnecessary statements and fields": RemoveUnnecessaryFields(),
+    }[pass_name]
+    transform.apply(_possibly_empty_draw_game(probe_body), ctx)
+    return [nm for nm in ctx.near_misses if nm.transform_name == pass_name]
+
+
+@pytest.mark.parametrize(
+    "pass_name",
+    ["Topological Sorting", "Remove unnecessary statements and fields"],
+)
+def test_dead_possibly_empty_draw_kept_near_miss(pass_name: str) -> None:
+    """A draw whose result is unused but whose domain may be empty is kept,
+    and the pass says why, naming the draw, its target and its oracle."""
+    misses = _structural_pass_misses(
+        pass_name,
+        "Set<BitString<1>> L; L = L union {0b0};"
+        " BitString<1> junk <- BitString<1> \\ L;",
+    )
+    assert len(misses) == 1
+    assert misses[0].variable == "junk"
+    assert misses[0].method == "Probe"
+    assert "may be empty" in misses[0].reason
+    assert "BitString<1> \\ L" in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "pass_name",
+    ["Topological Sorting", "Remove unnecessary statements and fields"],
+)
+@pytest.mark.parametrize(
+    "probe_body",
+    [
+        # A draw from a type is dropped, not kept.
+        "BitString<1> junk <- BitString<1>;",
+        # So is a draw from a type minus a literal it cannot cover.
+        "BitString<1> junk <- BitString<1> \\ {0b0};",
+    ],
+)
+def test_dead_draw_from_non_empty_domain_no_near_miss(
+    pass_name: str, probe_body: str
+) -> None:
+    assert not _structural_pass_misses(pass_name, probe_body)
+
+
+def test_sink_uniform_sample_near_miss_possibly_empty_domain() -> None:
+    """SinkUniformSample declines to move a draw from a runtime set into the
+    branch that uses it, and reports it."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Set<BitString<1>> S;
+            Int O(Bool b) {
+                Set<BitString<1>> x <- S;
+                if (b) {
+                    return |x|;
+                }
+                return 0;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = SinkUniformSample().apply(game, ctx)
+    assert result == game
+    misses = [
+        nm for nm in ctx.near_misses if nm.transform_name == "Sink Uniform Sample"
+    ]
+    assert len(misses) == 1
+    assert misses[0].variable == "x"
+    assert "may be empty" in misses[0].reason
+
+
+# ---------------------------------------------------------------------------
+# State relations, ModInt cancellation and group power distribution
+# ---------------------------------------------------------------------------
+
+
+def _group_ctx() -> PipelineContext:
+    lets = NameTypeMap()
+    group = frog_ast.Variable("G")
+    lets.set("G", frog_ast.GroupType())
+    lets.set(
+        "H",
+        frog_ast.FunctionType(
+            frog_ast.GroupElemType(group),
+            frog_ast.ModIntType(frog_ast.FieldAccess(group, "order")),
+        ),
+    )
+    return PipelineContext(
+        variables={}, proof_let_types=lets, proof_namespace={}, subsets_pairs=[]
+    )
+
+
+def _names(ctx: PipelineContext) -> set[str]:
+    return {nm.transform_name for nm in ctx.near_misses}
+
+
+def test_near_miss_group_power_with_call_in_exponent() -> None:
+    from proof_frog.transforms.algebraic import GroupElemSimplification
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> f(GroupElem<G> pk, GroupElem<G> m) {
+                return (pk * m) ^ F.Sample();
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    GroupElemSimplification().apply(game, ctx)
+    assert "GroupElem Simplification" in _names(ctx)
+
+
+def test_near_miss_field_invariant_not_preserved() -> None:
+    from proof_frog.transforms.state_relations import FieldInvariantElimination
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> pk;
+            ModInt<G.order> sk;
+            GroupElem<G> Initialize() {
+                ModInt<G.order> x <- ModInt<G.order>;
+                pk = G.generator ^ x;
+                sk = x;
+                return pk;
+            }
+            GroupElem<G> Upd(ModInt<G.order> d) {
+                pk = pk * G.generator ^ d;
+                sk = sk + d + d;
+                return pk;
+            }
+            ModInt<G.order> Reveal() {
+                return sk;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    FieldInvariantElimination().apply(game, ctx)
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == "Field Invariant Elimination"]
+    assert misses and misses[0].method == "Upd"
+
+
+def test_near_miss_group_field_not_generator_power() -> None:
+    from proof_frog.transforms.state_relations import GeneratorPowerFieldToExponent
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> pk;
+            GroupElem<G> Initialize() {
+                ModInt<G.order> x <- ModInt<G.order>;
+                pk = G.generator ^ x;
+                return pk;
+            }
+            GroupElem<G> Upd(GroupElem<G> c) {
+                pk = pk * c;
+                return pk;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    GeneratorPowerFieldToExponent().apply(game, ctx)
+    assert "Generator Power Field To Exponent" in _names(ctx)
+
+
+def test_near_miss_offset_read_on_its_own() -> None:
+    from proof_frog.transforms.state_relations import OffsetFusion
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> P;
+            ModInt<G.order> D;
+            GroupElem<G> Initialize() {
+                D = 0;
+                ModInt<G.order> a <- ModInt<G.order>;
+                P = G.generator ^ a;
+                return P;
+            }
+            [GroupElem<G>, ModInt<G.order>] Shift(ModInt<G.order> d) {
+                D = D + d;
+                return [P * G.generator ^ D, D];
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert OffsetFusion().apply(game, ctx) == game
+    assert "Offset Fusion" in _names(ctx)
+
+
+def _removed_field_misses(ctx: PipelineContext, transform: str) -> list[NearMiss]:
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == transform and "Removing field" in nm.reason
+    ]
+
+
+def test_near_miss_invariant_field_named_by_another_field() -> None:
+    from proof_frog.transforms.state_relations import FieldInvariantElimination
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            Int a;
+            Int b;
+            Int q = a;
+            Void Initialize(Int s) {
+                b = s;
+                a = s + 1;
+            }
+            Int Step() {
+                a = a + 1;
+                b = b + 1;
+                return a + q;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert FieldInvariantElimination().apply(game, ctx) == game
+    (miss,) = _removed_field_misses(ctx, "Field Invariant Elimination")
+    assert miss.variable == "a" and "field 'q'" in miss.reason
+
+
+def test_near_miss_invariant_field_named_in_a_type_before_its_local() -> None:
+    from proof_frog.transforms.state_relations import FieldInvariantElimination
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            Int a;
+            Int b;
+            Void Initialize(Int s) {
+                b = s;
+                a = s + 1;
+            }
+            Int Samp() {
+                BitString<a> x <- BitString<a>;
+                a = a + 1;
+                b = b + 1;
+                return |x|;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert FieldInvariantElimination().apply(game, ctx) == game
+    (miss,) = _removed_field_misses(ctx, "Field Invariant Elimination")
+    assert miss.variable == "a" and miss.method == "Samp"
+
+
+def test_near_miss_group_field_named_by_another_field() -> None:
+    from proof_frog.transforms.state_relations import GeneratorPowerFieldToExponent
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> P;
+            GroupElem<G> Q = P;
+            Void Initialize() {
+                ModInt<G.order> e <- ModInt<G.order>;
+                P = G.generator ^ e;
+            }
+            GroupElem<G> Upd(ModInt<G.order> d) {
+                P = P * G.generator ^ d;
+                return Q;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert GeneratorPowerFieldToExponent().apply(game, ctx) == game
+    (miss,) = _removed_field_misses(ctx, "Generator Power Field To Exponent")
+    assert miss.variable == "P" and "field 'Q'" in miss.reason
+
+
+def test_near_miss_fixed_key_named_by_another_field() -> None:
+    from proof_frog.transforms.state_relations import OffsetFusion
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> P;
+            ModInt<G.order> D;
+            GroupElem<G> Q = P;
+            Void Initialize() {
+                ModInt<G.order> e <- ModInt<G.order>;
+                P = G.generator ^ e;
+                D = 0;
+            }
+            GroupElem<G> Shift(ModInt<G.order> r) {
+                D = D + r;
+                return P * G.generator ^ D;
+            }
+            GroupElem<G> GetQ() {
+                return Q;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert OffsetFusion().apply(game, ctx) == game
+    misses = _removed_field_misses(ctx, "Offset Fusion")
+    assert misses and all(
+        nm.variable == "P" and "field 'Q'" in nm.reason for nm in misses
+    )
+
+
+def test_near_miss_modint_cancellation_blocked_by_nondeterminism() -> None:
+    from proof_frog.transforms.algebraic import ModIntCancellation
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            ModInt<G.order> f(ModInt<G.order> d) {
+                return (d + F.Sample()) - F.Sample();
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    ctx.proof_namespace["F"] = frog_parser.parse_primitive_file(
+        "Primitive P(Group G) { ModInt<G.order> Sample(); }"
+    )
+    assert ModIntCancellation().apply(game, ctx) == game
+    assert "ModInt Cancellation" in _names(ctx)
+
+
+def _kept_constant_reasons(ctx: PipelineContext, transform: str) -> list[str]:
+    return [
+        nm.reason
+        for nm in ctx.near_misses
+        if nm.transform_name == transform and "kept as written" in nm.reason
+    ]
+
+
+def test_near_miss_modint_cancellation_keeps_nonzero_constant() -> None:
+    # F-357: (x + 1 + 1) - x is 2 mod q; the Int literal 2 would drop the
+    # reduction, so the whole expression is not rewritten to it.
+    from proof_frog.transforms.algebraic import ModIntCancellation
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Int q) {
+            Bool f(ModInt<q> x, ModInt<q> y) {
+                return ((x + 1) + 1) - x == y;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    result = ModIntCancellation().apply(game, ctx)
+    assert "2 ==" not in str(result)
+    reasons = _kept_constant_reasons(ctx, "ModInt Cancellation")
+    assert reasons and "constant 2 in ModInt<q>" in reasons[0]
+
+
+def test_near_miss_express_after_update_keeps_nonzero_constant() -> None:
+    # F-357: the moved value's exponent (y + 1) - y is 1 mod q.
+    from proof_frog.transforms.algebraic import ExpressAfterUpdate
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G, Int q) {
+            ModInt<q> f;
+            GroupElem<G> Get(ModInt<q> d, ModInt<q> y) {
+                GroupElem<G> pk = G.generator ^ ((y + 1) - y) * G.generator ^ (f + d);
+                f = f + d;
+                return pk;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    result = ExpressAfterUpdate().apply(game, ctx)
+    assert "G.generator ^ 1" not in str(result)
+    reasons = _kept_constant_reasons(ctx, "Express After Update")
+    assert reasons and "constant 1 in ModInt<q>" in reasons[0]
+
+
+def test_near_miss_cancel_through_local_keeps_nonzero_constant() -> None:
+    # F-357: substituting v = x + 5 makes the exponent (x + 5) - x, which is
+    # 5 mod q; the rewrite to g ^ 5 is refused. Before it, (x + 5) * (x + 5)
+    # is kept for its constant term (F-370(h)).
+    from proof_frog.transforms.algebraic import CancelThroughLocal
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G, Int q, Function<GroupElem<G>, ModInt<q>> H) {
+            ModInt<q> w;
+            ModInt<q> Get(ModInt<q> x) {
+                ModInt<q> v = x + 5;
+                w = v * v;
+                return x + H(G.generator ^ (v - x));
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert CancelThroughLocal().apply(game, ctx) == game
+    reasons = _kept_constant_reasons(ctx, "Cancel Through Local")
+    assert len(reasons) == 2
+    assert "'(x + 5) * (x + 5)'" in reasons[0] and "constant term" in reasons[0]
+    assert "constant 5 in ModInt<q>" in reasons[1]
+
+
+def test_near_miss_modint_cancellation_keeps_zero_power_base() -> None:
+    # F-378: x - x is 0 mod q, but as the base of a power the Int literal 0
+    # would make (x - x) ^ 0 the Int power 0 ^ 0.
+    from proof_frog.transforms.algebraic import ModIntCancellation
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Int q) {
+            Bool f(ModInt<q> x, ModInt<q> y) {
+                return (x - x) ^ 0 + (x - x) ^ 0 == y;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert ModIntCancellation().apply(game, ctx) == game
+    reasons = _kept_constant_reasons(ctx, "ModInt Cancellation")
+    assert any(
+        "is 0 in ModInt<q>" in r and "the base of a power" in r for r in reasons
+    )
+
+
+def test_near_miss_cancel_through_local_keeps_zero_division_operand() -> None:
+    # F-378: substituting v = x makes the operands (x - x) and (y - y), both
+    # 0 mod q; the rewrite to the Int division 0 / 0 is refused.
+    from proof_frog.transforms.algebraic import CancelThroughLocal
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Int q) {
+            ModInt<q> w;
+            ModInt<q> Get(ModInt<q> x, ModInt<q> y) {
+                ModInt<q> v = x;
+                w = v * v;
+                return (v - x) / (y - y);
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert CancelThroughLocal().apply(game, ctx) == game
+    reasons = _kept_constant_reasons(ctx, "Cancel Through Local")
+    assert any(
+        "is 0 in ModInt<q>" in r and "an operand of a division" in r
+        for r in reasons
+    )
+
+
+def test_near_miss_repeated_mask_with_different_partners() -> None:
+    from proof_frog.transforms.algebraic import UniformModIntRepeatedMask
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            ModInt<G.order> s;
+            [GroupElem<G>, ModInt<G.order>] f(ModInt<G.order> e) {
+                ModInt<G.order> u <- ModInt<G.order>;
+                return [G.generator ^ (s + u), e + u];
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert UniformModIntRepeatedMask().apply(game, ctx) == game
+    assert "Uniform ModInt Repeated Mask" in _names(ctx)
+
+
+def _redeclared_reasons(ctx: PipelineContext, transform: str) -> list[NearMiss]:
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == transform and "more than once" in nm.reason
+    ]
+
+
+def test_near_miss_blocked_local_absorption_redeclared_local() -> None:
+    # F-370(a): x is declared again (bare) between the blocker and the use.
+    from proof_frog.transforms.algebraic import BlockedLocalAbsorption
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            ModInt<G.order> sk;
+            [GroupElem<G>, ModInt<G.order>] f(ModInt<G.order> d) {
+                ModInt<G.order> x = sk;
+                sk = sk + d;
+                ModInt<G.order> x;
+                return [G.generator ^ sk, x + d];
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert BlockedLocalAbsorption().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "Blocked Local Absorption")
+    assert misses and misses[0].variable == "x" and misses[0].method == "f"
+
+
+def test_near_miss_repeated_mask_redeclared_uniform() -> None:
+    # F-370(a): u is declared again (bare) after the draw.
+    from proof_frog.transforms.algebraic import UniformModIntRepeatedMask
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            ModInt<G.order> s;
+            [GroupElem<G>, ModInt<G.order>] f() {
+                ModInt<G.order> u <- ModInt<G.order>;
+                ModInt<G.order> u;
+                return [G.generator ^ (s + u), s + u];
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert UniformModIntRepeatedMask().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "Uniform ModInt Repeated Mask")
+    assert misses and misses[0].variable == "u"
+
+
+def test_near_miss_express_after_update_redeclared_local() -> None:
+    # F-370(a): v is declared again (bare) between the value and the update.
+    from proof_frog.transforms.algebraic import ExpressAfterUpdate
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Int q) {
+            ModInt<q> f;
+            ModInt<q> Get(ModInt<q> d) {
+                ModInt<q> v = f + d;
+                ModInt<q> v;
+                f = f + d;
+                return v;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert ExpressAfterUpdate().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "Express After Update")
+    assert misses and misses[0].variable == "v"
+
+
+def test_near_miss_cancel_through_local_local_shadows_field() -> None:
+    # F-370(a): the local v shadows the field v its initializer reads.
+    from proof_frog.transforms.algebraic import CancelThroughLocal
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Int q) {
+            ModInt<q> v;
+            ModInt<q> Get(ModInt<q> d) {
+                ModInt<q> v = v + d;
+                return v - d;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert CancelThroughLocal().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "Cancel Through Local")
+    assert misses and misses[0].variable == "v"
+
+
+def test_near_miss_modint_cancellation_redeclared_operand() -> None:
+    # F-370(a): a and e are ModInt locals in the if block and group elements
+    # after it; typed as group elements, (a / e) * e cancelled to a.
+    from proof_frog.transforms.algebraic import ModIntCancellation
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G, Int q) {
+            ModInt<q> f(Bool c, ModInt<q> b, ModInt<q> d, GroupElem<G> h) {
+                if (c) {
+                    ModInt<q> a = d * d;
+                    ModInt<q> e = d + d;
+                    return b + ((a / e) * e);
+                }
+                GroupElem<G> a = h;
+                GroupElem<G> e = h;
+                return d;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert ModIntCancellation().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "ModInt Cancellation")
+    assert misses and misses[0].variable == "a"
+
+
+def test_near_miss_modint_cancellation_keeps_large_coefficient() -> None:
+    # F-370(h): (5u + s) - s is 5u; with no Int literal next to a ModInt the
+    # rebuild would be five copies of u added up, past the cap, so the
+    # expression is kept as written.
+    from proof_frog.transforms.algebraic import ModIntCancellation
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Int q) {
+            ModInt<q> f(ModInt<q> u, ModInt<q> s) {
+                return ((((u + u) + u) + u) + u + s) - s;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    result = ModIntCancellation().apply(game, ctx)
+    assert "5 *" not in str(result)
+    reasons = _kept_constant_reasons(ctx, "ModInt Cancellation")
+    assert reasons and "large coefficient" in reasons[0]
+
+
+def test_near_miss_gpfe_redeclared_exponent_local() -> None:
+    # F-370(j): d is declared in both branches; typed by the method's
+    # last-write-wins map, its type may not be the one each write reads.
+    from proof_frog.transforms.state_relations import GeneratorPowerFieldToExponent
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> h;
+            Void Initialize() {
+                ModInt<G.order> e <- ModInt<G.order>;
+                h = G.generator ^ e;
+            }
+            GroupElem<G> Upd(Bool c, ModInt<G.order> r) {
+                if (c) { ModInt<G.order> d = r; h = h * G.generator ^ d; }
+                else { ModInt<G.order> d = r + r; h = h * G.generator ^ d; }
+                return h;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert GeneratorPowerFieldToExponent().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "Generator Power Field To Exponent")
+    assert misses and misses[0].variable == "d"
+
+
+def test_near_miss_offset_fusion_redeclared_exponent_local() -> None:
+    # F-370(j): Initialize declares e twice, and P's write reads e.
+    from proof_frog.transforms.state_relations import OffsetFusion
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Group G) {
+            GroupElem<G> P;
+            ModInt<G.order> D;
+            Void Initialize(Bool c) {
+                ModInt<G.order> e <- ModInt<G.order>;
+                P = G.generator ^ e;
+                D = 0;
+                if (c) { ModInt<G.order> e <- ModInt<G.order>; D = e; }
+            }
+            GroupElem<G> Shift(ModInt<G.order> r) {
+                D = D + r;
+                return P * G.generator ^ D;
+            }
+        }
+        """
+    )
+    ctx = _group_ctx()
+    assert OffsetFusion().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "Offset Fusion")
+    assert misses and misses[0].variable == "e"
+
+
+# ---------------------------------------------------------------------------
+# Merge Bare Declaration
+# ---------------------------------------------------------------------------
+
+
+def _merge_bare_declaration_misses(body: str) -> list[NearMiss]:
+    from proof_frog.transforms.inlining import MergeBareDeclaration
+
+    game = frog_parser.parse_game(
+        f"Game T() {{\n Int f(Int a, Bool b) {{\n{body}\n}}\n}}"
+    )
+    ctx = _make_ctx()
+    assert MergeBareDeclaration().apply(game, ctx) == game
+    return [
+        nm for nm in ctx.near_misses if nm.transform_name == "Merge Bare Declaration"
+    ]
+
+
+def test_near_miss_merge_bare_declaration_value_reads_default() -> None:
+    misses = _merge_bare_declaration_misses("Int v;\nv = v + a;\nreturn v;")
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert "reads the variable" in misses[0].reason
+
+
+def test_near_miss_merge_bare_declaration_mentioned_in_between() -> None:
+    misses = _merge_bare_declaration_misses(
+        "Int v;\nInt w = v + 1;\nv = a;\nreturn v + w;"
+    )
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert "between the declaration and the assignment" in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # No top-level assignment to merge with.
+        "Int v;\nif (b) {\nv = a;\n} else {\nv = 0;\n}\nreturn v;",
+        # The branches are the first write; the later assignment an update.
+        "Int v;\nif (b) {\nv = a;\n} else {\nv = 0;\n}\nv = v + 1;\nreturn v;",
+        # A draw is the first write.
+        "BitString<8> v;\nv <- BitString<8>;\nv = v + 0^8;\nreturn a;",
+    ],
+)
+def test_no_near_miss_merge_bare_declaration_when_no_merge_was_close(
+    body: str,
+) -> None:
+    assert not _merge_bare_declaration_misses(body)
+
+
+def test_near_miss_forward_literal_field_write_keeps_modint_zero() -> None:
+    # F-379: the Int literal 0 for a ModInt field is not put into a power's
+    # base, where it would make an Int power.
+    from proof_frog.transforms.state_relations import ForwardLiteralFieldWrite
+
+    game = frog_parser.parse_game(
+        """
+        Game T(Int q) {
+            ModInt<q> D;
+            ModInt<q> Probe(Int n) {
+                D = 0;
+                return D ^ n;
+            }
+        }
+        """
+    )
+    ctx = _make_ctx()
+    assert ForwardLiteralFieldWrite().apply(game, ctx) == game
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Forward Literal Field Write"
+    ]
+    assert len(misses) == 1
+    assert misses[0].variable == "D" and misses[0].method == "Probe"
+    assert "the literal 0 is an Int" in misses[0].reason

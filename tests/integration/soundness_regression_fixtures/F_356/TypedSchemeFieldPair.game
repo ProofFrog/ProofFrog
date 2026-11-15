@@ -1,0 +1,17 @@
+// F-356 support pair (positive control): Left runs the scheme's test, Right
+// writes it out with the scheme's field read as x.
+import 'ModTest.primitive';
+
+Game Left(ModTest T, Int q, ModInt<q> x) {
+    Bool Test() {
+        return T.Test();
+    }
+}
+
+Game Right(ModTest T, Int q, ModInt<q> x) {
+    Bool Test() {
+        return x + x == x;
+    }
+}
+
+export as TypedSchemeFieldPair;

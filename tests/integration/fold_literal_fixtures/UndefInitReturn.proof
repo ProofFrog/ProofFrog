@@ -1,0 +1,21 @@
+// Single-hop claim UndefInitReturn.Real -> UndefInitReturn.Random with no assumptions.
+// See UndefInitReturn.game for the expected outcome.
+import 'Chan.primitive';
+import 'ChanImpl.scheme';
+import 'UndefInitReturn.game';
+
+proof:
+
+let:
+    Int lambda;
+    ChanImpl C = ChanImpl(lambda);
+
+assume:
+
+theorem:
+    UndefInitReturn(C);
+
+games:
+    UndefInitReturn(C).Real against UndefInitReturn(C).Adversary;
+
+    UndefInitReturn(C).Random against UndefInitReturn(C).Adversary;

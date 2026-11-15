@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'ReturnedFunction.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    ReturnedFunction(S);
+
+games:
+    ReturnedFunction(S).Left against ReturnedFunction(S).Adversary;
+    ReturnedFunction(S).Right against ReturnedFunction(S).Adversary;

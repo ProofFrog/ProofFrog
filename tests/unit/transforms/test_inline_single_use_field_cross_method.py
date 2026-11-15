@@ -46,3 +46,43 @@ def test_f216_inlines_cross_method_when_def_in_initialize() -> None:
     )
     assert "return 5" in after
     assert "b = 5" not in after
+
+
+def test_f349_declines_cross_method_when_initialize_may_return_before_def() -> None:
+    # Initialize can return before `G = 5`, leaving G at its initial value 0,
+    # so `return G` in O must NOT be inlined to `return 5` (audit F-349).
+    after = _after(
+        """
+        Game G() {
+            Int G = 0;
+            Bool Initialize() {
+                Bool c <- Bool;
+                if (c) { return true; }
+                G = 5;
+                return false;
+            }
+            Int O() { return G; }
+        }
+        """
+    )
+    assert "G = 5" in after
+    assert "return G;" in after
+
+
+def test_f349_inlines_cross_method_when_return_follows_def() -> None:
+    # A return AFTER the definition cannot skip it. Positive control.
+    after = _after(
+        """
+        Game G() {
+            Int G = 0;
+            Bool Initialize() {
+                G = 5;
+                Bool c <- Bool;
+                if (c) { return true; }
+                return false;
+            }
+            Int O() { return G; }
+        }
+        """
+    )
+    assert "return 5;" in after

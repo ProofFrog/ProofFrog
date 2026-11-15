@@ -1,0 +1,20 @@
+// F-356: claims SchemeFieldPair.Left and SchemeFieldPair.Right are
+// interchangeable with ModField; they are not (see ModField.scheme). The
+// engine cannot read ModField's field f as its initializer, so the sound
+// outcome is a type error naming the field.
+import 'ModTest.primitive';
+import 'ModField.scheme';
+import 'SchemeFieldPair.game';
+
+proof:
+
+let:
+    Int q;
+    ModTest T = ModField(q);
+
+theorem:
+    SchemeFieldPair(T, q);
+
+games:
+    SchemeFieldPair(T, q).Left against SchemeFieldPair(T, q).Adversary;
+    SchemeFieldPair(T, q).Right against SchemeFieldPair(T, q).Adversary;

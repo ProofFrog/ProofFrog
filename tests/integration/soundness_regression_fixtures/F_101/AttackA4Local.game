@@ -1,0 +1,55 @@
+// Target pass: DeadGuardedAssignmentElimination.
+// Twin of AttackA4 that still type checks: the outer x is a local copy of
+// the parameter p instead of the parameter itself, since a local may no
+// longer shadow a method parameter (AttackA4 now stops at type checking).
+// An inner local x shadows the outer local x; the path fact "x == 1"
+// (about the inner x, always 1) must not entail the guard "x == 1" (about
+// the outer x). Right is the literal post-kill image of Left.
+//
+// Distinguisher refuting Left == Right: one call O(5, true).
+//   Left: inner x = 1 makes the fact true, v = true; outer x = 5 at the
+//         guard, inner guard fails -> returns 1.
+//   Right: v always false -> returns 0.
+import 'Trivial.primitive';
+
+Game Left(Trivial T) {
+    Int O(Int p, Bool c) {
+        Int x = p;
+        Bool v = false;
+        if (c) {
+            Int x = 1;
+            if (x == 1) {
+                v = c;
+            }
+        }
+        if (v) {
+            if (x == 1) {
+                return 0;
+            }
+            return 1;
+        }
+        return 0;
+    }
+}
+
+Game Right(Trivial T) {
+    Int O(Int p, Bool c) {
+        Int x = p;
+        Bool v = false;
+        if (c) {
+            Int x = 1;
+            if (x == 1) {
+                v = false;
+            }
+        }
+        if (v) {
+            if (x == 1) {
+                return 0;
+            }
+            return 1;
+        }
+        return 0;
+    }
+}
+
+export as DistinguishA4L;

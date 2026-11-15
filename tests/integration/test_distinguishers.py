@@ -11,6 +11,7 @@ proofs — so a failure points directly at one engine path.
 
 from __future__ import annotations
 
+import pytest
 from sympy import Symbol
 
 from proof_frog import frog_parser, visitors
@@ -374,11 +375,12 @@ def test_lazy_map_scan_multicall() -> None:
 
 
 def test_map_key_reindex_multicall() -> None:
-    """``MapKeyReindex``: when every read of ``M`` goes through an
-    injective deterministic call ``TT.Eval(.)``, re-keying ``M`` on the
-    Eval'd value (and rewriting writes accordingly) preserves cross-call
-    observation. Store and Lookup are separate oracles so any mismatch
-    between the rewritten write site and the read site would surface."""
+    """``MapKeyReindex``: when the stored keys are read only through an
+    injective deterministic call ``TT.Eval(e[0])`` in an ``M.entries``
+    scan, re-keying ``M`` on the Eval'd value (and rewriting writes
+    accordingly) preserves cross-call observation. Store and Lookup are
+    separate oracles so any mismatch between the rewritten write site and
+    the read site would surface."""
     prim = frog_parser.parse_primitive_file("""
         Primitive T(Set I, Set Y) {
             Set Input = I;
@@ -393,8 +395,10 @@ def test_map_key_reindex_multicall() -> None:
                 M[a] = s;
             }
             BitString<16>? Lookup(TT.Input a2) {
-                if (TT.Eval(a2) in M) {
-                    return M[TT.Eval(a2)];
+                for ([TT.Input, BitString<16>] e in M.entries) {
+                    if (TT.Eval(e[0]) == TT.Eval(a2)) {
+                        return e[1];
+                    }
                 }
                 return None;
             }
@@ -417,6 +421,144 @@ def test_map_key_reindex_multicall() -> None:
     engine = _engine_with(T=prim, TT=prim)
     result = engine.check_equivalent(pre, post)
     assert result.valid, result.failure_detail
+
+
+def test_map_key_reindex_keeps_wrapped_read() -> None:
+    """``MapKeyReindex`` must not wrap a raw-key write while a read already
+    applies the wrapper. After ``Put(0b00)``, ``Get(0b00)`` returns true in
+    Right but in Left only if ``Tag(0b00) = 0b00``."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive P() {
+            deterministic injective BitString<2> Tag(BitString<2> x0);
+        }
+        """)
+    left = frog_parser.parse_game("""
+        Game Left(P S) {
+            Map<BitString<2>, Bool> e;
+            Bool Initialize() {
+                return false;
+            }
+            Void Put(BitString<2> pk) {
+                e[pk] = true;
+            }
+            Bool Get(BitString<2> pk) {
+                if ((S.Tag(0^2) in e)) {
+                    return e[S.Tag(0^2)];
+                }
+                return false;
+            }
+        }
+        """)
+    right = frog_parser.parse_game("""
+        Game Right(P S) {
+            Map<BitString<2>, Bool> e;
+            Bool Initialize() {
+                return false;
+            }
+            Void Put(BitString<2> pk) {
+                e[S.Tag(pk)] = true;
+            }
+            Bool Get(BitString<2> pk) {
+                if (S.Tag(0^2) in e) {
+                    return e[S.Tag(0^2)];
+                }
+                return false;
+            }
+        }
+        """)
+    engine = _engine_with(P=prim, S=prim)
+    assert not engine.check_equivalent(left, right).valid
+
+
+_MAP_REINDEX_WHOLE_USE_PRIMITIVE = """
+    Primitive T() {
+        deterministic injective BitString<8> Eval(BitString<8> x);
+    }
+    """
+
+
+_MAP_REINDEX_WHOLE_USE_SCANS = {
+    "Left": "TT.Eval(e[0]) == y",
+    "Right": "e[0] == y",
+}
+
+
+def _map_reindex_whole_use_game(side: str, extra: str) -> str:
+    key = "a" if side == "Left" else "TT.Eval(a)"
+    return f"""
+        Game {side}(T TT) {{
+            Map<BitString<8>, Int> M;
+            Map<BitString<8>, Int> N;
+            Void Store(BitString<8> a) {{ M[{key}] = 0; }}
+            {extra}
+            Bool Scan(BitString<8> y) {{
+                for ([BitString<8>, Int] e in M.entries) {{
+                    if ({_MAP_REINDEX_WHOLE_USE_SCANS[side]}) {{ return true; }}
+                }}
+                return false;
+            }}
+        }}
+        """
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        "Map<BitString<8>, Int> Dump() { return M; }",
+        "Bool Has(BitString<8> b) { N = M; return b in N; }",
+        "Void Put(BitString<8> a) { N[a] = 0; }\n            Void Load() { M = N; }",
+    ],
+    ids=["return-map", "copy-out-then-member", "load-from-other-map"],
+)
+def test_map_key_reindex_keeps_keys_used_whole(extra: str) -> None:
+    """``MapKeyReindex`` must not re-key ``M`` when the map is also used
+    whole. Left stores raw keys and Right stores ``TT.Eval`` of them, so
+    ``Dump`` returns different maps, ``Has`` answers differently, and keys
+    loaded by ``Load`` are found by Left's scan only through ``Eval`` but by
+    Right's scan raw."""
+    prim = frog_parser.parse_primitive_file(_MAP_REINDEX_WHOLE_USE_PRIMITIVE)
+    left = frog_parser.parse_game(_map_reindex_whole_use_game("Left", extra))
+    right = frog_parser.parse_game(_map_reindex_whole_use_game("Right", extra))
+    engine = _engine_with(T=prim, TT=prim)
+    assert not engine.check_equivalent(left, right).valid
+
+
+def _map_reindex_keyed_init_game(side: str) -> str:
+    key = "z" if side == "Left" else "TT.Eval(k, z)"
+    cond = "TT.Eval(k, e[0]) == y" if side == "Left" else "e[0] == y"
+    return f"""
+        Game {side}(T TT) {{
+            BitString<8> k;
+            Map<BitString<8>, Int> M;
+            Void Initialize() {{
+                BitString<8> z = 0^8;
+                M[{key}] = 0;
+                k <- BitString<8>;
+            }}
+            Bool Scan(BitString<8> y) {{
+                for ([BitString<8>, Int] e in M.entries) {{
+                    if ({cond}) {{ return true; }}
+                }}
+                return false;
+            }}
+        }}
+        """
+
+
+def test_map_key_reindex_keeps_initialize_write_before_context_arg() -> None:
+    """``MapKeyReindex`` must not wrap a write in ``Initialize`` that runs
+    before the wrapper's context argument ``k`` is sampled. Left's scan finds
+    ``Eval(k, 0^8)`` for the final ``k``; Right stored ``Eval`` of the
+    unset ``k``."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive T() {
+            deterministic injective BitString<8> Eval(BitString<8> k, BitString<8> x);
+        }
+        """)
+    left = frog_parser.parse_game(_map_reindex_keyed_init_game("Left"))
+    right = frog_parser.parse_game(_map_reindex_keyed_init_game("Right"))
+    engine = _engine_with(T=prim, TT=prim)
+    assert not engine.check_equivalent(left, right).valid
 
 
 def test_distinct_const_rf_symbolic_length_not_uniform() -> None:
@@ -446,6 +588,99 @@ def test_distinct_const_rf_symbolic_length_not_uniform() -> None:
         }
         """)
     assert not _engine_with().check_equivalent(real, random).valid
+
+
+def _unique_rf_pair(write: str) -> tuple[object, object]:
+    template = """
+        Game G() {{
+            Function<BitString<2>, BitString<2>> H;
+            Set<BitString<2>> T;
+            Void Initialize() {{
+                H <- Function<BitString<2>, BitString<2>>;
+            }}
+            BitString<2> Q(Bool b, Int k) {{
+                BitString<2> r <-uniq[T] BitString<2>;
+                {write}
+                {query}
+                return z;
+            }}
+        }}
+        """
+    real = template.format(write=write, query="BitString<2> z = H(r);")
+    rand = template.format(write=write, query="BitString<2> z <- BitString<2>;")
+    return frog_parser.parse_game(real), frog_parser.parse_game(rand)
+
+
+@pytest.mark.parametrize(
+    "write",
+    [
+        "if (b) { r = 0b00; }",
+        "for (Int i = 0 to k) { r = 0b00; }",
+        "Set<BitString<2>> L; r <-uniq[L] BitString<2>;",
+    ],
+)
+def test_unique_rf_written_draw_multicall(write: str) -> None:
+    """`UniqueRFSimplification`: after `r <-uniq[T]`, a write may set `r` to a
+    value an earlier call queried.  Two calls then repeat an `H` query with
+    probability 1/4 and match more often than two uniform draws."""
+    real, rand = _unique_rf_pair(write)
+    assert not _engine_with().check_equivalent(real, rand).valid
+
+
+def test_unique_rf_fresh_draw_control() -> None:
+    real, rand = _unique_rf_pair("if (b) { k = 0; }")
+    result = _engine_with().check_equivalent(real, rand)
+    assert result.valid, result.failure_detail
+
+
+def test_unique_rf_call_inside_writing_branch_multicall() -> None:
+    """`ExtractRFCalls` must not hoist `H(r)` above a branch that writes `r`
+    first: the hoisted call queries the drawn `r`, which
+    `UniqueRFSimplification` then rightly samples.  In the real game two
+    `Q(true)` calls both return `H(0b00)`, so they always match."""
+    template = """
+        Game G() {{
+            Function<BitString<2>, BitString<2>> H;
+            Set<BitString<2>> T;
+            Void Initialize() {{
+                H <- Function<BitString<2>, BitString<2>>;
+            }}
+            BitString<2> Q(Bool b) {{
+                BitString<2> r <-uniq[T] BitString<2>;
+                if (b) {{
+                    r = 0b00;
+                    {query}
+                }}
+                return 0b11;
+            }}
+        }}
+        """
+    real = frog_parser.parse_game(template.format(query="return H(r);"))
+    rand = frog_parser.parse_game(
+        template.format(query="BitString<2> z <- BitString<2>; return z;")
+    )
+    assert not _engine_with().check_equivalent(real, rand).valid
+
+
+def test_unique_rf_self_assignment_control() -> None:
+    """`r = H(r)` queries `H` on the drawn `r` before writing `r`."""
+    _, rand = _unique_rf_pair("")
+    real = frog_parser.parse_game("""
+        Game G() {
+            Function<BitString<2>, BitString<2>> H;
+            Set<BitString<2>> T;
+            Void Initialize() {
+                H <- Function<BitString<2>, BitString<2>>;
+            }
+            BitString<2> Q(Bool b, Int k) {
+                BitString<2> r <-uniq[T] BitString<2>;
+                r = H(r);
+                return r;
+            }
+        }
+        """)
+    result = _engine_with().check_equivalent(real, rand)
+    assert result.valid, result.failure_detail
 
 
 def test_lazy_map_to_sampled_function_multicall() -> None:
@@ -950,12 +1185,16 @@ def test_uniq_sample_is_not_dead_code() -> None:
     assert not _engine_with().check_equivalent(with_sample, without_sample).valid
 
 
-def test_minus_sample_with_unused_target_is_dead_code() -> None:
-    """Control: the pure `x <- T \\ E` form has no side effect, so an unused
-    draw IS dead code -- the game with it equals the game without it."""
+def test_minus_sample_with_unused_target_is_not_dead_code() -> None:
+    """F-318: the `x <- T \\ E` form inserts nothing, but when E covers T its
+    domain is empty and the draw does not complete, which the adversary
+    observes. Here Add can fill S with every element of BitString<8>, after
+    which Query never returns in the game with the draw. So an unused draw is
+    NOT dead code."""
     with_sample = frog_parser.parse_game("""
         Game WithSample() {
             Set<BitString<8>> S;
+            Void Add(BitString<8> s) { S = S union {s}; }
             Int Query() {
                 BitString<8> x <- BitString<8> \\ S;
                 return 0;
@@ -966,10 +1205,32 @@ def test_minus_sample_with_unused_target_is_dead_code() -> None:
     without_sample = frog_parser.parse_game("""
         Game WithoutSample() {
             Set<BitString<8>> S;
+            Void Add(BitString<8> s) { S = S union {s}; }
             Int Query() {
                 return 0;
             }
             Int Size() { return |S|; }
+        }
+        """)
+    assert not _engine_with().check_equivalent(with_sample, without_sample).valid
+
+
+def test_minus_sample_from_non_empty_domain_is_dead_code() -> None:
+    """Control: excluding a single value from BitString<8> leaves a non-empty
+    domain, so the draw always completes and an unused one IS dead code."""
+    with_sample = frog_parser.parse_game("""
+        Game WithSample() {
+            Int Query(BitString<8> y) {
+                BitString<8> x <- BitString<8> \\ {y};
+                return 0;
+            }
+        }
+        """)
+    without_sample = frog_parser.parse_game("""
+        Game WithoutSample() {
+            Int Query(BitString<8> y) {
+                return 0;
+            }
         }
         """)
     assert _engine_with().check_equivalent(with_sample, without_sample).valid
@@ -1103,3 +1364,219 @@ def test_modint_loop_reused_uniform_not_absorbed() -> None:
         }
         """)
     assert not _engine_with().check_equivalent(twice, once).valid
+
+
+def test_f321_tuple_swap_reassignment_not_sequentialized() -> None:
+    """F-321: ``pair = [pair[1], pair[0]]; return pair[1];`` returns the
+    ORIGINAL ``pair[0]`` (the RHS evaluates before the assignment lands).
+    ExpandTuple used to sequentialize the swap into
+    ``pair@0 = pair@1; pair@1 = pair@0;``, after which BOTH components hold
+    the old ``pair[1]`` -- so the engine canonicalized the game to return
+    the wrong component and accepted an equivalence that any instantiation
+    with ``Left != Right`` refutes with advantage 1."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive P(Int n) {
+            BitString<n> Left(BitString<n> k);
+            BitString<n> Right(BitString<n> k);
+        }
+        """)
+    pre = frog_parser.parse_game("""
+        Game Pre(P PP) {
+            Void Initialize() {
+            }
+            BitString<n> Run() {
+                BitString<n> a <- BitString<n>;
+                BitString<n> b <- BitString<n>;
+                [BitString<n>, BitString<n>] pair = [PP.Left(a), PP.Right(b)];
+                pair = [pair[1], pair[0]];
+                return pair[1];
+            }
+        }
+        """)
+    post = frog_parser.parse_game("""
+        Game Post(P PP) {
+            Void Initialize() {
+            }
+            BitString<n> Run() {
+                BitString<n> b <- BitString<n>;
+                return PP.Right(b);
+            }
+        }
+        """)
+    engine = _engine_with(P=prim, PP=prim)
+    result = engine.check_equivalent(pre, post)
+    assert not result.valid
+
+
+def _detfn_namespace() -> dict:
+    prim = frog_parser.parse_primitive_file("""
+        Primitive DetFn(Int n) {
+            deterministic BitString<n> F(BitString<n> a);
+            deterministic BitString<n> G(BitString<n> a, BitString<n> b);
+        }
+        """)
+    return {"DetFn": prim, "D": prim}
+
+
+_F339_RIGHT = """
+    Game Right(DetFn D) {
+        BitString<n> x;
+        BitString<n> y;
+        BitString<n> c;
+        Void Initialize() {
+            x <- BitString<n>;
+            y <- BitString<n>;
+            c = D.G(D.F(x), y);
+        }
+        BitString<n> O(BitString<n> PARAM) {
+            return c;
+        }
+    }
+    """
+
+_F339_LEFT = """
+    Game Left(DetFn D) {
+        BitString<n> x;
+        BitString<n> y;
+        Void Initialize() {
+            x <- BitString<n>;
+            y <- BitString<n>;
+        }
+        BitString<n> O(BitString<n> PARAM) {
+            BitString<n> g = D.F(x);
+            return D.G(g, y);
+        }
+    }
+    """
+
+
+def test_f339_parameter_capture_multicall() -> None:
+    """F-339: with the oracle parameter named `x` like the field, Left reads
+    the parameter (answers depend on the query) while Right returns a
+    per-execution constant. For D.F = identity and D.G(a, b) = a, querying
+    O(0^n) and O(1^n) distinguishes them with advantage 1. InlineSingleUseField
+    used to inline Right's `c = D.G(D.F(x), y)` into O, where `x` is captured
+    by the parameter, making the two canonical forms equal."""
+    engine = _engine_with(**_detfn_namespace())
+    left = frog_parser.parse_game(_F339_LEFT.replace("PARAM", "x"))
+    right = frog_parser.parse_game(_F339_RIGHT.replace("PARAM", "x"))
+    result = engine.check_equivalent(left, right)
+    assert not result.valid
+
+
+def test_f339_renamed_parameter_control_still_equivalent() -> None:
+    """Sound control: with the parameter named `z`, both games read the field
+    `x` and are genuinely interchangeable."""
+    engine = _engine_with(**_detfn_namespace())
+    left = frog_parser.parse_game(_F339_LEFT.replace("PARAM", "z"))
+    right = frog_parser.parse_game(_F339_RIGHT.replace("PARAM", "z"))
+    result = engine.check_equivalent(left, right)
+    assert result.valid, result.failure_detail
+
+
+def test_f342_reject_fold_across_resampled_init_local() -> None:
+    """F-342: ``Initialize`` derives ``G`` and ``H`` from two samples held in
+    the same local ``x``.  ``O(true)`` returns ``G`` and ``Peek()`` returns
+    ``G`` too in the first game, but ``O`` always returns ``H`` in the second:
+    the two answers agree only on a collision, so the games are
+    distinguishable and must not be judged equivalent."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive D(Int n) {
+            deterministic BitString<n> eval(BitString<n> x);
+        }
+        """)
+    body = """
+            BitString<n> G;
+            BitString<n> H;
+            Void Initialize() {
+                BitString<n> x <- BitString<n>;
+                G = F.eval(x);
+                x <- BitString<n>;
+                H = F.eval(x);
+            }
+            BitString<n> Peek() {
+                return G;
+            }
+    """
+    with_flag = frog_parser.parse_game(
+        "Game A(D F) {"
+        + body
+        + """
+            BitString<n> O(Bool flag) {
+                if (flag) {
+                    return G;
+                }
+                return H;
+            }
+        }"""
+    )
+    without_flag = frog_parser.parse_game(
+        "Game B(D F) {"
+        + body
+        + """
+            BitString<n> O(Bool flag) {
+                return H;
+            }
+        }"""
+    )
+    engine = _engine_with(D=prim, F=prim)
+    result = engine.check_equivalent(with_flag, without_flag)
+    assert not result.valid
+
+
+def _encoded_flag_game(name: str, encode: str, body: str) -> object:
+    return frog_parser.parse_game(
+        f"""
+        Game {name}(E F) {{
+            BitString<n> f1;
+            BitString<n> f2;
+            Bool flag;
+            Void Initialize() {{
+                BitString<n> a <- BitString<n>;
+                BitString<n> b <- BitString<n>;
+                f1 = F.{encode}(a);
+                f2 = F.{encode}(b);
+                flag = a == b;
+            }}
+            BitString<n> Peek1() {{
+                return f1;
+            }}
+            Bool O() {{
+                {body}
+            }}
+        }}
+        """
+    )
+
+
+def test_injective_encoding_decides_flag_multicall() -> None:
+    """A flag computed in Initialize as ``a == b`` equals ``enc(a) == enc(b)``
+    when ``enc`` is injective, so the guarded return of the flag is the same
+    as the unguarded comparison of the stored encodings."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive E(Int n) {
+            deterministic injective BitString<n> enc(BitString<n> x);
+        }
+        """)
+    engine = _engine_with(E=prim, F=prim)
+    guarded = _encoded_flag_game(
+        "A", "enc", "if (f1 == f2) { return flag; } return f1 == f2;"
+    )
+    plain = _encoded_flag_game("B", "enc", "return f1 == f2;")
+    assert engine.check_equivalent(guarded, plain).valid
+
+
+def test_non_injective_encoding_does_not_decide_flag() -> None:
+    """With a merely deterministic encoding the stored images can collide while
+    ``a != b``, where the guarded game returns false and the plain one true."""
+    prim = frog_parser.parse_primitive_file("""
+        Primitive E(Int n) {
+            deterministic BitString<n> enc(BitString<n> x);
+        }
+        """)
+    engine = _engine_with(E=prim, F=prim)
+    guarded = _encoded_flag_game(
+        "A", "enc", "if (f1 == f2) { return flag; } return f1 == f2;"
+    )
+    plain = _encoded_flag_game("B", "enc", "return f1 == f2;")
+    assert not engine.check_equivalent(guarded, plain).valid

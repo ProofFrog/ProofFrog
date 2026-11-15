@@ -303,7 +303,7 @@ How rungs relate to the registry is set by R3, R4 and R6 above. Today the
 `cached-guided` and `admit-guided` rungs come only from the whole-hop and
 whole-oracle paths listed under "Not yet conforming": do not add entries
 there. A per-transform cache entry (rung 4) is filled as
-`docs/for_agents/EASYCRYPT_TACTICS.md` describes, but that file's advice to
+`proof_frog/claude_docs/EASYCRYPT_TACTICS.md` describes, but that file's advice to
 climb from whole-hop admits to whole-hop cache entries predates the
 architecture and must not be followed.
 
@@ -337,7 +337,7 @@ minutes to recheck, while stepping shows the live goal in seconds. Keep
 `ec_compile` for a final whole-file check or a small self-contained
 prototype. (The tools are deferred: load them with `ToolSearch
 "select:mcp__easycrypt-mcp__cli_open,mcp__easycrypt-mcp__cli_step,..."`.
-See `docs/for_agents/MCP_GUIDE.md` for the list.)
+See `proof_frog/claude_docs/MCP_GUIDE.md` for the list.)
 
 ## The fast regression loop
 
@@ -358,7 +358,7 @@ before chain emission are untouched. So, per change:
   tests/integration/test_ec_architecture_conformance.py`. The
   `test_easycrypt_export.py` cases skip without Docker; record whether
   they ran.
-- [../../../docs/for_agents/EASYCRYPT_TACTICS.md](../../../docs/for_agents/EASYCRYPT_TACTICS.md)
+- [../../claude_docs/EASYCRYPT_TACTICS.md](../../claude_docs/EASYCRYPT_TACTICS.md)
   has the `.ec-tmp/` sandbox-mount workaround for macOS.
 
 The full `make check-tactic-cache` and the EasyCrypt dashboard (which

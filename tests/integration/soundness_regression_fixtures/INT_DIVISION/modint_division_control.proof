@@ -1,0 +1,16 @@
+// Positive control: division on ModInt<q> stays well formed.
+import 'ModIntDivision.game';
+
+proof:
+
+let:
+    Int q;
+
+assume:
+
+theorem:
+    ModIntDivision(q);
+
+games:
+    ModIntDivision(q).Left against ModIntDivision(q).Adversary;
+    ModIntDivision(q).Right against ModIntDivision(q).Adversary;

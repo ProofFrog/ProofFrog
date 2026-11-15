@@ -996,11 +996,13 @@ def create_app(directory: str, *, watch: bool = True) -> tuple[Flask, Any]:
                         )
                     for assumption in proof_file.assumptions:
                         assumption_details.append(
-                            _resolve_game_reference(engine, assumption)
+                            _resolve_game_reference(
+                                engine, frog_ast.notion_game(assumption)
+                            )
                         )
                     if proof_file.theorem is not None:
                         theorem_details = _resolve_game_reference(
-                            engine, proof_file.theorem
+                            engine, frog_ast.notion_game(proof_file.theorem)
                         )
                 except Exception:  # pylint: disable=broad-exception-caught
                     # Leave details empty/None — caller still gets string forms.

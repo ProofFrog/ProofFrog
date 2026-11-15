@@ -1,0 +1,212 @@
+# ProofFrog Transform Pass Index
+
+Names and one-line descriptions of every pass in the canonicalization
+pipeline. Use this as a capability list when reasoning about whether the
+engine can simplify a given pattern. The pass code lives in
+`proof_frog/transforms/` (in the source repo).
+
+## Core Pipeline
+
+The core pipeline runs in a fixed-point loop until convergence.
+
+### Sampling (`sampling.py`)
+
+| Pass | Description |
+|---|---|
+| SingleCallFieldToLocal | Pushes field-initialized uniform samples to oracle locals when max_calls=1. |
+| CounterGuardedFieldToLocal | Converts fields to locals when only read inside counter-guarded branches. |
+| SimplifySplice | Replaces slice accesses on concatenated variables with the original components. |
+| MergeUniformSamples | Merges independent uniform BitString samples used only via concatenation. |
+| MergeProductSamples | Merges independent uniform samples combined into a returned tuple. |
+| SplitUniformSamples | Splits a uniform BitString sample accessed only via non-overlapping slices. |
+| SinkUniformSample | Moves a uniform sample into the single if-branch that uses it, or past an `if` when it is used only after it. Declines (with a near miss) for a draw from a runtime set value (a field, parameter or local), whose domain may be empty: such a draw may not complete, and moving it would change the traces on which that happens (see the draws-that-may-not-complete note below). |
+| LocalizeInitOnlyFieldSample | Converts field samples to local samples when the field is only used in Initialize. |
+| SliceOfInlineConcat | Rewrites slice-of-concat expressions when bounds line up with the underlying concat components. |
+| SplitProductSample | Splits a uniform sample of a product type (`[A, B] v <- [A, B];`) that is never written again and is used only through constant indices into independent samples of each component (`A v@0 <- A; B v@1 <- B;`, fresh names). |
+
+### Symbolic (`symbolic.py`)
+
+| Pass | Description |
+|---|---|
+| SymbolicComputation | Evaluates arithmetic over Int literals and Int parameters symbolically using SymPy. A division by the literal 0 is left unfolded (its value is unspecified), with a near-miss. |
+
+### Structural (`structural.py`)
+
+| Pass | Description |
+|---|---|
+| TopologicalSort | Reorders statements by dependency graph and drops the ones that neither a return nor a statement mentioning a field depends on. Ordering rule (F-354): a statement that writes a name stays below every earlier statement that mentions that name, not only the nearest one, and a statement that reads a name stays below the nearest earlier writer of it. A bare declaration counts as a write of its name, so it stays below earlier mentions of the name (which refer to an outer binding) and above its later uses, and it is kept while a later use is. Names are compared textually; a name shared with a proof-level `let` is ordered like any other. A statement that may not complete (it contains a draw whose domain may be empty, see the note below) is ordered relative to every statement containing a `return`, like a field write, and is never dropped: it is kept, with what it depends on, even when nothing reads its result (near miss when that is the only reason it is kept). |
+| RemoveDuplicateFields | Removes fields with same type that always hold the same value. Two fields qualify only if they have no initializer, or equal initializers that make no call, and every write to either is a whole-field assignment or sample paired with the same write to the other, with nothing in between writing a variable the value reads (`M` in `|M.keys|` included). An element write, an exclusion sample, an insertion into a `<-uniq` set, or a local, loop binder or parameter of either name blocks the merge. The merge deletes the second write of each pair it found by identity, so an equal write elsewhere (the first write of a pair in a method that updates the fields in the other order) stays. |
+| RemoveUnnecessaryFields | Removes unused fields and dead statements via liveness analysis. A statement is live when it is a return, writes a necessary variable, is a `<-uniq` draw (its insertion is a write), or is a draw whose domain may be empty (see the note below), which is kept even when its result is unused (near miss), together with the fields it reads. A field that a kept field's initializer reads stays declared, since the initializer takes its starting value (F-383); when no method needs that field, its writes in the methods are still removed, as they all run after the initializers. |
+| UniformBijectionElimination | Replaces `f(x)` with `x` when x is uniform and f is a deterministic injective bijection. |
+
+### Random Functions (`random_functions.py`)
+
+The field-level RF rewrites (UniqueRFSimplification, FreshInputRFToUniform, ChallengeExclusionRFToUniform) treat a `Function` name `H` as a random function only when (a) `H` is a field sampled once by a top-level, untyped `H <- Function<...>;` in Initialize (no earlier return or read of `H`), or a sampled `let:` function (FreshInputRFToUniform only), and nothing else in the game writes or rebinds `H`: no assignment, sample or element write in any method, no second write in Initialize, no loop binder, declaration or method parameter of that name; and (b) `H`'s value never escapes: every occurrence in a method, and for a sampled `let:` function also in a field initializer, is a direct call `H(...)` or a `.domain` read, never a copy `K = H` (in a method or as a field's initializer), an argument, a return value, or an element of a tuple, map or field. (The field initializers of a game sampling `H` itself run before its sample, so they see an earlier value and are not checked.) Either failure blocks the rewrite with a near miss naming the writing method or the escape (`_classify_sampled_function_fields`, `_rf_ineligibility`). A re-sample of `H` outside its one sample is refused too, although it would be sound.
+
+| Pass | Description |
+|---|---|
+| ExtractRFCalls | Extracts RF calls embedded in expressions into separate assignments, hoisting only a call evaluated as its statement starts (the statement's own expression, or an `if`'s first condition); a call in a branch or loop body is extracted inside that block. |
+| UniqueRFSimplification | Replaces `z = RF(r)` with `z <- R` when every RF input is drawn by `<-uniq` and not written before the call. Every call to `RF` must be such a standalone assignment: a call left in an `else if` condition, a loop header or a larger expression (which ExtractRFCalls does not hoist) blocks the rewrite, since its input is unchecked. |
+| ChallengeExclusionRFToUniform | Replaces Initialize RF calls with uniform samples when oracle guards exclude the input. |
+| LocalRFToUniform | Replaces locally-sampled RFs called exactly once with uniform samples. |
+| DistinctConstRFToUniform | Replaces locally-sampled RFs called on pairwise-distinct literal constants with independent uniform samples. |
+| FreshInputRFToUniform | Replaces `RF(v)`, `RF([v, ...])`, or `RF(v \|\| ...)` with uniform sample when `v` is a fresh single-use `<-uniq[S]` local and no other `RF` query can be on `v`: every `RF` call's component at `v`'s position is either itself drawn by `<-uniq[S]` earlier in the call's method (in its block or an enclosing one, not written since) or, when `S` is a never-reset field, inserted into `S` by `S = S union {..}` in Initialize before the draw. For a sampled `let:` function this includes the calls in the field initializers of the game the pass is given, and such a call never counts. `S` may also be `RF.domain` (whole argument only), the hidden set of the points `<-uniq[RF.domain]` has drawn: a plain query `RF(x)` does not add `x` to it, so an oracle such as `Hash(x) { return RF(x); }` blocks the rewrite. An oracle's insertion does not count, even behind an `x in S` guard, because the oracle may run after the draw. The `v <-uniq[S]` draw itself is kept, since it inserts `v` into `S`; dead-code elimination removes it when that is unobservable. |
+| LocalFunctionFieldToLet | Unifies a game-local sampled `Function<K,V>` field with a let-bound sampled `H` of identical type when `H` is otherwise unused in the game, field initializers included, and no field initializer reads the field (it would see the field before its sample). |
+| LazyMapToSampledFunction | Rewrites a `Map<K,V>` field used exclusively as a lazy random oracle into a sampled `Function<K,V>` field. |
+| LazyMapPairToSampledFunction | Generalizes LazyMapToSampledFunction to a pair of maps used jointly via the guarded-pair idiom. |
+
+### Map Iteration (`map_iteration.py`)
+
+| Pass | Description |
+|---|---|
+| LazyMapScan | Rewrites a `for e in M.entries { if e[0] == k { return e[1]; } }` scan over a lazy map into a direct `M[k]` lookup under uniqueness of map keys. |
+
+### Map Reindex (`map_reindex.py`)
+
+| Pass | Description |
+|---|---|
+| MapKeyReindex | Re-keys a map field `M` by an injective wrapper `w` (a `deterministic injective` primitive call, or `x^k` on `GroupElem<G>` under `requires G.order is prime;` with `k` known-nonzero): entry `k` moves to `w(k)`. It wraps each raw-variable-key write (`M[a] = v` / `M[a] <- T` becomes `M[w(a)] = ...`) and strips `w(e[0])` to `e[0]` in `M.entries` scans, so it fires when the stored keys are read back only through `w(e[0])` in an entries scan. If every key access already applies `w`, only the key type changes. It declines (with a near miss) when: a key access it would leave unchanged already applies `w` (`M[w(b)]`, `w(b) in M`), or a write key is neither `w(...)` nor a variable; the map is used other than through `M[k]`, `k in M`, `|M|`, `M.values` or an `M.entries` loop, or a loop tuple other than as `e[<int>]` (e.g. `return M;`, `N = M;`, `M = N;`, `M == N`, `t = e;`); `M.keys` or a loose `M.entries` is read; `w`'s context argument is not a game field set only in `Initialize`, or a method it rewrites binds a local of that name; a wrapped write in `Initialize` is not in a later top-level statement than the single top-level assignment of every field `w` reads; or the wrapper's own preconditions fail (prime order, nonzero exponent). |
+
+### Inlining (`inlining.py`)
+
+| Pass | Description |
+|---|---|
+| RedundantCopy | Eliminates redundant variable copies (`Type v = w` where v replaces w). |
+| IfSplitBranchAssignment | Moves subsequent statements into if-else branches when all branches assign the same variable. |
+| InlineSingleUseVariable | Inlines `Type v = expr` when v is used exactly once and nothing `expr` reads can be written before that use, including earlier in the branch or anywhere in the loop that holds it. |
+| DeduplicateDeterministicCalls | Extracts duplicate deterministic primitive calls into shared variables, placed before the first statement holding one, when the arguments make no non-deterministic call and nothing the calls read can be written between that place and any of the calls, including inside the statements holding them (a loop around a call counts as a whole). |
+| ForwardExpressionAlias | Replaces repeated pure expressions with their named alias variable. |
+| HoistFieldPureAlias | Hoists field assignments of pure expressions before their first use. |
+| CrossMethodFieldAlias | Replaces deterministic calls in oracles with matching field references from Initialize. |
+| HoistDeterministicCallToInitialize | Hoists a deterministic call out of oracles into Initialize and caches it in a new field. Sees through top-level single-assignment stable oracle locals (e.g. `g = NG.Generator(); NG.Exp(g, x)`), hoisting the alias-expanded call so both sides of a hop cache the same calls regardless of which already held one in a field. |
+| SplitOpaqueTupleField | Splits a `ProductType` field whose RHS is an opaque call and whose only reads are constant-indexed projections, into one fresh field per used component. |
+| HoistGroupExpToInitialize | Hoists `base ^ k` group exponentiations out of oracles into `Initialize` and caches the result in a pinned field; requires a prime-order / nonzero-exponent context. |
+| RefactorGroupElemFieldExp | Rewrites `base ^ (a * b)` as `Field2 ^ b` when a pre-existing pinned field `Field2 = base ^ a` exists and no statement between the two field assignments in `Initialize` can write a variable `a` reads, including inside a branch or loop. |
+| InlineSingleUseField | Inlines field assignments when the field is used exactly once in the same method (skips pinned fields). |
+| InlineSingleUseField (cross-method) | Extends field inlining across methods when expression is pure with stable field free vars. |
+| CollapseAssignment | Collapses a declaration followed by reassignment into one statement. |
+| ExtractRepeatedTupleAccess | Extracts repeated `var[constant]` accesses into named local variables (CSE for tuple destructuring). The base may be a tuple-typed local, method parameter or loop binder, or, in a method other than `Initialize`, a tuple-typed game field, extracted at the top of the block. A field is taken only if it is definitely assigned before any oracle runs (a declared initializer, or a top-level `Initialize` assignment that no earlier `return` can skip and no call to a method of the game precedes), the method binds no parameter, local or loop binder of its name, and the block neither writes nor rebinds it (element writes included) nor calls a method of the game (`M(...)` or `G.M(...)`). When only these conditions block the extraction, the first that fails is reported as a near miss. A method that binds a local of the field's name declines even for reads that are of the field; in the pipeline AlphaRename, which runs first, has already renamed every such local. |
+| InlineLocalTupleLiteral | Substitutes `[T0,...] v = [e0,...]` through constant-index accesses when accesses are pure. Also fires on the optional form `[T0,...]? v = [e0,...]` under the same conditions, since a tuple literal is never `None`: every later reference to `v` is a constant-index access `v[k]` (a bare use such as `v == None` or `return v` blocks it, so a null guard on `v` must first be removed by DeadNullGuardElimination), `v` and the free variables of the elements are not written later, and an element with a non-deterministic call is projected exactly once and not inside a loop. Declines when an element that indexes a map or array would be dropped or moved (more cautious than needed: such a read cannot fail, FROGLANG_REFERENCE.md section 6.9): such an element must be projected by the statement right after the declaration, which must not be a branch or loop. Declines when an element mentions a same-named outer `v`. |
+| InlineMultiUsePureExpression | Inlines multi-use pure (call-free) expressions at every use site; also inlines `Function<D,R>` proof-let calls. |
+| RedundantFieldCopy | Eliminates intermediate locals used only to assign to a field. |
+| MergeBareDeclaration | Merges `T v; ... v = e;` into `... T v = e;` when the assignment is at the top level of the same block, nothing in between mentions `v` and `e` does not read `v`. Near miss when `e` reads `v`, or a statement in between reads `v` before a later top-level assignment. |
+
+### Algebraic (`algebraic.py`)
+
+| Pass | Description |
+|---|---|
+| UniformXorSimplification | Simplifies `u + m` to `u` when u is a single-use uniform BitString sample. |
+| UniformModIntSimplification | Simplifies `u +/- m` to `u` when u is a single-use uniform ModInt sample. |
+| UniformGroupElemSimplification | Simplifies `u * m` or `m / u` to `u` when u is a single-use uniform GroupElem sample. |
+| SimplifyNot | Rewrites `!(a == b)` as `a != b`. |
+| BooleanIdentity | Simplifies boolean AND/OR with literal `true`/`false` operands. |
+| BooleanAbsorption | Drops a conjunct `B` from an `A && B` chain when `A`'s flat OR-disjuncts are a subset of `B`'s. |
+| XorCancellation | Cancels pairs of identical terms in XOR chains (`a + a` = `0^n`). |
+| XorIdentity | Removes `0^n` terms from XOR chains. |
+| ModIntSimplification | Applies algebraic identities for ModInt arithmetic (identity, zero, inverse). |
+| GroupElemSimplification | Group algebra identities: power-of-power, `g^0`/`g^1`, identity element rules, and `(a * b)^e` = `a^e * b^e` (likewise for `/`) when `e` makes no call. |
+| GroupElemCancellation | Cancels matching terms in GroupElem multiply/divide chains (`x * m / x` = `m`). |
+| GroupElemExponentCombination | Combines same-base exponentiations: `g^a * g^b` = `g^(a+b)`. |
+| NormalizeCommutativeChains | Sorts operands of commutative chains by structural key; also normalizes `==`/`!=` operand order. |
+| FlattenConcatChain | Left-associates `\|\|` chains; sound under both Boolean OR and BitString concatenation. |
+| ReflexiveComparison | Simplifies `x == x` to `true` and `x != x` to `false`. |
+| InjectiveEqualitySimplify | Rewrites `f(a1,...) == f(b1,...)` to `(a1==b1) && ...` when `f` is `deterministic injective`. An operand may be a local bound once to such a call, or a field assigned once in `Initialize`, outside the method being rewritten; it is resolved to its call only when every value the call reads, including one read only through a member access (`M` in `F.Enc(\|M.keys\|)`), is unchanged at the comparison. |
+| ConcatEqualityDecompose | Decomposes `(a \|\| b \|\| ...) op other` into pairwise slice equalities when concatenation-term lengths are derivable. An operand may be a top-level local bound once to a concatenation; it is resolved to that concatenation only when every value the concatenation reads, including one read only through a member access (`M` in `F.Ev(\|M.keys\|) \|\| u`), is unchanged in the method. |
+| TupleEqualityDecompose | Rewrites `a != b` between tuple-typed expressions to the per-component disjunction of `!=`. `==` is intentionally NOT decomposed. |
+| ModIntCancellation | Rewrites a ModInt arithmetic expression to its exact normal form (`_algebra.py`) when that is strictly smaller: `sk + ((d + H(x)) - H(x))` = `sk + d`. Every call it cancels or moves must be deterministic. The rebuild has no integer literal next to a ModInt operand (a coefficient up to 4 is repeated addition, `u + u`); a nonzero constant, a constant term or a larger coefficient, and a zero where an `Int` operand would change the operation (base of `^`, operand of `/`), are kept as written (near miss). |
+| CancelThroughLocal | ModInt cancellation through a pure local that is also used elsewhere: `v = d + H(x); sk = sk + (v - H(x));` gives `sk = sk + d;`. Same literal and determinism rules as ModIntCancellation. |
+| ExpressAfterUpdate | Moves `T v = e;` after a following update `f = f + delta;` of a ModInt variable, as `e[f := f - delta]`, when that is strictly smaller (the delta cancels): `pk = g ^ (s + d); s = s + d;` becomes `s = s + d; pk = g ^ s;`. |
+| BlockedLocalAbsorption | A pure single-use local whose inlining is blocked by a write in between takes over the largest deterministic expression around its use that the write leaves unchanged, computed before the write: `x = g ^ (sk * u); sk = sk + d; return d + H(x);` becomes `x = d + H(g ^ (sk * u)); sk = sk + d; return x;`. |
+| UniformModIntRepeatedMask | A uniform ModInt `u` used only in copies of one `e + u` within a single statement is used bare: `return [g ^ (s + u), s + u];` becomes `return [g ^ u, u];`. |
+
+### Control Flow (`control_flow.py`)
+
+| Pass | Description |
+|---|---|
+| IfConditionAliasSubstitution | Substitutes field references with local aliases inside equality-guarded if-branches. Before that, a field whose definition mentions the compared field is replaced in the branch by that definition when the field is assigned once, at the top level of `Initialize` with no earlier `return`, and every field the definition reads, including one read only through a member access (`M` in `\|M.keys\|`), is likewise assigned once, in `Initialize`. The definition may not read a parameter or local of `Initialize`. |
+| RedundantConditionalReturn | Removes `if (c) { return X; } return X;` patterns. |
+| AbsorbRedundantEarlyReturn | Absorbs `if (P) { return X; } ... if (Q) { ... } return X;` into `if (!P && Q) { ... } return X;` (outermost-block-only). |
+| IfFalseReturnToConjunction | Absorbs `if (P) { return false; } ...; return Q;` into `...; return Q && !P;`. |
+| FoldLiteralConditions | Folds `!true`/`!false`, `<`/`>`/`<=`/`>=` on integer literals, `==`/`!=` on boolean literals or equal integer literals, and `None == L` / `None != L` when `L` is a tuple, set, integer, boolean, or bitstring literal whose evaluation cannot fail. That last fold drops the evaluation of `L`, so `L` may contain only literals, variables, field accesses and operators other than division (no call, index or slice), and every variable it reads must be definitely assigned there: a method parameter, a local in scope declared with a value or a loop binder, a field with an initializer or one `Initialize` assigns in a top-level statement before any `return` and any call to a method of the game (read outside `Initialize`), a game parameter, or a `let:` name. A field assigned only by another oracle, a local declared bare (`T x;`), and a name bound more than once or shared by a local and a field all decline, with a near-miss naming the variable. Distinct integer literals under `==`/`!=` are left alone (they may be equal at `ModInt<q>`). `1 == 1` and `true == true` overlap with ReflexiveComparison. Runs just before BranchElimination. |
+| BranchElimination | Eliminates branches with statically known `true`/`false` conditions. |
+| UniqExclusionBranchElimination | Statically eliminates `x in S` branches when `x` was sampled via `<-uniq[S] T` and `S` has not been mutated since. |
+| ElseUnwrap | Unwraps else blocks when the if-branch unconditionally returns. |
+| SimplifyReturn | Inlines `Type v = expr; return v;` into `return expr;`. |
+| SimplifyIf | Merges adjacent if/else-if branches with identical (alpha-equivalent) bodies. |
+| RemoveUnreachable | Removes statements after all execution paths have returned (Z3-assisted). |
+| FlagSetToAssignment | Folds `x = false; S; if (C) { x = true; }` into `x = false; S; x = C;` when S does not mention `x` (the flag-raise shape of identical-until-bad pairs). |
+| RemoveEmptyIf | Drops an `if` whose branches are all empty when its conditions make no call and index no map/array (else records a near-miss). |
+| FoldEquivalentReturnBranch | Folds `if (P) { return X; } return Y;` to `return Y;` when Z3 proves `P ⇒ (X ↔ Y)`. Refuses on any non-deterministic call. Fields assigned once in Initialize (to a deterministic call or a comparison) are expanded to their definitions in P, X and Y when every value the definition reads is fixed from the definition on and none of its names is rebound at the fold site; Z3 is also told that `injective` primitive methods are injective (`D(a) == D(b)` implies `a == b`). |
+| GuardConditionSimplification | Inside the branches of an `if (C)` with a single condition that makes no non-deterministic call, in a branch that writes no variable of `C`, replaces `C` by its value, and each Boolean flag of `C` whose value that value forces is replaced by it (a false `a \|\| b` makes `a` and `b` false). After `if (C) { ...; return e; }`, replaces the flags a false `C` settles in the following statements, up to the first that may change a variable of `C`. A name is a flag only if every declaration of it is a `Bool`. |
+
+### Types (`types.py`)
+
+| Pass | Description |
+|---|---|
+| DeadNullGuardElimination | Removes `if (x == None)` guards when x cannot be null: `x` is declared with a non-optional type, `x` is a call to a primitive/scheme method with a non-optional return type, or `x` is an optional local initialised from a non-nullable expression (a non-optional variable, such a call, or a tuple literal, which is never `None`) and not written later in the block. A later write at any depth keeps the guard and records a near-miss: an assignment, sample, element write, loop binder of the same name, or redeclaration. The declared type of a name the method binds under two different types is not trusted. A guard that can never fire is still kept, with a near-miss, when removing it would drop the read of a variable that may be unassigned (`_definedness.py`): a variable in the tested expression (`if ([x, f] == None)` with `f` a field only another oracle assigns), or in the initialiser of the local it tests, which the guard keeps alive. |
+| SubsetTypeNormalization | Normalizes subset types to their superset equivalents. |
+
+### Tuples (`tuples.py`)
+
+| Pass | Description |
+|---|---|
+| FoldTupleIndex | Constant-folds `[e0, e1, ...][i]` to `e_i`. |
+| ExpandTuple | Expands product-typed variables into individual component variables. |
+| SimplifyTuple | Collapses `[v[0], v[1], ...]` back to `v`. |
+| CollapseSingleIndexTuple | Collapses product-typed variable accessed at a single constant index. |
+
+### State Relations (`state_relations.py`)
+
+Run at the end of the core pipeline. They use relations between a game's fields across oracle calls; a pass that removes a field keeps it (near miss) when the new game would still name it with nothing in scope to bind it.
+
+| Pass | Description |
+|---|---|
+| ForwardLiteralFieldWrite | After `f = c;` for a field `f` and a literal `c` that `f` holds exactly (`Bool`, `Int`, `None`; not bit strings), replaces reads of `f` by `c` in the same block, up to the next statement that may write `f`. For a ModInt field only `0`, and a statement is rewritten only if every read of `f` in it is an operand of `+`, or the right operand of `-`, next to a ModInt operand that does not read `f` or a name bound twice (the literal is an `Int`: `D ^ n` and `D + D` stay; near miss). |
+| FieldInvariantElimination | Removes a field `a`, written outside Initialize, once `a == E` over other fields is proved to hold after Initialize and to be preserved by every oracle (each method executed symbolically, path by path, exit values compared by normal form); reads of `a` become `E`. The only `E` tried is `a`'s value at the end of an Initialize with one path, over the fields holding its drawn values. |
+| GeneratorPowerFieldToExponent | A group field with no initializer, set first in Initialize, also written outside Initialize, and written only as `P = g ^ x` or `P = P * g ^ x` with every exponent atom a `ModInt<G.order>`, is kept as its exponent `P@exp` (`P@exp = x`, `P@exp = P@exp + x`); reads become `g ^ P@exp`. |
+| OffsetFusion | Replaces a fixed `P = g ^ e` and an additive offset `D` by one evolving secret `P@fused == e + D`, kept only if the core pipeline then removes `D` (random self-reducibility). |
+
+## Standardization Pipeline
+
+The standardization pipeline runs once after the core pipeline converges.
+
+### Standardization (`standardization.py`)
+
+| Pass | Description |
+|---|---|
+| VariableStandardize | Renames explicit local binders (typed assignments and samples, bare declarations, loop binders) to v1, v2, ... per method, by a scope walk. Untyped writes follow their binder. Field, parameter, type and free names are reserved. |
+| StandardizeFieldNames | Normalizes field names to canonical ordering. Two-phase: rename by oracle first-read order, then regroup by type. |
+| NormalizeCommutativeChains | Re-sorts commutative chains after field/variable renaming. |
+| BubbleSortFieldAssignments | Sorts field assignments into canonical dependency order: swaps two adjacent whole-field writes, lower field name first, when the later one has no edge to the earlier in the dependency graph. It permutes the graph's own nodes, which compare by identity, so two equal statements keep their own edges. |
+| StabilizeIndependentStatements | Sorts independent statements by value expression for deterministic ordering. Uses the TopologicalSort dependency graph, so a draw whose domain may be empty is never moved across an `if` that returns. |
+| FieldLexMinByRHS | Within each same-type field group, picks the lex-smallest slot index for the field whose Initialize-RHS sort key is smallest. |
+
+## Inlining Infrastructure (`visitors.py`)
+
+Modifications to the `InlineTransformer` that runs during proof composition.
+
+| Component | Description |
+|---|---|
+| InlinerEarlyReturnNormalization | Normalizes early returns in inlined methods so no bare `ReturnStatement` leaks into the caller. |
+
+## Per-Step Passes
+
+### Assumptions (`assumptions.py`)
+
+| Pass | Description |
+|---|---|
+| ApplyAssumptions | Applies step-specific assumed predicates using Z3 implication checking. |
+
+## Equivalence-engine escape hatches
+
+NOT transforms — fallbacks invoked by the proof engine after
+`CORE_PIPELINE + STANDARDIZATION_PIPELINE` runs and structural game equality fails.
+Live in `proof_frog/proof_engine.py`.
+
+| Hook | Description |
+|---|---|
+| `_z3_residual_equivalence` (+ `Z3FormulaVisitor.opaque_func_call_fallback`) | If two games differ only in if-conditions and/or final return expressions, neutralize both classes and re-check structural equality; otherwise assert `Not(f1 == f2)` is `unsat` via Z3 with opaque-call fallback for shapes Z3 can't mix. Refuses if either differing expression contains a non-deterministic call (Gap-F guard). |
+
+## Draws that may not complete
+
+Expressions are total, but a sampling statement whose domain is empty does not complete: the oracle call never returns, and the adversary sees that. `dependencies.is_possibly_empty_draw` decides when a draw may be such a statement: `x <- T \ E;` and `x <-uniq[E] T;` (empty when `E` covers `T`), unless `E` is a set literal with fewer elements than `T` certainly has (every length and modulus is at least 1, so `BitString<n> \ {s}` and `T \ {}` are non-empty, while `ModInt<q> \ {0}` may be empty); and `x <- D;` when `D` is a runtime value (a field, parameter or local of the game, a view such as `M.keys`, or any other expression) rather than a type. A draw from a type (`BitString<n>`, `E.Key`, a `let:` set) is non-empty. `dependencies.may_not_complete` asks whether a statement contains such a draw at any depth. A pass may not delete such a draw as dead code, or move it onto or off traces (across a `return`). TopologicalSort, RemoveUnnecessaryFields, StabilizeIndependentStatements and SinkUniformSample consult the predicate; of the other passes that delete or move statements, CollapseAssignment never deletes a sample, IfFalseReturnToConjunction moves only assignments, and the field-to-local sampling passes skip set-typed fields and expression domains.

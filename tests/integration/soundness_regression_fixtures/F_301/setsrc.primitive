@@ -1,0 +1,5 @@
+// A source of sets. Gen has no `deterministic` modifier, so two calls may
+// return different sets.
+Primitive SetSrc(Int n) {
+    Set<BitString<n>> Gen();
+}

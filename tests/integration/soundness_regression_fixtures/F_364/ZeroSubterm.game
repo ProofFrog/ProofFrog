@@ -1,0 +1,22 @@
+// Target: ModInt Simplification (with Symbolic Computation).
+// The same loss as PowerOfZeroSum.game with a zero sub-term: x - x became
+// the literal 0 and each x ^ 0 the Int literal 1, and 0 + 1 + 1 was folded
+// to 2, so the comparison became the Int comparison 2 == 0. The literal 0
+// alone is harmless (it is 0 in every modulus); the 1s are not.
+// The games are distinguishable: Left is 2 == 0 mod q, true for q = 2,
+// while Right is always false.
+// Expected: Proof Failed.
+
+Game Left(Int q) {
+    Bool Probe(ModInt<q> x, ModInt<q> y) {
+        return ((x - x) + x ^ 0) + x ^ 0 == y - y;
+    }
+}
+
+Game Right(Int q) {
+    Bool Probe(ModInt<q> x, ModInt<q> y) {
+        return false;
+    }
+}
+
+export as ZeroSubterm;

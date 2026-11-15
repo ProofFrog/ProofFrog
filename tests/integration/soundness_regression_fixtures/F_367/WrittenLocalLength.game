@@ -1,0 +1,18 @@
+// The length k of 0^k is a local the method writes after declaring it.
+Game Left(Int n) {
+    Bool Test() {
+        Int k = n;
+        k = k + 1;
+        return 0^k == 0^k;
+    }
+}
+
+Game Right(Int n) {
+    Bool Test() {
+        Int k = n;
+        k = k + 1;
+        return 0^k == 0^k;
+    }
+}
+
+export as WrittenLocalLength;

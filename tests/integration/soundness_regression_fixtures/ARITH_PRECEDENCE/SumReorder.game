@@ -1,0 +1,18 @@
+// Left returns a + 3 - b, which is (a + 3) - b; Right returns a - b - 3,
+// which is (a - b) - 3. They differ by 6, so the games are distinguishable.
+// SymbolicComputation simplifies Left through SymPy, which prints
+// a - b + 3; when + bound tighter than - that text re-parsed as
+// a - (b + 3), the same as Right.
+Game Left(Int a, Int b) {
+    Int E() {
+        return a + 3 - b;
+    }
+}
+
+Game Right(Int a, Int b) {
+    Int E() {
+        return a - b - 3;
+    }
+}
+
+export as SumReorder;

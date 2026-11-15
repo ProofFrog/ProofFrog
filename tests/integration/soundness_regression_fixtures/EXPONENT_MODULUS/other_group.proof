@@ -1,0 +1,17 @@
+// A GroupElem<G> exponent of type ModInt<H.order> is ill-formed.
+import 'OtherGroup.game';
+
+proof:
+
+let:
+    Group G;
+    Group H;
+
+assume:
+
+theorem:
+    OtherGroup(G, H);
+
+games:
+    OtherGroup(G, H).Left against OtherGroup(G, H).Adversary;
+    OtherGroup(G, H).Right against OtherGroup(G, H).Adversary;

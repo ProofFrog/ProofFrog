@@ -1,0 +1,21 @@
+// F-361: proof lets retyping same-named game fields. See AttackN5.game.
+// `Int x; Int y;` are not used by the theorem; they only collide with the
+// game's fields.
+// Expected if sound: Proof Failed. If unsound: Proof Succeeded!
+import 'AttackN5.game';
+
+proof:
+
+let:
+    Int q;
+    Group G;
+    Function<GroupElem<G>, ModInt<q>> Hg;
+    Int x;
+    Int y;
+
+theorem:
+    AttackN5(q, G, Hg);
+
+games:
+    AttackN5(q, G, Hg).Left against AttackN5(q, G, Hg).Adversary;
+    AttackN5(q, G, Hg).Right against AttackN5(q, G, Hg).Adversary;

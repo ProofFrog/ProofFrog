@@ -1,0 +1,3 @@
+Primitive D(Int n) {
+    deterministic BitString<n> eval(BitString<n> x);
+}

@@ -266,3 +266,68 @@ def test_two_visitor_instances_share_opaque_atom_by_repr() -> None:
     # that the visitor produces a USABLE Z3 expression (not None) for
     # each side; cross-instance const sharing is a proof-engine
     # responsibility and exercised in the equivalence-helper tests.
+
+
+# ---------------------------------------------------------------------------
+# Unary operators over operands Z3 cannot apply them to
+# ---------------------------------------------------------------------------
+
+
+def _modint_type_map() -> visitors.NameTypeMap:
+    type_map = visitors.NameTypeMap()
+    type_map.set("x", frog_ast.ModIntType(frog_ast.Variable("q")))
+    return type_map
+
+
+def test_negated_modint_is_untranslatable_not_a_crash() -> None:
+    # A ModInt is modelled as an opaque constant, never as an integer, so
+    # `-x` has no Z3 counterpart. The visitor used to apply Python's unary
+    # minus to the opaque constant and crash with a TypeError, aborting
+    # canonicalization (RemoveUnreachable walks every assignment).
+    visitor = visitors.Z3FormulaVisitor(_modint_type_map(), variable_version_map={})
+    assert visitor.visit(_parse_expr("-x")) is None
+    assert visitor.stack == []
+
+
+def test_negated_modint_inside_a_comparison_is_untranslatable() -> None:
+    formula = visitors.Z3FormulaVisitor(
+        _modint_type_map(), variable_version_map={}
+    ).visit(_parse_expr("-x == y"))
+    assert formula is None
+
+
+def test_negated_modint_with_fallback_is_a_shared_opaque_atom() -> None:
+    # With the opaque fallback, `-x` is one memoized atom: equal to itself,
+    # and not provably equal to `x`.
+    visitor = visitors.Z3FormulaVisitor(
+        _modint_type_map(), opaque_func_call_fallback=True
+    )
+    same = visitor.visit(_parse_expr("-x == -x"))
+    assert same is not None
+    solver = z3.Solver()
+    solver.add(z3.Not(same))
+    assert solver.check() == z3.unsat
+    other = visitor.visit(_parse_expr("-x == x"))
+    assert other is not None
+    solver = z3.Solver()
+    solver.add(z3.Not(other))
+    assert solver.check() == z3.sat
+
+
+def test_not_of_a_non_bool_is_untranslatable_not_a_crash() -> None:
+    visitor = visitors.Z3FormulaVisitor(_modint_type_map(), variable_version_map={})
+    assert visitor.visit(_parse_expr("!x")) is None
+    assert visitor.stack == []
+
+
+def test_negated_int_still_translates() -> None:
+    # The guard must not disturb the ordinary case.
+    type_map = visitors.NameTypeMap()
+    type_map.set("n", frog_ast.IntType())
+    formula = visitors.Z3FormulaVisitor(type_map, variable_version_map={}).visit(
+        _parse_expr("-n == 0 - n")
+    )
+    assert formula is not None
+    solver = z3.Solver()
+    solver.add(z3.Not(formula))
+    assert solver.check() == z3.unsat

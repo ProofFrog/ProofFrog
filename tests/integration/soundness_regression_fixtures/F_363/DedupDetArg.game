@@ -1,0 +1,20 @@
+// Sound control for attack_dedup_nondet_arg.proof (DeduplicateDeterministicCalls).
+// The argument of the deterministic call is a parameter, so the two calls
+// return the same value and merging them is exact.
+// Expected (sound or not): Proof Succeeded!
+import 'Rnd.primitive';
+
+Game Left(Rnd R, Int q) {
+    [ModInt<q>, ModInt<q>] Probe(ModInt<q> x) {
+        return [R.Det(x), R.Det(x)];
+    }
+}
+
+Game Right(Rnd R, Int q) {
+    [ModInt<q>, ModInt<q>] Probe(ModInt<q> x) {
+        ModInt<q> v = R.Det(x);
+        return [v, v];
+    }
+}
+
+export as DedupDetArg;

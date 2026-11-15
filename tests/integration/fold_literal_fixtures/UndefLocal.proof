@@ -1,0 +1,21 @@
+// Single-hop claim UndefLocal.Real -> UndefLocal.Random with no assumptions.
+// See UndefLocal.game for the expected outcome.
+import 'Chan.primitive';
+import 'ChanImpl.scheme';
+import 'UndefLocal.game';
+
+proof:
+
+let:
+    Int lambda;
+    ChanImpl C = ChanImpl(lambda);
+
+assume:
+
+theorem:
+    UndefLocal(C);
+
+games:
+    UndefLocal(C).Real against UndefLocal(C).Adversary;
+
+    UndefLocal(C).Random against UndefLocal(C).Adversary;

@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'ResetParam.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    ResetParam(S);
+
+games:
+    ResetParam(S).Left against ResetParam(S).Adversary;
+    ResetParam(S).Right against ResetParam(S).Adversary;

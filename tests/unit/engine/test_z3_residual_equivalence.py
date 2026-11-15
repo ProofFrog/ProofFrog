@@ -8,7 +8,7 @@ deterministic call (mirroring `BooleanAbsorption`'s Gap-F guard).
 """
 
 from proof_frog import frog_ast, frog_parser, visitors
-from proof_frog.proof_engine import _z3_residual_equivalence
+from proof_frog.proof_engine import EquivalenceResult, _z3_residual_equivalence
 
 
 def _parse_game(src: str) -> frog_ast.Game:
@@ -417,5 +417,125 @@ def test_membership_identical_query_still_passes() -> None:
         """
     result = _z3_residual_equivalence(
         _parse_game(src), _parse_game(src), _empty_let_types(), _empty_namespace()
+    )
+    assert result.valid, result.failure_detail
+
+
+# ---------------------------------------------------------------------------
+# F-365: differing expressions whose Z3 translations have different sorts
+#
+# The visitor models a value it cannot translate as an atom of the
+# uninterpreted `Opaque` sort (an untranslatable Bool comparison, any ModInt
+# value), an Int as a Z3 integer, and leaves a literal as a Python value.
+# Comparing two sides of different sorts raised a Z3 exception that aborted
+# the whole proof. The hop must fail instead, naming the two sorts.
+# ---------------------------------------------------------------------------
+
+
+def _residual(src1: str, src2: str) -> EquivalenceResult:
+    return _z3_residual_equivalence(
+        _parse_game(src1), _parse_game(src2), _empty_let_types(), _empty_namespace()
+    )
+
+
+def test_f365_untranslated_comparison_vs_bool_literal_fails_hop() -> None:
+    # `0 == x + 1` over ModInt<q> becomes one Opaque atom; `false` stays a
+    # Python bool. Pre-fix: Z3Exception "Z3 expression expected".
+    result = _residual(
+        """
+        Game G(Int q) {
+            Bool Probe(ModInt<q> x) { return 0 == x + 1; }
+        }
+        """,
+        """
+        Game G(Int q) {
+            Bool Probe(ModInt<q> x) { return false; }
+        }
+        """,
+    )
+    assert not result.valid
+    assert "Could not compare return in Z3: sort mismatch (Opaque vs Bool)" in (
+        result.failure_detail or ""
+    )
+
+
+def test_f365_int_vs_modint_return_fails_hop() -> None:
+    # A ModInt<q> oracle returning its Int parameter (reduced mod q) against
+    # one returning its ModInt<q> parameter: a Z3 integer against an Opaque
+    # constant. Pre-fix: Z3Exception "sort mismatch".
+    result = _residual(
+        """
+        Game G(Int q) {
+            ModInt<q> Probe(Int n, ModInt<q> x) { return n; }
+        }
+        """,
+        """
+        Game G(Int q) {
+            ModInt<q> Probe(Int n, ModInt<q> x) { return x; }
+        }
+        """,
+    )
+    assert not result.valid
+    assert "sort mismatch (Int vs Opaque)" in (result.failure_detail or "")
+
+
+def test_f365_if_condition_sort_mismatch_fails_hop() -> None:
+    # The same mismatch in an if-condition rather than a return.
+    result = _residual(
+        """
+        Game G(Int q) {
+            Int Probe(ModInt<q> x) {
+                if (0 == x + 1) { return 1; }
+                return 0;
+            }
+        }
+        """,
+        """
+        Game G(Int q) {
+            Int Probe(ModInt<q> x) {
+                if (false) { return 1; }
+                return 0;
+            }
+        }
+        """,
+    )
+    assert not result.valid
+    assert "Could not compare if-condition in Z3: sort mismatch" in (
+        result.failure_detail or ""
+    )
+
+
+def test_f365_bool_literal_vs_bool_formula_still_passes() -> None:
+    # Positive control: a Python bool literal still compares with a Z3 Bool
+    # formula, so a contradiction is proved equal to `false`.
+    result = _residual(
+        """
+        Game G() {
+            Bool Probe(Bool a) { return a && !a; }
+        }
+        """,
+        """
+        Game G() {
+            Bool Probe(Bool a) { return false; }
+        }
+        """,
+    )
+    assert result.valid, result.failure_detail
+
+
+def test_f365_int_literal_vs_int_formula_still_passes() -> None:
+    # Positive control: a Python int literal still compares with a Z3
+    # integer formula.
+    result = _residual(
+        """
+        Game G() {
+            Int Probe(Int n) { return n + 1 - n; }
+        }
+        """,
+        """
+        Game G() {
+            Int Probe(Int n) { return 1; }
+        }
+        """,
     )
     assert result.valid, result.failure_detail

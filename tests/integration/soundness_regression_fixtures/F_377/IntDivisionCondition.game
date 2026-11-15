@@ -1,0 +1,22 @@
+// F-377 (the Z3 layer): once Symbolic Computation leaves 0 / 0 unfolded,
+// the Z3 translation of the if condition divided the Python integers 0 and 0
+// with true division, which raised ZeroDivisionError and aborted the proof.
+// Left returns 1 when a is the unspecified value of the Int division 0 / 0,
+// Right always returns 0: the games differ.
+// Expected: Proof Failed! (no crash).
+Game Left(Int q) {
+    Int Probe(Int a) {
+        if ((q - q) / (q - q) == a) {
+            return 1;
+        }
+        return 0;
+    }
+}
+
+Game Right(Int q) {
+    Int Probe(Int a) {
+        return 0;
+    }
+}
+
+export as IntDivisionCondition;

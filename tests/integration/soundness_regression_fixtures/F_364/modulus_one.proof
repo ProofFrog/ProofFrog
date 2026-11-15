@@ -1,0 +1,15 @@
+// Target: ModInt Simplification. See ModulusOne.game.
+// Expected: Proof Failed.
+import 'ModulusOne.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    ModulusOne(q);
+
+games:
+    ModulusOne(q).Left against ModulusOne(q).Adversary;
+    ModulusOne(q).Right against ModulusOne(q).Adversary;

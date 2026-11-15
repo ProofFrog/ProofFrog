@@ -1,0 +1,51 @@
+// Positive control: the else-if condition queries the separate random
+// function K, so every H query is a fresh <-uniq[T] draw.
+import 'P.primitive';
+
+Game Left(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Function<BitString<2>, BitString<2>> K;
+    Set<BitString<2>> T;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+        K <- Function<BitString<2>, BitString<2>>;
+    }
+    Bool Probe(Bool b, BitString<2> x, BitString<2> y) {
+        if (b) {
+            return false;
+        } else if (K(x) == y) {
+            return true;
+        }
+        return false;
+    }
+    BitString<2> Q() {
+        BitString<2> r <-uniq[T] BitString<2>;
+        BitString<2> z = H(r);
+        return z;
+    }
+}
+
+Game Right(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Function<BitString<2>, BitString<2>> K;
+    Set<BitString<2>> T;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+        K <- Function<BitString<2>, BitString<2>>;
+    }
+    Bool Probe(Bool b, BitString<2> x, BitString<2> y) {
+        if (b) {
+            return false;
+        } else if (K(x) == y) {
+            return true;
+        }
+        return false;
+    }
+    BitString<2> Q() {
+        BitString<2> r <-uniq[T] BitString<2>;
+        BitString<2> z <- BitString<2>;
+        return z;
+    }
+}
+
+export as ElseIfOther;

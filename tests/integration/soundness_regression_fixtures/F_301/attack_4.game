@@ -1,0 +1,49 @@
+// F-301 (Remove Duplicate Fields): a `<-uniq[S]` draw inserts into S
+// alone.
+// T = F.Gen(); S = T; pairs the two set fields, and the draw
+// `x <-uniq[S] BitString<n>` adds x to S. The pass paired only whole-field
+// writes, so it did not see that insertion: it merged S into T, and every
+// draw then grew the set that Check reads.
+// Distinguisher: x = DrawFresh(); Check(x). Left: x was excluded from the
+// starting T and added to S only, so false. Right: the draw added x to the
+// one set, so true. Advantage 1.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+import 'setsrc.primitive';
+
+Game Left(SetSrc F, Int n) {
+    Set<BitString<n>> T;
+    Set<BitString<n>> S;
+
+    Void Initialize() {
+        T = F.Gen();
+        S = T;
+    }
+
+    BitString<n> DrawFresh() {
+        BitString<n> x <-uniq[S] BitString<n>;
+        return x;
+    }
+
+    Bool Check(BitString<n> y) {
+        return y in T;
+    }
+}
+
+Game Right(SetSrc F, Int n) {
+    Set<BitString<n>> T;
+
+    Void Initialize() {
+        T = F.Gen();
+    }
+
+    BitString<n> DrawFresh() {
+        BitString<n> x <-uniq[T] BitString<n>;
+        return x;
+    }
+
+    Bool Check(BitString<n> y) {
+        return y in T;
+    }
+}
+
+export as Attack4RDF;

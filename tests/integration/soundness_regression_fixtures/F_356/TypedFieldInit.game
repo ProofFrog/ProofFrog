@@ -1,0 +1,17 @@
+// Positive control for F-356: an initializer that already has its field's
+// type is still read as the initializer. f is initialized with x, which has
+// f's type ModInt<q>, so Left's oracle is Right's with f read as x.
+Game Left(Int q, ModInt<q> x) {
+    ModInt<q> f = x;
+    Bool TestTyped() {
+        return f + f == f;
+    }
+}
+
+Game Right(Int q, ModInt<q> x) {
+    Bool TestTyped() {
+        return x + x == x;
+    }
+}
+
+export as TypedFieldInit;

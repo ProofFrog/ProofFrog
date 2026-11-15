@@ -32,16 +32,63 @@ class FileType(Enum):
 
 
 class ASTNode:
+    # The structural-hash cache of a scalar leaf (see `_ScalarLeaf`) lives in
+    # a slot, NOT in the instance `__dict__`: `vars(node)` is the engine's
+    # generic "all attributes of this node" view (`__eq__` below, the
+    # visitors, `advantage.lemma_instantiation`, ...), and a cache entry
+    # present on some nodes and absent on others would be read there as a
+    # structural difference. Every node still has an ordinary `__dict__` for
+    # its real attributes.
+    __slots__ = ("_structural_hash", "__dict__")
+
+    _structural_hash: int | None
+
+    _NON_SEMANTIC = frozenset({"line_num", "column_num", "origin"})
+
     def __init__(self) -> None:
         self.line_num: int = -1
         self.column_num: int = -1
         self.origin: SourceOrigin | None = None
+
+    def __getstate__(self) -> dict[str, object]:
+        # Only the instance dict is state. Leaving the slot out means a copy
+        # (`copy.copy` / `copy.deepcopy`) or a pickle never carries a cached
+        # hash: Python salts string hashes per process, so a worker must
+        # recompute, and a copy is usually made in order to be mutated.
+        return self.__dict__
+
+    def structural_hash(self) -> int:
+        """Return a cached structural hash for a scalar leaf node."""
+        if type(self) not in _HASHABLE_LEAF_TYPES:
+            raise TypeError("structural hash requires a scalar leaf")
+        try:
+            cached = self._structural_hash
+        except AttributeError:  # slot never written (a copy or an unpickle)
+            cached = None
+        if cached is None:
+            non_semantic = self._NON_SEMANTIC
+            fields = tuple(
+                sorted(
+                    (key, value)
+                    for key, value in self.__dict__.items()
+                    if key not in non_semantic
+                )
+            )
+            cached = hash((type(self), fields))
+            _SET_STRUCTURAL_HASH(self, cached)
+        return cached
 
     def __eq__(self, other: object) -> bool:
         if self is other:
             return True
 
         if type(self) is not type(other):
+            return False
+
+        if (
+            type(self) in _HASHABLE_LEAF_TYPES
+            and self.structural_hash() != other.structural_hash()
+        ):
             return False
 
         # Compare all attributes. Only true source-position / provenance
@@ -59,12 +106,45 @@ class ASTNode:
         # well-formed instances of the same class have identical key sets, so
         # this changes nothing for them; a malformed node now compares
         # unequal (fail-closed) instead of accepting or raising.
-        excluded = {"line_num", "column_num", "origin"}
+        excluded = self._NON_SEMANTIC
         self_keys = self.__dict__.keys() - excluded
         other_keys = other.__dict__.keys() - excluded
         if self_keys != other_keys:
             return False
         return all(getattr(self, attr) == getattr(other, attr) for attr in self_keys)
+
+
+# C-level writer of the hash slot; it does not go through `__setattr__`.
+_SET_STRUCTURAL_HASH = vars(ASTNode)["_structural_hash"].__set__
+_SET_ATTRIBUTE = object.__setattr__
+_DEL_ATTRIBUTE = object.__delattr__
+
+
+class _ScalarLeaf(ASTNode):
+    """Mixin for the scalar leaf classes whose structural hash is cached.
+
+    Any attribute write or delete drops the cached hash, so a mutated leaf is
+    never compared on a stale one. Only these classes pay for a Python-level
+    `__setattr__`; composite nodes never cache a hash and keep the native one.
+    """
+
+    __slots__ = ()
+
+    def __init__(self) -> None:  # pylint: disable=super-init-not-called
+        # Same three attributes as `ASTNode.__init__`, written without the
+        # invalidating `__setattr__` below: a node under construction has no
+        # cached hash to drop, and leaves are built in very large numbers.
+        _SET_ATTRIBUTE(self, "line_num", -1)
+        _SET_ATTRIBUTE(self, "column_num", -1)
+        _SET_ATTRIBUTE(self, "origin", None)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        _SET_STRUCTURAL_HASH(self, None)
+        _SET_ATTRIBUTE(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        _SET_STRUCTURAL_HASH(self, None)
+        _DEL_ATTRIBUTE(self, name)
 
 
 Namespace: TypeAlias = dict[str, Optional[ASTNode]]
@@ -88,17 +168,17 @@ class Type(ASTNode):
     pass
 
 
-class IntType(Type):
+class IntType(_ScalarLeaf, Type):
     def __str__(self) -> str:
         return "Int"
 
 
-class BoolType(Type):
+class BoolType(_ScalarLeaf, Type):
     def __str__(self) -> str:
         return "Bool"
 
 
-class Void(Type):
+class Void(_ScalarLeaf, Type):
     def __str__(self) -> str:
         return "Void"
 
@@ -150,7 +230,7 @@ class ModIntType(Type):
         return f"ModInt<{self.modulus}>"
 
 
-class GroupType(Type):
+class GroupType(_ScalarLeaf, Type):
     """The ``Group`` declaration type (like ``Int`` or ``Set``)."""
 
     def __str__(self) -> str:
@@ -174,6 +254,8 @@ class ProductType(Type):
         self.types = types
 
     def __eq__(self, other: object) -> bool:
+        if self is other:
+            return True
         if isinstance(other, ProductType):
             return self.types == other.types
         # ProductType([A, B]) == Tuple([A, B]) when elements match,
@@ -228,26 +310,34 @@ class BinaryOperators(Enum):
     EXPONENTIATE = "^"
 
     def precedence(self) -> int:
-        """Return precedence level (higher binds tighter)."""
-        if self == BinaryOperators.EXPONENTIATE:
-            return 5
-        if self in (BinaryOperators.MULTIPLY, BinaryOperators.DIVIDE):
-            return 4
-        if self in (BinaryOperators.ADD, BinaryOperators.SUBTRACT):
-            return 3
-        if self in (
-            BinaryOperators.EQUALS,
-            BinaryOperators.NOTEQUALS,
-            BinaryOperators.GT,
-            BinaryOperators.LT,
-            BinaryOperators.GEQ,
-            BinaryOperators.LEQ,
-            BinaryOperators.IN,
-            BinaryOperators.SUBSETS,
-        ):
-            return 2
-        # AND, OR, UNION, SETMINUS
-        return 1
+        """Return precedence level (higher binds tighter).
+
+        Mirrors the ``expression`` rule of ``Shared.g4``; every level is
+        left-associative except ``^``. Unary minus sits between ``*``/``/``
+        and ``+``/``-`` (see ``BinaryOperation._parenthesize``).
+        """
+        return _PRECEDENCE[self]
+
+
+_PRECEDENCE: dict[BinaryOperators, int] = {
+    BinaryOperators.EXPONENTIATE: 8,
+    BinaryOperators.MULTIPLY: 7,
+    BinaryOperators.DIVIDE: 7,
+    BinaryOperators.ADD: 6,
+    BinaryOperators.SUBTRACT: 6,
+    BinaryOperators.UNION: 5,
+    BinaryOperators.SETMINUS: 5,
+    BinaryOperators.LT: 4,
+    BinaryOperators.LEQ: 4,
+    BinaryOperators.GT: 4,
+    BinaryOperators.GEQ: 4,
+    BinaryOperators.IN: 4,
+    BinaryOperators.SUBSETS: 4,
+    BinaryOperators.EQUALS: 3,
+    BinaryOperators.NOTEQUALS: 3,
+    BinaryOperators.AND: 2,
+    BinaryOperators.OR: 1,
+}
 
 
 class UnaryOperators(Enum):
@@ -276,6 +366,15 @@ class BinaryOperation(Expression, Type):
         right_assoc: bool = False,
     ) -> str:
         """Wrap child in parens if needed based on precedence."""
+        # Unary minus binds looser than `*`, `/` and `^` (`-a * b` parses as
+        # `-(a * b)`, `-a ^ 2` as `-(a ^ 2)`), so it needs parentheses as an
+        # operand of those operators.
+        if (
+            isinstance(child, UnaryOperation)
+            and child.operator == UnaryOperators.MINUS
+            and parent_prec > BinaryOperators.ADD.precedence()
+        ):
+            return f"({child})"
         if isinstance(child, BinaryOperation):
             child_prec = child.operator.precedence()
             if child_prec < parent_prec:
@@ -311,6 +410,14 @@ class UnaryOperation(Expression):
         if self.operator == UnaryOperators.SIZE:
             return f"|{self.expression}|"
         if self.operator == UnaryOperators.MINUS:
+            # The operand of a unary minus extends over `*`, `/` and `^`
+            # only; an additive or looser operand needs parentheses.
+            if (
+                isinstance(self.expression, BinaryOperation)
+                and self.expression.operator.precedence()
+                <= BinaryOperators.ADD.precedence()
+            ):
+                return f"-({self.expression})"
             return f"-{self.expression}"
         return "UNDEFINED UNARY OPERATOR"
 
@@ -423,7 +530,7 @@ class FuncCall(Expression, Statement):
         return f"{self.func}({arg_str})"
 
 
-class Variable(Expression, Type):
+class Variable(_ScalarLeaf, Expression, Type):
     def __init__(self, name: str) -> None:
         super().__init__()
         self.name = name
@@ -438,6 +545,8 @@ class Tuple(Expression):
         self.values = values
 
     def __eq__(self, other: object) -> bool:
+        if self is other:
+            return True
         if isinstance(other, Tuple):
             return self.values == other.values
         if isinstance(other, ProductType):
@@ -593,6 +702,19 @@ class GenericFor(Statement):
         return output_string
 
 
+def _exclusion_str(exclusion: Optional[Expression]) -> str:
+    """Print the exclusion set of ``x <- T \\ E;``.
+
+    The statement's ``\\`` is not part of either expression: the parser splits
+    at the last ``\\``, reading ``x <- T \\ A \\ B;`` as sampling from
+    ``T \\ A`` excluding ``B``. An exclusion that is a binary operation is
+    therefore parenthesized.
+    """
+    if isinstance(exclusion, BinaryOperation):
+        return f"({exclusion})"
+    return str(exclusion)
+
+
 class Sample(Statement):
     def __init__(
         self, the_type: Optional[Type], var: Expression, sampled_from: Expression
@@ -635,7 +757,11 @@ class UniqueSample(Statement):
     def __str__(self) -> str:
         prefix = f"{self.the_type} " if self.the_type else ""
         if self.surface_form == "minus":
-            return prefix + f"{self.var} <- {self.sampled_from} \\ {self.unique_set};"
+            return (
+                prefix
+                + f"{self.var} <- {self.sampled_from} \\ "
+                + f"{_exclusion_str(self.unique_set)};"
+            )
         return prefix + f"{self.var} <-uniq[{self.unique_set}] {self.sampled_from};"
 
 
@@ -689,11 +815,14 @@ class DestructuringBinding(Statement):
         if self.kind == "sample":
             return f"{self.the_type} {targets} <- {self.value};"
         if self.kind == "sample_minus":
-            return f"{self.the_type} {targets} <- {self.value} \\ {self.exclusion};"
+            return (
+                f"{self.the_type} {targets} <- {self.value} \\ "
+                f"{_exclusion_str(self.exclusion)};"
+            )
         return f"{self.the_type} {targets} = {self.value};"
 
 
-class Integer(Expression):
+class Integer(_ScalarLeaf, Expression):
     def __init__(self, num: int) -> None:
         super().__init__()
         self.num = num
@@ -702,7 +831,7 @@ class Integer(Expression):
         return str(self.num)
 
 
-class Boolean(Expression):
+class Boolean(_ScalarLeaf, Expression):
     def __init__(self, the_bool: bool) -> None:
         super().__init__()
         self.bool = the_bool
@@ -711,12 +840,12 @@ class Boolean(Expression):
         return str(self.bool).lower()
 
 
-class NoneExpression(Expression, Type):
+class NoneExpression(_ScalarLeaf, Expression, Type):
     def __str__(self) -> str:
         return "None"
 
 
-class BinaryNum(Expression):
+class BinaryNum(_ScalarLeaf, Expression):
     """A binary literal written as ``0bXYZ``.
 
     Carries both the integer value and the explicit bit length.  The length
@@ -735,6 +864,23 @@ class BinaryNum(Expression):
     def __str__(self) -> str:
         # Render with leading zeros to preserve the explicit length.
         return "0b" + format(self.num, f"0{self.length}b")
+
+
+_HASHABLE_LEAF_TYPES = frozenset(
+    {
+        Variable,
+        Integer,
+        Boolean,
+        NoneExpression,
+        BinaryNum,
+        IntType,
+        BoolType,
+        Void,
+        GroupType,
+    }
+)
+# Every hashed class must drop its cache on mutation (`_ScalarLeaf`).
+assert all(issubclass(leaf, _ScalarLeaf) for leaf in _HASHABLE_LEAF_TYPES)
 
 
 class BitStringLiteral(Expression):
@@ -853,6 +999,8 @@ class Game(ASTNode):
         self.methods = body[3]
 
     def __eq__(self, __value: object) -> bool:
+        if self is __value:
+            return True
         # F-335: exact-type match, not `isinstance`. `Reduction` subclasses
         # `Game`, so a loose `isinstance` check let a `Reduction` compare
         # equal to a plain `Game` with the same body (and, via the inherited
@@ -904,6 +1052,49 @@ class ParameterizedGame(Expression):
         return f"{self.name}({arg_str})"
 
 
+class EventTheorem(Expression):
+    """``event <flag> of <game>``: the event that ``<flag>`` is set in ``<game>``.
+
+    Appears as a proof's theorem (proven by a chain from one side of the
+    game pair), as a lemma or assumption entry, and inside ``advantage(...)``
+    in a claimed bound. ``at_initialize`` marks the output-stripped form for
+    a flag decided in ``Initialize``. The engine keys every event on
+    :meth:`notion`, a synthetic ``ParameterizedGame`` whose name cannot
+    collide with a user game (``#`` is not an identifier character).
+    """
+
+    def __init__(
+        self, flag: str, game: ParameterizedGame, at_initialize: bool = False
+    ) -> None:
+        super().__init__()
+        self.flag = flag
+        self.game = game
+        self.at_initialize = at_initialize
+
+    def notion(self) -> ParameterizedGame:
+        suffix = "#init" if self.at_initialize else ""
+        return ParameterizedGame(
+            f"{self.game.name}#event#{self.flag}{suffix}", list(self.game.args)
+        )
+
+    def __str__(self) -> str:
+        suffix = " at Initialize" if self.at_initialize else ""
+        return f"event {self.flag} of {self.game}{suffix}"
+
+
+Notion: TypeAlias = ParameterizedGame | EventTheorem
+
+
+def notion_key(notion: Notion) -> ParameterizedGame:
+    """The game the engine keys a notion on: the synthetic one for an event."""
+    return notion.notion() if isinstance(notion, EventTheorem) else notion
+
+
+def notion_game(notion: Notion) -> ParameterizedGame:
+    """The user-written game pair a notion is about."""
+    return notion.game if isinstance(notion, EventTheorem) else notion
+
+
 class ConcreteGame(Expression):
     def __init__(self, game: ParameterizedGame, which: str):
         super().__init__()
@@ -923,6 +1114,8 @@ class Reduction(Game):
         self.play_against = play_against
 
     def __eq__(self, __value: object) -> bool:
+        if self is __value:
+            return True
         # F-335: a Reduction is defined by its composition (which game it
         # plays and against what), not only by its body. Two Reductions with
         # identical bodies but different `to_use`/`play_against` are distinct;
@@ -977,7 +1170,7 @@ class AdvantageReference(Expression):
 
     def __init__(
         self,
-        notion: "ParameterizedGame",
+        notion: "Notion",
         reduction: Optional["ParameterizedGame"] = None,
     ) -> None:
         super().__init__()
@@ -1102,7 +1295,7 @@ ProofStep: TypeAlias = Step | Induction | StepAssumption
 class Lemma(ASTNode):
     """A lemma entry: a security property proven by another proof file."""
 
-    def __init__(self, game: ParameterizedGame, proof_path: str) -> None:
+    def __init__(self, game: ParameterizedGame | EventTheorem, proof_path: str) -> None:
         super().__init__()
         self.game = game
         self.proof_path = proof_path
@@ -1134,10 +1327,10 @@ class ProofFile(Root):
         imports: list[Import],
         helpers: list[Game],
         lets: list[Field],
-        assumptions: list[ParameterizedGame],
+        assumptions: list[ParameterizedGame | EventTheorem],
         lemmas: list[Lemma],
         max_calls: Optional[Variable],
-        theorem: ParameterizedGame,
+        theorem: ParameterizedGame | EventTheorem,
         steps: list[ProofStep],
         requirements: Optional[list[StructuralRequirement]] = None,
         helpers_after_theorem_count: int = 0,

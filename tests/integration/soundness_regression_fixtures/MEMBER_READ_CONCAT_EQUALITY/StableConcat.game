@@ -1,0 +1,22 @@
+// Positive control for StaleConcat.game: with no write to M, v equals
+// F.Ev(|M.keys|) || u at the comparison, and v == (t || u) holds exactly when
+// F.Ev(|M.keys|) == t.
+import 'DetEv.primitive';
+
+Game Left(DetEv F) {
+    Map<Int, Bool> M;
+    Bool O(BitString<F.n> t, BitString<F.n> u) {
+        BitString<2 * F.n> v = F.Ev(|M.keys|) || u;
+        return v == (t || u);
+    }
+}
+
+Game Right(DetEv F) {
+    Map<Int, Bool> M;
+    Bool O(BitString<F.n> t, BitString<F.n> u) {
+        BitString<F.n> e = F.Ev(|M.keys|);
+        return e == t;
+    }
+}
+
+export as StableConcat;

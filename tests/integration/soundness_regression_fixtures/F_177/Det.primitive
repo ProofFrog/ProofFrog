@@ -1,0 +1,5 @@
+// An abstract deterministic method f: interchangeability must hold for
+// every implementation of f.
+Primitive Det(Int lambda) {
+    deterministic Int f(Int x);
+}

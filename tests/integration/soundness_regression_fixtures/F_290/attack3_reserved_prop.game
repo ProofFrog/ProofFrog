@@ -1,0 +1,43 @@
+// Attack 3 proof-level property, RESERVED-PREFIX variant (audit:
+// UniformXorSimplification). Same shadowing shape as attack3_plain_prop.game
+// but every colliding binder is named __u. AlphaRename never renames binders
+// whose names start with __ (alpha_rename.py _RESERVED_PREFIX, _maybe_bind
+// returns None), so the sample keeps the name __u, the GenericFor binder
+// keeps the name __u, and the collision SURVIVES the pre-pass. The pass then
+// sees Sample(__u) with exactly one Variable("__u") occurrence (the binder is
+// a bare string, invisible to the count) and rewrites w = __u + m to w = __u.
+// Under lexical scoping:
+//   Left.O(m): loop-__u = 0^lambda, w = 0^lambda + m = m; returns m.
+//   Right.O(m): w = loop element = 0^lambda; returns 0^lambda.
+// Distinguisher: one call O(1^lambda): 1^lambda vs 0^lambda; advantage 1.
+// Right is the unsound stand-alone output of the pass on Left.
+
+Game Left(Int lambda) {
+    Void Initialize() { }
+
+    BitString<lambda> O(BitString<lambda> m) {
+        Set<BitString<lambda>> S = {0^lambda};
+        BitString<lambda> w = 0^lambda;
+        BitString<lambda> __u <- BitString<lambda>;
+        for (BitString<lambda> __u in S) {
+            w = __u + m;
+        }
+        return w;
+    }
+}
+
+Game Right(Int lambda) {
+    Void Initialize() { }
+
+    BitString<lambda> O(BitString<lambda> m) {
+        Set<BitString<lambda>> S = {0^lambda};
+        BitString<lambda> w = 0^lambda;
+        BitString<lambda> __u <- BitString<lambda>;
+        for (BitString<lambda> __u in S) {
+            w = __u;
+        }
+        return w;
+    }
+}
+
+export as Attack3ReservedSec;

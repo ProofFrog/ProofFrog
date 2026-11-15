@@ -1,0 +1,16 @@
+// Positive control: lengths naming never-written variables stay well formed.
+import 'ConstantLength.game';
+
+proof:
+
+let:
+    Int n;
+
+assume:
+
+theorem:
+    ConstantLength(n);
+
+games:
+    ConstantLength(n).Left against ConstantLength(n).Adversary;
+    ConstantLength(n).Right against ConstantLength(n).Adversary;

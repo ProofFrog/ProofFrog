@@ -1,0 +1,15 @@
+// Positive control. See PowerOfZeroControl.game.
+// Expected: Proof Succeeded.
+import 'PowerOfZeroControl.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    PowerOfZeroControl(q);
+
+games:
+    PowerOfZeroControl(q).Left against PowerOfZeroControl(q).Adversary;
+    PowerOfZeroControl(q).Right against PowerOfZeroControl(q).Adversary;

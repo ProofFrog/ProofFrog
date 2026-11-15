@@ -1,0 +1,8 @@
+// ATTACK-4 proof-level artifact (RefactorGroupElemFieldExp soundness audit).
+// Abstract primitive with a NON-deterministic method (no `deterministic`
+// annotation): per SEMANTICS.md sec 6.4 / owner ruling 7.A.6, each flip()
+// invocation resolves with fresh i.i.d. coins, so two structurally equal
+// calls denote INDEPENDENT draws.
+Primitive Coin() {
+    Int flip();
+}

@@ -1,0 +1,14 @@
+// F-356: Reduce returns its Int input as a ModInt<q>, so Test compares b
+// reduced modulo q with 0.
+import 'Tester.primitive';
+
+Scheme RetTester(Int q) extends Tester {
+    Bool Test(Int b) {
+        ModInt<q> z = 0;
+        return this.Reduce(b) == z;
+    }
+
+    ModInt<q> Reduce(Int b) {
+        return b;
+    }
+}

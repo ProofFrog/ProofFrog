@@ -1,0 +1,20 @@
+// Positive control for F-356: with RetTester, KeptPair.Left and
+// KeptPair.Right are interchangeable (see KeptPair.game). The inlined
+// return binding `ModInt<q> r = b;` is kept and matches Right's.
+
+import 'Tester.primitive';
+import 'RetTester.scheme';
+import 'KeptPair.game';
+
+proof:
+
+let:
+    Int q;
+    Tester T = RetTester(q);
+
+theorem:
+    KeptPair(T, q);
+
+games:
+    KeptPair(T, q).Left against KeptPair(T, q).Adversary;
+    KeptPair(T, q).Right against KeptPair(T, q).Adversary;

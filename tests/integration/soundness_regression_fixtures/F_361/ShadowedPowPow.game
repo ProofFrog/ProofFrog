@@ -1,0 +1,31 @@
+// Positive control for collateral_poison_powpow (F-361): the field t is in
+// G, the group whose order the exponents are reduced by, so folding
+// (t ^ x) ^ y into t ^ (x * y) is sound. The proof's let t, in another
+// group H and not passed to the game, must not stop the fold: inside the
+// game the field's own type applies.
+// Expected: Proof Succeeded!
+Game Left(Group G, Group H) {
+    GroupElem<G> t;
+
+    Void Put(GroupElem<G> v) {
+        t = v;
+    }
+
+    GroupElem<G> Q(ModInt<G.order> x, ModInt<G.order> y) {
+        return (t ^ x) ^ y;
+    }
+}
+
+Game Right(Group G, Group H) {
+    GroupElem<G> t;
+
+    Void Put(GroupElem<G> v) {
+        t = v;
+    }
+
+    GroupElem<G> Q(ModInt<G.order> x, ModInt<G.order> y) {
+        return t ^ (x * y);
+    }
+}
+
+export as ShadowedPowPow;

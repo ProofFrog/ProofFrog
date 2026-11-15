@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'LaterQuery.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    LaterQuery(S);
+
+games:
+    LaterQuery(S).Left against LaterQuery(S).Adversary;
+    LaterQuery(S).Right against LaterQuery(S).Adversary;

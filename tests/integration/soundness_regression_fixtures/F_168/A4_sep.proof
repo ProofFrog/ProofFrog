@@ -1,0 +1,14 @@
+// Full-pipeline (proof-level) probe for attack 4 against HoistFieldPureAlias.
+// SOUND -> prove REJECTS the Left -> Right hop. UNSOUND -> prove ACCEPTS it.
+
+import './A4_sep.game';
+
+proof:
+
+theorem:
+    A4Sep();
+
+games:
+    A4Sep().Left against A4Sep().Adversary;
+
+    A4Sep().Right against A4Sep().Adversary;

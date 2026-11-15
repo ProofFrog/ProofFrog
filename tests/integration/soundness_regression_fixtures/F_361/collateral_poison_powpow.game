@@ -1,0 +1,34 @@
+// Target: GroupElem Simplification's power-of-power rule, under a proof let
+// that shares its name with a game field.
+// The field t is in H; the proof has a let `GroupElem<G> t` that is not
+// passed to the game. The rule folds (t ^ x) ^ y into t ^ (x * y) with the
+// product taken in ModInt<G.order>, which is sound only when t's group order
+// divides G.order. If the let's type is applied to the field, the rule fires.
+// Distinguisher (|G| = 3, |H| = 2, x = y = 2, t a generator of H): Left
+// returns t ^ 4 = identity, Right t ^ (4 mod 3) = t.
+// Expected if sound: Proof Failed. If unsound: Proof Succeeded!
+Game Left(Group G, Group H) {
+    GroupElem<H> t;
+
+    Void Put(GroupElem<H> v) {
+        t = v;
+    }
+
+    GroupElem<H> Q(ModInt<G.order> x, ModInt<G.order> y) {
+        return (t ^ x) ^ y;
+    }
+}
+
+Game Right(Group G, Group H) {
+    GroupElem<H> t;
+
+    Void Put(GroupElem<H> v) {
+        t = v;
+    }
+
+    GroupElem<H> Q(ModInt<G.order> x, ModInt<G.order> y) {
+        return t ^ (x * y);
+    }
+}
+
+export as CollateralPowPow;

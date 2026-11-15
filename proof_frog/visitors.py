@@ -36,13 +36,117 @@ def _to_snake_case(camel_case: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Dispatch caches — avoid repeated hasattr / getattr / _to_snake_case lookups
+# Dispatch and child layout caches
 # ---------------------------------------------------------------------------
 
 _NOT_FOUND = object()
+_NOT_CACHED = object()
 
-# (visitor_class, node_class) -> (visit_method | None, leave_method | None)
-_VISITOR_METHODS_CACHE: dict[tuple[type, type], tuple[Any, Any]] = {}
+# The caches hold the looked-up functions directly.  Each entry is keyed by the
+# visitor or transformer class, which already keeps that class (and so its
+# methods) alive for as long as the entry exists; nothing would be freed any
+# sooner by holding the methods weakly.
+#
+# The caches are unbounded and never evict.  Their size is at most (number of
+# visitor/transformer classes) x (number of AST node classes), and both are
+# fixed once the modules are imported, PROVIDED every visitor and transformer
+# class is defined at module level.  A class defined inside a function is a
+# new class on every call and would add entries here that are never released,
+# so do not define one there (tests/unit/visitors/test_dispatch_fields.py
+# checks this).  With no eviction, concurrent use from the web server's and
+# the LSP's threads needs no lock: a racing miss just stores the same value
+# twice.
+
+# visitor_class -> node_class -> (visit_method | None, leave_method | None)
+_VISITOR_METHODS_CACHE: dict[type, dict[type, tuple[Any, Any]]] = {}
+
+# Only fields that can contain AST nodes belong here. Unknown node classes
+# retain the dynamic walk, including any attributes added by their callers.
+#
+# Every Visitor and Transformer descends through these fields and no others. A
+# node-holding field left out of its class's entry is skipped without any
+# error, and the order within an entry is the traversal order (it must stay the
+# constructor's assignment order, which is what the vars() walk followed).
+# tests/unit/visitors/test_dispatch_fields.py checks both against frog_ast.
+_CHILD_FIELDS: dict[type, tuple[str, ...]] = {
+    frog_ast.ASTNode: (),
+    frog_ast.Root: (),
+    frog_ast.Expression: (),
+    frog_ast.Statement: (),
+    frog_ast.Type: (),
+    frog_ast.IntType: (),
+    frog_ast.BoolType: (),
+    frog_ast.Void: (),
+    frog_ast.ArrayType: ("element_type", "count"),
+    frog_ast.MapType: ("key_type", "value_type"),
+    frog_ast.SetType: ("parameterization",),
+    frog_ast.BitStringType: ("parameterization",),
+    frog_ast.ModIntType: ("modulus",),
+    frog_ast.GroupType: (),
+    frog_ast.GroupElemType: ("group",),
+    frog_ast.ProductType: ("types",),
+    frog_ast.FunctionType: ("domain_type", "range_type"),
+    frog_ast.OptionalType: ("the_type",),
+    frog_ast.BinaryOperation: ("left_expression", "right_expression"),
+    frog_ast.UnaryOperation: ("expression",),
+    frog_ast.Set: ("elements",),
+    frog_ast.Field: ("type", "value"),
+    frog_ast.Parameter: ("type",),
+    frog_ast.MethodSignature: ("return_type", "parameters"),
+    frog_ast.Primitive: ("parameters", "fields", "methods"),
+    frog_ast.FuncCall: ("func", "args"),
+    frog_ast.Variable: (),
+    frog_ast.Tuple: ("values",),
+    frog_ast.ReturnStatement: ("expression",),
+    frog_ast.Block: ("statements",),
+    frog_ast.IfStatement: ("conditions", "blocks"),
+    frog_ast.FieldAccess: ("the_object",),
+    frog_ast.ArrayAccess: ("the_array", "index"),
+    frog_ast.Slice: ("the_array", "start", "end"),
+    frog_ast.VariableDeclaration: ("type",),
+    frog_ast.NumericFor: ("start", "end", "block"),
+    frog_ast.GenericFor: ("var_type", "over", "block"),
+    frog_ast.Sample: ("the_type", "var", "sampled_from"),
+    frog_ast.UniqueSample: ("the_type", "var", "unique_set", "sampled_from"),
+    frog_ast.Assignment: ("the_type", "var", "value"),
+    frog_ast.DestructuringBinding: ("the_type", "value", "exclusion"),
+    frog_ast.Integer: (),
+    frog_ast.Boolean: (),
+    frog_ast.NoneExpression: (),
+    frog_ast.BinaryNum: (),
+    frog_ast.BitStringLiteral: ("length",),
+    frog_ast.GroupGenerator: ("group",),
+    frog_ast.GroupOrder: ("group",),
+    frog_ast.Method: ("signature", "block"),
+    frog_ast.Import: (),
+    frog_ast.Scheme: ("parameters", "fields", "requirements", "methods", "imports"),
+    frog_ast.Game: ("parameters", "fields", "methods"),
+    frog_ast.ParameterizedGame: ("args",),
+    frog_ast.EventTheorem: ("game",),
+    frog_ast.ConcreteGame: ("game",),
+    frog_ast.Reduction: ("parameters", "fields", "methods", "to_use", "play_against"),
+    frog_ast.AdvantageClause: ("bound",),
+    frog_ast.AdvantageReference: ("notion", "reduction"),
+    frog_ast.ClaimedBound: ("bound",),
+    frog_ast.GameFile: ("imports", "games", "advantage"),
+    frog_ast.Step: ("challenger", "reduction", "adversary"),
+    frog_ast.StepAssumption: ("expression",),
+    frog_ast.Induction: ("start", "end", "steps"),
+    frog_ast.Lemma: ("game",),
+    frog_ast.StructuralRequirement: ("target",),
+    frog_ast.ProofFile: (
+        "imports",
+        "helpers",
+        "lets",
+        "max_calls",
+        "assumptions",
+        "lemmas",
+        "theorem",
+        "steps",
+        "requirements",
+        "claimed_bound",
+    ),
+}
 
 # (transformer_class, node_class) -> method | _NOT_FOUND
 _TRANSFORM_CACHE: dict[tuple[type, type], Any] = {}
@@ -52,42 +156,72 @@ _TRANSFORM_FALLBACK_CACHE: dict[type, Any] = {}
 
 
 def _lookup_visitor_methods(cls: type, node_cls: type) -> tuple[Any, Any]:
-    """Look up visit/leave methods for a (visitor_class, node_class) pair."""
-    key = (cls, node_cls)
-    cached = _VISITOR_METHODS_CACHE.get(key)
-    if cached is not None:
-        return cached
-    snake = _to_snake_case(node_cls.__name__)
-    visit_method = getattr(cls, "visit_" + snake, None) or getattr(
-        cls, "visit_ast_node", None
-    )
-    leave_method = getattr(cls, "leave_" + snake, None) or getattr(
-        cls, "leave_ast_node", None
-    )
-    result = (visit_method, leave_method)
-    _VISITOR_METHODS_CACHE[key] = result
-    return result
+    """Resolve the visit/leave hooks of visitor class *cls* for *node_cls*.
+
+    The hook is looked up by the node class's own name first, then by the name
+    of each of its AST base classes in MRO order, ending at the generic
+    ``visit_ast_node`` / ``leave_ast_node``.  So ``visit_game`` also fires on a
+    ``Reduction`` unless the visitor defines ``visit_reduction``.
+
+    ``Transformer`` dispatch does NOT do this (see ``_lookup_transform``).
+    """
+    methods: list[Any] = []
+    for prefix in ("visit_", "leave_"):
+        method = None
+        for ancestor in node_cls.__mro__:
+            if not issubclass(ancestor, frog_ast.ASTNode):
+                continue
+            method = getattr(cls, prefix + _to_snake_case(ancestor.__name__), None)
+            if method is not None:
+                break
+        if method is None:
+            method = getattr(cls, prefix + "ast_node", None)
+        methods.append(method)
+    return methods[0], methods[1]
+
+
+def _visitor_methods(cls: type) -> dict[type, tuple[Any, Any]]:
+    """The dispatch table of a visitor class, built on first use."""
+    methods = _VISITOR_METHODS_CACHE.get(cls)
+    if methods is None:
+        methods = {}
+        pending = [frog_ast.ASTNode]
+        while pending:
+            node_cls = pending.pop()
+            methods[node_cls] = _lookup_visitor_methods(cls, node_cls)
+            pending.extend(node_cls.__subclasses__())
+        _VISITOR_METHODS_CACHE[cls] = methods
+    return methods
+
+
+def _child_fields(node: frog_ast.ASTNode) -> tuple[str, ...]:
+    """Return the structural child fields for a node class."""
+    fields = _CHILD_FIELDS.get(type(node))
+    return tuple(vars(node)) if fields is None else fields
 
 
 def _lookup_transform(cls: type, node_cls: type) -> Any:
-    """Look up transform method for a (transformer_class, node_class) pair."""
+    """Look up transform method for a (transformer_class, node_class) pair.
+
+    Exact-name only: the hook for a node is ``transform_<its own class name>``.
+    Unlike ``_lookup_visitor_methods`` there is no fallback through the node
+    class's bases, so ``transform_game`` does not fire on a ``Reduction``.
+    """
     key = (cls, node_cls)
-    cached = _TRANSFORM_CACHE.get(key)
-    if cached is not None:
-        return cached
-    snake = _to_snake_case(node_cls.__name__)
-    method = getattr(cls, "transform_" + snake, _NOT_FOUND)
-    _TRANSFORM_CACHE[key] = method
+    method = _TRANSFORM_CACHE.get(key, _NOT_CACHED)
+    if method is _NOT_CACHED:
+        snake = _to_snake_case(node_cls.__name__)
+        method = getattr(cls, "transform_" + snake, _NOT_FOUND)
+        _TRANSFORM_CACHE[key] = method
     return method
 
 
 def _lookup_transform_fallback(cls: type) -> Any:
     """Look up transform_ast_node fallback for a transformer class."""
-    cached = _TRANSFORM_FALLBACK_CACHE.get(cls)
-    if cached is not None:
-        return cached
-    method = getattr(cls, "transform_ast_node", _NOT_FOUND)
-    _TRANSFORM_FALLBACK_CACHE[cls] = method
+    method = _TRANSFORM_FALLBACK_CACHE.get(cls, _NOT_CACHED)
+    if method is _NOT_CACHED:
+        method = getattr(cls, "transform_ast_node", _NOT_FOUND)
+        _TRANSFORM_FALLBACK_CACHE[cls] = method
     return method
 
 
@@ -117,6 +251,23 @@ U = TypeVar("U")
 
 
 class Visitor(ABC, Generic[U]):
+    """Read-only traversal with ``visit_<node>`` / ``leave_<node>`` hooks.
+
+    Hooks are named after the snake-cased node class.  Dispatch picks the most
+    specific hook the visitor defines along the node class's MRO: the node's
+    own class, then each AST base class in turn, then the generic
+    ``visit_ast_node`` / ``leave_ast_node``.  A ``visit_game`` hook therefore
+    also runs on a ``Reduction`` (a ``Game`` subclass) unless the visitor has
+    a ``visit_reduction``; at most one visit hook and one leave hook run per
+    node.
+
+    This differs from ``Transformer``, whose ``transform_<node>`` hooks match
+    the node's own class name only.
+
+    Children are reached through ``_CHILD_FIELDS``.  A field missing from that
+    map is never visited.
+    """
+
     @abstractmethod
     def result(self) -> U:
         pass
@@ -133,26 +284,33 @@ class Visitor(ABC, Generic[U]):
 
     def visit(self, visiting_node: frog_ast.ASTNode) -> U:
         cls = type(self)
+        dispatch = _visitor_methods(cls)
 
         def visit_helper(node: frog_ast.ASTNode) -> None:
-            visit_method, leave_method = _lookup_visitor_methods(cls, type(node))
+            node_cls = type(node)
+            methods = dispatch.get(node_cls)
+            if methods is None:
+                # A node class defined after this visitor's table was built.
+                methods = _lookup_visitor_methods(cls, node_cls)
+                dispatch[node_cls] = methods
+            visit_method, leave_method = methods
 
             if visit_method is not None:
                 visit_method(self, node)
 
-            def visit_children(child: Any) -> Any:
-                if isinstance(child, frog_ast.ASTNode):
-                    visit_helper(child)
-                if isinstance(child, (list, tuple)):
-                    for item in child:
-                        visit_children(item)
-
             if self.should_descend(node):
-                for attr in vars(node):
+                for attr in _child_fields(node):
                     visit_children(getattr(node, attr))
 
             if leave_method is not None:
                 leave_method(self, node)
+
+        def visit_children(child: Any) -> None:
+            if isinstance(child, frog_ast.ASTNode):
+                visit_helper(child)
+            elif isinstance(child, (list, tuple)):
+                for item in child:
+                    visit_children(item)
 
         visit_helper(visiting_node)
         return self.result()
@@ -164,6 +322,20 @@ T = TypeVar("T", bound=frog_ast.ASTNode)
 
 
 class Transformer(ABC):
+    """Copy-on-write rewriting with ``transform_<node>`` hooks.
+
+    Dispatch is exact-name: a node is handed to ``transform_<snake-cased name
+    of its own class>`` if the transformer defines it.  There is NO fallback
+    through the node class's bases, unlike ``Visitor``: ``transform_game`` is
+    not called for a ``Reduction``, and a transformer that must handle both
+    defines ``transform_reduction`` as well.  Failing an exact match, the
+    generic ``transform_ast_node`` is tried and its result used if truthy;
+    otherwise the node's children are transformed (``_transform_children``).
+
+    Children are reached through ``_CHILD_FIELDS``.  A field missing from that
+    map is never transformed.
+    """
+
     def transform(self, node: T) -> T:
         cls = type(self)
         node_cls = type(node)
@@ -185,16 +357,14 @@ class Transformer(ABC):
         # transformer's own per-node hooks for *node* itself. Subclasses that
         # override a container hook (e.g. ``transform_game``) to set up state
         # call this to perform the default structural descent.
-        changed = False
         new_attrs: dict[str, Any] = {}
-        for attr_name in vars(node):
+        for attr_name in _child_fields(node):
             old_val = getattr(node, attr_name)
             new_val = _cow_transform_child(self, old_val)
-            new_attrs[attr_name] = new_val
             if new_val is not old_val:
-                changed = True
+                new_attrs[attr_name] = new_val
 
-        if not changed:
+        if not new_attrs:
             return node
 
         node_copy = copy.copy(node)
@@ -319,8 +489,226 @@ class SubstitutionTransformer(Transformer):
             return None
 
 
+# ---------------------------------------------------------------------------
+# Capture-aware renaming of value references (F-337 / issue #252)
+# ---------------------------------------------------------------------------
+
+# ``frog_ast.Variable`` is declared ``class Variable(Expression, Type)``: ONE
+# node class models both "a reference to a value" and "the name of a
+# user-defined type" (a ``let:``-bound ``Set``, a scheme's ``Set Key = ...``
+# alias, a group name).  A rename driven by a plain name-keyed
+# ``SubstitutionTransformer`` therefore cannot tell the two apart and rewrites
+# both, which silently retypes the game.
+#
+# ``TYPE_SLOTS`` records which attribute of which node holds a TYPE rather than
+# a value expression.  A ``Variable`` reached through one of these slots names a
+# type and must be left alone by a value rename.  Attributes NOT listed for a
+# node stay in expression context -- in particular
+# ``BitStringType.parameterization`` / ``ModIntType.modulus`` /
+# ``ArrayType.count`` are length/size *expressions* that may legitimately
+# reference a renamed value.
+TYPE_SLOTS: dict[type, tuple[str, ...]] = {
+    # Declaration sites: the declared type of a field, parameter or local.
+    frog_ast.Field: ("type",),
+    frog_ast.Parameter: ("type",),
+    frog_ast.VariableDeclaration: ("type",),
+    frog_ast.MethodSignature: ("return_type",),
+    frog_ast.GenericFor: ("var_type",),
+    frog_ast.Assignment: ("the_type",),
+    # ``x <- T`` / ``x <-uniq[S] T``: ``sampled_from`` is the sampling DOMAIN, a
+    # type.  ``UniqueSample.unique_set`` is deliberately absent -- it is a real
+    # mutable-set lvalue that may well be a field and must keep being renamed.
+    frog_ast.Sample: ("the_type", "sampled_from"),
+    frog_ast.UniqueSample: ("the_type", "sampled_from"),
+    # Type constructors: their type arguments stay in type context.
+    frog_ast.ArrayType: ("element_type",),
+    frog_ast.MapType: ("key_type", "value_type"),
+    frog_ast.SetType: ("parameterization",),
+    frog_ast.ProductType: ("types",),
+    frog_ast.FunctionType: ("domain_type", "range_type"),
+    frog_ast.OptionalType: ("the_type",),
+    frog_ast.GroupType: ("group",),
+    frog_ast.GroupElemType: ("group",),
+}
+
+# Slots that ESCAPE type context back into expression context: a parameterized
+# type's length/size/modulus argument is an ordinary ``Int`` expression, and may
+# legitimately name the value being renamed (``BitString<n>`` where ``n`` is a
+# field).  Every other slot inherits its parent's context, so e.g. the
+# ``the_object`` of a ``FieldAccess`` stays a type name in ``E.Key`` but stays a
+# value in ``M.keys``.
+EXPRESSION_ESCAPE_SLOTS: dict[type, tuple[str, ...]] = {
+    frog_ast.BitStringType: ("parameterization",),
+    frog_ast.ModIntType: ("modulus",),
+    frog_ast.ArrayType: ("count",),
+}
+
+
+def walk_children(
+    node: frog_ast.ASTNode, in_type: bool, escape: bool = False
+) -> list[tuple[str, Any, bool]]:
+    """Yield ``(attr_name, value, child_in_type)`` for *node*'s children.
+
+    ``in_type`` is inherited: once inside a type, stay inside it.  When *escape*
+    is set, ``EXPRESSION_ESCAPE_SLOTS`` drops back into expression context --
+    used by the renamer, but deliberately NOT by ``type_position_names``, which
+    over-approximates the protected set so that a name occurring anywhere under
+    a type (including a length expression) is never minted into.
+    """
+    type_slots = TYPE_SLOTS.get(type(node), ())
+    escape_slots = EXPRESSION_ESCAPE_SLOTS.get(type(node), ()) if escape else ()
+    return [
+        (
+            attr,
+            getattr(node, attr),
+            False if attr in escape_slots else (in_type or attr in type_slots),
+        )
+        for attr in vars(node)
+    ]
+
+
+def type_position_names(node: Any, in_type: bool = False) -> set[str]:
+    """Every ``Variable`` name occurring in a TYPE position within *node*.
+
+    A rename must not mint one of these names: a target that coincides with an
+    in-scope type/set name would fuse the renamed value with that type.
+    """
+    if isinstance(node, frog_ast.Variable):
+        return {node.name} if in_type else set()
+    if isinstance(node, (list, tuple)):
+        names: set[str] = set()
+        for item in node:
+            names |= type_position_names(item, in_type)
+        return names
+    if not isinstance(node, frog_ast.ASTNode):
+        return set()
+    names = set()
+    for _, child, child_in_type in walk_children(node, in_type):
+        names |= type_position_names(child, child_in_type)
+    return names
+
+
+def rename_value_references(
+    node: Any, rename: dict[str, str], in_type: bool = False
+) -> Any:
+    """Copy-on-write rewrite of ``Variable`` references, skipping type positions.
+
+    The capture-aware replacement for a ``SubstitutionTransformer`` keyed on
+    bare ``frog_ast.Variable(name)`` nodes when the intent is to rename a
+    *value* (a field, a local): only occurrences that can denote the value are
+    rewritten, so a same-named type/set alias survives untouched.
+    """
+    if isinstance(node, frog_ast.Variable):
+        if in_type or node.name not in rename:
+            return node
+        return frog_ast.Variable(rename[node.name])
+    if isinstance(node, list):
+        new_items = [rename_value_references(item, rename, in_type) for item in node]
+        if all(new is old for new, old in zip(new_items, node)):
+            return node
+        return new_items
+    if not isinstance(node, frog_ast.ASTNode):
+        return node
+    changed = False
+    new_attrs: dict[str, Any] = {}
+    for attr, child, child_in_type in walk_children(node, in_type, escape=True):
+        new_child = rename_value_references(child, rename, child_in_type)
+        new_attrs[attr] = new_child
+        if new_child is not child:
+            changed = True
+    if not changed:
+        return node
+    node_copy = copy.copy(node)
+    for attr, new_child in new_attrs.items():
+        setattr(node_copy, attr, new_child)
+    return node_copy
+
+
+def written_field_names(module: frog_ast.ASTNode) -> set[str]:
+    """The names of *module*'s fields that one of its methods writes or
+    rebinds (:func:`reassigns_or_rebinds`), with or without an initializer."""
+    return {
+        field.name
+        for field in getattr(module, "fields", [])
+        if reassigns_or_rebinds({field.name}, module)
+    }
+
+
+def initializer_may_change(
+    initializer: frog_ast.ASTNode, written_fields: set[str]
+) -> bool:
+    """True if evaluating a field's *initializer* again after the fields are
+    initialized may not give the value the field was given, so the field
+    cannot be read as its initializer (F-384).
+
+    An initializer runs once, before any method, reading the current values
+    of the fields it names. A field that a method writes (in *written_fields*)
+    may hold another value by the time the field is read, and a method call
+    (``obj.m(...)``) may draw, so it can give another value each time it is
+    evaluated. A call of a ``Function`` value is deterministic, and one held
+    in a field a method writes (a random function drawn in ``Initialize``)
+    is a read of that field; a call naming a scheme or primitive
+    instantiates it (``UG(K, NG).EncapsKey`` once a parameter is replaced by
+    its argument), which evaluates nothing. Otherwise the initializer gives
+    the same value wherever it is evaluated, because a field initializer may
+    read only the fields declared before it.
+    """
+    calls_a_method = (
+        SearchVisitor[frog_ast.ASTNode](
+            lambda node: isinstance(node, frog_ast.FuncCall)
+            and isinstance(node.func, frog_ast.FieldAccess)
+        ).visit(initializer)
+        is not None
+    )
+    return calls_a_method or bool(
+        referenced_variable_names(initializer) & written_fields
+    )
+
+
+def _field_alias_value(
+    module: frog_ast.Scheme | frog_ast.Primitive, name: str
+) -> Optional[frog_ast.ASTNode]:
+    """The initializer of *module*'s field *name*, when ``module.name`` may
+    be read as it; None if there is no such field or initializer, if the
+    initializer may be stored with a change of value (an ``Int`` reduced
+    into a ``ModInt`` field, F-356; its type is not known here), or if
+    evaluating it again may give another value (a method call, or a read of
+    a field the module writes, F-384)."""
+    for field in module.fields:
+        if field.name == name:
+            if (
+                field.value is None
+                or not store_keeps_value_of_type(field.type, field.value, lambda: None)
+                or initializer_may_change(field.value, written_field_names(module))
+            ):
+                return None
+            return field.value
+    return None
+
+
+class InstantiationError(Exception):
+    """Instantiating a game, scheme or primitive cannot give a faithful
+    copy; reported to the user as a type error."""
+
+
+class ConvertingFieldInitializerError(InstantiationError):
+    """A scheme field's initializer converts the value it stores (an ``Int``
+    into a ``ModInt``), so its reads cannot be replaced by the initializer
+    (F-356)."""
+
+
+class ChangingFieldInitializerError(InstantiationError):
+    """A scheme field's initializer calls a method or reads a field one of
+    the scheme's methods writes, so evaluating it at a read may not give the
+    value the field was given (F-384)."""
+
+
 class InstantiationTransformer(Transformer):
-    def __init__(self, namespace: frog_ast.Namespace) -> None:
+    def __init__(
+        self,
+        namespace: frog_ast.Namespace,
+        field_value_types: Optional[dict[str, Optional[frog_ast.Type]]] = None,
+    ) -> None:
         self.namespace = dict(namespace)
         # Field names that are reassigned somewhere in the module currently being
         # transformed. Their initializer must NOT be substituted into method
@@ -328,21 +716,63 @@ class InstantiationTransformer(Transformer):
         # genuine state, not a constant alias, so replacing reads of `c` with `0`
         # would silently drop the mutation (see audit F-045).
         self._mutable_fields: set[str] = set()
+        # Every field a method of the current module writes, with or without
+        # an initializer. A field whose initializer reads one of them holds
+        # that field's value at initialization (F-384): ``GroupElem<G> Q =
+        # P;`` with ``P`` drawn later keeps P's starting value, so a read of
+        # ``Q`` must not become a read of the current ``P``: a game or
+        # reduction keeps such a field as a field, and a scheme with one is
+        # refused. That includes a game parameter the game writes, which
+        # instantiation binds as a written field (F-383).
+        self._written_fields: set[str] = set()
+        # The type of each field initializer where it is declared (None if
+        # unknown), with the module's parameters already substituted
+        # (:func:`proof_engine.instantiate` supplies it). A field whose
+        # initializer is not listed has an unknown initializer type.
+        self._field_value_types = dict(field_value_types or {})
+        self._module: Optional[frog_ast.ASTNode] = None
 
     def _instantiate_module(self, node: T) -> T:
-        saved = self._mutable_fields
-        written: set[str] = set()
-        for field in getattr(node, "fields", []):
-            if field.value is not None and reassigns_or_rebinds({field.name}, node):
-                written.add(field.name)
-        self._mutable_fields = written
+        saved = (self._mutable_fields, self._written_fields, self._module)
+        self._written_fields = written_field_names(node)
+        self._mutable_fields = {
+            field.name
+            for field in getattr(node, "fields", [])
+            if field.value is not None and field.name in self._written_fields
+        }
+        self._module = node
         try:
             return self._transform_children(node)
         finally:
-            self._mutable_fields = saved
+            self._mutable_fields, self._written_fields, self._module = saved
+
+    def _initializer_keeps_value(self, field: frog_ast.Field) -> bool:
+        """True if *field*'s initializer is stored unchanged, so the field
+        can be read as its initializer. An initializer is a store into the
+        field: an ``Int`` stored into a ``ModInt<q>`` field is reduced
+        modulo ``q`` (F-356), so such a field does not hold its
+        initializer. That includes an integer literal (``ModInt<2> f =
+        1;``): replaced by the literal, a read would be an ``Int``."""
+        assert field.value is not None
+        declared = self._field_value_types.get(field.name)
+
+        def value_type() -> Optional[frog_ast.Type]:
+            if declared is None:
+                return None
+            resolved = self.transform(declared)
+            return resolved if isinstance(resolved, frog_ast.Type) else None
+
+        return store_keeps_value_of_type(field.type, field.value, value_type)
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.ASTNode:
         return self._instantiate_module(game)
+
+    def transform_reduction(self, reduction: frog_ast.Reduction) -> frog_ast.ASTNode:
+        # Transformer dispatch is by exact class, so without this a reduction
+        # skipped the module set-up: a field its methods write was read as
+        # its initializer (``Int c = 0;`` with ``c = c + 1;`` became
+        # ``0 = 0 + 1;``).
+        return self._instantiate_module(reduction)
 
     def transform_scheme(self, scheme: frog_ast.Scheme) -> frog_ast.ASTNode:
         return self._instantiate_module(scheme)
@@ -368,6 +798,49 @@ class InstantiationTransformer(Transformer):
         # register its initializer for substitution into reads (audit F-045).
         # A pre-existing namespace binding (a proof-let constant) is left intact.
         if field.name in self._mutable_fields:
+            self.namespace.pop(field.name, None)
+        elif field.value is not None and initializer_may_change(
+            field.value, self._written_fields
+        ):
+            # The initializer ran once, before any method: evaluated again at
+            # a read, it would draw again, or see the current value of a field
+            # a method has written since (F-384). A game field stays a field
+            # holding the value it was given (:func:`snapshot_starting_values`
+            # later gives such a read its own field). A scheme's methods
+            # would carry the field's name into the games they are inlined
+            # into, so refuse.
+            if isinstance(self._module, frog_ast.Scheme):
+                raise ChangingFieldInitializerError(
+                    f"Cannot instantiate {self._module.name}: the initializer "
+                    f"of its field '{field.name}', {field.value}, calls a "
+                    "method or reads a field one of the scheme's methods "
+                    "writes. A field initializer runs once, before any "
+                    "method, and the engine can only read a scheme field as "
+                    "its initializer, which would evaluate it again at every "
+                    "read. Declare the value as a local in the methods that "
+                    "use it."
+                )
+            self.namespace.pop(field.name, None)
+        elif new_field.value is not None and not self._initializer_keeps_value(
+            new_field
+        ):
+            # The field holds its initializer converted to its type (an Int
+            # reduced into a ModInt), not the initializer, so its reads must
+            # not be replaced by the initializer (F-356). A game field stays
+            # a field. A scheme's methods would carry the field's name into
+            # every game they are inlined into, so refuse.
+            if isinstance(self._module, frog_ast.Scheme):
+                raise ConvertingFieldInitializerError(
+                    f"Cannot instantiate {self._module.name}: its field "
+                    f"'{field.name}' stores its initializer {field.value} in "
+                    f"type {new_field.type}, so the field does not hold the "
+                    "initializer: an Int stored in a ModInt is reduced modulo "
+                    "the modulus, and arithmetic on the field is modular, "
+                    "while on an Int, even a literal, it is not. The engine "
+                    "can only read a scheme field as its initializer. Give "
+                    f"the initializer the type {new_field.type}, or declare "
+                    "the value as a local in the methods that use it."
+                )
             self.namespace.pop(field.name, None)
         else:
             self.namespace[field.name] = ns_value
@@ -409,14 +882,7 @@ class InstantiationTransformer(Transformer):
                 ):
                     return copy.deepcopy(value.members[field_access.name])
             elif isinstance(value, (frog_ast.Scheme, frog_ast.Primitive)):
-                the_field = next(
-                    (
-                        field.value
-                        for field in value.fields
-                        if field.name == field_access.name
-                    ),
-                    None,
-                )
+                the_field = _field_alias_value(value, field_access.name)
                 if the_field is not None:
                     result = copy.deepcopy(the_field)
                     # Convert Tuple of types to ProductType for Set field aliases
@@ -443,14 +909,7 @@ class InstantiationTransformer(Transformer):
             assert isinstance(func_call.func, frog_ast.Variable)
             scheme_def = self.namespace[func_call.func.name]
             if isinstance(scheme_def, (frog_ast.Scheme, frog_ast.Primitive)):
-                the_field = next(
-                    (
-                        field.value
-                        for field in scheme_def.fields
-                        if field.name == field_access.name
-                    ),
-                    None,
-                )
+                the_field = _field_alias_value(scheme_def, field_access.name)
                 if the_field is not None:
                     result = copy.deepcopy(the_field)
                     # Substitute scheme parameters with the FuncCall's actual args
@@ -477,6 +936,74 @@ class InstantiationTransformer(Transformer):
                         )
                     return result
         return field_access
+
+
+def snapshot_starting_values(game: frog_ast.Game) -> frog_ast.Game:
+    """*game* (instantiated) with each field that a method writes and some
+    field initializer reads given a snapshot: a field ``P@start`` that no
+    method writes, declared just before ``P`` and holding P's starting value
+    (P's initializer, or, with none, the default of its type, one fixed
+    value of the type). Every initializer then reads ``P@start`` instead of
+    ``P``, P starts out as ``P@start``, and the fields that now read only
+    values fixed for the whole game are read as their initializers
+    (:class:`InstantiationTransformer` once more).
+
+    An initializer reads the fields declared before it at their values then
+    (F-384), and the snapshot holds exactly those values for the whole game.
+    Afterwards no initializer reads a field a method writes: a shape that the
+    passes, which decide a field's fate from the method bodies, mishandle
+    (Inline Single-Use Field dropped a written field read only by another
+    field's initializer, leaving that initializer naming an undeclared
+    field). A ``Set`` field's initializer is a type, renamed only in its
+    lengths. *game* is returned unchanged when no initializer reads a
+    written field.
+    """
+    written = written_field_names(game)
+    read_by_initializers: set[str] = set()
+    for field in game.fields:
+        if field.value is not None:
+            read_by_initializers |= referenced_variable_names(field.value)
+    targets = [
+        field.name
+        for field in game.fields
+        if field.name in written and field.name in read_by_initializers
+    ]
+    if not targets:
+        return game
+    taken = {field.name for field in game.fields} | referenced_variable_names(game)
+    snapshot: dict[str, str] = {}
+    for name in targets:
+        fresh = f"{name}@start"
+        suffix = 0
+        while fresh in taken:
+            suffix += 1
+            fresh = f"{name}@start{suffix}"
+        taken.add(fresh)
+        snapshot[name] = fresh
+    fields: list[frog_ast.Field] = []
+    for field in game.fields:
+        value = rename_value_references(
+            field.value, snapshot, isinstance(field.type, frog_ast.SetType)
+        )
+        if field.name not in snapshot:
+            fields.append(frog_ast.Field(field.type, field.name, value))
+            continue
+        start = snapshot[field.name]
+        fields.append(frog_ast.Field(copy.deepcopy(field.type), start, value))
+        fields.append(
+            frog_ast.Field(
+                field.type,
+                field.name,
+                None if value is None else frog_ast.Variable(start),
+            )
+        )
+    new_game = copy.copy(game)
+    new_game.fields = fields
+    # The field initializer types are not recorded here, so a field of a
+    # ModInt type counts as converting and stays a field.
+    result = InstantiationTransformer({}).transform(new_game)
+    assert isinstance(result, frog_ast.Game)
+    return result
 
 
 def block_unconditionally_returns(block: frog_ast.Block) -> bool:
@@ -562,6 +1089,80 @@ def _replace_returns_in_if(
     return frog_ast.IfStatement(list(if_stmt.conditions), new_blocks)
 
 
+def substitutable_argument(arg: frog_ast.Expression) -> bool:
+    """True if the inliner may substitute *arg* for the callee's parameter
+    instead of binding it to a variable: *arg* calls no method or function.
+
+    A call evaluates its argument once, before the callee's body;
+    substitution evaluates the argument expression wherever the callee reads
+    the parameter, as often as it reads it (and not at all when it never
+    reads it). A call in the argument may draw, change a challenger's
+    state, or not complete, so substituting it can turn one draw into two
+    or drop the call altogether (F-371). An expression without calls has no
+    effect and always completes, and it gives the value it had at the call
+    wherever the callee reads it, because nothing in the callee writes the
+    caller's variables, as long as the callee does not assign the parameter
+    itself. (``Int`` into ``ModInt`` parameters are bound separately, F-356,
+    and so is a parameter the callee writes, which is its own copy of the
+    argument.)
+    """
+    return (
+        SearchVisitor[frog_ast.ASTNode](
+            lambda node: isinstance(node, frog_ast.FuncCall)
+        ).visit(arg)
+        is None
+    )
+
+
+def _bind_returns(
+    block: frog_ast.Block,
+    return_type: frog_ast.Type,
+    name: str,
+    counter: list[int],
+) -> frog_ast.Block:
+    """Rewrite every ``return e;`` in *block* (at any depth) into
+    ``T r = e; return r;`` with *return_type* ``T`` and a fresh ``r``.
+
+    The inliner replaces a call by the expression its callee returns; when
+    the return type converts the returned value (an ``Int`` returned as a
+    ``ModInt<q>`` is reduced modulo ``q``), the typed temporary keeps that
+    conversion at the call site (F-356).
+    """
+    new_statements: list[frog_ast.Statement] = []
+    for statement in block.statements:
+        if (
+            isinstance(statement, frog_ast.ReturnStatement)
+            and statement.expression is not None
+        ):
+            temp = f"{name}{counter[0]}"
+            counter[0] += 1
+            new_statements.append(
+                frog_ast.Assignment(
+                    copy.deepcopy(return_type),
+                    frog_ast.Variable(temp),
+                    statement.expression,
+                )
+            )
+            new_statements.append(frog_ast.ReturnStatement(frog_ast.Variable(temp)))
+        elif isinstance(statement, frog_ast.IfStatement):
+            new_statements.append(
+                frog_ast.IfStatement(
+                    list(statement.conditions),
+                    [
+                        _bind_returns(inner, return_type, name, counter)
+                        for inner in statement.blocks
+                    ],
+                )
+            )
+        elif isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
+            loop = copy.copy(statement)
+            loop.block = _bind_returns(statement.block, return_type, name, counter)
+            new_statements.append(loop)
+        else:
+            new_statements.append(statement)
+    return frog_ast.Block(new_statements)
+
+
 class InlineTransformer(Transformer):
     def __init__(self, method_lookup: Dict[Tuple[str, str], frog_ast.Method]) -> None:
         self.blocks: list[frog_ast.Block] = []
@@ -573,11 +1174,20 @@ class InlineTransformer(Transformer):
         if self.finished:
             return block
 
-        self.blocks.append(block)
+        block_copy = copy.copy(block)
+        block_copy.statements = list(block.statements)
+        self.blocks.append(block_copy)
         for index, statement in enumerate(block.statements):
             self.statement_index = index
-            block.statements[index] = self.transform(statement)  # type: ignore
-        return self.blocks.pop()
+            transformed = self.transform(statement)
+            if self.blocks[-1] is block_copy:
+                block_copy.statements[index] = transformed  # type: ignore
+        result = self.blocks.pop()
+        if result is block_copy and all(
+            old is new for old, new in zip(block.statements, block_copy.statements)
+        ):
+            return block
+        return result
 
     def transform_func_call(self, exp: frog_ast.FuncCall) -> frog_ast.FuncCall:
         is_inlinable_call = (
@@ -643,14 +1253,58 @@ class InlineTransformer(Transformer):
                 called_method = SubstitutionTransformer(ast_map).transform(
                     called_method
                 )
-        transformed_method = InstantiationTransformer(
-            dict(
-                zip(
-                    (param.name for param in called_method.signature.parameters),
-                    (arg for arg in exp.args),
+        # A call evaluates each argument once, before the callee's body, and
+        # stores it in the parameter. Substituting the argument expression for
+        # the parameter is the same only when the argument calls nothing
+        # (`substitutable_argument`). An argument with a call is bound to a
+        # variable of the parameter's type, so a draw is drawn once even when
+        # the callee reads its parameter twice (F-371), and still made when
+        # the callee never reads it.
+        # F-356: a parameter (or return) type that contains a ModInt converts
+        # an Int argument (returned value) by reducing it modulo the modulus.
+        # Substituting the argument for the parameter, or the returned
+        # expression for the call, would drop that reduction, so such a value
+        # is bound even when it is a variable or a literal.
+        # A parameter the callee writes (assigns, samples into, writes an
+        # element of, inserts into with `<-uniq`, or rebinds) is bound too:
+        # arguments are passed by value, so the callee's parameter is its own
+        # copy. Substituting the argument would turn the callee's write into a
+        # write to the caller's variable (`x = 0^n;` becoming `y = 0^n;`, or
+        # `X[k] = v;` writing the caller's map).
+        # The pipeline forwards a binding when it provably keeps its value.
+        fresh_prefix = exp.func.the_object.name + "." + exp.func.name + "@"
+        fresh_suffix = str(self.statement_index)
+        bindings: list[frog_ast.Statement] = []
+        arguments: frog_ast.Namespace = {}
+        for param, arg in zip(called_method.signature.parameters, exp.args):
+            if (
+                type_contains_mod_int(param.type)
+                or not substitutable_argument(arg)
+                or reassigns_or_rebinds({param.name}, called_method.block)
+            ):
+                bound = fresh_prefix + param.name + fresh_suffix
+                bindings.append(
+                    frog_ast.Assignment(
+                        copy.deepcopy(param.type),
+                        frog_ast.Variable(bound),
+                        copy.deepcopy(arg),
+                    )
                 )
+                arguments[param.name] = frog_ast.Variable(bound)
+            else:
+                arguments[param.name] = arg
+        transformed_method = InstantiationTransformer(arguments).transform(
+            called_method
+        )
+        return_type = called_method.signature.return_type
+        if type_contains_mod_int(return_type):
+            transformed_method = copy.copy(transformed_method)
+            transformed_method.block = _bind_returns(
+                transformed_method.block,
+                return_type,
+                fresh_prefix + "return" + fresh_suffix + "_",
+                [0],
             )
-        ).transform(called_method)
 
         block_to_transform = self.blocks.pop()
 
@@ -673,7 +1327,7 @@ class InlineTransformer(Transformer):
         # branches so that normalized[:-1] contains no returns.
         normalized = _normalize_early_returns(list(transformed_method.block.statements))
 
-        statements_so_far += list(normalized[:-1])
+        statements_so_far += bindings + list(normalized[:-1])
 
         final_statement = normalized[-1]
 
@@ -920,17 +1574,53 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
         else:
             self.stack.append(tuple(items))
 
+    def leave_set(self, node: frog_ast.Set) -> None:
+        # Set literals are not modeled. Without this handler the elements
+        # leaked onto the stack, so `{a, b} == {c, b}` encoded as `c == b`.
+        # Pop them and intern the whole literal as an opaque atom, like a
+        # Set-typed variable. An untranslatable element (e.g. a call) refuses.
+        items = [self.stack.pop() if self.stack else None for _ in node.elements]
+        if any(item is None for item in items):
+            self.stack.append(None)
+        else:
+            # Deliberately not gated on `opaque_func_call_fallback`, unlike
+            # `leave_slice` / `leave_bit_string_literal`: `in` / `subsets`
+            # atoms and Set-typed variables are encoded ungated too.
+            self.stack.append(self._intern_opaque(node))
+
+    def _leave_member_access(
+        self,
+        node: frog_ast.FieldAccess | frog_ast.GroupGenerator | frog_ast.GroupOrder,
+    ) -> None:
+        # Member accesses are not modeled. Without a handler the receiver's
+        # item stood for the whole access, so `G.generator == G.identity`
+        # encoded as `G == G` and Z3 proved it. Pop the receiver and intern
+        # the whole access as one opaque atom: distinct members get distinct
+        # atoms, and the key's SSA versions give `M.keys` a new atom after
+        # a write to `M`. An untranslatable receiver (e.g. a call) refuses.
+        receiver = self.stack.pop() if self.stack else None
+        if receiver is None:
+            self.stack.append(None)
+        else:
+            self.stack.append(self._intern_opaque(node))
+
+    def leave_field_access(self, node: frog_ast.FieldAccess) -> None:
+        self._leave_member_access(node)
+
+    def leave_group_generator(self, node: frog_ast.GroupGenerator) -> None:
+        self._leave_member_access(node)
+
+    def leave_group_order(self, node: frog_ast.GroupOrder) -> None:
+        self._leave_member_access(node)
+
     def leave_array_access(self, _node: frog_ast.ArrayAccess) -> None:
         index = self.stack.pop() if self.stack else None
         array = self.stack.pop() if self.stack else None
-        if (
-            isinstance(array, tuple)
-            and isinstance(index, int)
-            and 0 <= index < len(array)
-        ):
-            self.stack.append(array[index])
-        else:
-            self.stack.append(None)
+        element = None
+        if isinstance(array, tuple):
+            if isinstance(index, int) and 0 <= index < len(array):
+                element = array[index]
+        self.stack.append(element)
 
     def leave_slice(self, node: frog_ast.Slice) -> None:
         # Bit-slicing is not modelled in Z3 here. Previously the Slice node had
@@ -984,10 +1674,20 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
             self.stack.append(None)
             return
 
-        if operation.operator == frog_ast.UnaryOperators.NOT:
-            self.stack.append(z3.Not(val))
-        else:
-            self.stack.append(-val)
+        try:
+            if operation.operator == frog_ast.UnaryOperators.NOT:
+                self.stack.append(z3.Not(val))
+            else:
+                self.stack.append(-val)
+        except (z3.Z3Exception, TypeError):
+            # The operand has a sort the operator does not accept: a ModInt
+            # (modelled as an opaque constant, never as an integer) under
+            # `-`, or a non-Bool under `!`. Fall back exactly as
+            # leave_binary_operation does instead of crashing.
+            if self.opaque_func_call_fallback:
+                self.stack.append(self._intern_opaque(operation))
+            else:
+                self.stack.append(None)
 
     def leave_binary_operation(self, operation: frog_ast.BinaryOperation) -> None:
         operators = {
@@ -1050,6 +1750,21 @@ class Z3FormulaVisitor(Visitor[z3.AstRef]):
                 )
                 return
             self.stack.append(None)
+            return
+
+        if (
+            operation.operator == frog_ast.BinaryOperators.DIVIDE
+            and isinstance(left_item, int)
+            and isinstance(right_item, int)
+        ):
+            # Two Python integers would be divided by Python's true division:
+            # a float, not FrogLang's integer division, and an exception for
+            # `c / 0` (an unspecified value determined by its operands, which
+            # Symbolic Computation leaves unfolded). Not modelled.
+            if self.opaque_func_call_fallback:
+                self.stack.append(self._intern_opaque(operation))
+            else:
+                self.stack.append(None)
             return
 
         if (
@@ -1231,6 +1946,26 @@ class NameTypeMap:
         return new_map
 
 
+def with_proof_let_types(
+    type_map: NameTypeMap, proof_let_types: Optional[NameTypeMap]
+) -> NameTypeMap:
+    """*type_map* (a game's declarations) with *proof_let_types* filled in
+    underneath it.
+
+    A proof's ``let:`` names are the outer scope of every game in the proof,
+    so a name the game declares itself (a field, parameter or local) keeps
+    the game's type, and a ``let:`` type applies only to a name the game
+    does not declare. ``NameTypeMap.__add__`` lets its right operand win, so
+    the old ``type_map + proof_let_types`` let a ``let:`` entry that is not
+    passed to the game retype a same-named game field (F-361: a field
+    ``GroupElem<H> t`` read as the let ``GroupElem<G> t`` folded
+    ``(t ^ x) ^ y`` into ``t ^ (x * y)`` in the wrong group order).
+    """
+    if proof_let_types is None:
+        return type_map
+    return proof_let_types + type_map
+
+
 F = TypeVar("F", bound=Callable[..., Any])
 
 
@@ -1296,7 +2031,8 @@ def build_game_type_map(
     """Build a NameTypeMap containing all variable types declared in a game.
 
     Collects types from fields, method parameters, assignments, and samples.
-    Optionally merges with proof-level let types.
+    Optionally merges with proof-level let types, which apply only to names
+    the game does not declare (:func:`with_proof_let_types`).
 
     WARNING: this map is *game-wide and scope-blind*. Because
     :meth:`NameTypeMap.set` is last-write-wins, a parameter or local named
@@ -1313,9 +2049,7 @@ def build_game_type_map(
     # Use a dummy stopping point that won't match any real node to collect everything
     dummy = frog_ast.Boolean(True)
     type_map = GetTypeMapVisitor(dummy).visit(game)
-    if proof_let_types is not None:
-        type_map = type_map + proof_let_types
-    return type_map
+    return with_proof_let_types(type_map, proof_let_types)
 
 
 def build_method_type_map(
@@ -1328,8 +2062,9 @@ def build_method_type_map(
     Contains the game's fields (module-global) plus only *method*'s own
     parameters and local declarations -- crucially NOT other methods'
     params/locals. A method-local binding shadowing a field name wins within
-    the method. Optionally merges proof-level let types (which win last,
-    matching :func:`build_game_type_map`).
+    the method. Optionally merges proof-level let types, which apply only to
+    names neither the game nor the method declares
+    (:func:`with_proof_let_types`, as in :func:`build_game_type_map`).
 
     This is the sound, scope-correct replacement for
     :func:`build_game_type_map` whenever a transform reasons about the type of
@@ -1344,12 +2079,321 @@ def build_method_type_map(
     for field in game.fields:
         field_map.set(field.name, field.type)
     method_map = GetTypeMapVisitor(dummy).visit(method)
-    # field_map + method_map: a method-local shadowing a field wins.
-    # + proof_let_types last, matching build_game_type_map's precedence.
-    result = field_map + method_map
-    if proof_let_types is not None:
-        result = result + proof_let_types
-    return result
+    # field_map + method_map: a method-local shadowing a field wins; both
+    # shadow a proof let of the same name.
+    return with_proof_let_types(field_map + method_map, proof_let_types)
+
+
+def type_contains_mod_int(the_type: Optional[frog_ast.ASTNode]) -> bool:
+    """True if a value of *the_type* has a ``ModInt`` part (the type itself,
+    or an element, key, value, component or range of it).
+
+    These are the types an ``Int`` value can be stored into with a change of
+    value: ``ModInt<q> x = b;`` with ``b : Int`` stores ``b`` reduced modulo
+    ``q`` (and likewise for an element of a ``Set<ModInt<q>>``, a component
+    of a tuple, and so on). Every other coercion the type checker accepts
+    (``T`` into ``T?``, a subset type into its superset) keeps the value.
+    """
+    if the_type is None:
+        return False
+    return (
+        SearchVisitor[frog_ast.ASTNode](
+            lambda node: isinstance(node, frog_ast.ModIntType)
+        ).visit(the_type)
+        is not None
+    )
+
+
+def store_may_change_value(  # pylint: disable=too-many-return-statements
+    target: Optional[frog_ast.Type], value_type: Optional[frog_ast.Type]
+) -> bool:
+    """True if storing a value of *value_type* into a slot of type *target*
+    may change the value, i.e. an ``Int`` part of the value may land in a
+    ``ModInt`` part of the slot. An unknown *value_type* (None) may."""
+    if not type_contains_mod_int(target):
+        return False
+    if value_type is None:
+        return True
+    if isinstance(target, frog_ast.ModIntType):
+        return not isinstance(value_type, frog_ast.ModIntType)
+    if isinstance(target, frog_ast.OptionalType):
+        inner = (
+            value_type.the_type
+            if isinstance(value_type, frog_ast.OptionalType)
+            else value_type
+        )
+        return store_may_change_value(target.the_type, inner)
+    if isinstance(target, frog_ast.ProductType):
+        if isinstance(value_type, frog_ast.ProductType) and len(
+            value_type.types
+        ) == len(target.types):
+            return any(
+                store_may_change_value(slot, part)
+                for slot, part in zip(target.types, value_type.types)
+            )
+        return True
+    if isinstance(target, frog_ast.SetType):
+        if isinstance(value_type, frog_ast.SetType):
+            return store_may_change_value(
+                target.parameterization, value_type.parameterization
+            )
+        return True
+    if isinstance(target, frog_ast.ArrayType):
+        if isinstance(value_type, frog_ast.ArrayType):
+            return store_may_change_value(target.element_type, value_type.element_type)
+        return True
+    if isinstance(target, frog_ast.MapType):
+        if isinstance(value_type, frog_ast.MapType):
+            return store_may_change_value(
+                target.key_type, value_type.key_type
+            ) or store_may_change_value(target.value_type, value_type.value_type)
+        return True
+    if isinstance(target, frog_ast.FunctionType):
+        if isinstance(value_type, frog_ast.FunctionType):
+            return store_may_change_value(
+                target.domain_type, value_type.domain_type
+            ) or store_may_change_value(target.range_type, value_type.range_type)
+        return True
+    return True
+
+
+def store_keeps_value_of_type(
+    target_type: frog_ast.Type,
+    value: frog_ast.ASTNode,
+    value_type: Callable[[], Optional[frog_ast.Type]],
+) -> bool:
+    """True if storing *value* into a slot of *target_type* keeps the value
+    exactly, so the slot can be read as *value*.
+
+    *value_type* gives the value's type (None if unknown); it is called only
+    when the answer depends on it. False when an ``Int`` part of the value may
+    be stored into a ``ModInt`` part of the slot (F-356), including when the
+    value's type is unknown there. That includes an integer literal the
+    modulus represents as itself (``1`` into ``ModInt<2>``): the stored number
+    is the same, but a read replaced by the literal is an ``Int``, so the
+    arithmetic around it would no longer be taken modulo the modulus
+    (``f + f == f - f`` is true for ``ModInt<2> f = 1;``, ``1 + 1 == 1 - 1``
+    is false).
+    """
+    if not type_contains_mod_int(target_type):
+        return True
+    if isinstance(value, frog_ast.NoneExpression) and isinstance(
+        target_type, frog_ast.OptionalType
+    ):
+        return True
+    return not store_may_change_value(target_type, value_type())
+
+
+_COMPARISON_OPERATORS = frozenset(
+    {
+        frog_ast.BinaryOperators.EQUALS,
+        frog_ast.BinaryOperators.NOTEQUALS,
+        frog_ast.BinaryOperators.LT,
+        frog_ast.BinaryOperators.GT,
+        frog_ast.BinaryOperators.LEQ,
+        frog_ast.BinaryOperators.GEQ,
+        frog_ast.BinaryOperators.AND,
+        frog_ast.BinaryOperators.IN,
+        frog_ast.BinaryOperators.SUBSETS,
+    }
+)
+
+_ARITHMETIC_OPERATORS = frozenset(
+    {
+        frog_ast.BinaryOperators.ADD,
+        frog_ast.BinaryOperators.SUBTRACT,
+        frog_ast.BinaryOperators.MULTIPLY,
+        frog_ast.BinaryOperators.DIVIDE,
+    }
+)
+
+
+def _member_type(
+    container: Optional[frog_ast.Type], name: str
+) -> Optional[frog_ast.Type]:
+    """Type of ``container.name`` for the built-in members of a map, a group
+    and a sampled function, or None."""
+    if isinstance(container, frog_ast.MapType):
+        if name == "keys":
+            return frog_ast.SetType(container.key_type)
+        if name == "values":
+            return frog_ast.SetType(container.value_type)
+        if name == "entries":
+            return frog_ast.SetType(
+                frog_ast.ProductType([container.key_type, container.value_type])
+            )
+    if isinstance(container, frog_ast.FunctionType) and name == "domain":
+        return frog_ast.SetType(container.domain_type)
+    return None
+
+
+def expression_type(  # pylint: disable=too-many-return-statements,too-many-branches
+    expr: frog_ast.Expression,
+    type_map: NameTypeMap,
+    proof_namespace: Optional[frog_ast.Namespace] = None,
+) -> Optional[frog_ast.Type]:
+    """Infer the type of *expr* from the declarations in *type_map*.
+
+    Returns None when the type cannot be determined, including for an
+    operation the type checker would refuse (``Int`` and ``ModInt`` operands
+    mixed), so a caller deciding soundness must treat None as unknown. The
+    map must be scoped to the method *expr* sits in (see
+    :func:`build_method_type_map`).
+    """
+    # pylint: disable=too-many-statements
+    if isinstance(expr, frog_ast.Variable):
+        return type_map.get(expr.name)
+    if isinstance(expr, frog_ast.Integer):
+        return frog_ast.IntType()
+    if isinstance(expr, frog_ast.Boolean):
+        return frog_ast.BoolType()
+    if isinstance(expr, frog_ast.BinaryNum):
+        return frog_ast.BitStringType(frog_ast.Integer(expr.length))
+    if isinstance(expr, frog_ast.BitStringLiteral):
+        return frog_ast.BitStringType(expr.length)
+    if isinstance(expr, frog_ast.GroupOrder):
+        return frog_ast.IntType()
+    if isinstance(expr, frog_ast.GroupGenerator):
+        return frog_ast.GroupElemType(expr.group)
+    if isinstance(expr, frog_ast.UnaryOperation):
+        if expr.operator == frog_ast.UnaryOperators.NOT:
+            return frog_ast.BoolType()
+        if expr.operator == frog_ast.UnaryOperators.SIZE:
+            return frog_ast.IntType()
+        return expression_type(expr.expression, type_map, proof_namespace)
+    if isinstance(expr, frog_ast.BinaryOperation):
+        if expr.operator in _COMPARISON_OPERATORS:
+            return frog_ast.BoolType()
+        left = expression_type(expr.left_expression, type_map, proof_namespace)
+        if expr.operator in (
+            frog_ast.BinaryOperators.UNION,
+            frog_ast.BinaryOperators.SETMINUS,
+        ):
+            return left
+        right = expression_type(expr.right_expression, type_map, proof_namespace)
+        if left is None or right is None:
+            return None
+        if expr.operator == frog_ast.BinaryOperators.OR:
+            if isinstance(left, frog_ast.BoolType) and isinstance(
+                right, frog_ast.BoolType
+            ):
+                return left
+            if isinstance(left, frog_ast.BitStringType) and isinstance(
+                right, frog_ast.BitStringType
+            ):
+                return frog_ast.BitStringType()
+            return None
+        if expr.operator == frog_ast.BinaryOperators.EXPONENTIATE:
+            # A ModInt or GroupElem base keeps its type; Int ^ Int is Int.
+            if isinstance(left, frog_ast.IntType) and not isinstance(
+                right, frog_ast.IntType
+            ):
+                return None
+            return left
+        if expr.operator in _ARITHMETIC_OPERATORS:
+            # Both operands have one kind: Int with Int, ModInt with ModInt,
+            # and so on. A mix only arises in a rewritten game and has no
+            # type.
+            if isinstance(left, frog_ast.IntType) != isinstance(
+                right, frog_ast.IntType
+            ):
+                return None
+            if isinstance(left, frog_ast.ModIntType) != isinstance(
+                right, frog_ast.ModIntType
+            ):
+                return None
+            return left
+        return None
+    if isinstance(expr, frog_ast.Tuple):
+        component_types: list[frog_ast.Type] = []
+        for value in expr.values:
+            value_type = expression_type(value, type_map, proof_namespace)
+            if value_type is None:
+                return None
+            component_types.append(value_type)
+        return frog_ast.ProductType(component_types)
+    if isinstance(expr, frog_ast.Set):
+        element_types = [
+            expression_type(element, type_map, proof_namespace)
+            for element in expr.elements
+        ]
+        if not element_types or any(t is None for t in element_types):
+            return None
+        if any(t != element_types[0] for t in element_types):
+            return None
+        return frog_ast.SetType(element_types[0])
+    if isinstance(expr, frog_ast.ArrayAccess):
+        base = expression_type(expr.the_array, type_map, proof_namespace)
+        if isinstance(base, frog_ast.MapType):
+            return base.value_type
+        if isinstance(base, frog_ast.ArrayType):
+            return base.element_type
+        if isinstance(base, frog_ast.ProductType) and isinstance(
+            expr.index, frog_ast.Integer
+        ):
+            if 0 <= expr.index.num < len(base.types):
+                return base.types[expr.index.num]
+        if isinstance(base, frog_ast.BitStringType):
+            return frog_ast.BitStringType(frog_ast.Integer(1))
+        return None
+    if isinstance(expr, frog_ast.Slice):
+        return frog_ast.BitStringType()
+    if isinstance(expr, frog_ast.FieldAccess):
+        if isinstance(expr.the_object, frog_ast.Variable):
+            object_type = type_map.get(expr.the_object.name)
+            if isinstance(object_type, frog_ast.GroupType):
+                if expr.name == "order":
+                    return frog_ast.IntType()
+                if expr.name in ("generator", "identity"):
+                    return frog_ast.GroupElemType(expr.the_object)
+                return None
+            member = _member_type(object_type, expr.name)
+            if member is not None:
+                return member
+            instance = (proof_namespace or {}).get(expr.the_object.name)
+            if isinstance(instance, (frog_ast.Scheme, frog_ast.Primitive)):
+                for field in instance.fields:
+                    if field.name == expr.name and not isinstance(
+                        field.type, frog_ast.SetType
+                    ):
+                        return field.type
+            return None
+        return _member_type(
+            expression_type(expr.the_object, type_map, proof_namespace), expr.name
+        )
+    if isinstance(expr, frog_ast.FuncCall):
+        if isinstance(expr.func, frog_ast.Variable):
+            func_type = type_map.get(expr.func.name)
+            if isinstance(func_type, frog_ast.FunctionType):
+                return func_type.range_type
+            return None
+        if isinstance(expr.func, frog_ast.FieldAccess) and isinstance(
+            expr.func.the_object, frog_ast.Variable
+        ):
+            instance = (proof_namespace or {}).get(expr.func.the_object.name)
+            if isinstance(instance, (frog_ast.Scheme, frog_ast.Primitive)):
+                for method in instance.methods:
+                    signature = (
+                        method.signature
+                        if isinstance(method, frog_ast.Method)
+                        else method
+                    )
+                    if signature.name == expr.func.name:
+                        return _resolve_member_type(instance, signature.return_type)
+        return None
+    return None
+
+
+def _resolve_member_type(
+    instance: frog_ast.Scheme | frog_ast.Primitive, the_type: frog_ast.Type
+) -> frog_ast.Type:
+    """Resolve a type name declared by *instance* (``Set Key = ModInt<q>;``)
+    to the type it stands for; any other type is returned unchanged."""
+    if isinstance(the_type, frog_ast.Variable):
+        for field in instance.fields:
+            if field.name == the_type.name and isinstance(field.value, frog_ast.Type):
+                return field.value
+    return the_type
 
 
 _MethodScopedT = TypeVar("_MethodScopedT", bound="MethodScopedTypeMapMixin")
@@ -1462,6 +2506,20 @@ def referenced_variable_names(node: frog_ast.ASTNode) -> set[str]:
     return names
 
 
+class _OrderedReferenceVisitor(Visitor[list[frog_ast.Variable]]):
+    def __init__(self) -> None:
+        self.variables: list[frog_ast.Variable] = []
+        self.seen: set[str] = set()
+
+    def result(self) -> list[frog_ast.Variable]:
+        return self.variables
+
+    def visit_variable(self, inner: frog_ast.Variable) -> None:
+        if inner.name not in self.seen:
+            self.seen.add(inner.name)
+            self.variables.append(inner)
+
+
 def referenced_variables_in_order(
     node: frog_ast.ASTNode,
 ) -> list[frog_ast.Variable]:
@@ -1469,19 +2527,6 @@ def referenced_variables_in_order(
     deduplicated by name -- the FieldAccess-complete analogue of
     :class:`VariableCollectionVisitor`.  Used where iteration order is
     observable (e.g. dependency-edge order)."""
-
-    class _OrderedReferenceVisitor(Visitor[list[frog_ast.Variable]]):
-        def __init__(self) -> None:
-            self.variables: list[frog_ast.Variable] = []
-            self.seen: set[str] = set()
-
-        def result(self) -> list[frog_ast.Variable]:
-            return self.variables
-
-        def visit_variable(self, inner: frog_ast.Variable) -> None:
-            if inner.name not in self.seen:
-                self.seen.add(inner.name)
-                self.variables.append(inner)
 
     return _OrderedReferenceVisitor().visit(node)
 
@@ -1506,17 +2551,30 @@ def reassigns_or_rebinds(names: set[str], node: frog_ast.ASTNode) -> bool:
       initializer) that rebinds one of *names*, shadowing the outer binding
       (F-196: a typed ``T x = e;`` is an ``Assignment`` and already caught by
       the l-value case above, but a no-initializer declaration was not, so a
-      structural substitution could still capture the inner binding).
+      structural substitution could still capture the inner binding);
+    - a tuple write: a ``DestructuringBinding`` (``[T1, T2] [a, b] = e;``,
+      kept only by a ``desugar=False`` parse) naming one of *names*, or a write
+      whose l-value is a tuple literal (``[a, b] = e;``) with an element that
+      writes one of them.
 
     Conservative by design: any such occurrence anywhere in *node* -- including
     nested branches and loop bodies -- counts, because callers substitute
     structurally and are not scope-aware.
     """
 
+    def _writes(target: frog_ast.ASTNode) -> bool:
+        if isinstance(target, frog_ast.Tuple):
+            return any(_writes(value) for value in target.values)
+        return lvalue_base_name(target) in names
+
     def _mutates(inner: frog_ast.ASTNode) -> bool:
         if isinstance(
             inner, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
-        ) and (lvalue_base_name(inner.var) in names):
+        ) and _writes(inner.var):
+            return True
+        if isinstance(inner, frog_ast.DestructuringBinding) and (
+            set(inner.names) & names
+        ):
             return True
         if (
             isinstance(inner, frog_ast.UniqueSample)
@@ -1550,14 +2608,71 @@ def _statement_can_exit(statement: frog_ast.Statement) -> bool:
     )
 
 
+def _unpaired_field_write(
+    statement: frog_ast.Statement, names: tuple[str, str]
+) -> bool:
+    """True if *statement* writes or rebinds a name in *names* other than by
+    an untyped assignment or sample to the whole variable.
+
+    SameFieldVisitor pairs only those whole writes.  This covers the rest:
+    element writes, ``<-uniq`` and ``\\`` samples, insertion into a
+    ``<-uniq`` exclusion set, local declarations and loop binders.  A write
+    whose l-value has no variable base counts too.
+    """
+    if isinstance(statement, frog_ast.NumericFor):
+        return statement.name in names
+    if isinstance(statement, frog_ast.GenericFor):
+        return statement.var_name in names
+    if isinstance(statement, frog_ast.VariableDeclaration):
+        return statement.name in names
+    if not isinstance(
+        statement, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+    ):
+        return False
+    if (
+        isinstance(statement, frog_ast.UniqueSample)
+        and statement.surface_form == "uniq"
+        and referenced_variable_names(statement.unique_set) & set(names)
+    ):
+        return True
+    base = lvalue_base_name(statement.var)
+    if base is not None and base not in names:
+        return False
+    return (
+        isinstance(statement, frog_ast.UniqueSample)
+        or statement.the_type is not None
+        or not isinstance(statement.var, frog_ast.Variable)
+    )
+
+
 class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
+    """Checks that every write keeps two fields equal.
+
+    The result is the list of second writes of each pair, which the caller
+    deletes, or None.  Initial values are the caller's to check.
+    """
+
     def __init__(self, field_name_pair: tuple[str, str]):
         self.field_name_pair = field_name_pair
         self.are_same = True
         self.paired_statements: list[frog_ast.Statement] = []
+        # Writes the pairing does not model, with their method names.
+        self.unpaired_writes: list[tuple[frog_ast.Statement, Optional[str]]] = []
+        self._method_name: Optional[str] = None
 
     def result(self) -> Optional[list[frog_ast.Statement]]:
-        return None if not self.are_same else self.paired_statements
+        if not self.are_same or self.unpaired_writes:
+            return None
+        return self.paired_statements
+
+    def visit_method(self, method: frog_ast.Method) -> None:
+        self._method_name = method.signature.name
+        # A parameter of either name hides that field in this method.
+        if any(
+            parameter.name in self.field_name_pair
+            for parameter in method.signature.parameters
+        ):
+            self.are_same = False
 
     def visit_block(self, block: frog_ast.Block) -> None:
         if not self.are_same:
@@ -1572,6 +2687,12 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             # The visitor runs on the original game, so the genuinely-paired
             # instances are identity-comparable here.
             if any(statement is paired for paired in self.paired_statements):
+                continue
+
+            # Recorded rather than returned on, so the caller can tell a
+            # merge refused only for these.
+            if _unpaired_field_write(statement, self.field_name_pair):
+                self.unpaired_writes.append((statement, self._method_name))
                 continue
 
             if not isinstance(statement, (frog_ast.Sample, frog_ast.Assignment)):
@@ -1605,8 +2726,10 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
 
                 copy_paired = False
                 for subsequent_statement in block.statements[index + 1 :]:
+                    # A typed write declares a local, so it cannot pair.
                     if (
                         isinstance(subsequent_statement, frog_ast.Assignment)
+                        and subsequent_statement.the_type is None
                         and isinstance(subsequent_statement.var, frog_ast.Variable)
                         and subsequent_statement.var.name == pair_name
                         and isinstance(subsequent_statement.value, frog_ast.Variable)
@@ -1638,7 +2761,13 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
                 return isinstance(node, frog_ast.Variable) and node.name == pair_name
 
             assert isinstance(statement, frog_ast.Assignment)
-            used_variables = VariableCollectionVisitor().visit(statement.value)
+            # Not VariableCollectionVisitor, which skips the receiver of a
+            # member access: a write to `M` between `g = A[|M.keys|]` and
+            # `f = A[|M.keys|]` went unseen and the fields were merged.
+            used_variables = [
+                frog_ast.Variable(name)
+                for name in sorted(referenced_variable_names(statement.value))
+            ]
 
             assigns_variable_partial = functools.partial(
                 assigns_variable, used_variables
@@ -1653,6 +2782,7 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             for subsequent_statement in block.statements[index + 1 :]:
                 if (
                     isinstance(subsequent_statement, frog_ast.Assignment)
+                    and subsequent_statement.the_type is None
                     and isinstance(subsequent_statement.var, frog_ast.Variable)
                     and subsequent_statement.var.name == pair_name
                     and subsequent_statement.value in (paired_value, statement.var)

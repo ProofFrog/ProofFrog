@@ -1,0 +1,38 @@
+// If Condition Alias Substitution inlined f's Initialize definition
+// c + |M.keys| inside `if (v == c)` in O. The definition reads M only
+// through the member access M.keys, so the check that every field it reads
+// is written once, in Initialize, never saw M, which O writes.
+// Initialize(x) sets f = x, since M is empty then. O(x) writes M[x] and
+// returns f = x in Left but x + 1 in Right.
+Game Left() {
+    Map<Int, Bool> M;
+    Int c;
+    Int f;
+    Void Initialize(Int x) {
+        c = x;
+        f = c + |M.keys|;
+    }
+    Int O(Int v) {
+        M[v] = true;
+        if (v == c) {
+            return f;
+        }
+        return v + |M.keys|;
+    }
+}
+
+Game Right() {
+    Map<Int, Bool> M;
+    Int c;
+    Int f;
+    Void Initialize(Int x) {
+        c = x;
+        f = c + |M.keys|;
+    }
+    Int O(Int v) {
+        M[v] = true;
+        return v + |M.keys|;
+    }
+}
+
+export as StaleDefinition;

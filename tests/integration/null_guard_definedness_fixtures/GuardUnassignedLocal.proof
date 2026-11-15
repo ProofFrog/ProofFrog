@@ -1,0 +1,21 @@
+// Single-hop claim GuardUnassignedLocal.Real -> GuardUnassignedLocal.Random with no assumptions.
+// See GuardUnassignedLocal.game for the expected outcome.
+import 'Probe.primitive';
+import 'ProbeImpl.scheme';
+import 'GuardUnassignedLocal.game';
+
+proof:
+
+let:
+    Int lambda;
+    ProbeImpl C = ProbeImpl(lambda);
+
+assume:
+
+theorem:
+    GuardUnassignedLocal(C);
+
+games:
+    GuardUnassignedLocal(C).Real against GuardUnassignedLocal(C).Adversary;
+
+    GuardUnassignedLocal(C).Random against GuardUnassignedLocal(C).Adversary;

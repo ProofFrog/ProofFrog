@@ -1,0 +1,20 @@
+// Multi-key PRF security: each query uses a fresh random key.
+// Real: evaluates the PRF with a fresh key per query. Random: returns a uniform random output.
+
+import 'PRF.primitive';
+
+Game Real(PRF F) {
+    BitString<F.out> Lookup(BitString<F.in> x) {
+        BitString<F.lambda> k <- BitString<F.lambda>;
+        return F.evaluate(k, x);
+    }
+}
+
+Game Random(PRF F) {
+    BitString<F.out> Lookup(BitString<F.in> x) {
+        BitString<F.out> r <- BitString<F.out>;
+        return r;
+    }
+}
+
+export as PRFSecurity_MultiKey;

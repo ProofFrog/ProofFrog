@@ -1,0 +1,17 @@
+// A group exponent of type ModInt<q> is ill-formed.
+import 'OtherModulus.game';
+
+proof:
+
+let:
+    Group G;
+    Int q;
+
+assume:
+
+theorem:
+    OtherModulus(G, q);
+
+games:
+    OtherModulus(G, q).Left against OtherModulus(G, q).Adversary;
+    OtherModulus(G, q).Right against OtherModulus(G, q).Adversary;

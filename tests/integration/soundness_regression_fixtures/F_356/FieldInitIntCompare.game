@@ -1,0 +1,19 @@
+// F-356 (field initializer, type checking): f is declared ModInt<q>, so
+// `f == 0` compares a ModInt<q> with an Int, which the type checker refuses
+// when it checks this file on its own. In a proof it used to accept it,
+// because instantiation replaced f by its Int initializer q before the check;
+// the proof then verified `q == 0` against Right.
+Game Left(Int q) {
+    ModInt<q> f = q;
+    Bool Test() {
+        return f == 0;
+    }
+}
+
+Game Right(Int q) {
+    Bool Test() {
+        return q == 0;
+    }
+}
+
+export as FieldInitIntCompare;

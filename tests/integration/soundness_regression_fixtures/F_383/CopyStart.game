@@ -1,0 +1,27 @@
+// F-383 (field initializer): Left's field a copies the parameter n's
+// starting value and Bump writes n, so Left's Get always returns the
+// starting value. Right counts up from n in a field c. Get(), Bump(), Get()
+// gives equal answers only on the left. Once n is bound as a field, a must
+// not be read as its initializer n: that read would follow Bump's writes
+// and make Left the same counter as Right.
+Game Left(Int n) {
+    Int a = n;
+    Void Bump() {
+        n = n + 1;
+    }
+    Int Get() {
+        return a;
+    }
+}
+
+Game Right(Int n) {
+    Int c = n;
+    Void Bump() {
+        c = c + 1;
+    }
+    Int Get() {
+        return c;
+    }
+}
+
+export as CopyStart;

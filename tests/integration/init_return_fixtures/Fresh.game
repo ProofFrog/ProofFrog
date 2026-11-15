@@ -1,0 +1,37 @@
+// F0 is an arbitrary known function (e.g. constant 0^n). When Initialize
+// returns early, H keeps its initial value F0 and is NOT a random function,
+// so H(v) for fresh v is F0(v), not uniform.
+Game Left(Int n, Function<BitString<n>, BitString<n>> F0) {
+    Function<BitString<n>, BitString<n>> H = F0;
+    Bool Initialize() {
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        H <- Function<BitString<n>, BitString<n>>;
+        return false;
+    }
+    BitString<n> O() {
+        BitString<n> v <-uniq[H.domain] BitString<n>;
+        return H(v);
+    }
+}
+
+Game Right(Int n, Function<BitString<n>, BitString<n>> F0) {
+    Function<BitString<n>, BitString<n>> H = F0;
+    Bool Initialize() {
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        H <- Function<BitString<n>, BitString<n>>;
+        return false;
+    }
+    BitString<n> O() {
+        BitString<n> v <-uniq[H.domain] BitString<n>;
+        BitString<n> z <- BitString<n>;
+        return z;
+    }
+}
+
+export as Fresh;

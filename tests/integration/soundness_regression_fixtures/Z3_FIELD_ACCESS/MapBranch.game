@@ -1,0 +1,25 @@
+// After M[k] = v, M.keys == M.values fails for k = 0, v = 1, so O(0, 1)
+// returns 2 in Left and 3 in Right.
+Game Left() {
+    Map<Int, Int> M;
+    Int O(Int k, Int v) {
+        M[k] = v;
+        if (M.keys == M.values) {
+            return 1;
+        }
+        return 2;
+    }
+}
+
+Game Right() {
+    Map<Int, Int> M;
+    Int O(Int k, Int v) {
+        M[k] = v;
+        if (M.keys == M.values) {
+            return 1;
+        }
+        return 3;
+    }
+}
+
+export as MapBranch;

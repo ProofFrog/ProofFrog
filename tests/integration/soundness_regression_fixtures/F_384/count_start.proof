@@ -1,0 +1,15 @@
+// F-384: claims CountStart().Left and CountStart().Right are
+// interchangeable. They are not (see CountStart.game). Sound engine:
+// Proof Failed!
+import 'CountStart.game';
+
+proof:
+
+let:
+
+theorem:
+    CountStart();
+
+games:
+    CountStart().Left against CountStart().Adversary;
+    CountStart().Right against CountStart().Adversary;

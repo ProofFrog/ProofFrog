@@ -9,15 +9,17 @@ import dataclasses
 import warnings
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 from sympy import Symbol
 
 from .. import frog_ast
 from ..frog_ast import SourceOrigin
-from ..visitors import NameTypeMap
+from ..visitors import NameTypeMap, SearchVisitor, referenced_variable_names
 
 _MAX_FIXED_POINT_ITERATIONS = 200
+
+_NON_SEMANTIC = frog_ast.ASTNode._NON_SEMANTIC  # pylint: disable=protected-access
 
 
 @dataclass
@@ -53,7 +55,15 @@ class PipelineContext:
     proof_namespace: frog_ast.Namespace
     subsets_pairs: list[tuple[frog_ast.Type, frog_ast.Type]]
     equality_pairs: set[tuple[str, str]] = dataclasses.field(default_factory=set)
-    sort_game_fn: Optional[Callable[[frog_ast.Game], frog_ast.Game]] = None
+    # The engine's ``sort_game``: sorts and prunes each method of a game,
+    # appending ``(method name, draw)`` for every draw it keeps only because
+    # its domain may be empty to the list it is given.
+    sort_game_fn: Optional[
+        Callable[
+            [frog_ast.Game, Optional[list[tuple[str, frog_ast.Statement]]]],
+            frog_ast.Game,
+        ]
+    ] = None
     max_calls: Optional[int] = None
     sampled_let_names: set[str] = dataclasses.field(default_factory=set)
     near_misses: list[NearMiss] = dataclasses.field(default_factory=list)
@@ -125,13 +135,11 @@ def has_nondeterministic_call(
     *shadowed_names* (F-267): names that are locally bound (declared) in the
     method whose expression this is. A proof-level ``let: Function<D,R> H;`` is
     a known deterministic function, but a same-named METHOD-LOCAL declaration
-    ``Function<D,R> H;`` shadows it -- and an unassigned local Function is an
-    uninitialized value, so calling it is an observable undefined read, not the
-    deterministic let-function. When a callee name is in *shadowed_names* the
-    let-``Function`` classification is NOT applied (the call is treated as
-    potentially non-deterministic).
+    ``Function<D,R> H;`` shadows it -- and an unassigned local Function holds
+    its type's unspecified default, not the let-function. When a callee name
+    is in *shadowed_names* the let-``Function`` classification is NOT applied
+    (the call is treated as potentially non-deterministic).
     """
-    from ..visitors import SearchVisitor  # pylint: disable=import-outside-toplevel
 
     def _is_nondeterministic_call(node: frog_ast.ASTNode) -> bool:
         if not isinstance(node, frog_ast.FuncCall):
@@ -155,6 +163,89 @@ def has_nondeterministic_call(
     return SearchVisitor(_is_nondeterministic_call).visit(expr) is not None
 
 
+def calls_are_deterministic(
+    expr: frog_ast.Expression,
+    ctx_namespace: frog_ast.Namespace,
+    let_types: Optional[NameTypeMap],
+    type_map: Optional[NameTypeMap],
+    shadowed: set[str],
+) -> bool:
+    """True if every call in *expr* returns the same value for the same
+    arguments: a ``deterministic`` primitive method, a let-bound ``Function``
+    (unless a local shadows it), or a variable of ``Function`` type in
+    *type_map* (a game field or a local holding a function).
+
+    A ``Function`` held in a game field may be reassigned between two calls,
+    so a caller that moves or duplicates such a call must also check that
+    nothing in between writes the function's name (its name is among the
+    names the expression references, which the passes below check).
+    """
+
+    def nondeterministic(node: frog_ast.ASTNode) -> bool:
+        if not isinstance(node, frog_ast.FuncCall):
+            return False
+        signature = _lookup_primitive_method(node.func, ctx_namespace)
+        if signature is not None:
+            return not signature.deterministic
+        if isinstance(node.func, frog_ast.Variable):
+            name = node.func.name
+            if (
+                name not in shadowed
+                and let_types is not None
+                and isinstance(let_types.get(name), frog_ast.FunctionType)
+            ):
+                return False
+            if type_map is not None and isinstance(
+                type_map.get(name), frog_ast.FunctionType
+            ):
+                return False
+        return True
+
+    return SearchVisitor(nondeterministic).visit(expr) is None
+
+
+def bound_names(method: frog_ast.Method) -> set[str]:
+    """:func:`method_bound_names` plus the names of bare declarations
+    ``T x;``, which also bind a local that shadows a same-named field."""
+    names = method_bound_names(method)
+
+    def _collect(node: frog_ast.ASTNode) -> bool:
+        if isinstance(node, frog_ast.VariableDeclaration):
+            names.add(node.name)
+        return False
+
+    SearchVisitor(_collect).visit(method.block)
+    return names
+
+
+def game_names(game: frog_ast.Game) -> set[str]:
+    """Every name *game* binds or mentions: its parameters and fields, each
+    method's :func:`bound_names`, and every variable it references (type
+    positions included).
+
+    A name a pass adds to *game* (a new field or local) must be none of
+    these: otherwise the new binding captures reads of the existing one, or
+    a declaration of the existing name captures reads of the new one."""
+    names = {param.name for param in game.parameters}
+    names |= {field.name for field in game.fields}
+    names |= referenced_variable_names(game)
+    for method in game.methods:
+        names |= bound_names(method)
+    return names
+
+
+def fresh_name(base: str, taken: set[str]) -> str:
+    """*base* if it is not in *taken*, else the first ``base@fresh<k>``
+    (k = 1, 2, ...) that is not. The name returned is added to *taken*, so
+    successive calls with the same set return distinct names."""
+    name, k = base, 0
+    while name in taken:
+        k += 1
+        name = f"{base}@fresh{k}"
+    taken.add(name)
+    return name
+
+
 class TransformPass(ABC):
     """A single canonicalization pass that can be applied to a Game AST."""
 
@@ -163,6 +254,39 @@ class TransformPass(ABC):
     @abstractmethod
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         """Apply this transformation pass. Return the (possibly new) game AST."""
+
+
+def same_structure(left: object, right: object) -> bool:
+    """True if two AST values are the same tree, node class for node class.
+
+    Stricter than ``ASTNode.__eq__``: every node must have exactly the same
+    class as its counterpart (no ``ProductType``/``Tuple`` cross-equality, no
+    subclass overrides), and every scalar the same type and value. Source
+    positions are ignored, as in ``__eq__``. Two values for which this holds
+    are interchangeable as the input of any pass.
+    """
+    if left is right:
+        return True
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, frog_ast.ASTNode):
+        assert isinstance(right, frog_ast.ASTNode)
+        left_attrs = vars(left)
+        right_attrs = vars(right)
+        if len(left_attrs) != len(right_attrs):
+            return False
+        for name, value in left_attrs.items():
+            if name in _NON_SEMANTIC:
+                continue
+            if name not in right_attrs or not same_structure(value, right_attrs[name]):
+                return False
+        return True
+    if isinstance(left, (list, tuple)):
+        assert isinstance(right, (list, tuple))
+        return len(left) == len(right) and all(
+            same_structure(a, b) for a, b in zip(left, right)
+        )
+    return bool(left == right)
 
 
 def run_pipeline(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -178,12 +302,47 @@ def run_pipeline(  # pylint: disable=too-many-arguments,too-many-positional-argu
     If *verbose_lines* is provided, verbose output is appended there instead
     of being printed directly.  This allows callers (e.g. parallel workers)
     to collect output for later ordered printing.
+
+    A pass is not re-applied to a game it has already left unchanged: once
+    nothing fires any more, the iteration that confirms the fixed point would
+    otherwise re-run every pass on the very game each of them just declined.
+    This relies on a pass's output being a function of the game and of
+    ``ctx``, whose only state that changes during a run is ``pinned_fields``;
+    a skip therefore also requires ``pinned_fields`` to be what it was when
+    the pass declined. Near-misses are unaffected: the declining application
+    already recorded them, and they are deduplicated.
+
+    "Left unchanged" means :func:`same_structure`, NOT ``==``: AST equality
+    is deliberately loose in places (a ``ProductType`` equals a ``Tuple``
+    with the same elements), and a pass such as ``Normalize Product-Literal
+    Tuples`` makes exactly such a change, which later passes depend on.
     """
+    # declined[i]: the game object pass i last left unchanged, with the
+    # pinned fields it saw. Holding the game keeps the identity test valid.
+    declined: list[tuple[frog_ast.Game, frozenset[str]] | None] = [None] * len(pipeline)
     for _ in range(max_iterations):
         new_game = game
-        for pass_ in pipeline:
+        for index, pass_ in enumerate(pipeline):
+            last = declined[index]
+            if (
+                last is not None
+                and last[0] is new_game
+                and last[1] == ctx.pinned_fields
+            ):
+                continue
+            pinned_before = frozenset(ctx.pinned_fields)
             result = pass_.apply(new_game, ctx)
-            if verbose and result != new_game:
+            if result is new_game or same_structure(result, new_game):
+                # Keep the input object, so that every later pass (and the
+                # next iteration) can recognise an unchanged game by identity.
+                declined[index] = (
+                    (new_game, pinned_before)
+                    if pinned_before == ctx.pinned_fields
+                    else None
+                )
+                continue
+            declined[index] = None
+            if verbose:
                 msg1 = f"APPLIED {pass_.name}"
                 msg2 = str(result)
                 if verbose_lines is not None:
@@ -356,3 +515,51 @@ def run_pipeline_until(
             return game, game != before, available_names
 
     return game, False, available_names
+
+
+def method_bound_names(method: frog_ast.Method) -> set[str]:
+    """The set of names *method* binds locally, i.e. introduces a NEW binding
+    for: signature parameters, typed local declarations / samples
+    (``T x = ...`` / ``T x <- ...``), and ``for`` binders.
+
+    A plain write to an existing name (``x = ...`` / ``M[k] <- ...`` with no
+    declared type) is NOT a binding -- it mutates the field/local already in
+    scope and does not create a capturing shadow. A name in this set, when it
+    occurs inside *method*, refers to the local binding rather than any
+    same-named game field/parameter, so a name-based mover that trusts
+    field/param membership must treat it as shadowed (audit RC4:
+    F-173/F-178/F-190/F-228)."""
+    names = {p.name for p in method.signature.parameters}
+
+    def _collect(n: frog_ast.ASTNode) -> bool:
+        if isinstance(n, frog_ast.NumericFor):
+            names.add(n.name)
+        elif isinstance(n, frog_ast.GenericFor):
+            names.add(n.var_name)
+        elif (
+            isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
+            and getattr(n, "the_type", None) is not None
+            and isinstance(n.var, frog_ast.Variable)
+        ):
+            names.add(n.var.name)
+        return False
+
+    SearchVisitor(_collect).visit(method.block)
+    return names
+
+
+def may_return_before(statements: Sequence[frog_ast.Statement], index: int) -> bool:
+    """True if a statement of *statements* before *index* contains a
+    ``return`` (at any depth), i.e. the statement at *index* may be skipped.
+
+    A pass that trusts a top-level Initialize definition ``f = e`` at
+    *index* (reading ``f`` elsewhere as ``e``) must check this: an earlier
+    ``if (c) { return ...; }`` ends Initialize with ``f`` still at its
+    initial value (audit F-349)."""
+
+    def _is_return(node: frog_ast.ASTNode) -> bool:
+        return isinstance(node, frog_ast.ReturnStatement)
+
+    return any(
+        SearchVisitor(_is_return).visit(stmt) is not None for stmt in statements[:index]
+    )

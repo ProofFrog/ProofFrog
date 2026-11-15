@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import copy
 import functools
-from typing import Sequence
+from operator import eq, ge, gt, le, lt, ne
+from typing import Any, Callable, Sequence
 
 import z3
 
@@ -24,18 +25,275 @@ from ..visitors import (
     SubstitutionTransformer,
     VariableCollectionVisitor,
     Z3FormulaVisitor,
+    _OPAQUE_Z3_SORT,
     GetTypeMapVisitor,
     NameTypeMap,
     lvalue_base_name,
     referenced_variable_names,
     reassigns_or_rebinds,
     block_unconditionally_returns,
+    with_proof_let_types,
 )
-from ._base import TransformPass, PipelineContext, NearMiss, has_nondeterministic_call
+from ._base import (
+    TransformPass,
+    PipelineContext,
+    NearMiss,
+    has_nondeterministic_call,
+    may_return_before,
+    method_bound_names,
+    _lookup_primitive_method,
+)
+from ._coercion import coercing_store_names_for, note_coercing_store
+from ._definedness import GameDefinedness, method_binder_counts
 
 # ---------------------------------------------------------------------------
 # Transformer classes (moved from visitors.py)
 # ---------------------------------------------------------------------------
+
+
+_NON_NONE_LITERALS = (
+    frog_ast.Tuple,
+    frog_ast.Set,
+    frog_ast.Integer,
+    frog_ast.Boolean,
+    frog_ast.BinaryNum,
+    frog_ast.BitStringLiteral,
+)
+
+_LITERAL_RELATIONS: dict[frog_ast.BinaryOperators, Callable[[Any, Any], bool]] = {
+    frog_ast.BinaryOperators.EQUALS: eq,
+    frog_ast.BinaryOperators.NOTEQUALS: ne,
+    frog_ast.BinaryOperators.LT: lt,
+    frog_ast.BinaryOperators.GT: gt,
+    frog_ast.BinaryOperators.LEQ: le,
+    frog_ast.BinaryOperators.GEQ: ge,
+}
+
+
+# Node kinds that may appear inside the literal ``L`` of a ``None == L`` fold.
+# Anything else (a call, an index, a slice, an unknown node) declines.
+_LITERAL_INTERIOR_NODES = _NON_NONE_LITERALS + (
+    frog_ast.NoneExpression,
+    frog_ast.Variable,
+    frog_ast.FieldAccess,
+    frog_ast.BinaryOperation,
+    frog_ast.UnaryOperation,
+)
+
+
+class FoldLiteralConditionsTransformer(Transformer):
+    """Folds comparisons whose value is fixed by literal operands.
+
+    - ``!true`` / ``!false`` becomes ``false`` / ``true``.
+    - ``<``, ``>``, ``<=``, ``>=`` on two ``Integer`` literals folds.
+      These operators type-check only on ``Int``.
+    - ``==`` / ``!=`` on two ``Boolean`` literals folds.
+    - ``==`` / ``!=`` on two ``Integer`` literals folds only when the values
+      are equal. A literal inlined into a ``ModInt<q>`` slot compares mod
+      ``q``, so distinct literals may still be equal.
+    - ``None == L`` / ``L == None`` (and ``!=``) folds to ``false`` / ``true``
+      when ``L`` is a tuple, set, integer, boolean, or bitstring literal.
+
+    The folds above the last have only literal operands, so they drop no
+    evaluation. (``1 == 1`` and ``true == true`` are also
+    ``ReflexiveComparison``'s; either pass may fold them.) The last fold
+    drops the evaluation of ``L``. Evaluation never fails in FrogLang
+    (FROGLANG_REFERENCE.md section 6.9), but the fold is more cautious and
+    fires only when ``L`` is built from the nodes below and reads only
+    variables that are definitely assigned:
+
+    - ``L`` contains only literals, variables, field accesses and unary or
+      binary operations other than division. A call, an index, a slice or
+      any other node declines.
+    - Every variable ``L`` reads is definitely assigned at that point:
+
+      * a parameter of the enclosing method;
+      * a local in lexical scope bound by an initialized declaration
+        (``T x = e;``, ``T x <- D;``, ``T x <-uniq[S] D;``) or a loop
+        binder;
+      * a game field with a declared initializer, or one ``Initialize``
+        assigns in a top-level statement that no earlier ``return`` can
+        skip (F-349) and no call to a method of the game precedes, read
+        from a method other than ``Initialize``;
+      * a game parameter or a proof ``let:`` name.
+
+      A name is declined when its binding is ambiguous: the method binds it
+      more than once, declares it bare (``T x;``) anywhere, or it names both
+      a local and a field (or a game parameter). So are a field assigned
+      only by another oracle, any field read inside ``Initialize``, and any
+      variable outside a method.
+
+    ``None`` against a variable or call never folds.
+    """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+        self._game = GameDefinedness(None, ctx)
+        self._scope = self._game.for_method(None)
+
+    # -- context ---------------------------------------------------------
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        saved = (self._game, self._scope)
+        self._game = GameDefinedness(game, self.ctx)
+        self._scope = self._game.for_method(None)
+        try:
+            return self._transform_children(game)
+        finally:
+            self._game, self._scope = saved
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        saved = self._scope
+        self._scope = self._game.for_method(method)
+        try:
+            return self._transform_children(method)
+        finally:
+            self._scope = saved
+
+    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
+        self._scope.enter_block()
+        try:
+            statements: list[frog_ast.Statement] = []
+            changed = False
+            for statement in block.statements:
+                new_statement = self.transform(statement)
+                changed = changed or new_statement is not statement
+                statements.append(new_statement)
+                self._scope.declare(statement)
+        finally:
+            self._scope.exit_block()
+        if not changed:
+            return block
+        new_block = copy.copy(block)
+        new_block.statements = statements
+        return new_block
+
+    def transform_numeric_for(self, loop: frog_ast.NumericFor) -> frog_ast.NumericFor:
+        new_loop: frog_ast.NumericFor = self._transform_loop(loop, ("start", "end"))
+        return new_loop
+
+    def transform_generic_for(self, loop: frog_ast.GenericFor) -> frog_ast.GenericFor:
+        new_loop: frog_ast.GenericFor = self._transform_loop(loop, ("over",))
+        return new_loop
+
+    def _transform_loop(self, loop: Any, headers: tuple[str, ...]) -> Any:
+        """Transforms a loop with its binder in scope for the body only."""
+        new_attrs = {attr: self.transform(getattr(loop, attr)) for attr in headers}
+        self._scope.enter_loop(loop)
+        try:
+            new_attrs["block"] = self.transform(loop.block)
+        finally:
+            self._scope.exit_loop()
+        if all(new_val is getattr(loop, attr) for attr, new_val in new_attrs.items()):
+            return loop
+        new_loop = copy.copy(loop)
+        for attr, new_val in new_attrs.items():
+            setattr(new_loop, attr, new_val)
+        return new_loop
+
+    # -- definedness -----------------------------------------------------
+
+    def _literal_is_total(self, literal: frog_ast.Expression) -> bool:
+        """True if evaluating *literal* cannot fail, so dropping it is
+        unobservable. Records a near-miss for a possibly unassigned read."""
+        for node in _walk_nodes(literal):
+            if not isinstance(node, _LITERAL_INTERIOR_NODES):
+                return False
+            if (
+                isinstance(node, frog_ast.BinaryOperation)
+                and node.operator == frog_ast.BinaryOperators.DIVIDE
+            ):
+                return False
+        unassigned = self._scope.unassigned_reads(literal)
+        if self.ctx is not None:
+            for name, reason in unassigned:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Fold Literal Conditions",
+                        reason=(
+                            f"None-vs-literal comparison against '{literal}' "
+                            f"not folded: '{name}' may be unassigned when "
+                            f"the literal is evaluated ({reason})"
+                        ),
+                        location=literal.origin,
+                        suggestion=(
+                            f"Make '{name}' definitely assigned: declare "
+                            "a local with a value, or assign a field in a "
+                            "top-level statement of Initialize before any "
+                            "return or call to a method of the game"
+                        ),
+                        variable=name,
+                        method=self._scope.method_name,
+                    )
+                )
+        return not unassigned
+
+    # -- folds -----------------------------------------------------------
+
+    def transform_unary_operation(
+        self, unary_op: frog_ast.UnaryOperation
+    ) -> frog_ast.Expression:
+        new_op = self._transform_children(unary_op)
+        if new_op.operator == frog_ast.UnaryOperators.NOT and isinstance(
+            new_op.expression, frog_ast.Boolean
+        ):
+            return frog_ast.Boolean(not new_op.expression.bool)
+        return new_op
+
+    def transform_binary_operation(
+        self, binary_op: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        new_op = self._transform_children(binary_op)
+        op = new_op.operator
+        if op not in _LITERAL_RELATIONS:
+            return new_op
+        left = new_op.left_expression
+        right = new_op.right_expression
+        relation = _LITERAL_RELATIONS[op]
+        is_eq = op in (
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.BinaryOperators.NOTEQUALS,
+        )
+        if isinstance(left, frog_ast.Integer) and isinstance(right, frog_ast.Integer):
+            if is_eq and left.num != right.num:
+                self._note_distinct_integers(new_op)
+                return new_op
+            return frog_ast.Boolean(relation(left.num, right.num))
+        if not is_eq:
+            return new_op
+        if isinstance(left, frog_ast.Boolean) and isinstance(right, frog_ast.Boolean):
+            return frog_ast.Boolean(relation(left.bool, right.bool))
+        if isinstance(left, frog_ast.NoneExpression):
+            other = right
+        elif isinstance(right, frog_ast.NoneExpression):
+            other = left
+        else:
+            return new_op
+        if isinstance(other, _NON_NONE_LITERALS) and self._literal_is_total(other):
+            return frog_ast.Boolean(op == frog_ast.BinaryOperators.NOTEQUALS)
+        return new_op
+
+    def _note_distinct_integers(self, comparison: frog_ast.BinaryOperation) -> None:
+        """Records why ``0 == 1`` stays: the fold does not know its type."""
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Fold Literal Conditions",
+                reason=(
+                    f"'{comparison}' not folded: distinct integer literals "
+                    "may be equal mod q when compared at type ModInt<q>, "
+                    "and the fold does not know the type"
+                ),
+                location=comparison.origin,
+                suggestion=(
+                    "Keep the comparison in the adjacent game so both games "
+                    "canonicalize to the same condition"
+                ),
+                variable=None,
+                method=self._scope.method_name,
+            )
+        )
 
 
 class BranchEliminiationTransformer(BlockTransformer):
@@ -550,6 +808,71 @@ class SimplifyIfTransformer(Transformer):
         return frog_ast.IfStatement(new_conditions, new_blocks)
 
 
+def _implied_facts(
+    cond: frog_ast.Expression, value: bool
+) -> list[tuple[frog_ast.Expression, bool]]:
+    """``cond`` with its truth *value*, then what that value forces on parts
+    of ``cond``: a false ``a || b`` makes both ``a`` and ``b`` false, a true
+    ``a && b`` makes both true, and ``!a`` having a value fixes ``a``."""
+    facts = [(cond, value)]
+    if (
+        isinstance(cond, frog_ast.UnaryOperation)
+        and cond.operator == frog_ast.UnaryOperators.NOT
+    ):
+        facts += _implied_facts(cond.expression, not value)
+    elif isinstance(cond, frog_ast.BinaryOperation) and (
+        (cond.operator == frog_ast.BinaryOperators.OR and not value)
+        or (cond.operator == frog_ast.BinaryOperators.AND and value)
+    ):
+        facts += _implied_facts(cond.left_expression, value)
+        facts += _implied_facts(cond.right_expression, value)
+    return facts
+
+
+def _bool_flags(game: frog_ast.Game | None, method: frog_ast.Method) -> set[str]:
+    """The names each of whose declarations in *method* (its parameters and
+    typed locals) and in *game* (its parameters and fields) is a ``Bool``.
+
+    Every declaration counts, not only the last one, so a name declared
+    ``Bool`` in one block and another type elsewhere is not a flag."""
+    types: dict[str, list[frog_ast.Type]] = {}
+
+    def add(name: str, the_type: frog_ast.Type) -> None:
+        types.setdefault(name, []).append(the_type)
+
+    if game is not None:
+        for parameter in game.parameters:
+            add(parameter.name, parameter.type)
+        for field in game.fields:
+            add(field.name, field.type)
+    for parameter in method.signature.parameters:
+        add(parameter.name, parameter.type)
+
+    def visit(node: frog_ast.ASTNode) -> bool:
+        if (
+            isinstance(
+                node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            )
+            and node.the_type is not None
+            and isinstance(node.var, frog_ast.Variable)
+        ):
+            add(node.var.name, node.the_type)
+        elif isinstance(node, frog_ast.VariableDeclaration):
+            add(node.name, node.type)
+        elif isinstance(node, frog_ast.NumericFor):
+            add(node.name, frog_ast.IntType())
+        elif isinstance(node, frog_ast.GenericFor):
+            add(node.var_name, node.var_type)
+        return False
+
+    SearchVisitor(visit).visit(method.block)
+    return {
+        name
+        for name, declared in types.items()
+        if all(isinstance(the_type, frog_ast.BoolType) for the_type in declared)
+    }
+
+
 class GuardConditionSimplificationTransformer(Transformer):
     """Replaces an if-condition by its known truth value inside its branches.
 
@@ -572,6 +895,24 @@ class GuardConditionSimplificationTransformer(Transformer):
 
     def __init__(self, ctx: PipelineContext | None = None) -> None:
         self.ctx = ctx
+        self._game: frog_ast.Game | None = None
+        self._flags: set[str] = set()
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        saved = self._game
+        self._game = game
+        try:
+            return self._transform_children(game)
+        finally:
+            self._game = saved
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        saved = self._flags
+        self._flags = _bool_flags(self._game, method)
+        try:
+            return self._transform_children(method)
+        finally:
+            self._flags = saved
 
     def _is_deterministic(self, expr: frog_ast.Expression) -> bool:
         namespace = self.ctx.proof_namespace if self.ctx else {}
@@ -598,11 +939,77 @@ class GuardConditionSimplificationTransformer(Transformer):
         )
 
     def _substitute(
-        self, block: frog_ast.Block, cond: frog_ast.Expression, value: bool
+        self,
+        block: frog_ast.Block,
+        cond: frog_ast.Expression,
+        value: bool,
+        whole_condition: bool = True,
     ) -> frog_ast.Block:
+        """Substitute *cond*'s truth *value* into *block*.
+
+        The whole condition is substituted when *whole_condition* is set (the
+        branches of the ``if`` itself, as always). The facts it implies about
+        its parts are substituted only for Boolean variables (flags): those
+        are what lets a compound guard such as ``revealed || !challenged``
+        settle a later ``if (revealed)``, while replacing a comparison by a
+        constant would hide it from the passes that reason about it (e.g.
+        ``FoldEquivalentReturnBranch``). A part is a flag only if every
+        declaration of its name is a ``Bool`` (F-370(f)): ``||`` is also
+        bit-string concatenation, and the decomposition does not look at
+        operand types."""
         replace_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-        replace_map.set(copy.deepcopy(cond), frog_ast.Boolean(value))
+        for index, (fact, fact_value) in enumerate(_implied_facts(cond, value)):
+            if not (
+                (index == 0 and whole_condition)
+                or (isinstance(fact, frog_ast.Variable) and fact.name in self._flags)
+            ):
+                continue
+            try:
+                replace_map.get(fact)
+            except KeyError:
+                replace_map.set(copy.deepcopy(fact), frog_ast.Boolean(fact_value))
         return SubstitutionTransformer(replace_map).transform(block)
+
+    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
+        """After ``if (C) { ...; return e; }`` (no else), the rest of the block
+        runs only when ``C`` is false: substitute the values that a false
+        ``C`` gives its Boolean flags (``C`` itself only when it is a flag)
+        into the statements that follow, up to the first one that may change
+        a variable ``C`` reads. A part of ``C`` that is not a flag is left in
+        place (see :meth:`_substitute`)."""
+        statements = list(block.statements)
+        for index, statement in enumerate(statements):
+            if not (
+                isinstance(statement, frog_ast.IfStatement)
+                and len(statement.conditions) == 1
+                and not statement.has_else_block()
+                and statement.blocks[0].statements
+                and isinstance(
+                    statement.blocks[0].statements[-1], frog_ast.ReturnStatement
+                )
+            ):
+                continue
+            cond = statement.conditions[0]
+            if isinstance(cond, frog_ast.Boolean) or not self._is_deterministic(cond):
+                continue
+            cond_vars = referenced_variable_names(cond)
+            end = index + 1
+            while end < len(statements) and not reassigns_or_rebinds(
+                cond_vars, statements[end]
+            ):
+                end += 1
+            if end == index + 1:
+                continue
+            prefix = self._substitute(
+                frog_ast.Block(statements[index + 1 : end]),
+                cond,
+                False,
+                whole_condition=False,
+            )
+            statements = (
+                statements[: index + 1] + list(prefix.statements) + statements[end:]
+            )
+        return frog_ast.Block([self.transform(s) for s in statements])
 
     def transform_if_statement(
         self, if_statement: frog_ast.IfStatement
@@ -853,17 +1260,189 @@ class SimplifyReturnTransformer(BlockTransformer):
 
 
 class RemoveStatementTransformer(BlockTransformer):
-    """Filters out specific statement instances (matched by identity) from all blocks."""
+    """Filters out specific statement instances from all blocks.
+
+    Statements are matched by identity, so apply it to the very tree the
+    statements were taken from (it is copy-on-write: that tree is left
+    unchanged).  A statement structurally equal to one in *to_remove* but
+    a different object stays: a structural match also deleted an equal
+    write elsewhere in the game that the caller never meant (F-382).
+    """
 
     def __init__(self, to_remove: list[frog_ast.Statement]):
+        # The list keeps the statements alive, so their ids stay theirs.
         self.to_remove = to_remove
+        self._to_remove_ids = {id(statement) for statement in to_remove}
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
-        new_statements = []
-        for statement in block.statements:
-            if statement not in self.to_remove:
-                new_statements.append(statement)
+        return frog_ast.Block(
+            [
+                statement
+                for statement in block.statements
+                if id(statement) not in self._to_remove_ids
+            ]
+        )
+
+
+class FlagSetToAssignmentTransformer(BlockTransformer):
+    """Folds a conditional flag raise after a known-false flag into an assignment.
+
+    ::
+
+        x = false; S; if (C) { x = true; }   ->   x = false; S; x = C;
+
+    when no statement of S mentions ``x`` (so ``x`` is false right before
+    the if). Afterwards ``x`` equals ``C`` on both sides, and ``C`` is
+    evaluated exactly once at the same point, so the rewrite is exact even
+    when ``C`` makes calls. The earlier ``x = false`` is then a dead store.
+    This is the shape an identical-until-bad pair uses to raise a flag in
+    Initialize.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+
+    @staticmethod
+    def _flag_assignment(stmt: frog_ast.Statement, value: bool) -> str | None:
+        if (
+            isinstance(stmt, frog_ast.Assignment)
+            and stmt.the_type is None
+            and isinstance(stmt.var, frog_ast.Variable)
+            and stmt.value == frog_ast.Boolean(value)
+        ):
+            return stmt.var.name
+        return None
+
+    def _raised_flag(self, stmt: frog_ast.Statement) -> str | None:
+        if (
+            isinstance(stmt, frog_ast.IfStatement)
+            and len(stmt.conditions) == 1
+            and len(stmt.blocks) == 1
+            and len(stmt.blocks[0].statements) == 1
+        ):
+            return self._flag_assignment(stmt.blocks[0].statements[0], True)
+        return None
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        known_false: set[str] = set()
+        reset_earlier: set[str] = set()
+        new_statements: list[frog_ast.Statement] = []
+        for stmt in block.statements:
+            flag = self._raised_flag(stmt)
+            if flag is not None and flag in known_false:
+                assert isinstance(stmt, frog_ast.IfStatement)
+                replacement = frog_ast.Assignment(
+                    None, frog_ast.Variable(flag), copy.deepcopy(stmt.conditions[0])
+                )
+                replacement.line_num, replacement.column_num = (
+                    stmt.line_num,
+                    stmt.column_num,
+                )
+                new_statements.append(replacement)
+                known_false.discard(flag)
+                continue
+            if flag is not None and flag in reset_earlier:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Flag Set To Assignment",
+                        reason=(
+                            f"'if (...) {{ {flag} = true; }}' was not folded into"
+                            f" '{flag} = ...;': {flag} is mentioned between its"
+                            f" reset to false and the if-statement"
+                        ),
+                        location=stmt.origin,
+                        suggestion=(
+                            f"move the statements that mention {flag} after the"
+                            " if-statement, or before the reset"
+                        ),
+                        variable=flag,
+                        method=None,
+                    )
+                )
+            mentioned = {
+                n.name for n in _walk_nodes(stmt) if isinstance(n, frog_ast.Variable)
+            }
+            known_false -= mentioned
+            reset = self._flag_assignment(stmt, False)
+            if reset is not None:
+                known_false.add(reset)
+                reset_earlier.add(reset)
+            new_statements.append(stmt)
         return frog_ast.Block(new_statements)
+
+
+class RemoveEmptyIfTransformer(BlockTransformer):
+    """Drops an ``if`` statement whose every arm is empty.
+
+    Such a statement writes nothing and continues at the same point on every
+    path, so only the evaluation of its conditions could be observable. It is
+    removed when that evaluation has no effect: no call (a method may be
+    non-deterministic, a random function lazily sampled) and no map/array
+    indexing (an absent-key read). Otherwise the statement is kept and a
+    near-miss recorded.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        kept: list[frog_ast.Statement] = []
+        for statement in block.statements:
+            if not (
+                isinstance(statement, frog_ast.IfStatement)
+                and all(not b.statements for b in statement.blocks)
+            ):
+                kept.append(statement)
+                continue
+            blocker = next(
+                (
+                    node
+                    for condition in statement.conditions
+                    for node in _walk_nodes(condition)
+                    if isinstance(
+                        node,
+                        (frog_ast.FuncCall, frog_ast.ArrayAccess, frog_ast.Slice),
+                    )
+                ),
+                None,
+            )
+            if blocker is None:
+                continue
+            kept.append(statement)
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Remove Empty If",
+                    reason=(
+                        f"an if-statement with only empty branches was kept"
+                        f" because its condition evaluates '{blocker}', which"
+                        f" may have an effect"
+                    ),
+                    location=statement.origin,
+                    suggestion=(
+                        "compute the condition into a local only if its value"
+                        " is needed, or drop the empty if-statement"
+                    ),
+                    variable=None,
+                    method=None,
+                )
+            )
+        return frog_ast.Block(kept)
+
+
+def _walk_nodes(node: object) -> list[frog_ast.ASTNode]:
+    """Every AST node reachable from *node* (including itself)."""
+    found: list[frog_ast.ASTNode] = []
+    stack: list[object] = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, frog_ast.ASTNode):
+            found.append(current)
+            stack.extend(
+                getattr(current, attr) for attr in vars(current) if attr != "origin"
+            )
+        elif isinstance(current, (list, tuple)):
+            stack.extend(current)
+    return found
 
 
 # Consider case where else if condition might have a return but then the if condition doesn't
@@ -890,6 +1469,13 @@ class RemoveUnreachableTransformer(BlockTransformer):
         self.ctx = ctx
         self._block_path: dict[int, list[z3.AstRef]] = {}
         self._block_versions: dict[int, dict[str, int]] = {}
+        # F-356: a store that converts an Int into a ModInt does not make its
+        # target equal to the RHS, so it records no path fact.
+        self._coercing: frozenset[str] = (
+            coercing_store_names_for(ast, ctx)
+            if isinstance(ast, frog_ast.Game)
+            else frozenset()
+        )
 
     def _condition_is_nondeterministic(self, cond: frog_ast.Expression) -> bool:
         namespace = self.ctx.proof_namespace if self.ctx else {}
@@ -983,7 +1569,10 @@ class RemoveUnreachableTransformer(BlockTransformer):
             if not isinstance(statement, frog_ast.IfStatement):
                 old_versions = dict(variable_version_map)
                 # Track assignments as path constraints for nested reasoning
-                if isinstance(statement, frog_ast.Assignment):
+                if (
+                    isinstance(statement, frog_ast.Assignment)
+                    and lvalue_base_name(statement.var) not in self._coercing
+                ):
                     type_map = GetTypeMapVisitor(statement).visit(self.ast)
                     # The stopping point excludes the assignment itself,
                     # so manually add the declared type for the LHS.
@@ -1252,6 +1841,8 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
         self,
         proof_namespace: frog_ast.Namespace | None = None,
         proof_let_types: NameTypeMap | None = None,
+        coercing: frozenset[str] = frozenset(),
+        ctx: PipelineContext | None = None,
     ) -> None:
         self.field_names: list[str] = []
         self.param_names: list[str] = []
@@ -1260,6 +1851,9 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
         self.field_definitions: dict[str, frog_ast.Expression] = {}
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
+        # F-356: fields some store converts into a ModInt.
+        self._coercing = coercing
+        self.ctx = ctx
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.field_names = [field.name for field in game.fields]
@@ -1279,9 +1873,16 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
         # Method that holds each field's (single, top-level) defining assignment.
         def_methods: dict[str, str] = {}
 
+        # Definitions an earlier return in their method may skip (F-349).
+        skippable: set[str] = set()
+        # Parameters and locals of Initialize, where every kept definition is.
+        init_local_names: set[str] = set()
+
         for method in game.methods:
+            if method.signature.name == "Initialize":
+                init_local_names |= set(method_binder_counts(method))
             # Collect top-level definitions (for the expression value)
-            for stmt in method.block.statements:
+            for idx, stmt in enumerate(method.block.statements):
                 if (
                     isinstance(stmt, frog_ast.Assignment)
                     and isinstance(stmt.var, frog_ast.Variable)
@@ -1289,6 +1890,8 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
                 ):
                     definitions[stmt.var.name] = stmt.value
                     def_methods[stmt.var.name] = method.signature.name
+                    if may_return_before(method.block.statements, idx):
+                        skippable.add(stmt.var.name)
 
             # Count ALL assignments recursively (including nested blocks)
             for field_name in self.field_names:
@@ -1313,17 +1916,41 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
             # def(A) is likewise written only in Initialize.
             if def_methods.get(name) != "Initialize":
                 continue
-            used_vars = VariableCollectionVisitor().visit(expr)
-            if not all(v.name in self.field_names for v in used_vars):
+            # F-349: an earlier return in Initialize may skip the definition,
+            # leaving the field at its initial value.
+            if name in skippable:
                 continue
+            # F-356: a ModInt field assigned an Int holds it reduced modulo
+            # the modulus, not its definition.
+            if name in self._coercing:
+                note_coercing_store(
+                    self.ctx,
+                    "If Condition Alias Substitution",
+                    name,
+                    None,
+                    "Initialize",
+                )
+                continue
+            used_names = {v.name for v in VariableCollectionVisitor().visit(expr)}
+            if not used_names <= set(self.field_names):
+                continue
+            # A name read only through a member access (`M` in `|M.keys|`,
+            # `KEM` in `KEM.Decaps(...)`) is missed by the collector above. A
+            # field read that way is game state like any other, so it is held
+            # to the same discipline below; any other such name must not be
+            # local to Initialize, where the definition would be out of scope.
+            member_only = referenced_variable_names(expr) - used_names
+            if member_only & init_local_names:
+                continue
+            read_fields = used_names | (member_only & set(self.field_names))
             # Referenced fields must also be single-assignment — if a
             # referenced field is reassigned after this definition, the
             # stored value diverges from the current field value.
-            if not all(assign_counts.get(v.name, 0) == 1 for v in used_vars):
+            if not all(assign_counts.get(n, 0) == 1 for n in read_fields):
                 continue
             # ...and that single assignment must be in Initialize too, so the
             # referenced field cannot be re-set by an interleaved oracle call.
-            if not all(def_methods.get(v.name) == "Initialize" for v in used_vars):
+            if not all(def_methods.get(n) == "Initialize" for n in read_fields):
                 continue
             if has_nondeterministic_call(
                 expr, self._proof_namespace, self._proof_let_types
@@ -1333,7 +1960,15 @@ class IfConditionAliasSubstitutionTransformer(BlockTransformer):
 
     def _transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
         self.param_names = [p.name for p in method.signature.parameters]
-        return self.transform(method)
+        if method.signature.name != "Initialize":
+            return self.transform(method)
+        # F-349: a branch in Initialize may run before a definition.
+        definitions = self.field_definitions
+        self.field_definitions = {}
+        try:
+            return self.transform(method)
+        finally:
+            self.field_definitions = definitions
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -2095,8 +2730,104 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
         self.ctx = ctx
         self.ast = ast
         self._init_field_rhs: list[tuple[frog_ast.Variable, frog_ast.Expression]] = []
+        # Names the method being transformed binds (F-346): an expansion
+        # whose free names include one of them would be captured there.
+        self._bound_names: set[str] = set()
+        self._in_initialize = False
         if isinstance(ast, frog_ast.Game):
             self._init_field_rhs = self._collect_init_field_rhs(ast)
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        self._bound_names = method_bound_names(method)
+        # Inside Initialize a fold site may run before a definition.
+        self._in_initialize = method.signature.name == "Initialize"
+        try:
+            return self._transform_children(method)
+        finally:
+            self._bound_names = set()
+            self._in_initialize = False
+
+    def _injectivity_facts(
+        self, visitor: Z3FormulaVisitor, exprs: Sequence[frog_ast.Expression]
+    ) -> list[Any]:
+        """``c1 == c2 => args(c1) == args(c2)`` for calls to the same method.
+
+        Sound for a method the primitive declares ``injective`` (distinct
+        inputs give distinct outputs); the pass already refuses inputs with
+        non-deterministic calls, so each call denotes one value.
+        """
+        calls: list[tuple[frog_ast.FuncCall, frog_ast.MethodSignature]] = []
+        for expr in exprs:
+            for node in _walk_nodes(expr):
+                if isinstance(node, frog_ast.FuncCall) and node.args:
+                    method = _lookup_primitive_method(
+                        node.func, self.ctx.proof_namespace
+                    )
+                    if (
+                        method is not None
+                        and method.injective
+                        and len(method.parameters) == len(node.args)
+                    ):
+                        calls.append((node, method))
+        facts = []
+        for i, (first, method) in enumerate(calls):
+            for second, _ in calls[i + 1 :]:
+                if first.func != second.func or first == second:
+                    continue
+                encoded = [visitor.visit(first), visitor.visit(second)]
+                arg_pairs = []
+                for param, a, b in zip(method.parameters, first.args, second.args):
+                    pair = (
+                        _faithful_z3_term(visitor.visit(a), param.type),
+                        _faithful_z3_term(visitor.visit(b), param.type),
+                    )
+                    if pair[0] is None or pair[1] is None:
+                        break
+                    arg_pairs.append(pair)
+                if len(arg_pairs) != len(method.parameters):
+                    continue
+                if not all(isinstance(t, z3.ExprRef) for t in encoded):
+                    continue
+                try:
+                    facts.append(
+                        z3.Implies(
+                            encoded[0] == encoded[1],
+                            z3.And(*[a == b for a, b in arg_pairs]),
+                        )
+                    )
+                except (z3.Z3Exception, TypeError):
+                    continue
+        return facts
+
+    def _usable_init_field_rhs(
+        self,
+    ) -> list[tuple[frog_ast.Variable, frog_ast.Expression]]:
+        """The Initialize definitions whose names mean the same here (F-346)."""
+        if self._in_initialize:
+            return []
+        usable = []
+        for field_var, rhs in self._init_field_rhs:
+            captured = sorted(
+                ({field_var.name} | referenced_variable_names(rhs)) & self._bound_names
+            )
+            if captured:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Fold Equivalent Return Branch",
+                        reason=(
+                            f"Init-only field RHS not expanded: {', '.join(captured)}"
+                            " is bound in this method, so the expansion would"
+                            " refer to a different variable"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=field_var.name,
+                        method=None,
+                    )
+                )
+                continue
+            usable.append((field_var, rhs))
+        return usable
 
     def _collect_init_field_rhs(
         self,
@@ -2112,18 +2843,18 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
         though each invocation draws independently.
         """
         field_names = {f.name for f in game.fields}
-        # Count assignments per field across all methods.
+        # Count the values each field can take across all methods: writes,
+        # element writes and `<-uniq` insertions.
         counts: dict[str, int] = {}
         for method in game.methods:
             for name in field_names:
-                counts[name] = counts.get(name, 0) + _count_field_assigns_recursive(
-                    method.block, name
-                )
+                counts[name] = counts.get(name, 0) + _local_value_count(method, name)
         init = next((m for m in game.methods if m.signature.name == "Initialize"), None)
         if init is None:
             return []
+        coercing = coercing_store_names_for(game, self.ctx)
         result: list[tuple[frog_ast.Variable, frog_ast.Expression]] = []
-        for stmt in init.block.statements:
+        for def_index, stmt in enumerate(init.block.statements):
             if not (
                 isinstance(stmt, frog_ast.Assignment)
                 and stmt.the_type is None
@@ -2133,7 +2864,30 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
                 continue
             if counts.get(stmt.var.name, 0) != 1:
                 continue
-            if not isinstance(stmt.value, frog_ast.FuncCall):
+            # F-356: a ModInt field assigned an Int holds it reduced modulo
+            # the modulus, not the RHS.
+            if stmt.var.name in coercing:
+                note_coercing_store(
+                    self.ctx,
+                    "Fold Equivalent Return Branch",
+                    stmt.var.name,
+                    stmt.origin,
+                    "Initialize",
+                )
+                continue
+            # A definition is a call (`F = D(x)`) or a comparison
+            # (`F = a == b`, e.g. an identical-until-bad flag folded by
+            # FlagSetToAssignment).
+            # The definition must run whenever Initialize completes: an
+            # earlier statement that can return would skip it, leaving the
+            # field at its initial value.
+            if may_return_before(init.block.statements, def_index):
+                continue
+            if not isinstance(stmt.value, frog_ast.FuncCall) and not (
+                isinstance(stmt.value, frog_ast.BinaryOperation)
+                and stmt.value.operator
+                in (frog_ast.BinaryOperators.EQUALS, frog_ast.BinaryOperators.NOTEQUALS)
+            ):
                 continue
             # Reject a non-deterministic FuncCall RHS: expanding the field
             # to a textual copy of the call would let the comparison fold
@@ -2167,14 +2921,79 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             # FIELD referenced by the RHS to be single-write (only its Initialize
             # assignment).
             rhs_field_refs = referenced_variable_names(stmt.value) & field_names
-            if any(counts.get(name, 0) > 1 for name in rhs_field_refs):
+            # F-345: a field the RHS reads must hold one value from the
+            # definition on: never written, or written exactly once, by a
+            # top-level Initialize statement BEFORE the definition (a write
+            # in an oracle, or after the definition, changes it).
+            if any(
+                counts.get(name, 0) > 1
+                or (
+                    counts.get(name, 0) == 1
+                    and not any(
+                        _local_value_count(earlier, name)
+                        for earlier in init.block.statements[:def_index]
+                    )
+                )
+                for name in rhs_field_refs
+            ):
                 self.ctx.near_misses.append(
                     NearMiss(
                         transform_name="Fold Equivalent Return Branch",
                         reason=(
                             "Init-only field RHS not expanded: a field referenced "
-                            "by the RHS is reassigned outside Initialize, so the "
-                            "stored value no longer matches the RHS at the fold site"
+                            "by the RHS is reassigned outside Initialize or after "
+                            "the definition, so the stored value no longer matches "
+                            "the RHS at the fold site"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=stmt.var.name,
+                        method=None,
+                    )
+                )
+                continue
+            # Soundness (F-342): the same applies to Initialize LOCALS the RHS
+            # reads. The recorded text `F.eval(x)` names whatever `x` holds
+            # when the field is assigned; if `x` is re-sampled or reassigned
+            # in Initialize (before or after), another field's RHS can have
+            # the same text for a different value, and the comparison below
+            # would equate the two fields. Require each such local to take a
+            # single value in Initialize.
+            # An Initialize local shadowing a field would be read as the
+            # field once the RHS is expanded in another method.
+            shadowing = sorted(
+                (referenced_variable_names(stmt.value) & field_names)
+                & method_bound_names(init)
+            )
+            if shadowing:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Fold Equivalent Return Branch",
+                        reason=(
+                            "Init-only field RHS not expanded: the Initialize"
+                            f" local(s) {', '.join(shadowing)} it reads shadow a"
+                            " field of the same name"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=stmt.var.name,
+                        method=None,
+                    )
+                )
+                continue
+            rhs_locals = referenced_variable_names(stmt.value) - field_names
+            rebound = sorted(
+                name for name in rhs_locals if _local_value_count(init, name) > 1
+            )
+            if rebound:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Fold Equivalent Return Branch",
+                        reason=(
+                            "Init-only field RHS not expanded: the Initialize"
+                            f" local(s) {', '.join(rebound)} it reads take more"
+                            " than one value in Initialize, so the RHS text does"
+                            " not identify the stored value"
                         ),
                         location=None,
                         suggestion=None,
@@ -2267,8 +3086,19 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             # field atoms intact in Z3 — overriding with the hoisted-call
             # RHS would replace one side of the equality with a structure
             # Z3 cannot relate to the other side's atom.
+            usable_init = self._usable_init_field_rhs()
+            if usable_init:
+                # Expand the Initialize definitions in P as well, so a guard
+                # on hoisted fields (`f1 == f2`) is stated over the values
+                # they were computed from.
+                p_map: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(
+                    identity=False
+                )
+                for field_var, rhs in usable_init:
+                    p_map.set(field_var, copy.deepcopy(rhs))
+                p_expr = SubstitutionTransformer(p_map).transform(copy.deepcopy(p_expr))
             all_sub_pairs: list[tuple[frog_ast.Expression, frog_ast.Expression]] = list(
-                self._init_field_rhs
+                usable_init
             ) + list(sub_pairs)
             if all_sub_pairs:
                 # Iterate substitution to a fixed point so chains like
@@ -2298,7 +3128,7 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             # Build Z3 formulas with opaque-FuncCall fallback.
             type_map = GetTypeMapVisitor(stmt).visit(self.ast)
             visitor = Z3FormulaVisitor(
-                type_map + (self.ctx.proof_let_types or NameTypeMap()),
+                with_proof_let_types(type_map, self.ctx.proof_let_types),
                 variable_version_map={},
                 opaque_func_call_fallback=True,
                 # Enable the in-visitor non-determinism backstop: any P/X/Y
@@ -2325,6 +3155,8 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
                 solver.set("timeout", 30000)
                 # Check Not(P => (X == Y)) is UNSAT, i.e., P AND X != Y is UNSAT.
                 solver.add(z3.And(p_formula, x_formula != y_formula))
+                for fact in self._injectivity_facts(visitor, (p_expr, x_sub, y_sub)):
+                    solver.add(fact)
                 if solver.check() != z3.unsat:
                     continue
             except (z3.Z3Exception, TypeError):
@@ -2335,6 +3167,60 @@ class FoldEquivalentReturnBranchTransformer(BlockTransformer):
             )
             return self.transform_block(frog_ast.Block(new_stmts))
         return block
+
+
+def _local_value_count(node: frog_ast.ASTNode, name: str) -> int:
+    """How many values *name* can take in *node* (a method, block or statement).
+
+    Counts assignments and samples to it (including element writes), a
+    ``<-uniq[name]`` draw (which inserts into it), and being a loop variable
+    (which takes one value per iteration, counted as two). A bare
+    declaration is not a value. A method parameter never written counts 0.
+    """
+    count = _count_field_assigns_recursive(node, name)
+
+    def _other_writes(node: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if (
+            isinstance(node, frog_ast.UniqueSample)
+            and lvalue_base_name(node.unique_set) == name
+        ):
+            count += 1
+        elif (isinstance(node, frog_ast.NumericFor) and node.name == name) or (
+            isinstance(node, frog_ast.GenericFor) and node.var_name == name
+        ):
+            count += 2
+        return False
+
+    SearchVisitor(_other_writes).visit(node)
+    return count
+
+
+def _faithful_z3_term(term: object, param_type: frog_ast.Type) -> Any:
+    """*term* as a Z3 expression denoting the argument's actual value, or None.
+
+    An injectivity fact concludes that the Z3 encodings of two arguments are
+    equal, which is sound only if each encoding denotes the argument's real
+    value: an ``Int`` or ``Bool`` term for a parameter of that type, or an
+    opaque constant otherwise. Anything else (a Python tuple for a product,
+    integer arithmetic standing for a ``ModInt`` value, which Z3 would not
+    reduce mod q) is refused.
+    """
+    if isinstance(param_type, frog_ast.IntType):
+        if isinstance(term, bool):
+            return None
+        if isinstance(term, int):
+            return z3.IntVal(term)
+        if isinstance(term, z3.ArithRef) and term.is_int():
+            return term
+        return None
+    if isinstance(param_type, frog_ast.BoolType):
+        if isinstance(term, bool):
+            return z3.BoolVal(term)
+        return term if isinstance(term, z3.BoolRef) else None
+    if isinstance(term, z3.ExprRef) and term.sort() == _OPAQUE_Z3_SORT:
+        return term
+    return None
 
 
 def _flatten_top_level_and(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
@@ -2578,19 +3464,20 @@ class MergeNestedGuardTransformer(BlockTransformer):
         return block
 
 
+class _BlockNodeCollector(Visitor[list[frog_ast.ASTNode]]):
+    def __init__(self) -> None:
+        self.nodes: list[frog_ast.ASTNode] = []
+
+    def result(self) -> list[frog_ast.ASTNode]:
+        return self.nodes
+
+    def leave_ast_node(self, node: frog_ast.ASTNode) -> None:
+        self.nodes.append(node)
+
+
 def _iter_block_nodes(block: frog_ast.Block) -> list[frog_ast.ASTNode]:
     """Return every AST node in *block* (the block and all descendants)."""
-    nodes: list[frog_ast.ASTNode] = []
-
-    class _Collector(Visitor[None]):
-        def result(self) -> None:
-            return None
-
-        def leave_ast_node(self, node: frog_ast.ASTNode) -> None:
-            nodes.append(node)
-
-    _Collector().visit(block)
-    return nodes
+    return _BlockNodeCollector().visit(block)
 
 
 def _condition_literal(cond: frog_ast.Expression, holds: bool) -> tuple[str, bool]:
@@ -2872,6 +3759,8 @@ class IfConditionAliasSubstitution(TransformPass):
         return IfConditionAliasSubstitutionTransformer(
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
+            coercing=coercing_store_names_for(game, ctx),
+            ctx=ctx,
         ).transform(game)
 
 
@@ -2938,6 +3827,13 @@ class FoldEquivalentReturnBranch(TransformPass):
         return FoldEquivalentReturnBranchTransformer(ctx, game).transform(game)
 
 
+class FoldLiteralConditions(TransformPass):
+    name = "Fold Literal Conditions"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return FoldLiteralConditionsTransformer(ctx).transform(game)
+
+
 class BranchElimination(TransformPass):
     name = "Branch Elimination"
 
@@ -2971,6 +3867,20 @@ class SimplifyIf(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return SimplifyIfTransformer().transform(game)
+
+
+class FlagSetToAssignment(TransformPass):
+    name = "Flag Set To Assignment"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return FlagSetToAssignmentTransformer(ctx).transform(game)
+
+
+class RemoveEmptyIf(TransformPass):
+    name = "Remove Empty If"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return RemoveEmptyIfTransformer(ctx).transform(game)
 
 
 class RemoveUnreachable(TransformPass):

@@ -1,0 +1,50 @@
+import 'D.primitive';
+
+Game Left(D F, Int n) {
+    BitString<n> a;
+    BitString<n> b;
+    Bool E = true;
+    Bool Initialize() {
+        a <- BitString<n>;
+        b <- BitString<n>;
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        E = a == b;
+        return false;
+    }
+    Bool O(Bool flag) {
+        if (flag) {
+            return E;
+        }
+        return a == b;
+    }
+    Bool Peek() {
+        return E;
+    }
+}
+
+Game Right(D F, Int n) {
+    BitString<n> a;
+    BitString<n> b;
+    Bool E = true;
+    Bool Initialize() {
+        a <- BitString<n>;
+        b <- BitString<n>;
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        E = a == b;
+        return false;
+    }
+    Bool O(Bool flag) {
+        return a == b;
+    }
+    Bool Peek() {
+        return E;
+    }
+}
+
+export as Cmp;

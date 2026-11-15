@@ -1,0 +1,37 @@
+// Pr[bad] in InitCollision is at most 1/|S|: the flag records whether two
+// uniform samples drawn in Initialize collide. The event depends only on
+// Initialize's coins, so the chain plays the stripped game (Initialize only,
+// its output dropped) and RandomTargetGuessing can hide one of the samples.
+import 'InitCollision.game';
+import 'RandomTargetGuessing.game';
+
+proof:
+
+let:
+    Set S;
+
+assume:
+    RandomTargetGuessing(S);
+
+theorem:
+    event bad of InitCollision(S) at Initialize;
+
+games:
+    InitCollision(S).Ideal against InitCollision(S).Adversary;
+    RandomTargetGuessing(S).Real  compose R_RTG(S) against InitCollision(S).Adversary;
+    RandomTargetGuessing(S).Ideal compose R_RTG(S) against InitCollision(S).Adversary;
+
+// R_RTG: the challenger's hidden target plays x; y is sampled here and the
+// flag is raised when the challenger reports y == target.
+Reduction R_RTG(Set S) compose RandomTargetGuessing(S) against InitCollision(S).Adversary {
+    Bool bad;
+
+    Void Initialize() {
+        challenger.Initialize();
+        S y <- S;
+        bad = false;
+        if (challenger.Eq(y)) {
+            bad = true;
+        }
+    }
+}

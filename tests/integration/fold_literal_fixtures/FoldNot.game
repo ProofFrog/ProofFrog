@@ -1,0 +1,26 @@
+// Must SUCCEED. Neg(false) inlines to `!false`, which folds to true.
+import 'Chan.primitive';
+
+Game Real(Chan C) {
+    Int count;
+    Void Initialize() { count = 0; }
+    [Int, Bool]? Query(Int x, Bool b) {
+        if (C.Neg(false)) {
+            count = count + x;
+        } else {
+            count = 6;
+        }
+        return [count, b];
+    }
+}
+
+Game Random(Chan C) {
+    Int count;
+    Void Initialize() { count = 0; }
+    [Int, Bool]? Query(Int x, Bool b) {
+        count = count + x;
+        return [count, b];
+    }
+}
+
+export as FoldNot;

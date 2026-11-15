@@ -1,0 +1,9 @@
+// F-362 support scheme: Get() returns the scheme's Boolean parameter, so
+// inlined into a game it reads the proof's let name passed as that parameter.
+import 'Flag.primitive';
+
+Scheme FlagImpl(Bool b) extends Flag {
+    Bool Get() {
+        return b;
+    }
+}

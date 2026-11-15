@@ -1,0 +1,15 @@
+// F-356: claims FieldInit.Left and FieldInit.Right are interchangeable.
+// They are not (see FieldInit.game). Sound engine: Proof Failed!
+import 'FieldInit.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    FieldInit(q);
+
+games:
+    FieldInit(q).Left against FieldInit(q).Adversary;
+    FieldInit(q).Right against FieldInit(q).Adversary;

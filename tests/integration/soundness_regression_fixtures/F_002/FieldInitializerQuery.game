@@ -1,0 +1,49 @@
+// FreshInputRFToUniform (F-002), a query in a field initializer. H is a
+// random function sampled in the proof's let:, so it is already sampled when
+// the field initializers run, before Initialize: y0 and y1 hold H(0b0) and
+// H(0b1). (Swap writes them, so they stay fields.) Fresh draws
+// v <-uniq[H.domain], which holds only such draws, not those queries.
+// Distinguisher: call Peek(), then Fresh(), and output whether Fresh's
+// answer is one of Peek's two values. In Real it always is; in Random only
+// with probability at most 2 / 2^m. The pass checked the queries in the
+// methods but not in field initializers.
+Game Real(Int m, Function<BitString<1>, BitString<m>> H) {
+    BitString<m> y0 = H(0b0);
+    BitString<m> y1 = H(0b1);
+    Void Initialize() {
+    }
+    Void Swap() {
+        BitString<m> t = y0;
+        y0 = y1;
+        y1 = t;
+    }
+    [BitString<m>, BitString<m>] Peek() {
+        return [y0, y1];
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[H.domain] BitString<1>;
+        return H(v);
+    }
+}
+
+Game Random(Int m, Function<BitString<1>, BitString<m>> H) {
+    BitString<m> y0 = H(0b0);
+    BitString<m> y1 = H(0b1);
+    Void Initialize() {
+    }
+    Void Swap() {
+        BitString<m> t = y0;
+        y0 = y1;
+        y1 = t;
+    }
+    [BitString<m>, BitString<m>] Peek() {
+        return [y0, y1];
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[H.domain] BitString<1>;
+        BitString<m> u <- BitString<m>;
+        return u;
+    }
+}
+
+export as FieldInitializerQuery;

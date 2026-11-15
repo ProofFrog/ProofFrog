@@ -1,0 +1,15 @@
+// {a, b} == {c, b} is not c == b: O(0, 1, 1) returns false in Left
+// and true in Right.
+Game Left(Int lambda) {
+    Bool O(Int a, Int b, Int c) {
+        return {a, b} == {c, b};
+    }
+}
+
+Game Right(Int lambda) {
+    Bool O(Int a, Int b, Int c) {
+        return c == b;
+    }
+}
+
+export as SetEquality;

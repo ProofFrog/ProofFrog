@@ -1,0 +1,16 @@
+// Positive control for F-356: ExactStore.Left and ExactStore.Right are
+// interchangeable (see exact_store_control.game).
+
+import 'exact_store_control.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    ExactStore(q);
+
+games:
+    ExactStore(q).Left against ExactStore(q).Adversary;
+    ExactStore(q).Right against ExactStore(q).Adversary;

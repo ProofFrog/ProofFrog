@@ -252,3 +252,142 @@ def test_if_with_return_in_body_is_a_barrier() -> None:
     # The if-with-return still sits between v1 and v2 (positions 0/1/2).
     assert isinstance(stmts[1], frog_ast.IfStatement)
     assert isinstance(stmts[2], frog_ast.Sample)
+
+
+def _stabilized_statements(source: str) -> list[str]:
+    game = frog_parser.parse_game(source)
+    result = _StabilizeIndependentStatementsTransformer().transform_game(game)
+    return [str(stmt) for stmt in result.methods[0].block.statements]
+
+
+def test_f354_reader_not_moved_below_conditional_write() -> None:
+    """Two readers of field ``f`` above an ``if`` that writes ``f``. The
+    dependency graph used to tie the ``if`` to the nearest reader (``a``)
+    only, so ``b`` -- last in return order -- traded places with ``c`` and
+    landed below the write."""
+    statements = _stabilized_statements("""
+        Game Test() {
+            Int f;
+            [Int, Int, Int] O(Int p) {
+                Int b = f + 2;
+                Int a = f + 1;
+                if (p == 0) {
+                    f = 5;
+                }
+                Int c = p + 0;
+                return [c, a, b];
+            }
+        }
+        """)
+    barrier = next(i for i, text in enumerate(statements) if text.startswith("if"))
+    assert statements.index("Int a = f + 1;") < barrier
+    assert statements.index("Int b = f + 2;") < barrier
+    assert statements.index("Int c = p + 0;") > barrier
+
+
+def test_f354_independent_readers_above_write_still_reorder() -> None:
+    """Sound twin: the two readers are independent of each other, so they are
+    still put in return order above the write."""
+    statements = _stabilized_statements("""
+        Game Test() {
+            Int f;
+            [Int, Int] O(Int p) {
+                Int b = f + 2;
+                Int a = f + 1;
+                if (p == 0) {
+                    f = 5;
+                }
+                return [a, b];
+            }
+        }
+        """)
+    assert statements[:2] == ["Int a = f + 1;", "Int b = f + 2;"]
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        # F-381's shape: the write to b reads the a of the first doubling and
+        # must stay above the second, equal doubling.
+        (
+            "a = a + a; b = b + a; a = a + a;",
+            ["a = a + a;", "b = b + a;", "a = a + a;"],
+        ),
+        # Sound twin: an independent write to b still sorts below both.
+        (
+            "a = a + a; b = b + b; a = a + a;",
+            ["a = a + a;", "a = a + a;", "b = b + b;"],
+        ),
+    ],
+)
+def test_f381_equal_statements_keep_their_own_edges(
+    body: str, expected: list[str]
+) -> None:
+    statements = _stabilized_statements(f"""
+        Game Test() {{
+            Int a;
+            Int b;
+            Void O() {{
+                {body}
+            }}
+        }}
+        """)
+    assert statements == expected
+
+
+def test_write_not_moved_above_shadowing_declaration() -> None:
+    """``f = p;`` below ``Int f;`` writes the local. The pass sorts field
+    assignments first, and used to lift it above the declaration, where it
+    writes the field."""
+    statements = _stabilized_statements("""
+        Game Test() {
+            Int f;
+            Int O(Int p) {
+                Int z = p + 9;
+                Int f;
+                f = p;
+                Int a = f + 1;
+                return a + z;
+            }
+        }
+        """)
+    declaration = statements.index("Int f;")
+    assert statements.index("f = p;") > declaration
+    assert statements.index("Int a = f + 1;") > declaration
+
+
+_DRAW_ACROSS_RETURN = """
+    Game G() {{
+        Set<BitString<1>> E;
+        Bool guard;
+        Int Draw(BitString<1> w) {{
+            BitString<1> junk <- {domain};
+            if (guard) {{
+                return 1;
+            }}
+            BitString<1> other = w;
+            return 0;
+        }}
+    }}
+    """
+
+
+def test_stabilize_keeps_possibly_empty_draw_above_early_return() -> None:
+    """F-327: the draw may not complete (E may cover BitString<1>), so moving
+    it below `if (guard) { return 1; }` would remove the traces on which it
+    fails to complete. It stays above the if."""
+    game = frog_parser.parse_game(
+        _DRAW_ACROSS_RETURN.format(domain="BitString<1> \\ E")
+    )
+    result = _StabilizeIndependentStatementsTransformer().transform_game(game)
+    assert result == game
+
+
+def test_stabilize_still_moves_type_draw_across_early_return() -> None:
+    """A draw from a type always completes and is independent of the guard,
+    so the pass still orders it after the independent assignment."""
+    game = frog_parser.parse_game(_DRAW_ACROSS_RETURN.format(domain="BitString<1>"))
+    result = _StabilizeIndependentStatementsTransformer().transform_game(game)
+    statements = [str(s) for s in result.get_method("Draw").block.statements]
+    assert statements[0] == "BitString<1> other = w;"
+    assert statements[2] == "BitString<1> junk <- BitString<1>;"

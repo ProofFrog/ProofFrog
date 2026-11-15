@@ -1,0 +1,13 @@
+import 'BranchInvariant.game';
+
+proof:
+
+let:
+    Group G;
+
+theorem:
+    BranchInvariant(G);
+
+games:
+    BranchInvariant(G).Left against BranchInvariant(G).Adversary;
+    BranchInvariant(G).Right against BranchInvariant(G).Adversary;

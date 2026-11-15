@@ -1,0 +1,44 @@
+// ModIntSimplification audit, attack 3 (proof-level): type-map poisoning.
+//
+// Real.Chal returns x ^ 0 where x : GroupElem<Grp>; by SEMANTICS.md
+// section 2.2 / 9.1 this equals Grp.identity, which is exactly what
+// Random.Chal returns. Real and Random ARE interchangeable (a true
+// equivalence; Other is identical on both sides).
+//
+// Note: PROSECUTION.md's Attempt-3 body for Other was `return x + 0;`,
+// which the front-end typechecker rejects ("Cannot add types ModInt<q>
+// and Int"). The poisoning is caused by Other's PARAMETER declaration
+// alone, so `return x;` is used here; everything else is unchanged.
+//
+// But build_game_type_map flattens all methods into one last-write-wins
+// NameTypeMap, so the parameter x : ModInt<q> of the LATER method Other
+// poisons the type of the parameter x : GroupElem<Grp> of Chal. The
+// exponent-zero arm of ModIntSimplification then rewrites Real.Chal's
+// x ^ 0 to the integer literal 1 (instead of leaving it for the sound
+// group rewrite GroupElemSimplification: g ^ 0 -> Grp.identity), so the
+// two canonical forms differ and the hop is falsely rejected.
+//
+// Control: attack3_control.game is identical except Other's parameter is
+// named y (no name collision); that proof verifies.
+
+Game Real(Group Grp, Int q) {
+    GroupElem<Grp> Chal(GroupElem<Grp> x) {
+        return x ^ 0;
+    }
+
+    ModInt<q> Other(ModInt<q> x) {
+        return x;
+    }
+}
+
+Game Random(Group Grp, Int q) {
+    GroupElem<Grp> Chal(GroupElem<Grp> x) {
+        return Grp.identity;
+    }
+
+    ModInt<q> Other(ModInt<q> x) {
+        return x;
+    }
+}
+
+export as PoisonedExp;

@@ -1,0 +1,12 @@
+// The product type below is drawn as a whole: every component is finite, so the draw is well formed.
+import 'Pairs.primitive';
+
+Scheme FinitePairs(Int n) extends Pairs {
+    Int n = n;
+    Set Pair = [BitString<n>, BitString<n>];
+
+    Pair Draw() {
+        Pair p <- Pair;
+        return p;
+    }
+}

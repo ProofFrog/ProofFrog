@@ -1,0 +1,24 @@
+// Every length names a parameter or a variable never written after its declaration.
+Game Left(Int n) {
+    Int m = n;
+
+    BitString<m> Samp(Int k) {
+        Int j = k + m;
+        BitString<j> pad = 0^j;
+        BitString<m> r <- BitString<m>;
+        return r;
+    }
+}
+
+Game Right(Int n) {
+    Int m = n;
+
+    BitString<m> Samp(Int k) {
+        Int j = k + m;
+        BitString<j> pad = 0^j;
+        BitString<m> r <- BitString<m>;
+        return r;
+    }
+}
+
+export as ConstantLength;

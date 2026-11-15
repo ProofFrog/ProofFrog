@@ -1,0 +1,19 @@
+import 'Fn.primitive';
+
+// Two games that agree exactly when Fn.Eval is deterministic.
+Game Shared(Fn F) {
+    [BitString<F.n>, BitString<F.n>] Query(BitString<F.n> x) {
+        BitString<F.n> y = F.Eval(x);
+        return [y, y];
+    }
+}
+
+Game Separate(Fn F) {
+    [BitString<F.n>, BitString<F.n>] Query(BitString<F.n> x) {
+        BitString<F.n> y = F.Eval(x);
+        BitString<F.n> z = F.Eval(x);
+        return [y, z];
+    }
+}
+
+export as Twice;

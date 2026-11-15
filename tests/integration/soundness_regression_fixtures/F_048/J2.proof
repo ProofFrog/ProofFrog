@@ -1,0 +1,34 @@
+// F-048 (Merge Uniform Samples): two draws merged across a write to their
+// length.
+// G3's Oracle draws x from BitString<n> with a local n = 5, sets n = 10, and
+// draws y from BitString<n>: x || y has 15 bits. Merge Uniform Samples
+// resolved both lengths to the proof's n, ignoring the write, and merged the
+// two draws into one BitString<2 * n> draw, so G3 was proved interchangeable
+// with J2Prop's games, whose Oracle returns 2n bits.
+// A length, modulus or size in a type may not name a variable that is
+// assigned or drawn, so the type checker now refuses G3: no length can
+// change between two draws.
+import 'J2Prop.game';
+
+proof:
+
+let:
+    Int n;
+
+theorem:
+    J2Prop(n);
+
+games:
+    J2Prop(n).Real against J2Prop(n).Adversary;
+    G3(n) against J2Prop(n).Adversary;
+    J2Prop(n).Random against J2Prop(n).Adversary;
+
+Game G3(Int n) {
+    BitString<2 * n> Oracle() {
+        Int n = 5;
+        BitString<n> x <- BitString<n>;
+        n = 10;
+        BitString<n> y <- BitString<n>;
+        return x || y;
+    }
+}

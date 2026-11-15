@@ -1,0 +1,48 @@
+// Probe queries H in an else-if condition, which is not hoisted into a
+// standalone assignment. Call Q, then Probe(false, x, z) on all four x: in
+// Left one answer is true.
+import 'P.primitive';
+
+Game Left(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> T;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+    }
+    Bool Probe(Bool b, BitString<2> x, BitString<2> y) {
+        if (b) {
+            return false;
+        } else if (H(x) == y) {
+            return true;
+        }
+        return false;
+    }
+    BitString<2> Q() {
+        BitString<2> r <-uniq[T] BitString<2>;
+        BitString<2> z = H(r);
+        return z;
+    }
+}
+
+Game Right(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> T;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+    }
+    Bool Probe(Bool b, BitString<2> x, BitString<2> y) {
+        if (b) {
+            return false;
+        } else if (H(x) == y) {
+            return true;
+        }
+        return false;
+    }
+    BitString<2> Q() {
+        BitString<2> r <-uniq[T] BitString<2>;
+        BitString<2> z <- BitString<2>;
+        return z;
+    }
+}
+
+export as ElseIfCall;

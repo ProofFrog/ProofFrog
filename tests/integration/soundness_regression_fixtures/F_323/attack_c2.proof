@@ -1,0 +1,19 @@
+// AUDIT ARTIFACT (ExpandTuple, Attack C2 -- PROSECUTION.md).
+// Claims C2.Real and C2.Mutate are interchangeable in a SINGLE hop, no
+// assumptions. They are NOT: in Real, Poke's uninitialised local __v__ is
+// method-scoped and never touches the field, so Get() always returns [0,0];
+// in Mutate, Poke() writes the field so after Poke() Get() returns [9,8].
+// Advantage 1 with the trace [Poke(); Get()]. ExpandTuple mis-compiles Real's
+// shadow-local element writes into field writes, so the engine ACCEPTS.
+// Engine acceptance is the CONFIRMED-UNSOUND artifact.
+
+import 'attack_c2.game';
+
+proof:
+
+theorem:
+    C2();
+
+games:
+    C2().Real against C2().Adversary;
+    C2().Mutate against C2().Adversary;

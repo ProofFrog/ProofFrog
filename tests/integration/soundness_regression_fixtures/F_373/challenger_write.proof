@@ -1,0 +1,35 @@
+// Target: the method inliner (InlineTransformer), a challenger oracle that
+// assigns its own parameter, inlined into a reduction.
+// Hypothesis: R passes its y to challenger.Query(y); Echo.Left's Query
+// assigns its parameter m, and substituting R's y for m turns that into
+// `y = 0^n;` in R, so Echo.Left compose R is taken to return 0^n. In truth
+// both Echo sides compose R to return y.
+// The proof derives Probe (false: Left returns 0^n, Right returns y) from
+// Echo (true). Sound engine: Proof Failed! (step 1). Unsound engine: Proof
+// Succeeded!
+import 'Echo.game';
+import 'Probe.game';
+
+Reduction R(Int n) compose Echo(n) against Probe(n).Adversary {
+    BitString<n> O(BitString<n> y) {
+        BitString<n> z = challenger.Query(y);
+        return y;
+    }
+}
+
+proof:
+
+let:
+    Int n;
+
+assume:
+    Echo(n);
+
+theorem:
+    Probe(n);
+
+games:
+    Probe(n).Left against Probe(n).Adversary;
+    Echo(n).Left compose R(n) against Probe(n).Adversary;
+    Echo(n).Right compose R(n) against Probe(n).Adversary;
+    Probe(n).Right against Probe(n).Adversary;

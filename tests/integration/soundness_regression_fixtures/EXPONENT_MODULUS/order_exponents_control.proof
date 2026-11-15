@@ -1,0 +1,16 @@
+// Positive control: ModInt<G.order> and Int exponents stay well formed.
+import 'OrderExponents.game';
+
+proof:
+
+let:
+    Group G;
+
+assume:
+
+theorem:
+    OrderExponents(G);
+
+games:
+    OrderExponents(G).Left against OrderExponents(G).Adversary;
+    OrderExponents(G).Right against OrderExponents(G).Adversary;

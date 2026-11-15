@@ -1,0 +1,4 @@
+// F-356 support primitive: one Boolean test with no input.
+Primitive ModTest(Int q) {
+    Bool Test();
+}

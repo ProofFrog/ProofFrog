@@ -1,0 +1,32 @@
+// When Initialize returns early, F keeps its initial value F0 (a known
+// function) and O(x) = F0(x); LocalFunctionFieldToLet renames F to the
+// let-sampled random function RO regardless.
+Game Left(Int n, Function<BitString<n>, BitString<n>> F0, Function<BitString<n>, BitString<n>> RO) {
+    Function<BitString<n>, BitString<n>> F = F0;
+    Bool Initialize() {
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        F <- Function<BitString<n>, BitString<n>>;
+        return false;
+    }
+    BitString<n> O(BitString<n> x) {
+        return F(x);
+    }
+}
+
+Game Right(Int n, Function<BitString<n>, BitString<n>> F0, Function<BitString<n>, BitString<n>> RO) {
+    Bool Initialize() {
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        return false;
+    }
+    BitString<n> O(BitString<n> x) {
+        return RO(x);
+    }
+}
+
+export as ToLet;

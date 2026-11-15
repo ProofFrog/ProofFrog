@@ -1,0 +1,22 @@
+// The local x in the branch reuses the name of the parameter x.
+Game Left(Int n) {
+    BitString<n> F(BitString<n> x, Bool c) {
+        if (c) {
+            BitString<n> x = 0^n;
+            return x;
+        }
+        return x;
+    }
+}
+
+Game Right(Int n) {
+    BitString<n> F(BitString<n> x, Bool c) {
+        if (c) {
+            BitString<n> x = 0^n;
+            return x;
+        }
+        return x;
+    }
+}
+
+export as ParameterShadowing;

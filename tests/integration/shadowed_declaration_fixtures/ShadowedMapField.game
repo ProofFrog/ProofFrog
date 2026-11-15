@@ -1,0 +1,30 @@
+import 'Source.primitive';
+
+// Like ShadowedField, but no side reads an unassigned value: the shadowing
+// local is a map, which a bare declaration leaves empty, and membership in an
+// empty map is plainly false. Left tests the field (0 is a key: true), Right
+// the fresh local (false). The bare declaration must not float above the
+// field read.
+Game Left(Source S) {
+    Map<Int, Int> __a5__;
+    Void Initialize() { __a5__[0] = 7; }
+    [Bool, Int] O() {
+        Bool hit = 0 in __a5__;
+        Map<Int, Int> __a5__;
+        __a5__[1] = S.Draw();
+        return [hit, __a5__[1]];
+    }
+}
+
+Game Right(Source S) {
+    Map<Int, Int> __a5__;
+    Void Initialize() { __a5__[0] = 7; }
+    [Bool, Int] O() {
+        Map<Int, Int> __a5__;
+        Bool hit = 0 in __a5__;
+        __a5__[1] = S.Draw();
+        return [hit, __a5__[1]];
+    }
+}
+
+export as ShadowedMapField;

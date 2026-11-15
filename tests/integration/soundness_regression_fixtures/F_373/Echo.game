@@ -1,0 +1,17 @@
+// Both sides return 0^n whatever they are passed: Left by assigning its
+// parameter first. The two games are interchangeable, so assuming Echo is
+// assuming a true fact.
+Game Left(Int n) {
+    BitString<n> Query(BitString<n> m) {
+        m = 0^n;
+        return m;
+    }
+}
+
+Game Right(Int n) {
+    BitString<n> Query(BitString<n> m) {
+        return 0^n;
+    }
+}
+
+export as Echo;

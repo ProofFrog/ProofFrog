@@ -1,0 +1,13 @@
+// SOUND -> prove REJECTS the Left -> Right hop. UNSOUND -> prove ACCEPTS it.
+
+import './MemberRead.game';
+
+proof:
+
+theorem:
+    MemberRead();
+
+games:
+    MemberRead().Left against MemberRead().Adversary;
+
+    MemberRead().Right against MemberRead().Adversary;

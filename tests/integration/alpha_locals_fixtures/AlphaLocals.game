@@ -1,0 +1,26 @@
+import 'Brancher.primitive';
+
+Game Real(Brancher B) {
+    Int First() {
+        Int extra = B.Extra();
+        return extra;
+    }
+
+    Int Send(Bool choose) {
+        Int answer = B.Maybe(choose);
+        return answer + answer;
+    }
+}
+
+Game Random(Brancher B) {
+    Int First() {
+        return 0;
+    }
+
+    Int Send(Bool choose) {
+        Int answer = B.Maybe(choose);
+        return answer + answer;
+    }
+}
+
+export as AlphaLocals;

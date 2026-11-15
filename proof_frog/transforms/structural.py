@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import functools
+from typing import cast
 
 from .. import frog_ast
 from .. import visitors
@@ -93,32 +94,179 @@ class _BijectionReplacer(visitors.Transformer):
         return result
 
 
-def remove_duplicate_fields(game: frog_ast.Game) -> frog_ast.Game:
-    """Remove fields that have the same type and always contain the same value."""
+def _initializer_mismatch(field: frog_ast.Field, other: frog_ast.Field) -> str | None:
+    """Why *field* and *other* may start with different values, or None.
+
+    Two fields start equal with no initializer, or with equal initializers
+    that make no call.
+    """
+    if field.value != other.value:
+        return "they start from different initializers"
+    if (
+        field.value is not None
+        and visitors.SearchVisitor(
+            lambda node: isinstance(node, frog_ast.FuncCall)
+        ).visit(field.value)
+        is not None
+    ):
+        return "their initializers make calls, which may return different values"
+    return None
+
+
+def _describe_unpaired_write(
+    statement: frog_ast.Statement, pair: tuple[str, str]
+) -> str:
+    """Say what *statement*, a write the pairing does not model, does to
+    the fields in *pair*, for a near-miss message."""
+    if isinstance(statement, frog_ast.NumericFor):
+        return f"a loop binder rebinds '{statement.name}'"
+    if isinstance(statement, frog_ast.GenericFor):
+        return f"a loop binder rebinds '{statement.var_name}'"
+    if isinstance(statement, frog_ast.VariableDeclaration):
+        return f"a local declaration rebinds '{statement.name}'"
+    assert isinstance(
+        statement, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+    )
+    base = visitors.lvalue_base_name(statement.var)
+    if base is None or base not in pair:
+        if isinstance(statement, frog_ast.UniqueSample):
+            inserted = sorted(
+                visitors.referenced_variable_names(statement.unique_set) & set(pair)
+            )
+            if inserted:
+                return f"a '<-uniq' sample inserts into '{inserted[0]}' alone"
+        return "a write with no variable base may change either"
+    if statement.the_type is not None:
+        return f"a local declaration rebinds '{base}'"
+    if not isinstance(statement.var, frog_ast.Variable):
+        return f"an element write changes '{base}' alone"
+    return f"an exclusion sample changes '{base}' alone"
+
+
+def _report_unmerged_fields(
+    ctx: PipelineContext | None,
+    fields: tuple[frog_ast.Field, frog_ast.Field],
+    reason: str,
+    suggestion: str,
+    method: str | None = None,
+) -> None:
+    if ctx is None:
+        return
+    field, other = fields
+    ctx.near_misses.append(
+        NearMiss(
+            transform_name="Remove Duplicate Fields",
+            reason=f"Fields '{field.name}' and '{other.name}' not merged: {reason}",
+            location=other.origin,
+            suggestion=suggestion,
+            # Canonical diffs name fields `fieldN`, so the diagnostic matcher
+            # would drop a near miss that names the source field.
+            variable=None,
+            method=method,
+        )
+    )
+
+
+def remove_duplicate_fields(
+    game: frog_ast.Game, ctx: PipelineContext | None = None
+) -> frog_ast.Game:
+    """Remove fields that have the same type and always contain the same value.
+
+    Two fields always hold the same value if they start equal and every write
+    updates both alike.  Near misses go to *ctx* when it is given.
+    """
     for field in game.fields:
         for other_field in game.fields:
             if field.type == other_field.type and field.name < other_field.name:
-                duplicated_statements = visitors.SameFieldVisitor(
-                    (field.name, other_field.name)
-                ).visit(game)
+                pair = (field.name, other_field.name)
+                same_field_visitor = visitors.SameFieldVisitor(pair)
+                duplicated_statements = same_field_visitor.visit(game)
+                # Reported only where every other write pairs.
+                if same_field_visitor.are_same and same_field_visitor.unpaired_writes:
+                    write, method = same_field_visitor.unpaired_writes[0]
+                    _report_unmerged_fields(
+                        ctx,
+                        (field, other_field),
+                        _describe_unpaired_write(write, pair),
+                        "Use one field in place of both if they always hold "
+                        "the same value",
+                        method,
+                    )
                 if duplicated_statements is not None:
-                    new_game = copy.deepcopy(game)
+                    mismatch = _initializer_mismatch(field, other_field)
+                    # With no paired write the fields are never written: they
+                    # are just two different constants, not a near miss.
+                    if mismatch is not None and duplicated_statements:
+                        _report_unmerged_fields(
+                            ctx,
+                            (field, other_field),
+                            f"every write updates both alike, but {mismatch}",
+                            "Give both fields the same call-free initializer, "
+                            "or none",
+                        )
+                    if mismatch is not None:
+                        continue
+                    # Capture-aware (F-337): ``Variable`` is both Expression and
+                    # Type, so a name-keyed substitution would also retype every
+                    # position naming a set/alias called ``other_field.name``.
+                    # And minting ``field.name`` where it already names an
+                    # in-scope type would fuse the two -- decline the merge then
+                    # (canonicalisation, so declining is always sound).
+                    if field.name in visitors.type_position_names(game):
+                        continue
+                    # F-382: delete the paired writes from the game the
+                    # visitor examined, by identity. A deep copy holds only
+                    # structurally equal statements, and deleting those also
+                    # deleted an equal write the visitor never paired (the
+                    # first write of a pair in another method, when two
+                    # methods update the fields in opposite orders). The
+                    # transformer is copy-on-write, so `game` is unchanged.
+                    new_game = copy.copy(
+                        RemoveStatementTransformer(duplicated_statements).transform(
+                            game
+                        )
+                    )
                     new_game.fields = [
                         the_field
                         for the_field in game.fields
                         if the_field.name != other_field.name
                     ]
-                    ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-                    ast_map.set(
-                        frog_ast.Variable(other_field.name),
-                        frog_ast.Variable(field.name),
-                    )
-                    return visitors.SubstitutionTransformer(ast_map).transform(
-                        RemoveStatementTransformer(duplicated_statements).transform(
-                            new_game
-                        )
+                    return cast(
+                        frog_ast.Game,
+                        visitors.rename_value_references(
+                            new_game, {other_field.name: field.name}
+                        ),
                     )
     return game
+
+
+def _note_kept_empty_domain_draws(
+    transform_name: str,
+    kept_draws: list[tuple[str, frog_ast.Statement]],
+    ctx: PipelineContext,
+) -> None:
+    """Record a near miss for each draw a pass kept although nothing reads
+    its result, because its domain may be empty
+    (``dependencies.is_possibly_empty_draw``)."""
+    for method_name, draw in kept_draws:
+        assert isinstance(draw, (frog_ast.Sample, frog_ast.UniqueSample))
+        ctx.near_misses.append(
+            NearMiss(
+                transform_name=transform_name,
+                reason=(
+                    f"Draw '{draw}' kept although its result is unused: its "
+                    f"domain may be empty, so the draw may not complete, "
+                    f"which the adversary observes"
+                ),
+                location=draw.origin,
+                suggestion=(
+                    "if the domain is never empty, draw from a type or exclude "
+                    "a set literal smaller than the type"
+                ),
+                variable=visitors.lvalue_base_name(draw.var),
+                method=method_name,
+            )
+        )
 
 
 class TopologicalSort(TransformPass):
@@ -127,21 +275,27 @@ class TopologicalSort(TransformPass):
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         if ctx.sort_game_fn is None:
             return game
-        return ctx.sort_game_fn(game)
+        kept_draws: list[tuple[str, frog_ast.Statement]] = []
+        result = ctx.sort_game_fn(game, kept_draws)
+        _note_kept_empty_domain_draws(self.name, kept_draws, ctx)
+        return result
 
 
 class RemoveDuplicateFields(TransformPass):
     name = "Remove Duplicate Fields"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return remove_duplicate_fields(game)
+        return remove_duplicate_fields(game, ctx)
 
 
 class RemoveUnnecessaryFields(TransformPass):
     name = "Remove unnecessary statements and fields"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return dependencies.remove_unnecessary_fields(game)
+        kept_draws: list[tuple[str, frog_ast.Statement]] = []
+        result = dependencies.remove_unnecessary_fields(game, kept_draws)
+        _note_kept_empty_domain_draws(self.name, kept_draws, ctx)
+        return result
 
 
 class UniformBijectionElimination(TransformPass):

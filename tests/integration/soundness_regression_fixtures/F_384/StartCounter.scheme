@@ -1,0 +1,15 @@
+// F-384 (scheme): start holds the counter c's starting value 0 and Next
+// counts c up, so Next always returns 0. Read as its initializer, start
+// would follow c; and a scheme field cannot stay a field, since Next is
+// inlined into the games that call it. The engine refuses the scheme.
+import 'Counter.primitive';
+
+Scheme StartCounter() extends Counter {
+    Int c = 0;
+    Int start = c;
+
+    Int Next() {
+        c = c + 1;
+        return start;
+    }
+}

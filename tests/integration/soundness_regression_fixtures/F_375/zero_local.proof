@@ -1,0 +1,16 @@
+// F-375: claims ZeroLocal(q).Left and ZeroLocal(q).Right are
+// interchangeable. They are not (see ZeroLocal.game). Sound engine:
+// Proof Failed!
+import 'ZeroLocal.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    ZeroLocal(q);
+
+games:
+    ZeroLocal(q).Left against ZeroLocal(q).Adversary;
+    ZeroLocal(q).Right against ZeroLocal(q).Adversary;

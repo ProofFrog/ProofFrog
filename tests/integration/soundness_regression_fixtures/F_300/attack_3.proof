@@ -1,0 +1,13 @@
+// F-300: Left and Right claimed interchangeable. They are not: after
+// SetOne(7, 5), GetTwo(7) returns 999 in Left and 5 in Right (see
+// attack_3.game).
+import 'attack_3.game';
+
+proof:
+
+theorem:
+    Attack3RDF();
+
+games:
+    Attack3RDF().Left against Attack3RDF().Adversary;
+    Attack3RDF().Right against Attack3RDF().Adversary;

@@ -1,0 +1,40 @@
+import 'D.primitive';
+
+Game Left(D F, Int n) {
+    BitString<n> k;
+    BitString<n> G = 0^n;
+    Bool Initialize() {
+        k <- BitString<n>;
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        G = F.eval(k);
+        return false;
+    }
+    BitString<n> O(Bool flag) {
+        if (flag) {
+            return G;
+        }
+        return F.eval(k);
+    }
+}
+
+Game Right(D F, Int n) {
+    BitString<n> k;
+    BitString<n> G = 0^n;
+    Bool Initialize() {
+        k <- BitString<n>;
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        G = F.eval(k);
+        return false;
+    }
+    BitString<n> O(Bool flag) {
+        return F.eval(k);
+    }
+}
+
+export as Early;

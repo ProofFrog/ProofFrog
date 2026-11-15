@@ -693,3 +693,142 @@ def test_f078_array_element_write_between_guard_and_use_declines() -> None:
         proof_namespace={}, proof_let_types=NameTypeMap()
     ).transform(game)
     assert result == game, "an element write must stop the guard-alias substitution"
+
+
+def test_f349_definition_after_possible_initialize_return_not_inlined() -> None:
+    # Initialize may return before `A = k + 1`, leaving A = 0, so inside
+    # `if (v == k)` A is not v + 1.
+    out = _transform_game("""
+        Game Test() {
+            Int k;
+            Int A = 0;
+            Bool Initialize() {
+                k = 5;
+                Bool c <- Bool;
+                if (c) { return true; }
+                A = k + 1;
+                return false;
+            }
+            Int f(Int v) {
+                if (v == k) {
+                    return A;
+                }
+                return v + 1;
+            }
+        }
+        """)
+    assert "return A;" in out, out
+
+
+def test_f349_definition_not_inlined_into_initialize_branch_before_it() -> None:
+    # The branch reads A before `A = k + 1` runs.
+    out = _transform_game("""
+        Game Test() {
+            Int k;
+            Int A = 0;
+            Int Initialize(Int v) {
+                k = 5;
+                Int r = 1;
+                if (v == k) {
+                    r = A;
+                }
+                A = k + 1;
+                return r;
+            }
+        }
+        """)
+    assert "r = A;" in out, out
+
+
+def test_member_read_field_written_in_oracle_not_inlined() -> None:
+    # MEMBER-READ-IF-CONDITION-ALIAS: f's definition reads M only through
+    # `|M.keys|`, and O writes M before the branch, so f is no longer
+    # c + |M.keys| there.
+    out = _transform_game("""
+        Game Test() {
+            Map<Int, Bool> M;
+            Int c;
+            Int f;
+            Void Initialize(Int x) {
+                c = x;
+                f = c + |M.keys|;
+            }
+            Int O(Int v) {
+                M[v] = true;
+                if (v == c) {
+                    return f;
+                }
+                return v + |M.keys|;
+            }
+        }
+        """)
+    assert "return f;" in out, out
+
+
+def test_member_read_field_set_once_in_initialize_inlined() -> None:
+    # Positive control: M is set once in Initialize and never again, so
+    # f == c + |M.keys| holds in every oracle.
+    out = _transform_game("""
+        Game Test() {
+            Map<Int, Bool> M;
+            Int c;
+            Int f;
+            Void Initialize(Int x, Map<Int, Bool> N) {
+                M = N;
+                c = x;
+                f = c + |M.keys|;
+            }
+            Int O(Int v) {
+                if (v == c) {
+                    return f;
+                }
+                return v + |M.keys|;
+            }
+        }
+        """)
+    assert "return f;" not in out, out
+    assert out.count("return v + |M.keys|;") == 2, out
+
+
+def test_member_read_of_initialize_local_not_inlined() -> None:
+    # `m` is a local of Initialize, read only through `|m.keys|`; it is out of
+    # scope in O, so f's definition must not be inlined there.
+    out = _transform_game("""
+        Game Test() {
+            Int c;
+            Int f;
+            Void Initialize(Int x, Map<Int, Bool> m) {
+                c = x;
+                f = c + |m.keys|;
+            }
+            Int O(Int v) {
+                if (v == c) {
+                    return f;
+                }
+                return v;
+            }
+        }
+        """)
+    assert "return f;" in out, out
+
+
+def test_member_read_of_non_state_receiver_still_inlined() -> None:
+    # A receiver that is neither game state nor local to Initialize (a scheme
+    # or primitive instance such as `S` in `S.n`) does not block the inline.
+    out = _transform_game("""
+        Game Test() {
+            Int c;
+            Int f;
+            Void Initialize(Int x) {
+                c = x;
+                f = c + S.n;
+            }
+            Int O(Int v) {
+                if (v == c) {
+                    return f;
+                }
+                return v + S.n;
+            }
+        }
+        """)
+    assert "return f;" not in out, out

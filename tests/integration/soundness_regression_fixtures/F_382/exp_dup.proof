@@ -1,0 +1,15 @@
+// Proof for ExpDup.game (target, hypothesis and expected outcome in its
+// header).
+import 'ExpDup.game';
+
+proof:
+
+let:
+    Group G;
+
+theorem:
+    ExpDup(G);
+
+games:
+    ExpDup(G).Left against ExpDup(G).Adversary;
+    ExpDup(G).Right against ExpDup(G).Adversary;

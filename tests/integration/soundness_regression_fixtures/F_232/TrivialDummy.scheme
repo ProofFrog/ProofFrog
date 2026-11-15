@@ -1,0 +1,6 @@
+// A trivial scheme instantiating the Dummy primitive.
+import 'Dummy.primitive';
+
+Scheme TrivialDummy(Int n) extends Dummy {
+    Int n = n;
+}

@@ -1,0 +1,50 @@
+// F-318 (RemoveUnnecessaryFields): a draw that may not complete deleted as a
+// dead statement.
+//
+// Drawing from an empty domain does not complete, so the oracle call never
+// returns, which the adversary observes. Real's Probe samples from
+// BitString<1> \ E, where the field E is filled by Add. The liveness
+// analysis kept only returns, writes of necessary variables and <-uniq
+// draws, so it deleted the draw (its result is unused), and the emptied Void
+// oracle was then removed, leaving Ideal.
+//
+// Probe has no return, so TopologicalSort cannot hoist anything here, and
+// the draw reads the field E, so the sort keeps it: only the liveness
+// analysis removed it.
+//
+// Distinguisher: Add(0b0); Add(0b1); Probe(). Now E covers BitString<1>, so
+// in Real Probe never returns, while in Ideal it does. The hop must be
+// refused.
+
+Game Real() {
+    Set<BitString<1>> E;
+
+    Void Add(BitString<1> x) {
+        E = E union {x};
+    }
+
+    Int Size() {
+        return |E|;
+    }
+
+    Void Probe() {
+        BitString<1> junk <- BitString<1> \ E;
+    }
+}
+
+Game Ideal() {
+    Set<BitString<1>> E;
+
+    Void Add(BitString<1> x) {
+        E = E union {x};
+    }
+
+    Int Size() {
+        return |E|;
+    }
+
+    Void Probe() {
+    }
+}
+
+export as Attack1;

@@ -753,3 +753,26 @@ def test_counter_guard_constant_local_still_localizes() -> None:
         }
         """)
     assert _counter_guarded_field_to_local(game) != game
+
+
+def test_f349_sample_after_possible_initialize_return_not_moved() -> None:
+    game = frog_parser.parse_game("""
+        Game Test() {
+            BitString<lambda> k = 0^lambda;
+            Int count;
+            Bool Initialize() {
+                count = 0;
+                Bool c <- Bool;
+                if (c) { return true; }
+                k <- BitString<lambda>;
+                return false;
+            }
+            BitString<lambda> Oracle(BitString<lambda> x) {
+                count = count + 1;
+                if (count == 1) {
+                    return k + x;
+                }
+                return x;
+            }
+        }""")
+    assert _counter_guarded_field_to_local(game) == game

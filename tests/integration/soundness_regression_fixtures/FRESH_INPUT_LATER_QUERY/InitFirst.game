@@ -1,0 +1,46 @@
+// Positive control: the only query recorded by an insertion is made in
+// Initialize, before any draw, and the other query is the draw itself, so
+// H(v) is a fresh point of H in every execution and the games are
+// interchangeable. Both sides draw v, since the draw also inserts v into seen.
+import 'P.primitive';
+
+Game Left(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> seen;
+    BitString<2> y;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+        BitString<2> u = 0b00;
+        seen = seen union {u};
+        y = H(u);
+    }
+    BitString<2> Reveal() {
+        return y;
+    }
+    BitString<2> Fresh() {
+        BitString<2> v <-uniq[seen] BitString<2>;
+        return H(v);
+    }
+}
+
+Game Right(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> seen;
+    BitString<2> y;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+        BitString<2> u = 0b00;
+        seen = seen union {u};
+        y = H(u);
+    }
+    BitString<2> Reveal() {
+        return y;
+    }
+    BitString<2> Fresh() {
+        BitString<2> v <-uniq[seen] BitString<2>;
+        BitString<2> z <- BitString<2>;
+        return z;
+    }
+}
+
+export as InitFirst;

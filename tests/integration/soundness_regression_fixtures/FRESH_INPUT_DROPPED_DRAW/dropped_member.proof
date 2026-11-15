@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'DroppedMember.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    DroppedMember(S);
+
+games:
+    DroppedMember(S).Left against DroppedMember(S).Adversary;
+    DroppedMember(S).Right against DroppedMember(S).Adversary;

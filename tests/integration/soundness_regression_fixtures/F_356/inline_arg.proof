@@ -1,0 +1,20 @@
+// F-356: claims TestPair.Left and TestPair.Right are interchangeable for
+// ArgTester. They are not: IsZero's ModInt<q> parameter receives b reduced
+// modulo q. The method inliner used to substitute b for the parameter.
+
+import 'Tester.primitive';
+import 'ArgTester.scheme';
+import 'TestPair.game';
+
+proof:
+
+let:
+    Int q;
+    Tester T = ArgTester(q);
+
+theorem:
+    TestPair(T);
+
+games:
+    TestPair(T).Left against TestPair(T).Adversary;
+    TestPair(T).Right against TestPair(T).Adversary;

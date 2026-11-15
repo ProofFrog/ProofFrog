@@ -432,3 +432,60 @@ def test_f252_stable_rhs_free_var_still_decomposes() -> None:
         """
     )
     assert "w[0 : 1] == a" in str(game)
+
+
+NS_INT_SRC = """
+Primitive T(Int n) {
+    deterministic BitString<n> Ev(Int c);
+}
+"""
+
+
+def _apply_int(source: str) -> frog_ast.Game:
+    game = frog_parser.parse_game(source)
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={"T": frog_parser.parse_primitive_file(NS_INT_SRC)},
+        subsets_pairs=[],
+    )
+    return ConcatEqualityDecompose().apply(game, ctx)
+
+
+def test_member_read_binding_not_decomposed_across_map_write() -> None:
+    """MEMBER-READ-CONCAT-EQUALITY: `v = T.Ev(|M.keys|) || u` reads M only
+    through `M.keys`; after `M[y] = true` the substituted concat would read
+    the new size of M, diverging from the frozen `v`."""
+    game = _apply_int(
+        """
+        Game G(Int n) {
+            Map<Int, Bool> M;
+            Bool O(Int y, BitString<n> t, BitString<n> u) {
+                BitString<2 * n> v = T.Ev(|M.keys|) || u;
+                M[y] = true;
+                return v == (t || u);
+            }
+        }
+        """
+    )
+    # Only the frozen v is sliced; its concat is not substituted.
+    assert "T.Ev(|M.keys|) == t" not in str(game), str(game)
+    assert "v[0 : n] == t" in str(game), str(game)
+
+
+def test_member_read_binding_decomposes_when_map_unwritten() -> None:
+    """Positive control: with no write to M, the binding is stable (the
+    receiver T of the call does not block it) and `v == (t || u)`
+    decomposes termwise."""
+    game = _apply_int(
+        """
+        Game G(Int n) {
+            Map<Int, Bool> M;
+            Bool O(Int y, BitString<n> t, BitString<n> u) {
+                BitString<2 * n> v = T.Ev(|M.keys|) || u;
+                return v == (t || u);
+            }
+        }
+        """
+    )
+    assert "T.Ev(|M.keys|) == t" in str(game), str(game)

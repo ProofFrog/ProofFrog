@@ -1,0 +1,29 @@
+// The null guard can never fire, but the tuple it tests reads the field f,
+// which only Store assigns. Real.Query called before Store reads an
+// unassigned field; Random.Query reads nothing. Expected: rejected.
+import 'Probe.primitive';
+
+Game Real(Probe C) {
+    Bool f;
+    Void Store(Bool v) {
+        f = v;
+    }
+    [Int, Bool]? Query(Int x) {
+        if (C.IsNone([x, f])) {
+            return None;
+        }
+        return [x, true];
+    }
+}
+
+Game Random(Probe C) {
+    Bool f;
+    Void Store(Bool v) {
+        f = v;
+    }
+    [Int, Bool]? Query(Int x) {
+        return [x, true];
+    }
+}
+
+export as GuardUnassignedField;

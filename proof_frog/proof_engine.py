@@ -4,6 +4,7 @@ import dataclasses
 import difflib
 import functools
 import os
+import re
 import shutil
 import warnings
 import sys
@@ -19,6 +20,8 @@ from . import visitors
 from . import dependencies
 from . import diagnostics
 from . import advantage
+from . import upto
+from . import hop_cache as hop_cache_module
 from .transforms._base import (
     NearMiss,
     PipelineContext,
@@ -32,6 +35,7 @@ from .transforms._base import (
     _MAX_FIXED_POINT_ITERATIONS,
 )
 from .transforms.pipelines import CORE_PIPELINE, STANDARDIZATION_PIPELINE
+from .transforms.alpha_rename import rename_colliding_binders
 from .transforms.assumptions import ApplyAssumptions
 from .transforms.structural import (  # pylint: disable=unused-import
     remove_duplicate_fields,
@@ -59,6 +63,11 @@ class EquivalenceResult:
     failure_detail: str = ""
     diagnosis: diagnostics.Diagnosis | None = None
     verbose_output: str = ""
+    # True when the verdict came from the hop cache (see hop_cache.py).
+    cached: bool = False
+    # Fingerprint of the engine code that produced the verdict, when the task
+    # asked for it (a pool worker loads the engine afresh; see hop_cache.py).
+    engine_fingerprint: str | None = None
 
 
 @dataclasses.dataclass
@@ -81,6 +90,9 @@ class HopResult:
     justification: frog_ast.ParameterizedGame | None = None
     reduction: frog_ast.ParameterizedGame | None = None
     direction: tuple[str, str] | None = None
+    # True when an equivalence hop was not re-checked: an identical hop was
+    # verified by this same engine in an earlier run (see hop_cache.py).
+    cached: bool = False
 
 
 class FailedProof(Exception):
@@ -98,12 +110,29 @@ class _EquivalenceTask:
     verbosity: Verbosity
     no_diagnose: bool
     proof_let_types: visitors.NameTypeMap
+    # Report the worker's engine fingerprint with the result (hop cache on).
+    report_fingerprint: bool = False
 
 
 def _check_equivalent_worker(task: _EquivalenceTask) -> EquivalenceResult:
     """Top-level function for multiprocessing: check equivalence of two games.
 
-    This must be a module-level function so it is picklable.
+    This must be a module-level function so it is picklable. When the task
+    asks, the result carries the engine fingerprint of the process that ran
+    the check ("" if it cannot be computed, which matches no cache).
+    """
+    result = _check_equivalent_task(task)
+    if task.report_fingerprint:
+        try:
+            result.engine_fingerprint = hop_cache_module.engine_fingerprint()
+        except OSError:
+            result.engine_fingerprint = ""
+    return result
+
+
+def _check_equivalent_task(task: _EquivalenceTask) -> EquivalenceResult:
+    """Check equivalence of two games for `_check_equivalent_worker`.
+
     Verbose output is collected into a list and returned in the result
     so the main process can print it in step order.
     """
@@ -119,6 +148,10 @@ def _check_equivalent_worker(task: _EquivalenceTask) -> EquivalenceResult:
     for index, game in enumerate((current_game_ast, next_game_ast)):
         which = WhichGame.CURRENT if index == 0 else WhichGame.NEXT
         ctx.near_misses = []
+        # Each game is canonicalized on its own: fields pinned while
+        # canonicalizing the current game must not affect the next one, so
+        # that a game's canonical form does not depend on its hop partner.
+        ctx.pinned_fields = set()
 
         if verbose:
             label = "CURRENT" if index == 0 else "NEXT"
@@ -187,6 +220,21 @@ def _check_equivalent_worker(task: _EquivalenceTask) -> EquivalenceResult:
     )
 
 
+def _z3_sort_label(formula: object) -> str:
+    """Name the Z3 sort of a `Z3FormulaVisitor` result for a message. The
+    visitor leaves a Python `bool` or `int` for a literal and a Python tuple
+    for a tuple value."""
+    if isinstance(formula, z3.ExprRef):
+        return str(formula.sort())
+    if isinstance(formula, bool):
+        return "Bool"
+    if isinstance(formula, int):
+        return "Int"
+    if isinstance(formula, tuple):
+        return "[" + ", ".join(_z3_sort_label(item) for item in formula) + "]"
+    return type(formula).__name__
+
+
 def _z3_check_expression_pair(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     current_game_ast: frog_ast.Game,
     next_game_ast: frog_ast.Game,
@@ -220,14 +268,20 @@ def _z3_check_expression_pair(  # pylint: disable=too-many-arguments,too-many-po
             ),
         )
 
+    # The game's own declarations shadow a same-named proof let (F-361).
     first_formula = visitors.Z3FormulaVisitor(
-        visitors.GetTypeMapVisitor(current_expr).visit(current_game_ast)
-        + proof_let_types,
+        visitors.with_proof_let_types(
+            visitors.GetTypeMapVisitor(current_expr).visit(current_game_ast),
+            proof_let_types,
+        ),
         opaque_func_call_fallback=True,
         proof_namespace=proof_namespace,
     ).visit(current_expr)
     next_formula = visitors.Z3FormulaVisitor(
-        visitors.GetTypeMapVisitor(next_expr).visit(next_game_ast) + proof_let_types,
+        visitors.with_proof_let_types(
+            visitors.GetTypeMapVisitor(next_expr).visit(next_game_ast),
+            proof_let_types,
+        ),
         opaque_func_call_fallback=True,
         proof_namespace=proof_namespace,
     ).visit(next_expr)
@@ -239,9 +293,26 @@ def _z3_check_expression_pair(  # pylint: disable=too-many-arguments,too-many-po
                 f"{current_expr} vs {next_expr}"
             ),
         )
+    # Fail closed (F-365): the two sides can have Z3 sorts that do not
+    # compare. The visitor interns a value it cannot model as an atom of the
+    # uninterpreted `Opaque` sort, so a Bool comparison it cannot translate
+    # (`0 == x + 1` over ModInt) faces a Bool literal on the other side, and
+    # `==` raises instead of building a formula. Such a pair is not proved
+    # equivalent, so the hop fails with the sorts named.
+    try:
+        difference = z3.Not(first_formula == next_formula)
+    except (z3.Z3Exception, TypeError):
+        return EquivalenceResult(
+            valid=False,
+            failure_detail=(
+                f"Could not compare {kind} in Z3: sort mismatch "
+                f"({_z3_sort_label(first_formula)} vs "
+                f"{_z3_sort_label(next_formula)}): {current_expr} vs {next_expr}"
+            ),
+        )
     solver = z3.Solver()
     solver.set("timeout", 30000)
-    solver.add(z3.Not(first_formula == next_formula))
+    solver.add(difference)
     if solver.check() != z3.unsat:
         return EquivalenceResult(
             valid=False,
@@ -523,7 +594,10 @@ class ProofEngine:
         skip_lemmas: bool = False,
         parallel: bool = True,
         skip_bound: bool = False,
+        hop_cache: hop_cache_module.HopCache | None = None,
     ) -> None:
+        # Verified-hop cache (opt-in; None = every hop is checked).
+        self.hop_cache = hop_cache
         self.definition_namespace: frog_ast.Namespace = {}
         self.proof_namespace: frog_ast.Namespace = {}
         self.proof_let_types: visitors.NameTypeMap = visitors.NameTypeMap()
@@ -545,6 +619,11 @@ class ProofEngine:
         self.step_assumptions: list[ProcessedAssumption] = []
         self.hop_results: list[HopResult] = []
         self.advantage_bound: advantage.AdvantageBound | None = None
+        # The bound before lemma bounds were inlined (None when identical).
+        self.advantage_bound_raw: advantage.AdvantageBound | None = None
+        # Bounds established by verified lemma proofs, keyed by the lemma's
+        # notion key (str), for inlining into this proof's bound.
+        self._lemma_bounds: dict[str, advantage.LemmaBound] = {}
         self.variables: dict[str, Symbol | frog_ast.Expression] = {}
         self.method_lookup: MethodLookup = {}
         self.max_calls: Optional[int] = None
@@ -552,16 +631,96 @@ class ProofEngine:
         self.requirements: list[frog_ast.StructuralRequirement] = []
         self._total_steps = 0
         self._current_step = 0
+        # Event-theorem proofs: display labels for the engine-internal steps
+        # (keyed by their default rendering) and the top-level hop number of
+        # the terminal "flag unreachable" hop.
+        self._display_overrides: dict[str, str] = {}
+        self._event_terminal_hop: int | None = None
+        # Events licensing `upto` hops, keyed by str(event.game).
+        self._events_in_scope: dict[str, frog_ast.EventTheorem] = {}
 
     def add_definition(self, name: str, root: frog_ast.Root) -> None:
         self.definition_namespace[name] = root
 
-    @staticmethod
-    def _step_display(step: frog_ast.Step) -> str:
+    def _step_display(self, step: frog_ast.Step) -> str:
         """Format a step for display, omitting the adversary and semicolon."""
         if step.reduction:
-            return f"{step.challenger} compose {step.reduction}"
-        return str(step.challenger)
+            default = f"{step.challenger} compose {step.reduction}"
+        else:
+            default = str(step.challenger)
+        return self._display_overrides.get(default, default)
+
+    def _event_chain(
+        self, proof_file: frog_ast.ProofFile, event: frog_ast.EventTheorem
+    ) -> list[frog_ast.ProofStep]:
+        """Rewrite an event theorem's games list into the flag-game chain.
+
+        Pr[flag] in the pair side of the first step equals the advantage of
+        the adversary that plays and then calls ``__reveal`` against that
+        side's flag game (``Real`` reveals the flag, ``Ideal`` says false).
+        The first step becomes the flag game's ``Real``; every helper
+        (reduction or intermediate game) gets a ``__reveal`` returning its
+        own ``Bool <flag>`` field, so equivalence hops preserve the joint
+        distribution of transcript and flag and assumption hops charge the
+        helper as usual. A terminal step repeats the last game with
+        ``__reveal`` returning false: the hop into it holds exactly when the
+        flag can no longer be raised there, and the sum of the hop losses
+        then bounds Pr[flag] (Shoup 2004; Bellare-Rogaway 2006).
+        """
+        first = proof_file.steps[0]
+        assert isinstance(first, frog_ast.Step)
+        assert isinstance(first.challenger, frog_ast.ConcreteGame)
+        pair = self.definition_namespace[event.game.name]
+        assert isinstance(pair, frog_ast.GameFile)
+        notion = event.notion()
+        build = upto.strip if event.at_initialize else upto.flag_game
+        self.definition_namespace[notion.name] = build(
+            pair, first.challenger.which, event.flag, notion.name
+        )
+        for helper in proof_file.helpers:
+            self.definition_namespace[helper.name] = upto.with_reveal(
+                helper, frog_ast.Variable(event.flag)
+            )
+            self.definition_namespace[helper.name + upto.SILENCED] = upto.with_reveal(
+                helper, frog_ast.Boolean(False)
+            )
+
+        steps: list[frog_ast.ProofStep] = list(proof_file.steps)
+        real = frog_ast.Step(
+            frog_ast.ConcreteGame(notion, "Real"), None, first.adversary
+        )
+        self._display_overrides[str(real.challenger)] = str(first.challenger)
+        steps[0] = real
+
+        last = next(s for s in reversed(steps) if isinstance(s, frog_ast.Step))
+        last_display = self._step_display(last)
+        terminal: frog_ast.Step
+        if last.reduction is not None:
+            silenced = frog_ast.ParameterizedGame(
+                last.reduction.name + upto.SILENCED, list(last.reduction.args)
+            )
+            terminal = frog_ast.Step(last.challenger, silenced, last.adversary)
+        elif isinstance(last.challenger, frog_ast.ParameterizedGame):
+            terminal = frog_ast.Step(
+                frog_ast.ParameterizedGame(
+                    last.challenger.name + upto.SILENCED, list(last.challenger.args)
+                ),
+                None,
+                last.adversary,
+            )
+        else:
+            terminal = frog_ast.Step(
+                frog_ast.ConcreteGame(notion, "Ideal"), None, last.adversary
+            )
+        default = (
+            f"{terminal.challenger} compose {terminal.reduction}"
+            if terminal.reduction
+            else str(terminal.challenger)
+        )
+        self._display_overrides[default] = f"{last_display} with {event.flag} silenced"
+        steps.append(terminal)
+        self._event_terminal_hop = self._count_hops(steps)
+        return steps
 
     @staticmethod
     def _count_hops(steps: list[frog_ast.ProofStep]) -> int:
@@ -615,11 +774,17 @@ class ProofEngine:
                 # Necessary because mypy doesn't allow for union types with typevar functions
                 if isinstance(definition, frog_ast.Primitive):
                     self.proof_namespace[let.name] = instantiate(
-                        definition, let.value.args, self.proof_namespace
+                        definition,
+                        let.value.args,
+                        self.proof_namespace,
+                        arg_types=self._argument_types(let.value.args),
                     )
                 elif isinstance(definition, frog_ast.Scheme):
                     self.proof_namespace[let.name] = instantiate(
-                        definition, let.value.args, self.proof_namespace
+                        definition,
+                        let.value.args,
+                        self.proof_namespace,
+                        arg_types=self._argument_types(let.value.args),
                     )
                 else:
                     raise TypeError("Must instantiate either a Primitive or Scheme ")
@@ -655,8 +820,18 @@ class ProofEngine:
     def prove(self, proof_file: frog_ast.ProofFile, proof_path: str = "") -> None:
         self.set_up_proof_context(proof_file)
 
-        first_step = proof_file.steps[0]
-        final_step = proof_file.steps[-1]
+        theorem: frog_ast.ParameterizedGame
+        steps: list[frog_ast.ProofStep]
+        is_event = isinstance(proof_file.theorem, frog_ast.EventTheorem)
+        if isinstance(proof_file.theorem, frog_ast.EventTheorem):
+            steps = self._event_chain(proof_file, proof_file.theorem)
+            theorem = proof_file.theorem.notion()
+        else:
+            steps = proof_file.steps
+            theorem = proof_file.theorem
+
+        first_step = steps[0]
+        final_step = steps[-1]
 
         assert isinstance(first_step, frog_ast.Step)
         assert isinstance(final_step, frog_ast.Step)
@@ -666,7 +841,7 @@ class ProofEngine:
         assert isinstance(first_step.challenger, frog_ast.ConcreteGame)
         assert isinstance(final_step.challenger, frog_ast.ConcreteGame)
 
-        if first_step.challenger.game != proof_file.theorem:
+        if first_step.challenger.game != theorem:
             print(
                 Fore.RED
                 + "Proof must start with a game matching the theorem's security game"
@@ -679,7 +854,7 @@ class ProofEngine:
             )
 
         # Process lemmas: verify each lemma proof and add its theorem as an assumption
-        effective_assumptions = list(proof_file.assumptions)
+        effective_assumptions = [frog_ast.notion_key(a) for a in proof_file.assumptions]
         lemma_games: set[str] = set()
         for lemma in proof_file.lemmas:
             if self.skip_lemmas:
@@ -687,40 +862,64 @@ class ProofEngine:
                     f"{Fore.CYAN}Lemma: {lemma.game} "
                     f"by '{lemma.proof_path}' ... skipped{Fore.RESET}\n"
                 )
-                effective_assumptions.append(lemma.game)
-                lemma_games.add(str(lemma.game))
+                effective_assumptions.append(frog_ast.notion_key(lemma.game))
+                lemma_games.add(str(frog_ast.notion_key(lemma.game)))
                 continue
 
             lemma_path = os.path.join(os.path.dirname(proof_path), lemma.proof_path)
             print(f"Lemma: {lemma.game} by '{lemma.proof_path}'")
             try:
-                verify_proof_file(
+                lemma_file, lemma_engine = _verify_proof_file_with_engine(
                     lemma_path,
                     verbosity=self.verbosity,
                     no_diagnose=True,
                     skip_lemmas=self.skip_lemmas,
+                    hop_cache=self.hop_cache,
                 )
                 print(f"{Fore.GREEN}Lemma verified.{Fore.RESET}\n")
             except (FailedProof, Exception) as e:
                 print(f"{Fore.RED}Lemma FAILED: {e}{Fore.RESET}")
                 raise FailedProof(f"Lemma {lemma.game} failed verification") from e
+            match = _lemma_mismatch(
+                lemma_file, lemma_path, lemma, proof_file, proof_path
+            )
+            if isinstance(match, str):
+                print(f"{Fore.RED}{match}{Fore.RESET}")
+                print(f"{Fore.RED}Proof Failed! (lemma {lemma.game}){Fore.RESET}")
+                raise FailedProof(match)
+            if lemma_engine.advantage_bound is not None:
+                self._lemma_bounds[str(frog_ast.notion_key(lemma.game))] = (
+                    advantage.LemmaBound(
+                        theorem=frog_ast.notion_key(lemma_file.theorem),
+                        bound=lemma_engine.advantage_bound,
+                        lets=list(lemma_file.lets),
+                        name_map=match.name_map,
+                    )
+                )
 
-            effective_assumptions.append(lemma.game)
-            lemma_games.add(str(lemma.game))
+            effective_assumptions.append(frog_ast.notion_key(lemma.game))
+            lemma_games.add(str(frog_ast.notion_key(lemma.game)))
 
+        self._register_events_in_scope(proof_file)
         print(f"Theorem: {proof_file.theorem}\n")
 
         self.hop_results = []
-        self._total_steps = self._count_hops(proof_file.steps)
+        self._total_steps = self._count_hops(steps)
         self._current_step = 0
         self.prove_steps(
-            proof_file.steps,
+            steps,
             effective_assumptions,
             lemma_games=lemma_games if lemma_games else None,
         )
 
         print()
         self._print_summary_table()
+        cached_hops = sum(1 for r in self.hop_results if r.cached)
+        if cached_hops:
+            print(
+                f"\n  {cached_hops} equivalence hop(s) not re-checked: verified by "
+                "this engine in an earlier run (--no-cache re-checks them)."
+            )
         print()
 
         # Level 2: Print full diagnostics for failed hops
@@ -737,7 +936,9 @@ class ProofEngine:
             )
             raise FailedProof()
 
-        if (
+        # An event theorem's chain is complete once every hop, including the
+        # terminal "flag unreachable" hop, has passed.
+        if is_event or (
             first_step.challenger.game == final_step.challenger.game
             and first_step.challenger.which != final_step.challenger.which
             and first_step.adversary == final_step.adversary
@@ -746,8 +947,17 @@ class ProofEngine:
                 self.hop_results,
                 definition_lookup=self.definition_namespace,
                 max_calls=proof_file.max_calls,
+                lemma_bounds=self._lemma_bounds or None,
             )
-            self._print_advantage_bound(proof_file.theorem)
+            if self._lemma_bounds:
+                raw = advantage.synthesize_from_hop_results(
+                    self.hop_results,
+                    definition_lookup=self.definition_namespace,
+                    max_calls=proof_file.max_calls,
+                )
+                if raw.render() != self.advantage_bound.render():
+                    self.advantage_bound_raw = raw
+            self._print_advantage_bound(theorem)
             if not self._check_claimed_bound(proof_file):
                 raise FailedProof()
             print(Fore.GREEN + "Proof Succeeded!" + Fore.RESET)
@@ -814,8 +1024,12 @@ class ProofEngine:
                 type_labels.append("assumption")
             elif r.kind == "by_lemma":
                 type_labels.append("lemma")
+            elif r.kind == "by_upto":
+                type_labels.append("upto")
             elif r.kind == "induction_rollover":
                 type_labels.append("rollover")
+            elif r.step_num == self._event_terminal_hop:
+                type_labels.append("flag unreachable")
             else:
                 type_labels.append("equivalence")
         type_width = max(len(t) for t in type_labels)
@@ -861,8 +1075,10 @@ class ProofEngine:
                 result_str = Fore.CYAN + "assume" + Fore.RESET
             elif r.kind == "by_lemma":
                 result_str = Fore.CYAN + "lemma" + Fore.RESET
+            elif r.kind == "by_upto" and r.valid:
+                result_str = Fore.CYAN + "upto" + Fore.RESET
             elif r.valid:
-                result_str = Fore.GREEN + "ok" + Fore.RESET
+                result_str = Fore.GREEN + ("cached" if r.cached else "ok") + Fore.RESET
             else:
                 result_str = Fore.RED + "FAILED" + Fore.RESET
 
@@ -897,11 +1113,19 @@ class ProofEngine:
         bound = self.advantage_bound
         if bound is None:
             return
-        lhs = f"Adv^{theorem}(A)"
+        lhs = (
+            f"Pr[{upto.pretty_notion(theorem)}](A)"
+            if upto.is_event_notion(theorem)
+            else f"Adv^{theorem}(A)"
+        )
         if not bound.supported:
             print(f"Advantage bound: {lhs} <= (not synthesized: {bound.note})")
             return
         print(f"Advantage bound: {lhs} <= {bound.render()}")
+        if self.advantage_bound_raw is not None:
+            print(
+                f"  (before inlining lemma bounds: {self.advantage_bound_raw.render()})"
+            )
         for note in bound.notes:
             print(f"  note: {note}")
 
@@ -917,6 +1141,16 @@ class ProofEngine:
         if claim is None or self.advantage_bound is None:
             return True
         result = advantage.check_claimed_bound(claim.bound, self.advantage_bound)
+        if result.status != "verified" and self.advantage_bound_raw is not None:
+            # A claim may name a lemma's own term (the form before inlining);
+            # it is a valid bound if it bounds either form.
+            raw_result = advantage.check_claimed_bound(
+                claim.bound, self.advantage_bound_raw
+            )
+            if raw_result.status == "verified" or (
+                raw_result.status == "undecided" and result.status == "not_verified"
+            ):
+                result = raw_result
         if result.status == "verified":
             print(Fore.GREEN + f"Claimed bound verified: {result.detail}." + Fore.RESET)
             return True
@@ -954,13 +1188,22 @@ class ProofEngine:
     def _print_diagnostics(self) -> None:
         """Print Level 2 diagnostic output for failed hops."""
         failed = [
-            r for r in self.hop_results if not r.valid and r.diagnosis is not None
+            r
+            for r in self.hop_results
+            if not r.valid and (r.diagnosis is not None or r.kind == "by_upto")
         ]
         if not failed:
             return
 
         for result in failed:
-            assert result.diagnosis is not None
+            if result.diagnosis is None:
+                print()
+                print(
+                    f"  {Fore.RED}Step {result.step_num} failed:{Fore.RESET} "
+                    f"{result.current_desc} -> {result.next_desc}"
+                )
+                print(f"    {result.failure_detail}")
+                continue
             diag = result.diagnosis
             print()
             print(
@@ -1003,6 +1246,11 @@ class ProofEngine:
         )
         # For induction entry hops, the original step index:
         induction_step_index: int | None = None
+        # For `upto` hops: why the side condition failed ("" when it holds).
+        failure: str = ""
+        # For equivalence hops over a side flip of a flagged pair: a hint
+        # naming the event routes that would license the hop.
+        hint: str = ""
 
     def _prepare_hops(
         self,
@@ -1072,6 +1320,26 @@ class ProofEngine:
                         )
                     )
                     continue
+                event, failure = self._is_by_upto(current_step, next_step)
+                if event is not None:
+                    assert isinstance(current_step.challenger, frog_ast.ConcreteGame)
+                    assert isinstance(next_step.challenger, frog_ast.ConcreteGame)
+                    prepared.append(
+                        ProofEngine._PreparedHop(
+                            step_num=step_num,
+                            current_desc=self._step_display(current_step),
+                            next_desc=self._step_display(next_step),
+                            kind="by_upto",
+                            justification=event.notion(),
+                            reduction=current_step.reduction,
+                            direction=(
+                                current_step.challenger.which,
+                                next_step.challenger.which,
+                            ),
+                            failure=failure,
+                        )
+                    )
+                    continue
                 current_game_ast = self._get_game_ast(
                     current_step.challenger, current_step.reduction
                 )
@@ -1133,9 +1401,101 @@ class ProofEngine:
                     induction_step_index=(
                         i if isinstance(steps[i], frog_ast.Induction) else None
                     ),
+                    hint=self._upto_hint(current_step, next_step),
                 )
             )
         return prepared
+
+    def _register_events_in_scope(self, proof_file: frog_ast.ProofFile) -> None:
+        """Record the assumed/lemma events and register their flag games.
+
+        The flag game is registered under the event's synthetic name so bound
+        synthesis can resolve a clause declared on the pair (Tier 2).
+        """
+        self._events_in_scope = {}
+        notions: list[frog_ast.Notion] = [
+            *proof_file.assumptions,
+            *(lemma.game for lemma in proof_file.lemmas),
+        ]
+        for notion in notions:
+            if not isinstance(notion, frog_ast.EventTheorem):
+                continue
+            self._events_in_scope[str(notion.game)] = notion
+            pair = self.definition_namespace.get(notion.game.name)
+            key = notion.notion().name
+            if isinstance(pair, frog_ast.GameFile) and key not in (
+                self.definition_namespace
+            ):
+                self.definition_namespace[key] = upto.flag_game(
+                    pair, pair.games[0].name, notion.flag, key
+                )
+
+    def _is_by_upto(
+        self, current_step: frog_ast.Step, next_step: frog_ast.Step
+    ) -> tuple[frog_ast.EventTheorem | None, str]:
+        """An `upto` hop: a side flip over a pair whose event is in scope.
+
+        Returns the licensing event (None if the hop is not of this kind) and
+        a failure message when the pair is not identical until the event's
+        flag (or, for `at Initialize`, the extra conditions fail); "" when
+        the hop is licensed.
+        """
+        flip = advantage.side_flip_game(current_step, next_step)
+        if flip is None or current_step.adversary != next_step.adversary:
+            return None, ""
+        event = self._events_in_scope.get(str(flip))
+        if event is None:
+            return None, ""
+        pair = self.definition_namespace.get(event.game.name)
+        if not isinstance(pair, frog_ast.GameFile):
+            return event, f"{event.game.name} is not a game pair"
+        err = upto.identical_until_bad(pair, event.flag)
+        if err is not None:
+            return event, (
+                f"{event.game.name} is not identical until {event.flag}: {err}"
+            )
+        if event.at_initialize:
+            for game in pair.games:
+                if not upto.raised_only_in_initialize(game, event.flag):
+                    return event, (
+                        f"{game.name} raises {event.flag} outside Initialize"
+                    )
+                if game.get_method("Initialize").signature.parameters:
+                    return event, f"{game.name}.Initialize takes parameters"
+            if current_step.reduction is not None:
+                red = self.definition_namespace.get(current_step.reduction.name)
+                if isinstance(red, frog_ast.Reduction):
+                    message = upto.check_challenger_init_placement(red)
+                    if message is not None:
+                        return event, message
+        return event, ""
+
+    def _upto_hint(self, current_step: frog_ast.Step, next_step: frog_ast.Step) -> str:
+        """A hint for a side flip over a non-assumed pair with a Bool field."""
+        flip = advantage.side_flip_game(current_step, next_step)
+        if flip is None:
+            return ""
+        pair = self.definition_namespace.get(flip.name)
+        if not isinstance(pair, frog_ast.GameFile):
+            return ""
+        left, right = pair.games
+        flags = [
+            f.name
+            for f in left.fields
+            if isinstance(f.type, frog_ast.BoolType)
+            and any(
+                g.name == f.name and isinstance(g.type, frog_ast.BoolType)
+                for g in right.fields
+            )
+        ]
+        if not flags:
+            return ""
+        flag = flags[0]
+        return (
+            f"{flip} looks like an identical-until-{flag} pair; to hop over it,"
+            f" put \"lemma: event {flag} of {flip} by '<proof>';\" or"
+            f' "assume: event {flag} of {flip};" in scope'
+        )
 
     def _make_task(self, hop: _PreparedHop) -> _EquivalenceTask:
         """Build an _EquivalenceTask from a prepared hop."""
@@ -1149,6 +1509,7 @@ class ProofEngine:
             verbosity=self.verbosity,
             no_diagnose=self.no_diagnose,
             proof_let_types=self.proof_let_types,
+            report_fingerprint=self.hop_cache is not None,
         )
 
     def _report_hop(
@@ -1165,10 +1526,14 @@ class ProofEngine:
             print(f"Current: {hop.current_desc}")
             print(f"Hop To: {hop.next_desc}\n")
         if equiv_result.valid:
-            self._print_step_status(hop_desc, "ok", Fore.GREEN)
+            self._print_step_status(
+                hop_desc, "ok (cached)" if equiv_result.cached else "ok", Fore.GREEN
+            )
         else:
             self._print_step_status(hop_desc, "FAILED", Fore.RED)
             self._print_failure_inline(equiv_result)
+            if hop.hint:
+                print(f"    {Fore.CYAN}Hint:{Fore.RESET} {hop.hint}")
         self.hop_results.append(
             HopResult(
                 step_num=hop.step_num,
@@ -1179,6 +1544,7 @@ class ProofEngine:
                 next_desc=hop.next_desc,
                 failure_detail=equiv_result.failure_detail,
                 diagnosis=equiv_result.diagnosis,
+                cached=equiv_result.cached,
             )
         )
 
@@ -1189,18 +1555,26 @@ class ProofEngine:
     ) -> None:
         """Print status and append to hop_results for an assumption/lemma hop."""
         self._current_step += 1
-        hop_label = "by lemma" if hop.kind == "by_lemma" else "by assumption"
+        hop_label = {
+            "by_lemma": "by lemma",
+            "by_upto": "up to bad",
+        }.get(hop.kind, "by assumption")
         if self.verbosity >= Verbosity.NORMAL:
             print(f"===STEP {hop.step_num}===")
             print(f"Current: {hop.current_desc}")
             print(f"Hop To: {hop.next_desc}\n")
-            print(f"Valid {hop_label}")
+            print(f"Valid {hop_label}" if not hop.failure else hop.failure)
         hop_desc = f"{hop.current_desc} -> {hop.next_desc}"
-        self._print_step_status(hop_desc, hop_label, Fore.CYAN)
+        if hop.failure:
+            self._print_step_status(hop_desc, f"FAILED ({hop_label})", Fore.RED)
+            print(f"    {Fore.YELLOW}{hop.failure}{Fore.RESET}")
+        else:
+            self._print_step_status(hop_desc, hop_label, Fore.CYAN)
         self.hop_results.append(
             HopResult(
                 step_num=hop.step_num,
-                valid=True,
+                valid=not hop.failure,
+                failure_detail=hop.failure,
                 kind=hop.kind,
                 depth=depth,
                 current_desc=hop.current_desc,
@@ -1246,12 +1620,58 @@ class ProofEngine:
         # Collect equivalence tasks for parallel dispatch
         equiv_indices: list[int] = []
         tasks: list[_EquivalenceTask] = []
+        results: dict[int, EquivalenceResult] = {}
+        cache_keys: dict[int, str | None] = {}
         for idx, hop in enumerate(prepared):
             if not hop.kind:  # equivalence hop
+                task = self._make_task(hop)
+                # The worker reads `task.proof_let_types` as well as the
+                # context's copy; the key covers only the latter, so a task
+                # where they are not the same object is never cached.
+                cache_keys[idx] = (
+                    self._hop_cache_key(
+                        task.ctx,
+                        task.current_game_ast,
+                        task.next_game_ast,
+                        task.step_assumptions,
+                    )
+                    if task.proof_let_types is task.ctx.proof_let_types
+                    else None
+                )
+                if self._hop_cache_hit(cache_keys[idx]):
+                    results[idx] = EquivalenceResult(valid=True, cached=True)
+                    continue
                 equiv_indices.append(idx)
-                tasks.append(self._make_task(hop))
+                tasks.append(task)
 
-        # Run equivalence checks in parallel with progress bar
+        total = len(tasks)
+        if total < 4:
+            # Too few uncached hops left to be worth a process pool.
+            for idx, task in zip(equiv_indices, tasks):
+                results[idx] = _check_equivalent_worker(task)
+        else:
+            results.update(self._run_tasks_in_pool(equiv_indices, tasks))
+        if self.hop_cache is not None:
+            for idx in equiv_indices:
+                if results[idx].valid:
+                    self.hop_cache.add(
+                        cache_keys[idx], verified_by=results[idx].engine_fingerprint
+                    )
+
+        # Report all hops in order, printing captured verbose output
+        for idx, hop in enumerate(prepared):
+            if hop.kind:
+                self._report_assumption_hop(hop, _depth)
+            else:
+                result = results[idx]
+                if result.verbose_output:
+                    sys.stdout.write(result.verbose_output)
+                self._report_hop(hop, result, _depth)
+
+    def _run_tasks_in_pool(
+        self, equiv_indices: list[int], tasks: list[_EquivalenceTask]
+    ) -> dict[int, EquivalenceResult]:
+        """Run equivalence checks in a process pool, with a progress bar."""
         total = len(tasks)
         results: dict[int, EquivalenceResult] = {}
         with ProcessPoolExecutor() as executor:
@@ -1273,16 +1693,7 @@ class ProofEngine:
                 # Clear the progress bar line
                 sys.stderr.write("\r" + " " * shutil.get_terminal_size().columns + "\r")
                 sys.stderr.flush()
-
-        # Report all hops in order, printing captured verbose output
-        for idx, hop in enumerate(prepared):
-            if hop.kind:
-                self._report_assumption_hop(hop, _depth)
-            else:
-                result = results[idx]
-                if result.verbose_output:
-                    sys.stdout.write(result.verbose_output)
-                self._report_hop(hop, result, _depth)
+        return results
 
     @staticmethod
     def _print_progress_bar(done: int, total: int) -> None:
@@ -1314,7 +1725,7 @@ class ProofEngine:
                 continue
 
             self.step_assumptions = hop.step_assumptions
-            equiv_result = self.check_equivalent(
+            equiv_result = self._check_equivalent_cached(
                 hop.current_game_ast, hop.next_game_ast  # type: ignore[arg-type]
             )
             self._report_hop(hop, equiv_result, _depth)
@@ -1366,12 +1777,18 @@ class ProofEngine:
                     print(f"Current: {rollover_current_desc}")
                     print(f"Hop To: {rollover_next_desc}\n")
                 self.set_up_assumptions(rollover_assumptions, last_step, first_step)
-                rollover_result = self.check_equivalent(last_step_ast, first_step_ast)
+                rollover_result = self._check_equivalent_cached(
+                    last_step_ast, first_step_ast
+                )
                 rollover_hop = (
                     f"[rollover] {rollover_current_desc} -> {rollover_next_desc}"
                 )
                 if rollover_result.valid:
-                    self._print_step_status(rollover_hop, "ok", Fore.GREEN)
+                    self._print_step_status(
+                        rollover_hop,
+                        "ok (cached)" if rollover_result.cached else "ok",
+                        Fore.GREEN,
+                    )
                 else:
                     self._print_step_status(rollover_hop, "FAILED", Fore.RED)
                     self._print_failure_inline(rollover_result)
@@ -1385,6 +1802,7 @@ class ProofEngine:
                         next_desc=rollover_next_desc,
                         failure_detail=rollover_result.failure_detail,
                         diagnosis=rollover_result.diagnosis,
+                        cached=rollover_result.cached,
                     )
                 )
                 self.proof_let_types.remove(the_induction.name)
@@ -1427,8 +1845,17 @@ class ProofEngine:
             ).visit(expression)
             applies_to = WhichGame.CURRENT
             while assumption_field is not None:
+                assert isinstance(
+                    assumption_field.the_object,
+                    (frog_ast.ParameterizedGame, frog_ast.ConcreteGame),
+                )
+                # The field as the resolved game names it: instantiation
+                # renames a field named like a `let:` entry (F-361).
+                field_name = self._instantiated_field_name(
+                    assumption_field.the_object, assumption_field.name
+                )
                 new_var = frog_ast.Variable(
-                    get_challenger_field_name(assumption_field.name)
+                    get_challenger_field_name(field_name)
                     if (
                         assumption_field.the_object == current_step.challenger
                         and current_step.reduction
@@ -1437,7 +1864,7 @@ class ProofEngine:
                         assumption_field.the_object == next_step.challenger
                         and next_step.reduction
                     )
-                    else assumption_field.name
+                    else field_name
                 )
                 if assumption_field.the_object in (
                     next_step.challenger,
@@ -1467,6 +1894,55 @@ class ProofEngine:
             requirements=list(self.requirements),
         )
 
+    def _hop_cache_key(
+        self,
+        ctx: PipelineContext,
+        current_game_ast: frog_ast.Game,
+        next_game_ast: frog_ast.Game,
+        step_assumptions: list[ProcessedAssumption],
+    ) -> str | None:
+        """The hop's cache digest, or None when caching is off or impossible."""
+        if self.hop_cache is None:
+            return None
+        return self.hop_cache.key(
+            ctx, current_game_ast, next_game_ast, step_assumptions
+        )
+
+    def _hop_cache_hit(self, key: str | None) -> bool:
+        """True if the hop *key* may be reported verified without checking.
+
+        At NORMAL verbosity and above the user asked to see the canonical
+        games, so the hop is always re-checked (and still recorded).
+        """
+        return (
+            self.hop_cache is not None
+            and self.verbosity < Verbosity.NORMAL
+            and self.hop_cache.lookup(key)
+        )
+
+    def _check_equivalent_cached(
+        self, current_game_ast: frog_ast.Game, next_game_ast: frog_ast.Game
+    ) -> EquivalenceResult:
+        """`check_equivalent`, consulting and updating the hop cache.
+
+        Only a success is ever stored, so a failing hop is always re-checked
+        and its diagnostics are never served from the cache.
+        """
+        if self.hop_cache is None:
+            return self.check_equivalent(current_game_ast, next_game_ast)
+        key = self._hop_cache_key(
+            self._build_context(),
+            current_game_ast,
+            next_game_ast,
+            self.step_assumptions,
+        )
+        if self._hop_cache_hit(key):
+            return EquivalenceResult(valid=True, cached=True)
+        result = self.check_equivalent(current_game_ast, next_game_ast)
+        if result.valid:
+            self.hop_cache.add(key)
+        return result
+
     def check_equivalent(
         self, current_game_ast: frog_ast.Game, next_game_ast: frog_ast.Game
     ) -> EquivalenceResult:
@@ -1477,6 +1953,10 @@ class ProofEngine:
         for index, game in enumerate((current_game_ast, next_game_ast)):
             which = WhichGame.CURRENT if index == 0 else WhichGame.NEXT
             ctx.near_misses = []  # Reset for each game
+            # Each game is canonicalized on its own: fields pinned while
+            # canonicalizing the current game must not affect the next one, so
+            # that a game's canonical form does not depend on its hop partner.
+            ctx.pinned_fields = set()
 
             if self.verbosity >= Verbosity.VERBOSE:
                 label = "CURRENT" if index == 0 else "NEXT"
@@ -1648,17 +2128,8 @@ class ProofEngine:
             )
 
             # Check if the reduction already calls challenger.Initialize()
-            def _has_challenger_init_call(node: frog_ast.ASTNode) -> bool:
-                return (
-                    isinstance(node, frog_ast.FuncCall)
-                    and isinstance(node.func, frog_ast.FieldAccess)
-                    and isinstance(node.func.the_object, frog_ast.Variable)
-                    and node.func.the_object.name == "challenger"
-                    and node.func.name == "Initialize"
-                )
-
             already_calls = (
-                visitors.SearchVisitor(_has_challenger_init_call).visit(
+                visitors.SearchVisitor(upto.is_challenger_init_call).visit(
                     reduction_initialize
                 )
                 is not None
@@ -1731,42 +2202,59 @@ class ProofEngine:
         all use one resolution path. Names are *not* canonicalized (use
         ``canonicalize_game`` for that).
         """
-        game: frog_ast.Game
-        if isinstance(challenger, frog_ast.ConcreteGame):
-            game_file = self.definition_namespace[challenger.game.name]
-            assert isinstance(game_file, frog_ast.GameFile)
-            game = instantiate(
-                game_file.get_game(challenger.which),
-                challenger.game.args,
-                self.proof_namespace,
-            )
-        else:
-            game_node = self.definition_namespace[challenger.name]
-            assert isinstance(game_node, frog_ast.Game)
-            game = instantiate(game_node, challenger.args, self.proof_namespace)
+        root, args = self._step_game_definition(challenger)
+        game = instantiate(
+            root, args, self.proof_namespace, True, self._argument_types(args)
+        )
+        # No initializer may read a field a method writes once the passes
+        # run (F-384): such a read gets a snapshot of the starting value.
+        # A reduction's fields get theirs here too, since the reduction is
+        # resolved by this method (below) before it is composed.
+        game = visitors.snapshot_starting_values(game)
 
-        lookup = copy.deepcopy(self.method_lookup)
+        lookup = dict(self.method_lookup)
         if reduction:
             reduction_ast = self.resolve_step_game(reduction)
             assert isinstance(reduction_ast, frog_ast.Reduction)
             # Ensure independent methods list before mutation
             game = copy.copy(game)
             game.methods = list(game.methods)
+            # Capture-aware (F-337): a name-keyed substitution would also rewrite
+            # a same-named TYPE (``Variable`` is both Expression and Type), so a
+            # challenger field ``KA`` typed by a ``let:``-bound set ``KA`` would
+            # have its type prefixed too.
+            field_prefix = {
+                field.name: get_challenger_field_name(field.name)
+                for field in game.fields
+            }
             for index, method in enumerate(game.methods):
-                ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-                for field in game.fields:
-                    ast_map.set(
-                        frog_ast.Variable(field.name),
-                        frog_ast.Variable(get_challenger_field_name(field.name)),
-                    )
-                game.methods[index] = visitors.SubstitutionTransformer(
-                    ast_map
-                ).transform(method)
+                game.methods[index] = visitors.rename_value_references(
+                    method, field_prefix
+                )
+            # A field the instantiation kept (written, F-045; converting,
+            # F-356; or initialized by a method call, F-384) may have an
+            # initializer naming another challenger field, one no method
+            # writes, and a length in a field's type may name one: they follow
+            # the rename, or they would name nothing, or a reduction field of
+            # the same name (F-384). A ``Set`` field's initializer is a type,
+            # renamed only in its lengths.
+            game.fields = [
+                frog_ast.Field(
+                    visitors.rename_value_references(field.type, field_prefix, True),
+                    field.name,
+                    visitors.rename_value_references(
+                        field.value,
+                        field_prefix,
+                        isinstance(field.type, frog_ast.SetType),
+                    ),
+                )
+                for field in game.fields
+            ]
             lookup.update(get_challenger_method_lookup(game))
             game = self.apply_reduction(game, reduction_ast)
 
         for _iteration in range(_MAX_FIXED_POINT_ITERATIONS):
-            new_game = visitors.InlineTransformer(lookup).transform(copy.deepcopy(game))
+            new_game = visitors.InlineTransformer(lookup).transform(game)
             if game != new_game:
                 game = new_game
             else:
@@ -1778,6 +2266,39 @@ class ProofEngine:
                 stacklevel=2,
             )
         return game
+
+    def _argument_types(
+        self, args: list[frog_ast.Expression]
+    ) -> list[Optional[frog_ast.Type]]:
+        """The type of each instantiation argument written in the proof (None
+        if unknown), so that :func:`instantiate` can tell an argument its
+        parameter would convert (F-374)."""
+        return [
+            visitors.expression_type(arg, self.proof_let_types, self.proof_namespace)
+            for arg in args
+        ]
+
+    def _step_game_definition(
+        self, game: frog_ast.ParameterizedGame | frog_ast.ConcreteGame
+    ) -> tuple[frog_ast.Game, list[frog_ast.Expression]]:
+        """The definition a proof step's game instantiates, and its arguments."""
+        if isinstance(game, frog_ast.ConcreteGame):
+            game_file = self.definition_namespace[game.game.name]
+            assert isinstance(game_file, frog_ast.GameFile)
+            return game_file.get_game(game.which), game.game.args
+        game_node = self.definition_namespace[game.name]
+        assert isinstance(game_node, frog_ast.Game)
+        return game_node, game.args
+
+    def _instantiated_field_name(
+        self, game: frog_ast.ParameterizedGame | frog_ast.ConcreteGame, name: str
+    ) -> str:
+        """The name field *name* of the step game *game* has once
+        :meth:`resolve_step_game` has instantiated it."""
+        root, args = self._step_game_definition(game)
+        return instantiated_field_names(root, args, self.proof_namespace).get(
+            name, name
+        )
 
     # Takes in a game from a proof step, and returns the AST associated with that game
     def _get_game_ast(
@@ -1907,29 +2428,43 @@ class ProofEngine:
             return current_step.challenger.game
         return None
 
-    def sort_game(self, game: frog_ast.Game) -> frog_ast.Game:
+    def sort_game(
+        self,
+        game: frog_ast.Game,
+        kept_draws: Optional[list[tuple[str, frog_ast.Statement]]] = None,
+    ) -> frog_ast.Game:
+        """Sort each method of *game* by its dependency graph and drop the
+        statements nothing observable depends on (:meth:`sort_block`).
+
+        A draw kept only because its domain may be empty is appended to
+        *kept_draws* as ``(method name, draw)`` when given.
+        """
         new_game = copy.deepcopy(game)
+        value_names = dependencies.game_value_names(game)
         for method in new_game.methods:
-            param_names = {p.name for p in method.signature.parameters}
-            method.block = self.sort_block(game, method.block, param_names)
+            method_kept: list[frog_ast.Statement] = []
+            method.block = self.sort_block(game, method.block, value_names, method_kept)
+            if kept_draws is not None:
+                kept_draws.extend((method.signature.name, draw) for draw in method_kept)
         return new_game
 
     def sort_block(
         self,
         game: frog_ast.Game,
         block: frog_ast.Block,
-        param_names: set[str] | None = None,
+        value_names: Optional[set[str]] = None,
+        kept_draws: Optional[list[frog_ast.Statement]] = None,
     ) -> frog_ast.Block:
-        # A bare declaration that shadows a field or parameter must survive the
-        # sort (its removal would rebind later references to the outer binding).
-        shadowed = {field.name for field in game.fields} | (param_names or set())
+        if value_names is None:
+            value_names = dependencies.game_value_names(game)
         graph = dependencies.generate_dependency_graph(
-            block, game.fields, self.proof_namespace, shadowed_names=shadowed
+            block, game.fields, self.proof_namespace, value_names
         )
 
         def is_return(node: frog_ast.ASTNode) -> bool:
-            return node in block.statements and isinstance(
-                node, frog_ast.ReturnStatement
+            # By identity: a top-level return of this very block.
+            return isinstance(node, frog_ast.ReturnStatement) and any(
+                node is statement for statement in block.statements
             )
 
         def contains_return(statement: frog_ast.Statement) -> bool:
@@ -1990,6 +2525,22 @@ class ProofEngine:
                 dfs_stack.append(graph.get_node(statement))
                 do_dfs()
 
+        # Keep every statement that may not complete: it holds a draw whose
+        # domain may be empty (`x <- T \ E` with E covering T), and whether
+        # the method completes is observable even when nothing reads the
+        # draw. Seeding only from returns and field references pruned such a
+        # draw over a local exclusion set as dead code (F-305).
+        for statement in block.statements:
+            if id(statement) not in dfs_visited_ids and dependencies.may_not_complete(
+                statement, value_names
+            ):
+                if kept_draws is not None:
+                    kept_draws.extend(
+                        dependencies.possibly_empty_draws(statement, value_names)
+                    )
+                dfs_stack.append(graph.get_node(statement))
+                do_dfs()
+
         sorted_statements: list[frog_ast.Statement] = []
         stack: list[dependencies.Node] = []
 
@@ -2000,6 +2551,8 @@ class ProofEngine:
         while stack:
             node = stack.pop()
             sorted_statements.append(node.statement)
+            # Nodes compare by identity, so a placed statement releases only
+            # the edges to itself, not those to an equal statement elsewhere.
             for other_node in graph.nodes:
                 if node in other_node.in_neighbours:
                     other_node.in_neighbours.remove(node)
@@ -2020,19 +2573,395 @@ class ProofEngine:
 T = TypeVar("T", bound=Union[frog_ast.Primitive, frog_ast.Scheme, frog_ast.Game])
 
 
+class InstantiationCaptureError(visitors.InstantiationError):
+    """Instantiation would let a scheme or primitive field capture a name in
+    an instantiation argument (F-341)."""
+
+
+_INSTANTIATION_FRESH_RE = re.compile(r"__i(\d+)__")
+
+
+def _avoid_instantiation_capture(
+    root: T,
+    args: list[frog_ast.Expression],
+    namespace: frog_ast.Namespace,
+    rename_namespace_fields: bool = False,
+    bound_parameters: frozenset[str] = frozenset(),
+) -> T:
+    """Rename the bindings inside *root* that the name-keyed substitutions of
+    :func:`instantiate` would otherwise capture (F-341).
+
+    ``instantiate`` replaces *root*'s parameters with *args*, then
+    ``InstantiationTransformer`` replaces names bound in *namespace* and
+    field aliases, all by name and across method bodies. So:
+
+    * a method parameter, typed local or ``for`` binder named like a root
+      parameter, a root field, a namespace name, or a free name of an argument
+      is renamed to a fresh ``__iN__`` (otherwise ``Int O(Int n) { return n; }``
+      loses its argument, or an argument ``lambda`` is captured by a parameter
+      ``lambda``);
+    * a GAME field named like a free name of an argument is renamed (fields
+      are internal to a game), and with *rename_namespace_fields* so is one
+      named like a namespace name. A proof's ``let:`` names are the outer
+      scope of every game, so inside the game the field wins; the rename
+      keeps it that way once inlined scheme code that reads the ``let:``
+      name lands next to it, and once later passes look the name up in the
+      proof's ``let:`` types or namespace (F-361). A ``Set`` alias field is
+      left alone there: ``InstantiationTransformer`` substitutes its value
+      for every reference, so none is left to collide. A renamed field's own
+      initializer and the earlier fields' initializers keep their
+      references, since they are evaluated before the field is bound. A
+      scheme or primitive field cannot be renamed (it is
+      part of the interface, read as ``E.field``), so such a collision is
+      refused unless the field just re-exports that same name, as in
+      ``Int lambda = lambda;`` instantiated with ``lambda``, which is checked
+      after substitution by :func:`instantiate`.
+    * a game parameter in *bound_parameters*, which :func:`instantiate`
+      binds as a game field instead of substituting (an argument the
+      parameter's type would convert, or a parameter the game writes), is
+      renamed by the field rule above, since it becomes a field.
+    """
+    arg_names: set[str] = set()
+    for arg in args:
+        arg_names |= visitors.referenced_variable_names(arg)
+    field_names = {field.name for field in root.fields}
+    colliding = frozenset(
+        {param.name for param in root.parameters}
+        | field_names
+        | set(namespace)
+        | arg_names
+    )
+    taken = visitors.referenced_variable_names(root) | set(colliding)
+    existing = [int(m) for m in _INSTANTIATION_FRESH_RE.findall(str(root) + str(args))]
+    counter = [max(existing) + 1 if existing else 0]
+
+    def fresh() -> str:
+        while True:
+            name = f"__i{counter[0]}__"
+            counter[0] += 1
+            if name not in taken:
+                taken.add(name)
+                return name
+
+    new_root = copy.copy(root)
+    if isinstance(new_root, (frog_ast.Game, frog_ast.Scheme)):
+        new_root.methods = [
+            rename_colliding_binders(method, colliding, fresh)
+            for method in new_root.methods
+        ]
+    if isinstance(new_root, frog_ast.Game):
+        shadowed = set(arg_names)
+        if rename_namespace_fields:
+            shadowed |= set(namespace) - {
+                field.name for field in root.fields if field.type == frog_ast.SetType()
+            }
+        field_rename = {name: fresh() for name in sorted(field_names & shadowed)}
+        if field_rename:
+            new_root.fields = _rename_game_fields(new_root.fields, field_rename)
+            new_root.methods = [
+                visitors.rename_value_references(method, field_rename)
+                for method in new_root.methods
+            ]
+        parameter_rename = {
+            name: fresh() for name in sorted(set(bound_parameters) & shadowed)
+        }
+        if parameter_rename:
+            new_root.parameters = [
+                frog_ast.Parameter(
+                    visitors.rename_value_references(param, parameter_rename).type,
+                    parameter_rename.get(param.name, param.name),
+                )
+                for param in new_root.parameters
+            ]
+            new_root.fields = [
+                visitors.rename_value_references(field, parameter_rename)
+                for field in new_root.fields
+            ]
+            new_root.methods = [
+                visitors.rename_value_references(method, parameter_rename)
+                for method in new_root.methods
+            ]
+    return new_root
+
+
+def _rename_game_fields(
+    fields: list[frog_ast.Field], rename: dict[str, str]
+) -> list[frog_ast.Field]:
+    """*fields* with each field in *rename* renamed, and the references to it
+    in the declarations after it renamed with it. A field's own initializer
+    and the ones before it are evaluated before it is bound, so a same-named
+    reference there (a game parameter) is left alone."""
+    in_scope: dict[str, str] = {}
+    renamed: list[frog_ast.Field] = []
+    for field in fields:
+        new_field = (
+            visitors.rename_value_references(field, in_scope) if in_scope else field
+        )
+        if field.name in rename:
+            new_field = frog_ast.Field(
+                new_field.type, rename[field.name], new_field.value
+            )
+            in_scope[field.name] = rename[field.name]
+        renamed.append(new_field)
+    return renamed
+
+
+class ConvertingParameterError(visitors.InstantiationError):
+    """A scheme or primitive parameter would store its argument with a change
+    of value (an ``Int`` into a ``ModInt``), so its reads cannot be replaced
+    by the argument."""
+
+
+def _converting_parameters(
+    root: frog_ast.Game | frog_ast.Scheme | frog_ast.Primitive,
+    args: list[frog_ast.Expression],
+    namespace: frog_ast.Namespace,
+    arg_types: Optional[list[Optional[frog_ast.Type]]],
+) -> dict[int, Optional[frog_ast.Type]]:
+    """The parameters of *root* that store their argument with a change of
+    value, by index, each with its type in the caller's terms.
+
+    A parameter receives its argument like a store (F-374): the type checker
+    accepts an ``Int`` argument for a ``ModInt<q>`` parameter, and the
+    parameter then holds the ``Int`` reduced modulo ``q``, so it cannot be
+    read as the argument. The parameter's type is taken with the arguments
+    and *namespace* substituted, and the argument's type from *arg_types*
+    (its type where the argument is written; None, or no list, if unknown).
+    An unknown argument type counts as converting wherever the parameter's
+    type holds a ``ModInt``.
+    """
+    ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+    for index, parameter in enumerate(root.parameters[: len(args)]):
+        ast_map.set(frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
+    substitution = visitors.SubstitutionTransformer(ast_map)
+    resolver = visitors.InstantiationTransformer(namespace)
+
+    def resolved(the_type: Optional[frog_ast.ASTNode]) -> Optional[frog_ast.Type]:
+        if the_type is None:
+            return None
+        result = resolver.transform(copy.deepcopy(the_type))
+        return result if isinstance(result, frog_ast.Type) else None
+
+    converting: dict[int, Optional[frog_ast.Type]] = {}
+    for index, parameter in enumerate(root.parameters[: len(args)]):
+        slot = resolved(substitution.transform(parameter.type))
+        if slot is None:
+            if not visitors.type_contains_mod_int(parameter.type):
+                continue
+            converting[index] = None
+            continue
+        if not visitors.type_contains_mod_int(slot):
+            continue
+        given = arg_types[index] if arg_types and index < len(arg_types) else None
+        if not visitors.store_keeps_value_of_type(
+            slot, args[index], lambda given=given: resolved(given)  # type: ignore[misc]
+        ):
+            converting[index] = slot
+    return converting
+
+
+class WrittenParameterError(visitors.InstantiationError):
+    """A scheme writes one of its own parameters in a method body, so its
+    reads cannot be replaced by the argument (F-383)."""
+
+
+def _written_parameters(
+    root: frog_ast.Game | frog_ast.Scheme | frog_ast.Primitive,
+    args: list[frog_ast.Expression],
+    namespace: frog_ast.Namespace,
+) -> list[int]:
+    """The parameters of *root* that one of its methods writes, by index.
+
+    A parameter receives its argument by value (F-383): inside a game it is
+    a variable of the game's own that starts out holding the argument, so a
+    write to it (an assignment, a draw, an element write, a ``<-uniq``
+    insertion) changes what later reads of it see, and those reads cannot
+    all be replaced by the argument. A method parameter, local or ``for``
+    binder of the same name shadows the parameter, so a write to it does not
+    count: the writes are looked for after :func:`_avoid_instantiation_capture`
+    has renamed such binders.
+    """
+    if not isinstance(root, (frog_ast.Game, frog_ast.Scheme)):
+        return []
+    parameters = root.parameters[: len(args)]
+    candidates = {
+        parameter.name
+        for parameter in parameters
+        if any(
+            visitors.reassigns_or_rebinds({parameter.name}, method)
+            for method in root.methods
+        )
+    }
+    if not candidates:
+        return []
+    renamed = _avoid_instantiation_capture(root, args, namespace)
+    return [
+        index
+        for index, parameter in enumerate(parameters)
+        if parameter.name in candidates
+        and any(
+            visitors.reassigns_or_rebinds({parameter.name}, method)
+            for method in renamed.methods
+        )
+    ]
+
+
 def instantiate(
     root: T,
     args: list[frog_ast.Expression],
     namespace: frog_ast.Namespace,
+    rename_namespace_fields: bool = False,
+    arg_types: Optional[list[Optional[frog_ast.Type]]] = None,
 ) -> T:
+    """*root* with its parameters replaced by *args* and the names *namespace*
+    binds substituted, capture-avoiding (:func:`_avoid_instantiation_capture`).
+
+    *rename_namespace_fields* also renames a game field named like a
+    namespace name, so that the field and the proof's ``let:`` entry stay
+    apart in the canonicalization that follows (F-361). The engine passes it
+    when it resolves a proof step; the type checker does not need it, since
+    it resolves names by scope.
+
+    *arg_types* gives each argument's type where the argument is written
+    (None for unknown; no list: all unknown). A parameter that would store
+    its argument with a change of value (an ``Int`` into a ``ModInt``,
+    :func:`_converting_parameters`) is not replaced by the argument: a game
+    parameter becomes a game field initialized with the argument, ahead of
+    the game's own fields, and a scheme or primitive parameter is refused
+    (:class:`ConvertingParameterError`), because its methods would carry the
+    parameter's name into the games they are inlined into.
+
+    A parameter that one of *root*'s methods writes (:func:`_written_parameters`)
+    is not replaced by the argument either, since the write must reach the
+    later reads: a game or reduction parameter becomes a game field the same
+    way, and a scheme is refused (:class:`WrittenParameterError`).
+    """
+    converting = _converting_parameters(root, args, namespace, arg_types)
+    if converting and not isinstance(root, frog_ast.Game):
+        index, slot = next(iter(converting.items()))
+        given = arg_types[index] if arg_types and index < len(arg_types) else None
+        raise ConvertingParameterError(
+            f"Cannot instantiate {root.name}: its parameter "
+            f"'{root.parameters[index].name}' of type "
+            f"{slot if slot is not None else root.parameters[index].type} "
+            f"is given {args[index]} (of type "
+            f"{given if given is not None else 'unknown'}), which it stores with "
+            "a change of value: an Int stored in a ModInt is reduced modulo the "
+            "modulus, and arithmetic on the parameter is modular, while on an "
+            "Int, even a literal, it is not. The engine can only read a scheme "
+            "or primitive parameter as its argument. Pass an argument of the "
+            "parameter's type."
+        )
+    written = _written_parameters(root, args, namespace)
+    if written and not isinstance(root, frog_ast.Game):
+        raise WrittenParameterError(
+            f"Cannot instantiate {root.name}: one of its methods writes its "
+            f"parameter '{root.parameters[written[0]].name}'. A parameter "
+            "holds the value it is given, and the engine can only read a "
+            "scheme parameter as its argument, so a scheme may not assign, "
+            "draw into, write an element of or insert with <-uniq into its own "
+            "parameter. Declare a local copy in the method that changes it."
+        )
+    # The game parameters that stay names: each becomes a game field
+    # initialized with its argument.
+    bound = sorted(set(converting) | set(written))
+    bound_names = frozenset(root.parameters[index].name for index in bound)
+    root = _avoid_instantiation_capture(
+        root, args, namespace, rename_namespace_fields, bound_names
+    )
+    arg_names: set[str] = set()
+    for arg in args:
+        arg_names |= visitors.referenced_variable_names(arg)
     ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
     for index, parameter in enumerate(root.parameters):
+        if index in bound:
+            continue
         ast_map.set(frog_ast.Variable(parameter.name), copy.deepcopy(args[index]))
-    new_root = visitors.SubstitutionTransformer(ast_map).transform(root)
+    substitution = visitors.SubstitutionTransformer(ast_map)
+    field_value_types: dict[str, Optional[frog_ast.Type]] = {}
+    for name, value_type in _field_initializer_types(root).items():
+        substituted = None if value_type is None else substitution.transform(value_type)
+        field_value_types[name] = (
+            substituted if isinstance(substituted, frog_ast.Type) else None
+        )
+    new_root = substitution.transform(root)
     # Ensure independent copy before mutation — transform may share lists
     new_root = copy.copy(new_root)
     new_root.parameters = []
-    return visitors.InstantiationTransformer(namespace).transform(new_root)
+    if bound:
+        # A converting game parameter holds its argument converted to its
+        # type, and a written one holds what was last written to it, so each
+        # stays a name: a field initialized with the argument, which
+        # InstantiationTransformer keeps as a field (a written field is state,
+        # F-045; a converting one's initializer type is not recorded, so it
+        # counts as converting) and which the forwarding passes do not
+        # forward. A field whose initializer reads a written one holds its
+        # starting value, so InstantiationTransformer keeps it too (F-384).
+        bound_fields: list[frog_ast.Field] = []
+        for index in bound:
+            parameter = root.parameters[index]
+            bound_type = substitution.transform(copy.deepcopy(parameter.type))
+            assert isinstance(bound_type, frog_ast.Type)
+            bound_fields.append(
+                frog_ast.Field(bound_type, parameter.name, copy.deepcopy(args[index]))
+            )
+        new_root.fields = bound_fields + list(new_root.fields)
+    if not isinstance(new_root, frog_ast.Game):
+        for field in new_root.fields:
+            if field.name in arg_names and field.value != frog_ast.Variable(field.name):
+                raise InstantiationCaptureError(
+                    f"Cannot instantiate {root.name}: its field '{field.name}' "
+                    f"has the same name as '{field.name}' in the instantiation "
+                    "arguments, so the argument would be read as the field. "
+                    "Rename the field or the argument."
+                )
+    return visitors.InstantiationTransformer(namespace, field_value_types).transform(
+        new_root
+    )
+
+
+def _field_initializer_types(
+    root: frog_ast.Game | frog_ast.Scheme | frog_ast.Primitive,
+) -> dict[str, Optional[frog_ast.Type]]:
+    """The type of each of *root*'s field initializers where it is written,
+    from *root*'s parameter and field declarations (None if unknown).
+
+    An initializer is a store into its field (F-356): ``ModInt<q> f = q;``
+    with ``q : Int`` holds ``q`` reduced modulo ``q``, so instantiation may
+    read the field as its initializer only when the two types agree. The
+    type is taken before the arguments replace the parameters, because only
+    *root*'s own declarations say what its names are.
+    """
+    type_map = visitors.NameTypeMap()
+    for parameter in root.parameters:
+        type_map.set(parameter.name, parameter.type)
+    for field in root.fields:
+        type_map.set(field.name, field.type)
+    return {
+        field.name: visitors.expression_type(field.value, type_map)
+        for field in root.fields
+        if isinstance(field.value, frog_ast.Expression)
+        and field.type != frog_ast.SetType()
+    }
+
+
+def instantiated_field_names(
+    root: frog_ast.Game,
+    args: list[frog_ast.Expression],
+    namespace: frog_ast.Namespace,
+) -> dict[str, str]:
+    """For each field of *root* that ``instantiate(root, args, namespace,
+    rename_namespace_fields=True)`` renames, its new name.
+
+    A step assumption names a game's field as written in the game
+    (``R(F, q).count``), so it must be put through the same rename to keep
+    reading the field."""
+    renamed = _avoid_instantiation_capture(root, args, namespace, True)
+    return {
+        old.name: new.name
+        for old, new in zip(root.fields, renamed.fields)
+        if old.name != new.name
+    }
 
 
 def rewrite_this_in_scheme(name: str, scheme: frog_ast.Scheme) -> frog_ast.Scheme:
@@ -2065,6 +2994,95 @@ def _get_file_type_for_import(file_name: str) -> frog_ast.FileType:
     return frog_ast.FileType(extension)
 
 
+def _lemma_mismatch(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    lemma_file: frog_ast.ProofFile,
+    lemma_path: str,
+    lemma: frog_ast.Lemma,
+    proof_file: frog_ast.ProofFile,
+    proof_path: str,
+) -> advantage.LemmaInstantiation | str:
+    """How a verified lemma file establishes its entry, or why it does not.
+
+    The file must not rely on a query cap (``calls <= N``). Its theorem must
+    be the entry's notion: the same kind (game or event), game, flag and
+    ``at Initialize``; its game must resolve to the
+    same imported file; and the entry's arguments must be an instance of the
+    theorem's (``advantage.lemma_instantiation``), with every primitive or
+    scheme matched on the way resolving to the same file on both sides.
+    """
+    proven, claimed = lemma_file.theorem, lemma.game
+    if lemma_file.max_calls is not None:
+        # The lemma holds only for adversaries within its query cap, which
+        # the parent's hops do not respect in general (the constructed
+        # adversary may query more).
+        return (
+            f"Lemma file '{lemma.proof_path}' proves '{proven}' only under"
+            f" `calls <= {lemma_file.max_calls}`, which a lemma entry cannot"
+            f" rely on"
+        )
+    key_p, key_c = frog_ast.notion_key(proven), frog_ast.notion_key(claimed)
+    if type(proven) is not type(claimed) or key_p.name != key_c.name:
+        return f"Lemma file '{lemma.proof_path}' proves '{proven}', not '{claimed}'"
+    game_name = frog_ast.notion_game(proven).name
+    lemma_game_path = _imported_file_path(lemma_file, lemma_path, game_name)
+    if lemma_game_path is None or lemma_game_path != _imported_file_path(
+        proof_file, proof_path, game_name
+    ):
+        return (
+            f"Lemma file '{lemma.proof_path}' proves '{proven}' about a different"
+            f" file named {game_name} than this proof imports"
+        )
+    match = advantage.lemma_instantiation(
+        key_p.args,
+        lemma_file.lets,
+        lemma_file.sampled_let_names,
+        key_c.args,
+        proof_file.lets,
+        proof_file.sampled_let_names,
+    )
+    if isinstance(match, str):
+        return (
+            f"Lemma file '{lemma.proof_path}' proves '{proven}', which does not"
+            f" cover '{claimed}': {match}"
+        )
+    for callee in sorted(match.callees):
+        callee_path = _imported_file_path(lemma_file, lemma_path, callee)
+        if callee_path is None or callee_path != _imported_file_path(
+            proof_file, proof_path, callee
+        ):
+            return (
+                f"Lemma file '{lemma.proof_path}' instantiates a different file"
+                f" named {callee} than this proof imports"
+            )
+    return match
+
+
+def _imported_file(
+    proof_file: frog_ast.ProofFile, proof_path: str, export_name: str
+) -> tuple[str, frog_ast.Root] | None:
+    """The resolved path and root of the file imported as *export_name*."""
+    # pylint: disable=import-outside-toplevel,cyclic-import
+    from . import frog_parser
+
+    for imp in proof_file.imports:
+        resolved = frog_parser.resolve_import_path(imp.filename, proof_path)
+        try:
+            root = frog_parser.parse_file(resolved)
+        except Exception:  # pylint: disable=broad-exception-caught
+            continue
+        if (imp.rename or root.get_export_name()) == export_name:
+            return os.path.realpath(resolved), root
+    return None
+
+
+def _imported_file_path(
+    proof_file: frog_ast.ProofFile, proof_path: str, export_name: str
+) -> str | None:
+    """The resolved path of the file *proof_file* imports as *export_name*."""
+    imported = _imported_file(proof_file, proof_path, export_name)
+    return None if imported is None else imported[0]
+
+
 def verify_proof_file(
     proof_path: str,
     verbosity: Verbosity = Verbosity.QUIET,
@@ -2073,6 +3091,21 @@ def verify_proof_file(
     skip_bound: bool = False,
 ) -> frog_ast.ProofFile:
     """Parse, load imports, and verify a proof file. Returns the ProofFile on success."""
+    proof_file, _ = _verify_proof_file_with_engine(
+        proof_path, verbosity, no_diagnose, skip_lemmas, skip_bound
+    )
+    return proof_file
+
+
+def _verify_proof_file_with_engine(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    proof_path: str,
+    verbosity: Verbosity = Verbosity.QUIET,
+    no_diagnose: bool = True,
+    skip_lemmas: bool = False,
+    skip_bound: bool = False,
+    hop_cache: hop_cache_module.HopCache | None = None,
+) -> tuple[frog_ast.ProofFile, "ProofEngine"]:
+    """As :func:`verify_proof_file`, also returning the engine (for its bound)."""
     # pylint: disable=import-outside-toplevel,cyclic-import
     from . import frog_parser, semantic_analysis
 
@@ -2084,6 +3117,7 @@ def verify_proof_file(
         no_diagnose=no_diagnose,
         skip_lemmas=skip_lemmas,
         skip_bound=skip_bound,
+        hop_cache=hop_cache,
     )
 
     for imp in proof_file.imports:
@@ -2103,4 +3137,4 @@ def verify_proof_file(
         engine.add_definition(name, root)
 
     engine.prove(proof_file, proof_path)
-    return proof_file
+    return proof_file, engine

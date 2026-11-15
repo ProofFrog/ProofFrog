@@ -115,3 +115,81 @@ def test_group_exp_reindex_blocked_when_sk_not_known_nonzero() -> None:
     misses = [nm for nm in ctx.near_misses if nm.transform_name == "Map Key Reindex"]
     assert misses, "expected a near-miss citing the non-nonzero exponent"
     assert any("nonzero" in nm.reason for nm in misses), [nm.reason for nm in misses]
+
+
+_GAME_EXP_WRAPPED_READ = """
+Game G(Group G) {
+    ModInt<G.order> sk;
+    Map<GroupElem<G>, Int> M;
+
+    Void Initialize() {
+        sk <- ModInt<G.order> \\ {0};
+    }
+    Void Store(GroupElem<G> a) {
+        M[a] = 0;
+    }
+    Bool Has(GroupElem<G> y) {
+        return y ^ sk in M;
+    }
+}
+"""
+
+
+def test_group_exp_reindex_blocked_by_wrapped_read() -> None:
+    """After ``Store(g)``, ``Has(g)`` is true only if ``g^sk = g``. Wrapping
+    the write as ``M[a ^ sk]`` would make it always true."""
+    ctx = _ctx_with_requirements([_prime_requirement_on("G")])
+    game = frog_parser.parse_game(_GAME_EXP_WRAPPED_READ)
+    assert MapKeyReindex().apply(game, ctx) == game
+
+
+def _game_exp_initialize_write(initialize_body: str) -> str:
+    return f"""
+Game G(Group G) {{
+    ModInt<G.order> sk;
+    Map<GroupElem<G>, Int> M;
+
+    Void Initialize() {{
+        {initialize_body}
+    }}
+    Bool Scan(GroupElem<G> y) {{
+        for ([GroupElem<G>, Int] e in M.entries) {{
+            if (e[0] ^ sk == y) {{
+                return true;
+            }}
+        }}
+        return false;
+    }}
+}}
+"""
+
+
+def test_group_exp_reindex_blocked_by_initialize_write_before_sample() -> None:
+    """Wrapping ``M[g] = 0`` as ``M[g ^ sk] = 0`` ahead of the sample of
+    ``sk`` would read ``sk`` before it is set."""
+    ctx = _ctx_with_requirements([_prime_requirement_on("G")])
+    game = frog_parser.parse_game(_game_exp_initialize_write("""
+        GroupElem<G> g = G.generator;
+        M[g] = 0;
+        sk <- ModInt<G.order> \\ {0};
+        """))
+    assert MapKeyReindex().apply(game, ctx) == game
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == "Map Key Reindex"]
+    assert any("before it is set" in nm.reason for nm in misses), [
+        nm.reason for nm in misses
+    ]
+
+
+def test_group_exp_reindex_fires_on_initialize_write_after_sample() -> None:
+    ctx = _ctx_with_requirements([_prime_requirement_on("G")])
+    got = _apply(
+        _game_exp_initialize_write("""
+        sk <- ModInt<G.order> \\ {0};
+        GroupElem<G> g = G.generator;
+        M[g] = 0;
+        """),
+        ctx,
+    )
+    got_str = str(got)
+    assert "M[g ^ sk] = 0;" in got_str, got_str
+    assert "e[0] == y" in got_str, got_str

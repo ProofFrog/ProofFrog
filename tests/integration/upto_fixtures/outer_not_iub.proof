@@ -1,0 +1,32 @@
+// Negative: NotIUB is not identical until bad, so the upto hop fails
+// even though an event lemma is in scope.
+import 'TargetGuess.game';
+import 'NotIUB.game';
+
+proof:
+
+let:
+    Set S;
+
+lemma:
+    event bad of NotIUB(S) by 'NotIUBEvent.proof';
+
+theorem:
+    TargetGuess(S);
+
+games:
+    TargetGuess(S).Left against TargetGuess(S).Adversary;
+    NotIUB(S).Left compose R(S) against TargetGuess(S).Adversary;
+    NotIUB(S).Right compose R(S) against TargetGuess(S).Adversary;
+    TargetGuess(S).Right against TargetGuess(S).Adversary;
+
+// R: forwards every guess to the pair.
+Reduction R(Set S) compose NotIUB(S) against TargetGuess(S).Adversary {
+    Void Initialize() {
+        challenger.Initialize();
+    }
+
+    Bool Eq(S c) {
+        return challenger.Eq(c);
+    }
+}

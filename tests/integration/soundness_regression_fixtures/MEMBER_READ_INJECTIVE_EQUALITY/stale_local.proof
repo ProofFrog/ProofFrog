@@ -1,0 +1,17 @@
+// Claims the distinguishable games of StaleLocal.game are
+// interchangeable; the engine must refuse the hop.
+import 'InjEnc.primitive';
+import 'StaleLocal.game';
+
+proof:
+
+let:
+    Int n;
+    InjEnc F = InjEnc(BitString<n>);
+
+theorem:
+    StaleLocal(F);
+
+games:
+    StaleLocal(F).Left against StaleLocal(F).Adversary;
+    StaleLocal(F).Right against StaleLocal(F).Adversary;

@@ -1,0 +1,38 @@
+// Attack 5 (DeduplicateDeterministicCalls): |M.keys| vacuous stability.
+// Left = input game: O reads F.EvalInt(|M.keys|), writes M[w] = 0^n, reads
+//   F.EvalInt(|M.keys|) again. The argument |M.keys| reaches M only through a
+//   FieldAccess (M.keys); VariableCollectionVisitor disables collection inside
+//   any FieldAccess, so arg_vars is empty and the stability check passes
+//   vacuously without scanning the interleaved write to M.
+// Right = the pass's own output: single __determ_0__ = F.EvalInt(|M.keys|)
+//   reused for both.
+// Distinguisher: O(w) once (fresh w); observe return. |M.keys| goes 0 -> 1
+//   across the write. Under EvalInt(c) = 0^n for even c, 1^n for odd c: Left
+//   returns F(0) + F(1) = 0^n + 1^n = 1^n; Right returns F(0)+F(0) = 0^n.
+//   Advantage 1.
+import 'DetPrimS.primitive';
+
+Game Left(DetPrimS F) {
+    Map<F.Block, F.Block> M;
+
+    F.Block O(F.Block w) {
+        F.Block y1 = F.EvalInt(|M.keys|);
+        M[w] = w;
+        F.Block y2 = F.EvalInt(|M.keys|);
+        return y1 + y2;
+    }
+}
+
+Game Right(DetPrimS F) {
+    Map<F.Block, F.Block> M;
+
+    F.Block O(F.Block w) {
+        F.Block t = F.EvalInt(|M.keys|);
+        F.Block y1 = t;
+        M[w] = w;
+        F.Block y2 = t;
+        return y1 + y2;
+    }
+}
+
+export as Attack5Prop;

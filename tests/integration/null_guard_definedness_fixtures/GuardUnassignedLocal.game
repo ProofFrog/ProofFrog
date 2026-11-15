@@ -1,0 +1,25 @@
+// As GuardUnassignedField, with a local declared without a value and
+// assigned only when c holds. Query(0, false) reads it unassigned in
+// Real. Expected: rejected.
+import 'Probe.primitive';
+
+Game Real(Probe C) {
+    [Int, Bool]? Query(Int x, Bool c) {
+        Bool f;
+        if (c) {
+            f = true;
+        }
+        if (C.IsNone([x, f])) {
+            return None;
+        }
+        return [x, true];
+    }
+}
+
+Game Random(Probe C) {
+    [Int, Bool]? Query(Int x, Bool c) {
+        return [x, true];
+    }
+}
+
+export as GuardUnassignedLocal;

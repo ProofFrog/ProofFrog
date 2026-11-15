@@ -1,0 +1,26 @@
+// Positive control for F-048: two draws from BitString<n> with the proof's
+// n, which no statement writes, concatenated. Merge Uniform Samples merges
+// them into one BitString<2 * n> draw, so G3 is interchangeable with both
+// sides of J2Prop. The proof must still verify.
+import 'J2Prop.game';
+
+proof:
+
+let:
+    Int n;
+
+theorem:
+    J2Prop(n);
+
+games:
+    J2Prop(n).Real against J2Prop(n).Adversary;
+    G3(n) against J2Prop(n).Adversary;
+    J2Prop(n).Random against J2Prop(n).Adversary;
+
+Game G3(Int n) {
+    BitString<2 * n> Oracle() {
+        BitString<n> x <- BitString<n>;
+        BitString<n> y <- BitString<n>;
+        return x || y;
+    }
+}

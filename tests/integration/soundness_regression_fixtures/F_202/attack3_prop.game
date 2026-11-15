@@ -1,0 +1,27 @@
+// Attack 3 (DeduplicateDeterministicCalls): non-deterministic nested arg.
+// Left = input game: O returns [F.Eval(F.Gen()), F.Eval(F.Gen())]. F.Gen() is
+//   NOT deterministic (fresh i.i.d. coins per invocation, SEMANTICS.md 6.4),
+//   so the two nested draws are independent. The pass checks only the OUTER
+//   callee's deterministic flag and collapses the two structurally-equal outer
+//   calls into one shared draw.
+// Right = the pass's own output: single __determ_0__ = F.Eval(F.Gen());
+//   returns [__determ_0__, __determ_0__].
+// Distinguisher: t = O(); test t[0] == t[1]. Under Gen = uniform, Eval =
+//   identity: Left gives Pr[t0==t1] = 2^-n, Right gives Pr = 1. Advantage
+//   1 - 2^-n.
+import 'DetPrimS.primitive';
+
+Game Left(DetPrimS F) {
+    [F.Block, F.Block] O() {
+        return [F.Eval(F.Gen()), F.Eval(F.Gen())];
+    }
+}
+
+Game Right(DetPrimS F) {
+    [F.Block, F.Block] O() {
+        F.Block t = F.Eval(F.Gen());
+        return [t, t];
+    }
+}
+
+export as Attack3Prop;

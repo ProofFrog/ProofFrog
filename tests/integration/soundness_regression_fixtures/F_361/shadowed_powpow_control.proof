@@ -1,0 +1,17 @@
+// Positive control for collateral_poison_powpow (F-361). See
+// ShadowedPowPow.game. Expected: Proof Succeeded!
+import 'ShadowedPowPow.game';
+
+proof:
+
+let:
+    Group G;
+    Group H;
+    GroupElem<H> t;
+
+theorem:
+    ShadowedPowPow(G, H);
+
+games:
+    ShadowedPowPow(G, H).Left against ShadowedPowPow(G, H).Adversary;
+    ShadowedPowPow(G, H).Right against ShadowedPowPow(G, H).Adversary;

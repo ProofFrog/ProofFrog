@@ -1,0 +1,16 @@
+// Again samples through the scheme's own Sample method via `this.`.
+
+import './Twice.primitive';
+
+Scheme TwiceScheme(Int n) extends Twice {
+    Int lambda = n;
+
+    BitString<lambda> Sample() {
+        BitString<lambda> r <- BitString<lambda>;
+        return r;
+    }
+
+    BitString<lambda> Again() {
+        return this.Sample();
+    }
+}

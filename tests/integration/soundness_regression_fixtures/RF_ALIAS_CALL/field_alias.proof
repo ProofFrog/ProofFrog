@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'FieldAlias.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    FieldAlias(S);
+
+games:
+    FieldAlias(S).Left against FieldAlias(S).Adversary;
+    FieldAlias(S).Right against FieldAlias(S).Adversary;

@@ -1,0 +1,16 @@
+// A local that shadows a method parameter is ill-formed.
+import 'ParameterShadowing.game';
+
+proof:
+
+let:
+    Int n;
+
+assume:
+
+theorem:
+    ParameterShadowing(n);
+
+games:
+    ParameterShadowing(n).Left against ParameterShadowing(n).Adversary;
+    ParameterShadowing(n).Right against ParameterShadowing(n).Adversary;

@@ -1,0 +1,16 @@
+// F-356: claims Reassign.Left and Reassign.Right are interchangeable. They
+// are not (see reassign.game).
+
+import 'reassign.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    Reassign(q);
+
+games:
+    Reassign(q).Left against Reassign(q).Adversary;
+    Reassign(q).Right against Reassign(q).Adversary;

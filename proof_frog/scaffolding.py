@@ -39,9 +39,10 @@ def scaffold_intermediate_game(
     Raises ValueError when the theorem cannot be parsed or its game file
     cannot be found in the engine namespace.
     """
-    theorem = proof_file.theorem
-    if theorem is None:
+    if proof_file.theorem is None:
         raise ValueError("Proof has no theorem.")
+    # For an event theorem the scaffolds are built over the game pair.
+    theorem = frog_ast.notion_game(proof_file.theorem)
     theorem_name = theorem.name
     if theorem_name not in engine.definition_namespace:
         raise ValueError(f"Theorem game '{theorem_name}' not found in proof's imports.")
@@ -146,9 +147,10 @@ def scaffold_reduction(  # pylint: disable=too-many-arguments,too-many-positiona
             f" Available sides: {valid}."
         )
 
-    theorem = proof_file.theorem
-    if theorem is None:
+    if proof_file.theorem is None:
         raise ValueError("Proof has no theorem.")
+    # For an event theorem the scaffolds are built over the game pair.
+    theorem = frog_ast.notion_game(proof_file.theorem)
     theorem_name = theorem.name
     if theorem_name not in engine.definition_namespace:
         raise ValueError(f"Theorem game '{theorem_name}' not found in proof's imports.")
@@ -235,11 +237,13 @@ def scaffold_reduction_hop(  # pylint: disable=too-many-arguments,too-many-posit
             f"assumption_index {assumption_index} out of range "
             f"(proof has {len(proof_file.assumptions)} assumptions)."
         )
-    assumption = proof_file.assumptions[assumption_index]
+    # An event assumption licenses a hop over its game pair.
+    assumption = frog_ast.notion_game(proof_file.assumptions[assumption_index])
 
-    theorem = proof_file.theorem
-    if theorem is None:
+    if proof_file.theorem is None:
         raise ValueError("Proof has no theorem.")
+    # For an event theorem the scaffolds are built over the game pair.
+    theorem = frog_ast.notion_game(proof_file.theorem)
 
     if assumption.name not in engine.definition_namespace:
         raise ValueError(

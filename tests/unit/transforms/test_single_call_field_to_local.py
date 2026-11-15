@@ -468,3 +468,22 @@ def test_f058_is_written_detects_element_and_uniq_writes() -> None:
     # Unrelated write must not match.
     other = frog_parser.parse_method("Void f() { y = 5; }")
     assert _is_written_in_recursive(other.block, "M") is False
+
+
+def test_f349_sample_after_possible_initialize_return_not_moved() -> None:
+    # Initialize may return before `k <- ...`, leaving k = 0^lambda; moving
+    # the sample into CTXT would make that trace return a fresh value.
+    game = frog_parser.parse_game("""
+        Game Test() {
+            BitString<lambda> k = 0^lambda;
+            Bool Initialize() {
+                Bool c <- Bool;
+                if (c) { return true; }
+                k <- BitString<lambda>;
+                return false;
+            }
+            BitString<lambda> CTXT(BitString<lambda> m) {
+                return m + k;
+            }
+        }""")
+    assert _single_call_field_to_local(game) == game

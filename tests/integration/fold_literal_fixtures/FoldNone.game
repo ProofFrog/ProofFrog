@@ -1,0 +1,26 @@
+// Must SUCCEED. IsNone([x, b]) inlines to `[x, b] == None` over method
+// parameters, which folds to false.
+import 'Chan.primitive';
+
+Game Real(Chan C) {
+    Int count;
+    Void Initialize() { count = 0; }
+    [Int, Bool]? Query(Int x, Bool b) {
+        count = count + x;
+        if (C.IsNone([x, b])) {
+            return None;
+        }
+        return [count, b];
+    }
+}
+
+Game Random(Chan C) {
+    Int count;
+    Void Initialize() { count = 0; }
+    [Int, Bool]? Query(Int x, Bool b) {
+        count = count + x;
+        return [count, b];
+    }
+}
+
+export as FoldNone;

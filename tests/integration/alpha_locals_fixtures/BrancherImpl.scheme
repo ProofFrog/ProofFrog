@@ -1,0 +1,16 @@
+import 'Brancher.primitive';
+import 'Source.primitive';
+
+Scheme BrancherImpl(Source S) extends Brancher {
+    deterministic Int Extra() {
+        Int extra = 0;
+        return extra;
+    }
+
+    Int Maybe(Bool choose) {
+        if (choose) {
+            return S.Draw();
+        }
+        return S.Draw();
+    }
+}

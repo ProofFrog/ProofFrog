@@ -1,0 +1,21 @@
+// Positive control for F-356: a scheme field whose initializer already has
+// the field's type is still read as its initializer, so with TypedModField
+// TypedSchemeFieldPair.Left and TypedSchemeFieldPair.Right are
+// interchangeable.
+import 'ModTest.primitive';
+import 'TypedModField.scheme';
+import 'TypedSchemeFieldPair.game';
+
+proof:
+
+let:
+    Int q;
+    ModInt<q> x;
+    ModTest T = TypedModField(q, x);
+
+theorem:
+    TypedSchemeFieldPair(T, q, x);
+
+games:
+    TypedSchemeFieldPair(T, q, x).Left against TypedSchemeFieldPair(T, q, x).Adversary;
+    TypedSchemeFieldPair(T, q, x).Right against TypedSchemeFieldPair(T, q, x).Adversary;

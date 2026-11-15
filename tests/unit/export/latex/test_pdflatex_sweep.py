@@ -3,9 +3,10 @@
 The manual export+compile sweep that surfaced the v3 bug classes (double
 sub/superscripts, unescaped specials, macro/builtin collisions, math-unsafe
 fallbacks) is promoted here into a permanent regression gate: every
-``examples/**/*.proof`` is exported (symbolic composition) and compiled under
-``pdflatex``, plus a spread of ``.scheme`` / ``.game`` modules that exercise
-the side-by-side game path and tuple-destructuring rendering.
+``examples/**/*.proof`` and fixture proof is exported (symbolic composition)
+and compiled under ``pdflatex``, plus a spread of ``.scheme`` / ``.game``
+modules that exercise the side-by-side game path and tuple-destructuring
+rendering.
 
 Skipped entirely unless ``pdflatex`` is on PATH, so it is a no-op for
 contributors and CI images without a TeX install. Marked ``slow`` so the whole
@@ -32,7 +33,9 @@ pytestmark = [
 ]
 
 PROOFS = sorted(
-    p.relative_to(REPO).as_posix() for p in (REPO / "examples").glob("**/*.proof")
+    p.relative_to(REPO).as_posix()
+    for root in ("examples", "tests/unit/export/latex/fixtures")
+    for p in (REPO / root).glob("**/*.proof")
 )
 
 # Module files spanning the new side-by-side two-game rendering, schemes with

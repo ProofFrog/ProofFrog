@@ -1,0 +1,15 @@
+// Proof for Inl3.game (target, hypothesis and expected outcome in its
+// header).
+import 'Inl3.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    Inl3(q);
+
+games:
+    Inl3(q).Left against Inl3(q).Adversary;
+    Inl3(q).Right against Inl3(q).Adversary;

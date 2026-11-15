@@ -1,0 +1,42 @@
+// CrossMethodFieldAlias (F-177). In Real's Query, P.f(t) is evaluated before
+// t = x0, while t still holds Int's unspecified default d
+// (FROGLANG_REFERENCE.md section 6.9), so Query returns P.f(d) + x0. Ideal's
+// Query returns c + x0 = P.f(x0) + x0. Distinguisher: compare Query() - x0
+// with Reveal(); they always match in Ideal, and differ in Real whenever
+// P.f(d) != P.f(x0). The pass recorded t -> x0 without its position and
+// replaced the early P.f(t) by the cached field c.
+import 'Det.primitive';
+
+Game Real(Det P, Int x0) {
+    Int c;
+    Void Initialize() {
+        c = P.f(x0);
+    }
+    Int Reveal() {
+        return c;
+    }
+    Int Query() {
+        Int t;
+        Int r = P.f(t);
+        t = x0;
+        return r + t;
+    }
+}
+
+Game Ideal(Det P, Int x0) {
+    Int c;
+    Void Initialize() {
+        c = P.f(x0);
+    }
+    Int Reveal() {
+        return c;
+    }
+    Int Query() {
+        Int t;
+        Int r = c;
+        t = x0;
+        return r + t;
+    }
+}
+
+export as ReadBeforeWrite;

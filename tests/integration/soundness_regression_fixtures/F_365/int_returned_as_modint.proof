@@ -1,0 +1,15 @@
+// Target: the residual Z3 equivalence check. See IntReturnedAsModInt.game.
+// Expected: Proof Failed (no crash).
+import 'IntReturnedAsModInt.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    IntReturnedAsModInt(q);
+
+games:
+    IntReturnedAsModInt(q).Left against IntReturnedAsModInt(q).Adversary;
+    IntReturnedAsModInt(q).Right against IntReturnedAsModInt(q).Adversary;

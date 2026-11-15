@@ -240,7 +240,15 @@ class ExprRenderer:
             head = self.macros.register_algorithm(expr.name)
             if not expr.args:
                 return head
-            rendered_args = [self._render(a) for a in expr.args]
+            # Module arguments (`E`) are macros, as in the proof's game headings.
+            rendered_args = [
+                (
+                    self.macros.register_algorithm(a.name)
+                    if isinstance(a, frog_ast.Variable) and self._is_module_name(a.name)
+                    else self._render(a)
+                )
+                for a in expr.args
+            ]
             return f"{head}({', '.join(rendered_args)})"
         # ConcreteGame (`G(params).Side`) in expression position, e.g. as the
         # object of a `.count` field access in an assumption expression.

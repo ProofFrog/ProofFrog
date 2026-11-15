@@ -1,0 +1,16 @@
+import 'Det.primitive';
+import 'ReadBeforeWrite.game';
+
+proof:
+
+let:
+    Int lambda;
+    Int x0;
+    Det P = Det(lambda);
+
+theorem:
+    ReadBeforeWrite(P, x0);
+
+games:
+    ReadBeforeWrite(P, x0).Real against ReadBeforeWrite(P, x0).Adversary;
+    ReadBeforeWrite(P, x0).Ideal against ReadBeforeWrite(P, x0).Adversary;

@@ -1,0 +1,21 @@
+// Both games write v into M[k] and return the entry; Left goes through a
+// local copy of v.
+
+Game Left() {
+    Map<Int, Int> M;
+    Int O(Int k, Int v) {
+        Int w = v;
+        M[k] = w;
+        return M[k];
+    }
+}
+
+Game Right() {
+    Map<Int, Int> M;
+    Int O(Int k, Int v) {
+        M[k] = v;
+        return M[k];
+    }
+}
+
+export as ElementWrite;

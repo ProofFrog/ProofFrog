@@ -1,0 +1,5 @@
+// A primitive whose method takes an optional tuple, so that inlining a call
+// with a tuple-literal argument produces a null guard on that literal.
+Primitive Probe(Int lambda) {
+    Bool IsNone([Int, Bool]? s);
+}

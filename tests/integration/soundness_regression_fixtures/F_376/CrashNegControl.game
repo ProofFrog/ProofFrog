@@ -1,0 +1,17 @@
+// F-376 control: Left and Right are the same game, so the hop is a true
+// equivalence. With a step assumption, Apply Assumptions handed the Int
+// negation -n to the solver and the proof aborted, losing the true hop.
+// Expected: Proof Succeeded!
+Game Left() {
+    Int Probe(Int n) {
+        return -n;
+    }
+}
+
+Game Right() {
+    Int Probe(Int n) {
+        return -n;
+    }
+}
+
+export as CrashNegControl;

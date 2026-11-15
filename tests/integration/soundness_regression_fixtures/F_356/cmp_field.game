@@ -1,0 +1,23 @@
+// F-356: `f = q;` into a ModInt<q> field stores q mod q = 0, so Left's Test
+// returns true, while Right's compares the integer q with 0 (false for
+// q = 1). The engine used to read f as q in Test (Inline Single-Use Field).
+Game Left(Int q) {
+    ModInt<q> f;
+    Void Initialize() {
+        f = q;
+    }
+    Bool Test() {
+        ModInt<q> z = 0;
+        return f == z;
+    }
+}
+
+Game Right(Int q) {
+    Void Initialize() {
+    }
+    Bool Test() {
+        return q == 0;
+    }
+}
+
+export as CmpField;

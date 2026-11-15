@@ -1,0 +1,15 @@
+// Proof for WrittenQControl.game (positive control; see its header).
+import 'sampler.primitive';
+import 'WrittenQControl.game';
+
+proof:
+
+let:
+    Sampler S = Sampler();
+
+theorem:
+    WrittenQControl(S);
+
+games:
+    WrittenQControl(S).Real against WrittenQControl(S).Adversary;
+    WrittenQControl(S).Random against WrittenQControl(S).Adversary;

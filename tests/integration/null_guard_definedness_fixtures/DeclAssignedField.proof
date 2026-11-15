@@ -1,0 +1,21 @@
+// Single-hop claim DeclAssignedField.Real -> DeclAssignedField.Random with no assumptions.
+// See DeclAssignedField.game for the expected outcome.
+import 'Probe.primitive';
+import 'ProbeImpl.scheme';
+import 'DeclAssignedField.game';
+
+proof:
+
+let:
+    Int lambda;
+    ProbeImpl C = ProbeImpl(lambda);
+
+assume:
+
+theorem:
+    DeclAssignedField(C);
+
+games:
+    DeclAssignedField(C).Real against DeclAssignedField(C).Adversary;
+
+    DeclAssignedField(C).Random against DeclAssignedField(C).Adversary;

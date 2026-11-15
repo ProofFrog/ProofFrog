@@ -1,0 +1,43 @@
+import 'I.primitive';
+
+Game Left(I F, Int n) {
+    BitString<n> T;
+    BitString<n> Fd = 0^n;
+    Bool Initialize() {
+        T <- BitString<n>;
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        Fd = F.inj(T);
+        return false;
+    }
+    Bool Test() {
+        return Fd == F.inj(T);
+    }
+    BitString<n> Peek() {
+        return Fd;
+    }
+}
+
+Game Right(I F, Int n) {
+    BitString<n> T;
+    BitString<n> Fd = 0^n;
+    Bool Initialize() {
+        T <- BitString<n>;
+        Bool c <- Bool;
+        if (c) {
+            return true;
+        }
+        Fd = F.inj(T);
+        return false;
+    }
+    Bool Test() {
+        return true;
+    }
+    BitString<n> Peek() {
+        return Fd;
+    }
+}
+
+export as Ie;

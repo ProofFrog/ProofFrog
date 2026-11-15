@@ -247,6 +247,70 @@ def test_h_referenced_in_game_is_noop() -> None:
     )
 
 
+def test_h_referenced_in_field_initializer_is_noop() -> None:
+    # A field initializer queries H (violates P-5): F is independent of y,
+    # but H(x) would not be.
+    _apply_and_expect_unchanged(
+        """
+        Game G() {
+            Function<BitString<8>, BitString<16>> F;
+            BitString<16> y = H(0^8);
+            Void Initialize() {
+                F <- Function<BitString<8>, BitString<16>>;
+            }
+            BitString<16> Peek() { return y; }
+            BitString<16> Hash(BitString<8> x) { return F(x); }
+        }
+        """,
+        _ctx(sampled={"H": _BS8_TO_BS16}),
+    )
+
+
+def test_f_read_in_field_initializer_is_noop() -> None:
+    # A field initializer reads F before its sample; the rewrite would drop
+    # the field F and leave that read naming nothing.
+    _apply_and_expect_unchanged(
+        """
+        Game G() {
+            Function<BitString<8>, BitString<16>> F;
+            BitString<16> y = F(0^8);
+            Void Initialize() {
+                F <- Function<BitString<8>, BitString<16>>;
+            }
+            BitString<16> Peek() { return y; }
+            BitString<16> Hash(BitString<8> x) { return F(x); }
+        }
+        """,
+        _ctx(sampled={"H": _BS8_TO_BS16}),
+    )
+
+
+def test_unrelated_field_initializer_still_rewrites() -> None:
+    _apply_and_expect(
+        """
+        Game G() {
+            Function<BitString<8>, BitString<16>> F;
+            BitString<16> y = 0^16;
+            Void Initialize() {
+                F <- Function<BitString<8>, BitString<16>>;
+            }
+            BitString<16> Peek() { return y; }
+            BitString<16> Hash(BitString<8> x) { return F(x); }
+        }
+        """,
+        """
+        Game G() {
+            BitString<16> y = 0^16;
+            Void Initialize() {
+            }
+            BitString<16> Peek() { return y; }
+            BitString<16> Hash(BitString<8> x) { return H(x); }
+        }
+        """,
+        _ctx(sampled={"H": _BS8_TO_BS16}),
+    )
+
+
 def test_f_reassigned_outside_initialize_is_noop() -> None:
     # F is reassigned in an oracle → violates P-2.
     _apply_and_expect_unchanged(

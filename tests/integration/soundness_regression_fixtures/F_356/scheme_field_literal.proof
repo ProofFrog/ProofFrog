@@ -1,0 +1,21 @@
+// F-356: claims LiteralSchemeFieldPair.Left and LiteralSchemeFieldPair.Right
+// are interchangeable with LiteralModField; they are not (see
+// LiteralModField.scheme). The engine cannot read the scheme's field f as
+// its Int initializer, so the sound outcome is a type error naming the
+// field.
+import 'ModTest.primitive';
+import 'LiteralModField.scheme';
+import 'LiteralSchemeFieldPair.game';
+
+proof:
+
+let:
+    Int q;
+    ModTest T = LiteralModField(q);
+
+theorem:
+    LiteralSchemeFieldPair(T);
+
+games:
+    LiteralSchemeFieldPair(T).Left against LiteralSchemeFieldPair(T).Adversary;
+    LiteralSchemeFieldPair(T).Right against LiteralSchemeFieldPair(T).Adversary;

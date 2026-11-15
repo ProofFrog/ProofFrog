@@ -1,3 +1,5 @@
+import pytest
+
 from proof_frog.diagnostics import (
     classify_diff,
     match_near_misses,
@@ -7,6 +9,9 @@ from proof_frog.diagnostics import (
     detect_field_order_diff,
     detect_extra_temporary_diff,
     detect_if_condition_reorder_diff,
+    detect_unfolded_negation_diff,
+    detect_possibly_empty_draw_diff,
+    detect_power_of_zero_diff,
     DiffHunk,
 )
 from proof_frog.transforms._base import NearMiss
@@ -249,3 +254,145 @@ def test_detect_if_condition_reorder_false():
         ],
     )
     assert detect_if_condition_reorder_diff(hunk) is False
+
+
+# --- Unfolded negation detector ---
+
+
+@pytest.mark.parametrize(
+    "current, next_line",
+    [
+        ("return arg1 + -3;", "return arg1 - 3;"),
+        ("return 2 + -2;", "return 0;"),
+        ("Int v1 = n * -2;", "Int v1 = 0 - 2 * n;"),
+        ("return n + -n;", "return 0;"),
+        ("return G.lambda + -1;", "return G.lambda - 1;"),
+    ],
+)
+def test_detect_unfolded_negation(current: str, next_line: str) -> None:
+    """Equal Int arithmetic, kept apart only by a negated operand."""
+    hunk = DiffHunk(
+        method="Test",
+        current_lines=[f"-    {current}"],
+        next_lines=[f"+    {next_line}"],
+    )
+    assert detect_unfolded_negation_diff(hunk) is True
+    reversed_hunk = DiffHunk(
+        method="Test",
+        current_lines=[f"-    {next_line}"],
+        next_lines=[f"+    {current}"],
+    )
+    assert detect_unfolded_negation_diff(reversed_hunk) is True
+
+
+@pytest.mark.parametrize(
+    "current, next_line",
+    [
+        ("return arg1 + -3;", "return arg1 - 4;"),  # not equal
+        ("return arg1 + 3;", "return 3 + arg1;"),  # no negation
+        ("return arg1 + -3;", "return arg1 / 1 - 3;"),  # division
+        ("Int v1 = arg1 + -3;", "Int v2 = arg1 - 3;"),  # different targets
+        ("return arg1 + -3;", "Int v1 = arg1 - 3;"),
+        ("return -(arg1 + 3);", "return 0 - arg1 - 3;"),  # not a constant
+        ("return k + -m;", "return [k, m];"),  # not arithmetic
+    ],
+)
+def test_detect_unfolded_negation_false(current: str, next_line: str) -> None:
+    hunk = DiffHunk(
+        method="Test",
+        current_lines=[f"-    {current}"],
+        next_lines=[f"+    {next_line}"],
+    )
+    assert detect_unfolded_negation_diff(hunk) is False
+
+
+def test_detect_unfolded_negation_needs_single_lines() -> None:
+    hunk = DiffHunk(
+        method="Test",
+        current_lines=["-    Int v1 = arg1 + -3;", "-    return v1;"],
+        next_lines=["+    return arg1 - 3;"],
+    )
+    assert detect_unfolded_negation_diff(hunk) is False
+
+
+def test_diagnose_failure_reports_unfolded_negation() -> None:
+    diff_text = (
+        "Methods that differ: Test\n"
+        "--- Test (current)\n"
+        "+++ Test (next)\n"
+        "  @@ -1,3 +1,3 @@\n"
+        "  -    return arg1 + -3;\n"
+        "  +    return arg1 - 3;"
+    )
+    diagnosis = diagnose_failure(diff_text, [], [])
+    assert len(diagnosis.engine_limitations) == 1
+    assert "does not evaluate a negation" in diagnosis.engine_limitations[0]
+    assert diagnosis.explanations[0].engine_limitation is True
+
+
+@pytest.mark.parametrize(
+    "current_lines, next_lines",
+    [
+        # A dead exclusion draw kept on one side.
+        (
+            ["-    BitString<1> v1 <- BitString<1> \\ field1;", "-    return 0;"],
+            ["+    return 0;"],
+        ),
+        (
+            ["-    return 0;"],
+            ["+    BitString<n> v1 <-uniq[field1] BitString<n>;", "+    return 0;"],
+        ),
+    ],
+)
+def test_detect_possibly_empty_draw(
+    current_lines: list[str], next_lines: list[str]
+) -> None:
+    hunk = DiffHunk(method="Draw", current_lines=current_lines, next_lines=next_lines)
+    assert detect_possibly_empty_draw_diff(hunk) is True
+
+
+@pytest.mark.parametrize(
+    "current_lines, next_lines",
+    [
+        # A draw from a type is not the reason.
+        (
+            ["-    BitString<1> v1 <- BitString<1>;", "-    return 0;"],
+            ["+    return 0;"],
+        ),
+        # The other lines differ too.
+        (
+            ["-    BitString<1> v1 <- BitString<1> \\ field1;", "-    return 1;"],
+            ["+    return 0;"],
+        ),
+        # The same draw on both sides, in the same place.
+        (
+            ["-    BitString<1> v1 <- BitString<1> \\ field1;", "-    return 1;"],
+            ["+    BitString<1> v1 <- BitString<1> \\ field1;", "+    return 0;"],
+        ),
+    ],
+)
+def test_detect_possibly_empty_draw_false(
+    current_lines: list[str], next_lines: list[str]
+) -> None:
+    hunk = DiffHunk(method="Draw", current_lines=current_lines, next_lines=next_lines)
+    assert detect_possibly_empty_draw_diff(hunk) is False
+
+
+@pytest.mark.parametrize(
+    "current_lines, next_lines, expected",
+    [
+        # F-364: a kept ModInt power of zero against an expression without one.
+        (["-    return arg1 ^ 0 + arg2;"], ["+    return 1 + arg2;"], True),
+        (["-    return arg2;"], ["+    return arg1 ^ 0 * arg3 + arg2;"], True),
+        # The same power on both sides is not the difference.
+        (["-    return arg1 ^ 0 + arg2;"], ["+    return arg1 ^ 0 + arg3;"], False),
+        # A bit-string literal 0^n is not a power, and 05 is not the exponent 0.
+        (["-    return 0^lambda;"], ["+    return arg1;"], False),
+        (["-    return arg1 ^ 05;"], ["+    return arg1;"], False),
+    ],
+)
+def test_detect_power_of_zero(
+    current_lines: list[str], next_lines: list[str], expected: bool
+) -> None:
+    hunk = DiffHunk(method="Probe", current_lines=current_lines, next_lines=next_lines)
+    assert detect_power_of_zero_diff(hunk) is expected

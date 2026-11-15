@@ -1,0 +1,18 @@
+// F-356: Left runs the scheme's test, which for ArgTester and RetTester
+// compares b reduced modulo q with 0; Right compares the integer b with 0.
+// With q = 1 and b = 1, Left returns true and Right false.
+import 'Tester.primitive';
+
+Game Left(Tester T) {
+    Bool O(Int b) {
+        return T.Test(b);
+    }
+}
+
+Game Right(Tester T) {
+    Bool O(Int b) {
+        return b == 0;
+    }
+}
+
+export as TestPair;

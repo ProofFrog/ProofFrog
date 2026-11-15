@@ -1,0 +1,23 @@
+// F-371 (method inliner). Test passes one draw to Same, which compares its
+// parameter with itself, so Left always returns true; Right compares two
+// independent draws. The inliner substituted the argument this.Draw() for
+// both reads of the parameter, which made two draws.
+// Sound engine: Proof Failed! (advantage 1 - 2^-n).
+import 'Caller.primitive';
+import 'Hash.primitive';
+import 'Callers.scheme';
+import 'SameDrawPair.game';
+
+proof:
+
+let:
+    Int n;
+    Hash H;
+    Caller T = Callers(n, H);
+
+theorem:
+    SameDrawPair(T, n);
+
+games:
+    SameDrawPair(T, n).Left against SameDrawPair(T, n).Adversary;
+    SameDrawPair(T, n).Right against SameDrawPair(T, n).Adversary;

@@ -1,0 +1,22 @@
+// The proof establishes advantage 0 and claims the bound 1 - (2 - 1 + 1).
+// The inner 2 - 1 + 1 is (2 - 1) + 1 = 2, so the claim is -1 and is not an
+// upper bound. When + bound tighter than - the inner term read as
+// 2 - (1 + 1) = 0, the claim as 1, and it was reported verified.
+import 'Identical.game';
+
+proof:
+
+let:
+    Int lambda;
+
+assume:
+
+theorem:
+    Identical(lambda);
+
+bound:
+    1 - (2 - 1 + 1);
+
+games:
+    Identical(lambda).Left against Identical(lambda).Adversary;
+    Identical(lambda).Right against Identical(lambda).Adversary;

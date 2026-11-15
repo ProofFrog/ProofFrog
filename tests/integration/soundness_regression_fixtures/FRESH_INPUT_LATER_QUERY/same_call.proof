@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'SameCall.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    SameCall(S);
+
+games:
+    SameCall(S).Left against SameCall(S).Adversary;
+    SameCall(S).Right against SameCall(S).Adversary;

@@ -1,0 +1,63 @@
+// Target pass: HoistGroupExpToInitialize (transforms/inlining.py L2664-3009).
+// Attack A1 (FieldAccess-suppressed free vars), full-pipeline reachable form.
+//
+// The exponent |M.keys| reads adversary-mutable state, but
+// VariableCollectionVisitor suppresses collection inside the FieldAccess
+// M.keys, so the pass sees no free variables in the exponent and RELOCATES
+// its evaluation from call-time (Chal) to Initialize-time. M is empty at
+// Initialize (Write is a separate oracle), so the cached exponent is 0.
+//
+// The base h = G.generator ^ s references the Initialize-local s, so
+// InlineSingleUseField cannot inline h out of Initialize before the hoist
+// runs -- the hoist pass is load-bearing here (unlike a pure-constant base,
+// which gets inlined and folds both sides to the live form).
+//
+// Right is the literal post-hoist image of Left. Its cache _hge_0 also
+// references the Init-local s, so InlineSingleUseField cannot un-freeze it.
+//
+// Distinguisher refuting Left == Right: Write(1, 1); Write(2, 2); Chal().
+//   Left:  Chal returns (g^s)^|{1,2}| = g^(2s).
+//   Right: Chal returns cached (g^s)^0 = G.identity.
+// For uniform s these differ with overwhelming probability; advantage ~1.
+// If the pass is SOUND the proof Atk1.proof must FAIL; if UNSOUND as
+// prosecuted, it is accepted.
+
+Game Left(Group G) {
+    GroupElem<G> h;
+    Map<Int, Int> M;
+
+    Void Initialize() {
+        ModInt<G.order> s <- ModInt<G.order>;
+        h = G.generator ^ s;
+    }
+
+    Void Write(Int k, Int v) {
+        M[k] = v;
+    }
+
+    GroupElem<G> Chal() {
+        return h ^ |M.keys|;
+    }
+}
+
+Game Right(Group G) {
+    GroupElem<G> h;
+    Map<Int, Int> M;
+    GroupElem<G> _hge_0;
+
+    Void Initialize() {
+        ModInt<G.order> s <- ModInt<G.order>;
+        h = G.generator ^ s;
+        _hge_0 = (G.generator ^ s) ^ |M.keys|;
+    }
+
+    Void Write(Int k, Int v) {
+        M[k] = v;
+    }
+
+    GroupElem<G> Chal() {
+        return _hge_0;
+    }
+}
+
+export as Atk1;

@@ -1,0 +1,34 @@
+// Must SUCCEED. Control for UndefField: Initialize assigns f, so the read of
+// f is always defined and `[x, f] == None` folds to false.
+import 'Chan.primitive';
+
+Game Real(Chan C) {
+    Bool f;
+    Void Initialize() {
+        f = false;
+    }
+    Void Store(Bool v) {
+        f = v;
+    }
+    [Int, Bool]? Query(Int x) {
+        if (C.IsNone([x, f])) {
+            return None;
+        }
+        return [x, true];
+    }
+}
+
+Game Random(Chan C) {
+    Bool f;
+    Void Initialize() {
+        f = false;
+    }
+    Void Store(Bool v) {
+        f = v;
+    }
+    [Int, Bool]? Query(Int x) {
+        return [x, true];
+    }
+}
+
+export as DefinedField;

@@ -1,0 +1,12 @@
+// F-374 (scheme parameter): instantiated as ParamModTest(q, q), the
+// parameter x : ModInt<q> holds q reduced modulo q, that is 0, so Test
+// always returns true; read as the Int q it is the integer comparison
+// q + q == q. The engine reads a scheme parameter as its argument, so such
+// an instantiation is now a type error.
+import 'ModTest.primitive';
+
+Scheme ParamModTest(Int q, ModInt<q> x) extends ModTest {
+    Bool Test() {
+        return x + x == x;
+    }
+}

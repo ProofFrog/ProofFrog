@@ -1,0 +1,14 @@
+// Negative: the chain never leaves the pair, so the flag is still reachable
+// and the terminal hop must fail.
+import 'BadGuess.game';
+
+proof:
+
+let:
+    Set S;
+
+theorem:
+    event bad of BadGuess(S);
+
+games:
+    BadGuess(S).Right against BadGuess(S).Adversary;

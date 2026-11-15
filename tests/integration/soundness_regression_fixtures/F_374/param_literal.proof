@@ -1,0 +1,15 @@
+// F-374: claims ParamLiteral(1).Left and ParamLiteral(1).Right are
+// interchangeable. They are not (see ParamLiteral.game). Sound engine:
+// Proof Failed!
+import 'ParamLiteral.game';
+
+proof:
+
+let:
+
+theorem:
+    ParamLiteral(1);
+
+games:
+    ParamLiteral(1).Left against ParamLiteral(1).Adversary;
+    ParamLiteral(1).Right against ParamLiteral(1).Adversary;

@@ -1,0 +1,12 @@
+// The product type below is drawn as a whole: its first component is Int, which is unbounded.
+import 'Pairs.primitive';
+
+Scheme IntPairs(Int n) extends Pairs {
+    Int n = n;
+    Set Pair = [Int, BitString<n>];
+
+    Pair Draw() {
+        Pair p <- Pair;
+        return p;
+    }
+}

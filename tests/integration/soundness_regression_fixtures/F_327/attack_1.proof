@@ -1,0 +1,14 @@
+// F-327: claims Attack1.Real and Attack1.Ideal are interchangeable. They are
+// not: after Add(0b0); Add(0b1); SetGuard(), Real's Draw does not complete
+// and Ideal's returns 1 (see attack_1.game).
+
+import 'attack_1.game';
+
+proof:
+
+theorem:
+    Attack1();
+
+games:
+    Attack1().Real against Attack1().Adversary;
+    Attack1().Ideal against Attack1().Adversary;

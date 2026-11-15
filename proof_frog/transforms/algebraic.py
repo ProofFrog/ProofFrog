@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import copy
 import functools
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 from .. import frog_ast
 from ..visitors import (
+    lvalue_base_name,
     Transformer,
     BlockTransformer,
     SearchVisitor,
@@ -25,28 +27,44 @@ from ..visitors import (
     build_method_type_map,
     MethodScopedTypeMapMixin,
     reassigns_or_rebinds,
+    referenced_variable_names,
 )
 from ._base import (
     TransformPass,
     PipelineContext,
     NearMiss,
     has_nondeterministic_call,
+    calls_are_deterministic,
     _lookup_primitive_method,
+    may_return_before,
+    method_bound_names,
 )
+from ._coercion import coercing_store_names_for, note_coercing_store
+from ._algebra import Normalizer, infer_type, int_sensitive_operands, node_count
+from ._definedness import method_binder_counts, note_redeclared_name, redeclared_names
 from ._ordering import node_sort_key
 from ._wrappers import GroupExponentWrapper, WrapperShape, _GroupExpShape
 
 
 def _count_field_assigns(node: frog_ast.ASTNode, name: str) -> int:
-    """Count assignments/samples to *name* recursively in *node*."""
+    """Count writes to *name* recursively in *node*.
+
+    Element and slice writes (``M[k] = v``) mutate *name* and count, as does
+    a ``<-uniq[name]`` draw, which inserts into *name* (F-343/F-344: counting
+    only bare-Variable targets let a map or set field look unchanged).
+    """
     count = 0
 
     def _visit(n: frog_ast.ASTNode) -> bool:
         nonlocal count
         if (
             isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
-            and isinstance(n.var, frog_ast.Variable)
-            and n.var.name == name
+            and lvalue_base_name(n.var) == name
+        ):
+            count += 1
+        if (
+            isinstance(n, frog_ast.UniqueSample)
+            and lvalue_base_name(n.unique_set) == name
         ):
             count += 1
         return False
@@ -763,6 +781,29 @@ def _is_integer_literal(expr: frog_ast.Expression, value: int) -> bool:
     return isinstance(expr, frog_ast.Integer) and expr.num == value
 
 
+def _is_literal_arithmetic(expr: frog_ast.Expression) -> bool:
+    """An expression built from integer literals alone (``0``, ``0 + 0``),
+    which Symbolic Computation evaluates as Int arithmetic."""
+    if isinstance(expr, frog_ast.Integer):
+        return True
+    if isinstance(expr, frog_ast.UnaryOperation):
+        return expr.operator == frog_ast.UnaryOperators.MINUS and (
+            _is_literal_arithmetic(expr.expression)
+        )
+    if isinstance(expr, frog_ast.BinaryOperation):
+        return expr.operator in (
+            frog_ast.BinaryOperators.ADD,
+            frog_ast.BinaryOperators.SUBTRACT,
+            frog_ast.BinaryOperators.MULTIPLY,
+            frog_ast.BinaryOperators.DIVIDE,
+            frog_ast.BinaryOperators.EXPONENTIATE,
+        ) and (
+            _is_literal_arithmetic(expr.left_expression)
+            and _is_literal_arithmetic(expr.right_expression)
+        )
+    return False
+
+
 def _modulus_is_group_order(
     modulus: frog_ast.Expression,
     base: Optional[frog_ast.Expression],
@@ -886,7 +927,24 @@ class ModIntSimplificationTransformer(MethodScopedTypeMapMixin):
     - Multiplicative zero: a * 0 = 0, 0 * a = 0
     - Additive inverse: a - a = 0 (only when a is pure/deterministic)
     - Double negation: -(-a) = a
-    - Exponentiation: a ^ 0 = 1, a ^ 1 = a
+    - Exponentiation: a ^ 1 = a; a ^ 0 = 1 only where the value is converted
+      to its own ModInt type (see below)
+
+    A rewrite whose result is an integer literal leaves an ``Int`` where a
+    ``ModInt<q>`` value was, and every later reader takes that literal as an
+    ``Int`` (Symbolic Computation folds ``1 + 1`` to ``2``; the Z3 layer
+    compares it as an integer). That is exact for 0, which is 0 in every
+    modulus, but not for 1: ``a ^ 0`` is the ModInt one, which is 0 when
+    q = 1, and two copies of it add to 0 when q = 2, while ``1 + 1 == 0`` is
+    false (F-364). So ``a ^ 0`` becomes the literal 1 only as the whole
+    value of a return or store of the same ModInt type, which reduces the
+    literal mod q again, and as a factor of a product with a ModInt operand
+    (``a ^ 0 * b`` is ``b``). Elsewhere it is kept, with a near miss. A power
+    whose base the rules reduce to the literal 0 (``(a - a) ^ 0``) keeps its
+    base as written, so it is not left as the Int ``0 ^ 0``. Likewise a
+    division whose operands the rules reduce to literals (``(a - a) / (b -
+    b)``) keeps its operands as written, so it is not left as the Int
+    ``0 / 0``.
     """
 
     def __init__(
@@ -894,14 +952,166 @@ class ModIntSimplificationTransformer(MethodScopedTypeMapMixin):
         type_map: NameTypeMap,
         proof_namespace: frog_ast.Namespace | None = None,
         proof_let_types: Optional[NameTypeMap] = None,
+        ctx: PipelineContext | None = None,
     ) -> None:
         self.type_map = type_map
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
+        self._ctx = ctx
+        self._method_name: str | None = None
+        self._return_type: frog_ast.Type | None = None
+        # The value expression of the return or store being transformed, and
+        # the ModInt type it is converted to (None outside such a statement).
+        self._converted_value: frog_ast.Expression | None = None
+        self._converted_type: frog_ast.ModIntType | None = None
 
     def _is_modint_expr(self, expr: frog_ast.Expression) -> bool:
         return isinstance(
             _get_expression_type(expr, self.type_map), frog_ast.ModIntType
+        )
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.ASTNode:
+        saved = (self._method_name, self._return_type)
+        self._method_name = method.signature.name
+        self._return_type = method.signature.return_type
+        try:
+            return super().transform_method(method)
+        finally:
+            self._method_name, self._return_type = saved
+
+    def _transform_converted(
+        self, statement: frog_ast.Statement, value: frog_ast.Expression, target: object
+    ) -> frog_ast.ASTNode:
+        """Transforms *statement*, whose *value* is converted to *target*."""
+        saved = (self._converted_value, self._converted_type)
+        if isinstance(target, frog_ast.ModIntType):
+            self._converted_value, self._converted_type = value, target
+        else:
+            self._converted_value, self._converted_type = None, None
+        try:
+            return self._transform_children(statement)
+        finally:
+            self._converted_value, self._converted_type = saved
+
+    def transform_return_statement(
+        self, return_statement: frog_ast.ReturnStatement
+    ) -> frog_ast.ASTNode:
+        return self._transform_converted(
+            return_statement, return_statement.expression, self._return_type
+        )
+
+    def transform_assignment(self, assignment: frog_ast.Assignment) -> frog_ast.ASTNode:
+        target: object = assignment.the_type
+        if target is None and isinstance(assignment.var, frog_ast.Variable):
+            target = self.type_map.get(assignment.var.name)
+        return self._transform_converted(assignment, assignment.value, target)
+
+    def _is_modint_one(self, expr: frog_ast.Expression) -> bool:
+        """``a ^ 0`` with a ModInt base: the ModInt one of a's type."""
+        return (
+            isinstance(expr, frog_ast.BinaryOperation)
+            and expr.operator == frog_ast.BinaryOperators.EXPONENTIATE
+            and _is_integer_literal(expr.right_expression, 0)
+            and self._is_modint_expr(expr.left_expression)
+        )
+
+    def _absorb_modint_one(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> Optional[frog_ast.Expression]:
+        """``a ^ 0 * b`` and ``b * a ^ 0`` are ``b`` for ``b`` of a's ModInt
+        type (in every modulus, q = 1 included). Checked on the operands as
+        written, before ``a ^ 0`` is visited, so it is not reported."""
+        left = binary_operation.left_expression
+        right = binary_operation.right_expression
+        for one, other in ((left, right), (right, left)):
+            if not self._is_modint_one(one) or not self._is_modint_expr(other):
+                continue
+            assert isinstance(one, frog_ast.BinaryOperation)
+            if _get_expression_type(
+                one.left_expression, self.type_map
+            ) == _get_expression_type(other, self.type_map):
+                return self.transform(other)
+        return None
+
+    def _simplify_modint_power(
+        self,
+        binary_operation: frog_ast.BinaryOperation,
+        left: frog_ast.Expression,
+        right: frog_ast.Expression,
+    ) -> frog_ast.Expression:
+        """``a ^ e`` with *a* a ModInt (as written); *left* and *right* are
+        the transformed base and exponent."""
+        if _is_integer_literal(right, 1):
+            return left
+        if not self._is_modint_expr(left):
+            # The base became an Int-typed form (``a - a`` -> ``0``): keep it
+            # as written, so that the power stays ModInt-typed.
+            left = binary_operation.left_expression
+        if not _is_integer_literal(right, 0):
+            return frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.EXPONENTIATE, left, right
+            )
+        if (
+            binary_operation is self._converted_value
+            and _get_expression_type(left, self.type_map) == self._converted_type
+        ):
+            return frog_ast.Integer(1)
+        if self._ctx is not None:
+            self._ctx.near_misses.append(
+                NearMiss(
+                    transform_name="ModInt Simplification",
+                    reason=(
+                        f"'{binary_operation}' not rewritten to 1: it is the "
+                        "ModInt one, not the Int 1 (it is 0 when the modulus "
+                        "is 1, and two copies add to 0 when it is 2), and "
+                        "the literal would be read as an Int here"
+                    ),
+                    location=binary_operation.origin,
+                    suggestion=(
+                        "It becomes 1 only as the whole value of a return or "
+                        "store of its ModInt type, or as a factor of a "
+                        "product with a ModInt operand (a ^ 0 * b becomes b); "
+                        "otherwise write the same power in the other game"
+                    ),
+                    variable=None,
+                    method=self._method_name,
+                )
+            )
+        return frog_ast.BinaryOperation(
+            frog_ast.BinaryOperators.EXPONENTIATE, left, right
+        )
+
+    def _keep_modint_division(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        """A ModInt division whose operands both reduce to integer literals
+        (``(a - a) / (b - b)`` -> ``0 / 0``) keeps its operands as written:
+        the Int division ``0 / 0`` is another unspecified value than the
+        ModInt one, and an Int division by zero written in another game would
+        canonicalize to the same ``0 / 0``."""
+        if self._ctx is not None:
+            self._ctx.near_misses.append(
+                NearMiss(
+                    transform_name="ModInt Simplification",
+                    reason=(
+                        f"Operands of '{binary_operation}' not simplified: "
+                        "both would become Int literals, and the result "
+                        "would be read as an Int division (a ModInt division "
+                        "by zero is another unspecified value than an Int one)"
+                    ),
+                    location=binary_operation.origin,
+                    suggestion=(
+                        "Divide by a ModInt value that is not zero, or write "
+                        "the same division in the other game"
+                    ),
+                    variable=None,
+                    method=self._method_name,
+                )
+            )
+        return frog_ast.BinaryOperation(
+            frog_ast.BinaryOperators.DIVIDE,
+            binary_operation.left_expression,
+            binary_operation.right_expression,
         )
 
     def transform_unary_operation(
@@ -926,6 +1136,10 @@ class ModIntSimplificationTransformer(MethodScopedTypeMapMixin):
     def transform_binary_operation(
         self, binary_operation: frog_ast.BinaryOperation
     ) -> frog_ast.Expression:
+        if binary_operation.operator == frog_ast.BinaryOperators.MULTIPLY:
+            absorbed = self._absorb_modint_one(binary_operation)
+            if absorbed is not None:
+                return absorbed
         transformed = frog_ast.BinaryOperation(
             binary_operation.operator,
             self.transform(binary_operation.left_expression),
@@ -935,12 +1149,24 @@ class ModIntSimplificationTransformer(MethodScopedTypeMapMixin):
         right = transformed.right_expression
         op = transformed.operator
 
+        if op == frog_ast.BinaryOperators.EXPONENTIATE and (
+            self._is_modint_expr(binary_operation.left_expression)
+            or self._is_modint_expr(left)
+        ):
+            return self._simplify_modint_power(binary_operation, left, right)
+
         if not self._is_modint_expr(left) and not self._is_modint_expr(right):
-            # Check for exponentiation where base is ModInt
-            if op != frog_ast.BinaryOperators.EXPONENTIATE:
-                return transformed
-            if not self._is_modint_expr(left):
-                return transformed
+            if (
+                op == frog_ast.BinaryOperators.DIVIDE
+                and _is_literal_arithmetic(left)
+                and _is_literal_arithmetic(right)
+                and (
+                    self._is_modint_expr(binary_operation.left_expression)
+                    or self._is_modint_expr(binary_operation.right_expression)
+                )
+            ):
+                return self._keep_modint_division(binary_operation)
+            return transformed
 
         # Additive identity: a + 0 = a, 0 + a = a
         if op == frog_ast.BinaryOperators.ADD:
@@ -970,13 +1196,6 @@ class ModIntSimplificationTransformer(MethodScopedTypeMapMixin):
                 return frog_ast.Integer(0)
             if _is_integer_literal(left, 0):
                 return frog_ast.Integer(0)
-
-        # Exponentiation identities: a ^ 0 = 1, a ^ 1 = a
-        if op == frog_ast.BinaryOperators.EXPONENTIATE:
-            if _is_integer_literal(right, 0):
-                return frog_ast.Integer(1)
-            if _is_integer_literal(right, 1):
-                return left
 
         return transformed
 
@@ -1523,6 +1742,258 @@ class ModIntSimplification(TransformPass):
                 type_map,
                 proof_namespace=ctx.proof_namespace,
                 proof_let_types=ctx.proof_let_types,
+                ctx=ctx,
+            )
+            .scope_to_game(game, ctx.proof_let_types)
+            .transform(game)
+        )
+
+
+def _holds_its_value(definition: frog_ast.Assignment, type_map: NameTypeMap) -> bool:
+    """True if the local declared by *definition* holds exactly its
+    initializer's value: the declared type is the initializer's type.
+
+    ``ModInt<q> x = b;`` with ``b`` an ``Int`` stores ``b`` reduced modulo
+    ``q``, so a pass that substitutes the initializer for ``x``, or moves it
+    into another expression, would drop that reduction.
+    """
+    value_type = infer_type(definition.value, type_map)
+    return value_type is not None and bool(value_type == definition.the_type)
+
+
+def _note_kept_constants(
+    normalizer: Normalizer, ctx: Optional[PipelineContext], transform_name: str
+) -> None:
+    """Report each ``ModInt`` constant *normalizer* kept as written.
+
+    Its value would need a ``ModInt<q>`` literal, which FrogLang lacks; the
+    ``Int`` literal would drop the reduction mod ``q``, or, for a zero in
+    an ``Int``-sensitive position, make the operation an ``Int`` one.
+    """
+    if ctx is None:
+        return
+    for kept in normalizer.kept_constants:
+        if kept.position is not None:
+            ctx.near_misses.append(
+                NearMiss(
+                    transform_name=transform_name,
+                    reason=(
+                        f"'{kept.expr}' is 0 in ModInt<{kept.modulus}>, kept "
+                        f"as written: it is {kept.position}, where the Int "
+                        "literal 0 would make the operation an Int one"
+                    ),
+                    location=kept.expr.origin,
+                    suggestion=(
+                        "Write the expression without the vanishing term on "
+                        "both sides"
+                    ),
+                    variable=None,
+                    method=None,
+                )
+            )
+            continue
+        if kept.value is None:
+            ctx.near_misses.append(
+                NearMiss(
+                    transform_name=transform_name,
+                    reason=(
+                        f"'{kept.expr}' simplifies in ModInt<{kept.modulus}> "
+                        "only to a polynomial with a constant term or a large "
+                        "coefficient, kept as written: FrogLang has no "
+                        f"ModInt<{kept.modulus}> literal for either"
+                    ),
+                    location=kept.expr.origin,
+                    suggestion=(
+                        "Write the expression in its simplified form on both " "sides"
+                    ),
+                    variable=None,
+                    method=None,
+                )
+            )
+            continue
+        ctx.near_misses.append(
+            NearMiss(
+                transform_name=transform_name,
+                reason=(
+                    f"'{kept.expr}' is the constant {kept.value} in "
+                    f"ModInt<{kept.modulus}>, kept as written: the Int "
+                    f"literal {kept.value} would drop the reduction mod "
+                    f"{kept.modulus}"
+                ),
+                location=kept.expr.origin,
+                suggestion=(
+                    f"Bind the constant to a typed local "
+                    f"(ModInt<{kept.modulus}> c = {kept.value};) and use it "
+                    "on both sides"
+                ),
+                variable=None,
+                method=None,
+            )
+        )
+
+
+class ModIntCancellationTransformer(MethodScopedTypeMapMixin):
+    """Rewrites ModInt arithmetic whose terms cancel to its normal form.
+
+    A maximal ``ModInt<M>`` arithmetic expression (``+``, ``-``, ``*``,
+    unary ``-``, ``^`` by a small literal) is read as a polynomial over its
+    atoms (:mod:`._algebra`); when the polynomial, rebuilt, is strictly
+    smaller than the expression, the expression is replaced by it. Example:
+    ``sk + ((d + H(x)) - H(x))`` becomes ``sk + d``. The rewrite is a ring
+    identity, so it is exact. It is refused when the expression makes a call
+    that is not known to be deterministic: two evaluations of such a call
+    are different values, and must not cancel. Requiring a strict decrease
+    keeps it from expanding products (which other passes rely on, e.g. a
+    uniform sample used once) and makes it terminate.
+    """
+
+    def __init__(
+        self,
+        type_map: NameTypeMap,
+        proof_namespace: frog_ast.Namespace,
+        proof_let_types: Optional[NameTypeMap],
+        ctx: Optional[PipelineContext] = None,
+    ) -> None:
+        self.type_map = type_map
+        self._proof_namespace = proof_namespace
+        self._proof_let_types = proof_let_types
+        self._shadowed: set[str] = set()
+        self._redeclared: set[str] = set()
+        self._method_name: Optional[str] = None
+        # Operands (by id) where an Int would change the operation around
+        # them, with that position: a ModInt zero there is kept as written,
+        # since its rebuild is the Int literal 0.
+        self._int_sensitive: dict[int, str] = {}
+        self.ctx = ctx
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.ASTNode:
+        saved = (self._shadowed, self._redeclared, self._method_name)
+        self._shadowed = method_bound_names(method)
+        # The type map gives a name one type for the whole method.
+        self._redeclared = redeclared_names(self._scope_game, method)
+        self._method_name = method.signature.name
+        try:
+            return super().transform_method(method)
+        finally:
+            self._shadowed, self._redeclared, self._method_name = saved
+
+    def _mark_int_sensitive(
+        self, operand: frog_ast.Expression, position: Optional[str]
+    ) -> None:
+        if position is not None:
+            self._int_sensitive[id(operand)] = position
+
+    def _try(
+        self, expr: frog_ast.Expression, position: Optional[str]
+    ) -> Optional[frog_ast.Expression]:
+        if not isinstance(
+            _get_expression_type(expr, self.type_map), frog_ast.ModIntType
+        ):
+            return None
+        deterministic = calls_are_deterministic(
+            expr,
+            self._proof_namespace,
+            self._proof_let_types,
+            self.type_map,
+            self._shadowed,
+        )
+        # The normalizer puts no Int literal next to a ModInt operand in the
+        # result (F-370(h)): (u + s) + (u - s) becomes u + u, not 2 * u,
+        # which the type helpers here read by its literal as an Int.
+        normalizer = Normalizer(self.type_map, self._proof_namespace)
+        rebuilt = normalizer.canonical(expr, position)
+        _note_kept_constants(normalizer, self.ctx, "ModInt Cancellation")
+        kept = normalizer.kept_constants
+        if kept and kept[-1].position is not None and kept[-1].expr == expr:
+            # A zero kept as written stays whole, as the normalizer keeps it:
+            # its parts are not rewritten one by one either.
+            return expr
+        if node_count(rebuilt) >= node_count(expr):
+            return None
+        # A name with several bindings may have another type here than the
+        # one the map gives it (F-370).
+        redeclared = sorted(referenced_variable_names(expr) & self._redeclared)
+        if redeclared:
+            note_redeclared_name(
+                self.ctx, "ModInt Cancellation", redeclared[0], self._method_name
+            )
+            return None
+        if deterministic:
+            return rebuilt
+        if self.ctx is not None:
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="ModInt Cancellation",
+                    reason=(
+                        f"'{expr}' would cancel to '{rebuilt}', but it makes a "
+                        "call that is not known to be deterministic, and two "
+                        "evaluations of such a call are different values"
+                    ),
+                    location=expr.origin,
+                    suggestion=(
+                        "Evaluate the call once into a local, or annotate the "
+                        "primitive method 'deterministic' if it is"
+                    ),
+                    variable=None,
+                    method=None,
+                )
+            )
+        return None
+
+    def transform_binary_operation(
+        self, binary_operation: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        operator = binary_operation.operator
+        left = binary_operation.left_expression
+        right = binary_operation.right_expression
+        position = self._int_sensitive.pop(id(binary_operation), None)
+        if operator in (
+            frog_ast.BinaryOperators.ADD,
+            frog_ast.BinaryOperators.SUBTRACT,
+            frog_ast.BinaryOperators.MULTIPLY,
+        ):
+            rebuilt = self._try(binary_operation, position)
+            if rebuilt is not None:
+                return rebuilt
+            # The operands are rewritten one at a time. An operand rebuilt as
+            # the Int literal 0 is read as 0 mod q only next to a ModInt
+            # operand; under an Int-sensitive position, or next to an Int
+            # (literal) operand, it would turn this operation into an Int one.
+            self._mark_int_sensitive(left, position or self._int_operand(right))
+            self._mark_int_sensitive(right, position or self._int_operand(left))
+        else:
+            left_position, right_position = int_sensitive_operands(operator)
+            self._mark_int_sensitive(left, left_position)
+            self._mark_int_sensitive(right, right_position)
+        return frog_ast.BinaryOperation(
+            operator, self.transform(left), self.transform(right)
+        )
+
+    def transform_unary_operation(
+        self, unary_operation: frog_ast.UnaryOperation
+    ) -> frog_ast.Expression:
+        # -e has the type of e, so an Int operand makes it an Int negation.
+        position = self._int_sensitive.pop(id(unary_operation), None)
+        if unary_operation.operator == frog_ast.UnaryOperators.MINUS:
+            self._mark_int_sensitive(unary_operation.expression, position)
+        return self._transform_children(unary_operation)
+
+    def _int_operand(self, sibling: frog_ast.Expression) -> Optional[str]:
+        """The position of an operand of ``+``, ``-`` or ``*`` whose *sibling*
+        reads as an ``Int`` (an integer literal), else None."""
+        if isinstance(_get_expression_type(sibling, self.type_map), frog_ast.IntType):
+            return "an operand next to an Int"
+        return None
+
+
+class ModIntCancellation(TransformPass):
+    name = "ModInt Cancellation"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        type_map = build_game_type_map(game, ctx.proof_let_types)
+        return (
+            ModIntCancellationTransformer(
+                type_map, ctx.proof_namespace, ctx.proof_let_types, ctx
             )
             .scope_to_game(game, ctx.proof_let_types)
             .transform(game)
@@ -1705,14 +2176,34 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         # resolve Variable references when CSE / ForwardExpressionAlias
         # has hoisted the call into a named local.
         self.local_funccall_bindings: dict[str, frog_ast.FuncCall] = {}
+        # Names the method being transformed binds (F-347).
+        self._bound_names: set[str] = set()
+        self._in_initialize = False
+        self._type_map = NameTypeMap()
+        # F-356: names some store converts into a ModInt; such a variable
+        # holds its RHS reduced modulo the modulus, not the RHS.
+        self._coercing = coercing_store_names_for(game, ctx)
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        self._bound_names = method_bound_names(method)
+        self._in_initialize = method.signature.name == "Initialize"
+        self._type_map = build_method_type_map(
+            self.game, method, self.ctx.proof_let_types
+        )
         bindings, reassigned = _scan_top_level_single_writes(
             method.block,
             value_predicate=lambda v: isinstance(v, frog_ast.FuncCall),
         )
         for name in reassigned:
             bindings.pop(name, None)
+        for name in sorted(set(bindings) & self._coercing):
+            bindings.pop(name)
+            note_coercing_store(
+                self.ctx,
+                "Injective Equality Simplify",
+                name,
+                method=method.signature.name,
+            )
         # Cast: predicate guarantees FuncCall values.
         funccall_bindings: dict[str, frog_ast.FuncCall] = {
             n: v for n, v in bindings.items() if isinstance(v, frog_ast.FuncCall)
@@ -1723,12 +2214,19 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         # the method (params, fields unwritten in this method, write-once
         # typed-locals -- nested-aware). See _stable_value_names.
         stable_names = _stable_value_names(method, self.game)
+        state_names = _method_state_names(method, self.game)
         for name in list(funccall_bindings.keys()):
             call = funccall_bindings[name]
             free = {
                 v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(call))
             }
-            if not free.issubset(stable_names):
+            # A value read only through a member access (`M` in
+            # `F.Enc(|M.keys|)`) must be stable too: a write to `M` between
+            # the binding and the comparison changes what the substituted
+            # call computes.
+            if not free.issubset(stable_names) or _reads_unstable_member(
+                call, stable_names, state_names
+            ):
                 funccall_bindings.pop(name, None)
         old = self.local_funccall_bindings
         self.local_funccall_bindings = funccall_bindings
@@ -1814,6 +2312,28 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
                 )
             )
             return transformed
+        # F-348: each pair is compared at the arguments' own type, which must
+        # be the parameter's: an Int passed to a ModInt<q> parameter is
+        # reduced mod q, so `encm(1) == encm(q + 1)` is not `1 == q + 1`.
+        for param, a, b in zip(method.parameters, left.args, right.args):
+            if not self._compared_at_parameter_type(param.type, a, b):
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Injective Equality Simplify",
+                        reason=(
+                            f"comparison of calls to '{method.name}' did not "
+                            f"simplify: an argument for parameter '{param.name}' "
+                            f"may not have its type {param.type}"
+                        ),
+                        location=binary_operation.origin,
+                        suggestion=(
+                            "Store the argument in a variable of the parameter's type"
+                        ),
+                        variable=None,
+                        method=method.name,
+                    )
+                )
+                return transformed
         pair_op = op  # EQUALS or NOTEQUALS
         combiner = (
             frog_ast.BinaryOperators.AND
@@ -1828,6 +2348,24 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         for pair in pairs[1:]:
             result = frog_ast.BinaryOperation(combiner, result, pair)
         return result
+
+    def _compared_at_parameter_type(
+        self,
+        param_type: frog_ast.Type,
+        a: frog_ast.Expression,
+        b: frog_ast.Expression,
+    ) -> bool:
+        """True if ``a == b`` decides equality in *param_type* (F-348)."""
+        a_type = _get_expression_type(a, self._type_map)
+        b_type = _get_expression_type(b, self._type_map)
+        if isinstance(param_type, frog_ast.ModIntType):
+            return isinstance(a_type, frog_ast.ModIntType) and a_type == b_type
+        if isinstance(param_type, frog_ast.IntType):
+            return True
+        # A type name may stand for a ModInt; an Int argument would coerce.
+        return not isinstance(a_type, frog_ast.IntType) and not isinstance(
+            b_type, frog_ast.IntType
+        )
 
     def _try_wrapper_simplification(
         self,
@@ -1961,6 +2499,11 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         fld = next((f for f in self.game.fields if f.name == name), None)
         if fld is None:
             return expr
+        if name in self._coercing:
+            note_coercing_store(
+                self.ctx, "Injective Equality Simplify", name, method="Initialize"
+            )
+            return expr
         init = next(
             (m for m in self.game.methods if m.signature.name == "Initialize"),
             None,
@@ -1982,6 +2525,15 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
                 def_idx = idx
         if rhs is None:
             return expr
+        # F-349: the definition must have run at the comparison site. In
+        # Initialize the site may precede it; elsewhere an earlier return in
+        # Initialize may have skipped it, leaving the initial value.
+        if self._in_initialize or may_return_before(init.block.statements, def_idx):
+            return expr
+        # The top-level definition must be the field's only write in
+        # Initialize (a nested rewrite, e.g. under an `if`, may replace it).
+        if _count_field_assigns(init.block, name) != 1:
+            return expr
         # No assignment may exist anywhere else in the game.
         for method in self.game.methods:
             if method is init:
@@ -2000,6 +2552,35 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         free = {v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(rhs))}
         if not free.issubset(visible):
             return expr
+        # A name read only through a member access (`M` in `|M.keys|`, `F` in
+        # `F.Enc(x)`) escapes the collector above. A field read that way must
+        # pass the same checks as any other read field, and a parameter or
+        # local of Initialize read that way is out of scope here.
+        member_only = _member_only_names(rhs)
+        if member_only & set(method_binder_counts(init)):
+            return expr
+        read_names = free | member_only
+        # F-347: at the comparison site the resolved RHS is read in the
+        # current method, where a parameter or local named like one of its
+        # free variables (or the field itself) would capture it.
+        captured = sorted((read_names | {name}) & self._bound_names)
+        if captured:
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Injective Equality Simplify",
+                    reason=(
+                        f"Field '{name}' was not resolved to its Initialize"
+                        f" definition: {', '.join(captured)} is bound in this"
+                        " method, so the definition would refer to a different"
+                        " variable"
+                    ),
+                    location=None,
+                    suggestion="rename the method's parameter or local",
+                    variable=name,
+                    method=None,
+                )
+            )
+            return expr
         # F-248: the resolved RHS is substituted at an arbitrary comparison
         # site (any oracle, any time), so each free variable must hold the
         # SAME value it had at Init when the field was frozen. Params are
@@ -2007,17 +2588,33 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         # AFTER the field's defining assignment -- neither later in Init nor
         # in any non-Init method. Otherwise `F == E.Enc(t)` would collapse to
         # `t == t` even though `F` holds the stale Init-time `E.Enc(t)`.
-        for t in free & field_names:
+        for t in read_names & field_names:
             if any(
                 reassigns_or_rebinds({t}, s)
                 for s in init.block.statements[def_idx + 1 :]
-            ):
-                return expr
-            if any(
+            ) or any(
                 _count_field_assigns(m.block, t) > 0
                 for m in self.game.methods
                 if m is not init
             ):
+                if t in member_only:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Injective Equality Simplify",
+                            reason=(
+                                f"Field '{name}' was not resolved to its"
+                                f" Initialize definition: the definition reads"
+                                f" '{t}' through a member access, and '{t}' is"
+                                " written after the definition"
+                            ),
+                            location=None,
+                            suggestion=(
+                                f"write '{t}' only in Initialize, before '{name}'"
+                            ),
+                            variable=name,
+                            method=None,
+                        )
+                    )
                 return expr
         return rhs
 
@@ -2167,6 +2764,43 @@ def _stable_value_names(method: frog_ast.Method, game: frog_ast.Game) -> set[str
     return param_names | stable_field_names | single_write_locals
 
 
+def _member_only_names(expr: frog_ast.Expression) -> set[str]:
+    """Names *expr* reads only through a member access: ``M`` in
+    ``|M.keys|``, ``F`` in ``F.Enc(x)``. ``VariableCollectionVisitor`` skips
+    them; ``referenced_variable_names`` does not."""
+    direct = {v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(expr))}
+    return referenced_variable_names(expr) - direct
+
+
+def _method_state_names(method: frog_ast.Method, game: frog_ast.Game) -> set[str]:
+    """Names that can denote a value *method* may change: the game's fields,
+    the method's parameters and locals, and every name it writes. Any other
+    name (a scheme or primitive instance, a ``let:`` constant, a game
+    parameter) is fixed for the whole game."""
+    names = {f.name for f in game.fields} | set(method_binder_counts(method))
+
+    def _collect(node: frog_ast.ASTNode) -> bool:
+        if isinstance(
+            node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            base = lvalue_base_name(node.var)
+            if base is not None:
+                names.add(base)
+        return False
+
+    SearchVisitor(_collect).visit(method.block)
+    return names
+
+
+def _reads_unstable_member(
+    expr: frog_ast.Expression, stable: set[str], state: set[str]
+) -> bool:
+    """True if *expr* reads, only through a member access, a name of *state*
+    that is not in *stable* (``M`` in ``|M.keys|`` when the method writes
+    ``M``). Receivers outside *state* are fixed and never count."""
+    return bool((_member_only_names(expr) & state) - stable)
+
+
 def _flatten_concat(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
     """Flatten a left- or right-nested ``||`` (BitString concat) chain.
 
@@ -2299,6 +2933,7 @@ class ConcatEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
         # `a || b` read the mutated value, diverging from the frozen `v`).
         if self._scope_game is not None:
             stable_names = _stable_value_names(method, self._scope_game)
+            state_names = _method_state_names(method, self._scope_game)
             for name in list(bindings.keys()):
                 free = {
                     v.name
@@ -2306,7 +2941,11 @@ class ConcatEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
                         copy.deepcopy(bindings[name])
                     )
                 }
-                if not free.issubset(stable_names):
+                # Values read only through a member access (`M` in
+                # `F.Ev(|M.keys|) || u`) must be stable as well.
+                if not free.issubset(stable_names) or _reads_unstable_member(
+                    bindings[name], stable_names, state_names
+                ):
                     bindings.pop(name, None)
         old = self.local_concat_bindings
         self.local_concat_bindings = bindings
@@ -2705,14 +3344,22 @@ class GroupElemSimplificationTransformer(MethodScopedTypeMapMixin):
 
     Rules:
     - Power-of-power: ``(base ^ e1) ^ e2`` -> ``base ^ (e1 * e2)``
+    - Power of a product: ``(a * b) ^ e`` -> ``a ^ e * b ^ e`` and
+      ``(a / b) ^ e`` -> ``a ^ e / b ^ e`` (the group is abelian), when ``e``
+      makes no call (the rewrite evaluates ``e`` once per factor)
     - Exponent zero: ``g ^ 0`` -> ``G.identity``
     - Exponent one: ``g ^ 1`` -> ``g``
     - Multiplicative identity: ``identity * g`` -> ``g``, ``g * identity`` -> ``g``
     - Division by identity: ``g / identity`` -> ``g``
     """
 
-    def __init__(self, type_map: Optional[NameTypeMap] = None) -> None:
+    def __init__(
+        self,
+        type_map: Optional[NameTypeMap] = None,
+        ctx: Optional[PipelineContext] = None,
+    ) -> None:
         self.type_map = type_map
+        self.ctx = ctx
 
     def _is_groupelem_expr(self, expr: frog_ast.Expression) -> bool:
         if self.type_map is not None:
@@ -2758,6 +3405,50 @@ class GroupElemSimplificationTransformer(MethodScopedTypeMapMixin):
             if _is_integer_literal(right, 1):
                 return left
 
+        # Power of a product or quotient, in an abelian group:
+        # (a * b) ^ e  -->  a ^ e * b ^ e;   (a / b) ^ e  -->  a ^ e / b ^ e
+        if (
+            op == frog_ast.BinaryOperators.EXPONENTIATE
+            and isinstance(left, frog_ast.BinaryOperation)
+            and _is_groupelem_mul_div_chain(left, self.type_map)
+        ):
+            if SearchVisitor(lambda n: isinstance(n, frog_ast.FuncCall)).visit(right):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="GroupElem Simplification",
+                            reason=(
+                                "A product of group elements is raised to an "
+                                "exponent that makes a call; distributing the "
+                                "power over the factors would evaluate the "
+                                "call once per factor."
+                            ),
+                            location=binary_operation.origin,
+                            suggestion=(
+                                "Bind the exponent to a local variable first, "
+                                "then raise the product to that variable."
+                            ),
+                            variable=None,
+                            method=None,
+                        )
+                    )
+            else:
+                return self.transform(
+                    frog_ast.BinaryOperation(
+                        left.operator,
+                        frog_ast.BinaryOperation(
+                            frog_ast.BinaryOperators.EXPONENTIATE,
+                            left.left_expression,
+                            copy.deepcopy(right),
+                        ),
+                        frog_ast.BinaryOperation(
+                            frog_ast.BinaryOperators.EXPONENTIATE,
+                            left.right_expression,
+                            copy.deepcopy(right),
+                        ),
+                    )
+                )
+
         # Power-of-power: (base ^ e1) ^ e2  -->  base ^ (e1 * e2)
         if (
             op == frog_ast.BinaryOperators.EXPONENTIATE
@@ -2801,7 +3492,7 @@ class GroupElemSimplification(TransformPass):
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         type_map = build_game_type_map(game, ctx.proof_let_types)
         return (
-            GroupElemSimplificationTransformer(type_map)
+            GroupElemSimplificationTransformer(type_map, ctx)
             .scope_to_game(game, ctx.proof_let_types)
             .transform(game)
         )
@@ -3085,3 +3776,814 @@ class GroupElemExponentCombination(TransformPass):
             .scope_to_game(game, ctx.proof_let_types)
             .transform(game)
         )
+
+
+# ---------------------------------------------------------------------------
+# One-time pad through a repeated combination
+# ---------------------------------------------------------------------------
+
+
+def _count_all_variable_uses(name: str, node: frog_ast.ASTNode) -> int:
+    """Exact number of ``Variable(name)`` positions in *node* (no cap)."""
+    count = 0
+
+    def visit(n: frog_ast.ASTNode) -> bool:
+        nonlocal count
+        if isinstance(n, frog_ast.Variable) and n.name == name:
+            count += 1
+        return False
+
+    SearchVisitor(visit).visit(node)
+    return count
+
+
+def _additive_parents(
+    name: str, node: frog_ast.ASTNode
+) -> list[frog_ast.BinaryOperation]:
+    """The ``+``/``-`` nodes of *node* with ``Variable(name)`` as an operand."""
+    parents: list[frog_ast.BinaryOperation] = []
+
+    def visit(n: frog_ast.ASTNode) -> bool:
+        if (
+            isinstance(n, frog_ast.BinaryOperation)
+            and n.operator
+            in (frog_ast.BinaryOperators.ADD, frog_ast.BinaryOperators.SUBTRACT)
+            and any(
+                isinstance(side, frog_ast.Variable) and side.name == name
+                for side in (n.left_expression, n.right_expression)
+            )
+        ):
+            parents.append(n)
+        return False
+
+    SearchVisitor(visit).visit(node)
+    return parents
+
+
+class UniformModIntRepeatedMaskTransformer(BlockTransformer):
+    """``u <- ModInt<q>`` used only inside copies of one ``e + u`` (or
+    ``u + e``, ``e - u``, ``u - e``) in one statement: each copy becomes ``u``.
+
+    For the fixed value of ``e`` in that statement, ``u |-> e + u`` is a
+    bijection of ``ModInt<q>``, so the copies (all equal to ``e + u``) are
+    jointly distributed like ``u`` itself. ``UniformModIntSimplification``
+    covers a single use; this covers the same combination used several times,
+    e.g. ``return [g ^ (s + u), s + u];``. All copies must be in one statement
+    (so ``e`` takes one value) and outside any loop.
+    """
+
+    def __init__(
+        self,
+        proof_namespace: frog_ast.Namespace,
+        proof_let_types: Optional[NameTypeMap],
+        function_fields: NameTypeMap,
+        ctx: Optional[PipelineContext] = None,
+        game: Optional[frog_ast.Game] = None,
+    ) -> None:
+        self.proof_namespace = proof_namespace
+        self.proof_let_types = proof_let_types
+        self.function_fields = function_fields
+        self.ctx = ctx
+        self.game = game
+        self._redeclared: set[str] = set()
+        self._method_name: Optional[str] = None
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.ASTNode:
+        saved = (self._redeclared, self._method_name)
+        self._redeclared = redeclared_names(self.game, method)
+        self._method_name = method.signature.name
+        try:
+            return self._transform_children(method)
+        finally:
+            self._redeclared, self._method_name = saved
+
+    def _near_miss(self, name: str, why: str) -> None:
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Uniform ModInt Repeated Mask",
+                reason=f"Uniform '{name}' is used several times, but {why}",
+                location=None,
+                suggestion=(
+                    f"Use '{name}' only inside one repeated combination such "
+                    f"as 's + {name}', in a single statement"
+                ),
+                variable=name,
+                method=None,
+            )
+        )
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        statements = list(block.statements)
+        for index, statement in enumerate(statements):
+            if not (
+                isinstance(statement, frog_ast.Sample)
+                and isinstance(statement.var, frog_ast.Variable)
+                and isinstance(statement.the_type, frog_ast.ModIntType)
+                and isinstance(statement.sampled_from, frog_ast.ModIntType)
+                and statement.the_type.modulus == statement.sampled_from.modulus
+            ):
+                continue
+            name = statement.var.name
+            later = statements[index + 1 :]
+            users = [
+                i for i, s in enumerate(later) if name in referenced_variable_names(s)
+            ]
+            if len(users) != 1:
+                continue
+            user = later[users[0]]
+            # One return or assignment: its value is evaluated in full before
+            # anything is written, so every copy sees the same e.
+            if not isinstance(user, (frog_ast.ReturnStatement, frog_ast.Assignment)):
+                continue
+            user_block = frog_ast.Block([user])
+            if reassigns_or_rebinds({name}, user_block):
+                continue
+            # Every occurrence of u must be an operand of one of the copies.
+            # Count exactly: _count_variable_uses stops at 2, which would let a
+            # third, bare use of u (e.g. g ^ u) slip past this comparison.
+            uses = _count_all_variable_uses(name, user_block)
+            parents = _additive_parents(name, user)
+            if uses < 2:
+                continue
+            if len(parents) != uses:
+                if parents:
+                    self._near_miss(name, "not every use is inside a sum")
+                continue
+            first = parents[0]
+            if any(p != first for p in parents[1:]):
+                self._near_miss(name, "it is combined with different values")
+                continue
+            other = (
+                first.right_expression
+                if isinstance(first.left_expression, frog_ast.Variable)
+                and first.left_expression.name == name
+                else first.left_expression
+            )
+            if name in referenced_variable_names(other):
+                continue
+            # Two evaluations of a non-deterministic e are different values.
+            if not calls_are_deterministic(
+                other,
+                self.proof_namespace,
+                self.proof_let_types,
+                self.function_fields,
+                set(),
+            ):
+                continue
+            if any(
+                _use_node_inside_type(user_block, p)
+                or _use_node_inside_loop(user_block, p)
+                for p in parents
+            ):
+                continue
+            # A second binding of u (or of a name of e) between the draw and
+            # the user is invisible to the name-based scans above (F-370).
+            redeclared = sorted(
+                ({name} | referenced_variable_names(other)) & self._redeclared
+            )
+            if redeclared:
+                note_redeclared_name(
+                    self.ctx,
+                    "Uniform ModInt Repeated Mask",
+                    redeclared[0],
+                    self._method_name,
+                )
+                continue
+            new_user: frog_ast.ASTNode = user
+            for parent in parents:
+                new_user = ReplaceTransformer(
+                    parent, frog_ast.Variable(name)
+                ).transform(new_user)
+            assert isinstance(new_user, frog_ast.Statement)
+            position = index + 1 + users[0]
+            return frog_ast.Block(
+                statements[:position] + [new_user] + statements[position + 1 :]
+            )
+        return frog_ast.Block([self.transform(s) for s in statements])
+
+
+class UniformModIntRepeatedMask(TransformPass):
+    name = "Uniform ModInt Repeated Mask"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        # Function-typed game fields that no method shadows with a local.
+        bound: set[str] = set()
+        for method in game.methods:
+            bound |= method_bound_names(method)
+        function_fields = NameTypeMap()
+        for field in game.fields:
+            if (
+                isinstance(field.type, frog_ast.FunctionType)
+                and field.name not in bound
+            ):
+                function_fields.set(field.name, field.type)
+        return UniformModIntRepeatedMaskTransformer(
+            ctx.proof_namespace, ctx.proof_let_types, function_fields, ctx, game
+        ).transform(game)
+
+
+# ---------------------------------------------------------------------------
+# Expressing a value through the updated state
+# ---------------------------------------------------------------------------
+
+
+class _VariableSubstitution(Transformer):
+    """Replaces every ``Variable(name)`` in an expression by *replacement*."""
+
+    def __init__(self, name: str, replacement: frog_ast.Expression) -> None:
+        self.name = name
+        self.replacement = replacement
+
+    def transform_variable(self, var: frog_ast.Variable) -> frog_ast.Expression:
+        if var.name == self.name:
+            return copy.deepcopy(self.replacement)
+        return var
+
+
+def _substitute_variable(
+    expr: frog_ast.Expression, name: str, replacement: frog_ast.Expression
+) -> frog_ast.Expression:
+    result = _VariableSubstitution(name, replacement).transform(copy.deepcopy(expr))
+    assert isinstance(result, frog_ast.Expression)
+    return result
+
+
+@dataclass
+class _MethodScope:
+    """What a statement-moving algebra pass knows about the method it
+    rewrites: the method's type map, the names it binds, the names it binds
+    more than once (or that shadow a field), and its name."""
+
+    type_map: NameTypeMap
+    shadowed: set[str]
+    redeclared: set[str]
+    method_name: str
+
+    def declines(
+        self,
+        ctx: PipelineContext,
+        transform_name: str,
+        names: set[str],
+    ) -> bool:
+        """True, with a near miss, if a rewrite reading or binding *names*
+        must be declined because one of them has several bindings: the type
+        map gives it one type for the whole method, and a name-based scan
+        does not see which binding an occurrence reads (F-370)."""
+        redeclared = sorted(names & self.redeclared)
+        if not redeclared:
+            return False
+        note_redeclared_name(ctx, transform_name, redeclared[0], self.method_name)
+        return True
+
+
+class ExpressAfterUpdate(TransformPass):
+    """Move a value computed just before an additive update after it.
+
+    For ``T v = e;`` followed (with no write in between to ``f`` or a name
+    in ``e``) by an update ``f = f + delta;`` of a ``ModInt`` variable, where
+    ``v`` is only used after the update, ``e`` equals ``e[f := f - delta]``
+    evaluated after the update. When that expression's normal form is
+    strictly smaller than ``e`` (``delta`` cancels), the declaration is moved
+    after the update with the smaller value. Example::
+
+        GroupElem<G> pk = g ^ (s + d);  s = s + d;  return pk;
+      becomes
+        s = s + d;  GroupElem<G> pk = g ^ s;  return pk;
+
+    so that a game that computes the new public key before updating the
+    secret and one that computes it afterwards agree. Exact: both sides are
+    the same value by a ring identity.
+    """
+
+    name = "Express After Update"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        new_methods = []
+        changed = False
+        for method in game.methods:
+            scope = _MethodScope(
+                build_method_type_map(game, method, ctx.proof_let_types),
+                method_bound_names(method),
+                redeclared_names(game, method),
+                method.signature.name,
+            )
+            block = self._block(method.block, scope, ctx)
+            if block is not method.block:
+                changed = True
+            new_methods.append(
+                frog_ast.Method(method.signature, block)
+                if block is not method.block
+                else method
+            )
+        if not changed:
+            return game
+        return frog_ast.Game((game.name, game.parameters, game.fields, new_methods))
+
+    def _block(
+        self,
+        block: frog_ast.Block,
+        scope: _MethodScope,
+        ctx: PipelineContext,
+    ) -> frog_ast.Block:
+        statements = list(block.statements)
+        changed = False
+        for index, statement in enumerate(statements):
+            inner = self._nested(statement, scope, ctx)
+            if inner is not statement:
+                statements[index] = inner
+                changed = True
+        while True:
+            moved = self._move_one(statements, scope, ctx)
+            if moved is None:
+                break
+            statements = moved
+            changed = True
+        return frog_ast.Block(statements) if changed else block
+
+    def _nested(
+        self,
+        statement: frog_ast.Statement,
+        scope: _MethodScope,
+        ctx: PipelineContext,
+    ) -> frog_ast.Statement:
+        if isinstance(statement, frog_ast.IfStatement):
+            blocks = [self._block(b, scope, ctx) for b in statement.blocks]
+            if all(new is old for new, old in zip(blocks, statement.blocks)):
+                return statement
+            return frog_ast.IfStatement(statement.conditions, blocks)
+        return statement
+
+    def _move_one(
+        self,
+        statements: list[frog_ast.Statement],
+        scope: _MethodScope,
+        ctx: PipelineContext,
+    ) -> Optional[list[frog_ast.Statement]]:
+        type_map, shadowed = scope.type_map, scope.shadowed
+        for w, update in enumerate(statements):
+            if not (
+                isinstance(update, frog_ast.Assignment)
+                and update.the_type is None
+                and isinstance(update.var, frog_ast.Variable)
+            ):
+                continue
+            field = update.var.name
+            field_type = type_map.get(field)
+            if not isinstance(field_type, frog_ast.ModIntType):
+                continue
+            if not calls_are_deterministic(
+                update.value,
+                ctx.proof_namespace,
+                ctx.proof_let_types,
+                type_map,
+                shadowed,
+            ):
+                continue
+            normalizer = Normalizer(type_map)
+            form = normalizer.normal_form(update.value, field_type)
+            poly = getattr(form, "poly", None)
+            if poly is None:
+                continue
+            field_symbol = normalizer.atoms.symbol(frog_ast.Variable(field))
+            delta = poly - field_symbol
+            if delta.has(field_symbol) or delta == 0:
+                continue
+            delta_ast = normalizer.rebuild_poly(delta)
+            # delta is re-evaluated after the update, so it must not read the
+            # updated variable at all, not even inside an atom such as
+            # H(g ^ (f * u)), whose value the update changes.
+            if field in referenced_variable_names(delta_ast):
+                continue
+            previous = frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.SUBTRACT, frog_ast.Variable(field), delta_ast
+            )
+            for k in range(w - 1, -1, -1):
+                candidate = statements[k]
+                if not (
+                    isinstance(candidate, frog_ast.Assignment)
+                    and candidate.the_type is not None
+                    and isinstance(candidate.var, frog_ast.Variable)
+                ):
+                    continue
+                value = candidate.value
+                if field not in referenced_variable_names(value):
+                    continue
+                if not _holds_its_value(candidate, type_map):
+                    continue
+                if not calls_are_deterministic(
+                    value, ctx.proof_namespace, ctx.proof_let_types, type_map, shadowed
+                ):
+                    continue
+                between = frog_ast.Block(statements[k + 1 : w])
+                watched = referenced_variable_names(value) | {field}
+                if reassigns_or_rebinds(watched, between):
+                    continue
+                local = candidate.var.name
+                if local in referenced_variable_names(
+                    frog_ast.Block(statements[k + 1 : w + 1])
+                ):
+                    continue
+                normalizer = Normalizer(type_map)
+                rewritten = normalizer.canonical(
+                    _substitute_variable(value, field, previous)
+                )
+                _note_kept_constants(normalizer, ctx, self.name)
+                # Compare with the value's own normal form, not its current
+                # spelling: the move is meant for a delta that cancels, and an
+                # unsimplified value (g^(s - D) * g^D) must not be moved past
+                # the update just because any rewrite of it is smaller.
+                if node_count(rewritten) >= node_count(normalizer.canonical(value)):
+                    continue
+                if scope.declines(
+                    ctx,
+                    self.name,
+                    {field, local}
+                    | referenced_variable_names(update.value)
+                    | referenced_variable_names(value),
+                ):
+                    continue
+                moved = frog_ast.Assignment(
+                    copy.deepcopy(candidate.the_type),
+                    frog_ast.Variable(local),
+                    rewritten,
+                )
+                return (
+                    statements[:k]
+                    + statements[k + 1 : w + 1]
+                    + [moved]
+                    + statements[w + 1 :]
+                )
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Cancellation through a local
+# ---------------------------------------------------------------------------
+
+
+class CancelThroughLocal(TransformPass):
+    """Substitute a pure local into a later ModInt expression when terms cancel.
+
+    For ``T v = e;`` and a later statement of the same block (an assignment
+    or a return) whose ModInt value reads ``v``, with no write in between to
+    ``v`` or to a name in ``e``, the value is replaced by the normal form of
+    the value with ``e`` for ``v`` whenever that is strictly smaller.
+    Example (a key update that the token also returns)::
+
+        ModInt<q> v = d + H(x);  sk = sk + (v - H(x));  return [.., v];
+      becomes
+        ModInt<q> v = d + H(x);  sk = sk + d;           return [.., v];
+
+    ``ModIntCancellation`` handles a single expression; this one looks
+    through a local that is also used elsewhere (so it is not inlined). Exact:
+    the local still holds ``e``'s value there, and the rewrite is a ring
+    identity. Refused when ``e`` or the value makes a call that is not known
+    to be deterministic.
+    """
+
+    name = "Cancel Through Local"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        new_methods = []
+        changed = False
+        for method in game.methods:
+            scope = _MethodScope(
+                build_method_type_map(game, method, ctx.proof_let_types),
+                method_bound_names(method),
+                redeclared_names(game, method),
+                method.signature.name,
+            )
+            block = self._block(method.block, scope, ctx)
+            if block is not method.block:
+                changed = True
+                new_methods.append(frog_ast.Method(method.signature, block))
+            else:
+                new_methods.append(method)
+        if not changed:
+            return game
+        return frog_ast.Game((game.name, game.parameters, game.fields, new_methods))
+
+    def _block(
+        self,
+        block: frog_ast.Block,
+        scope: _MethodScope,
+        ctx: PipelineContext,
+    ) -> frog_ast.Block:
+        type_map, shadowed = scope.type_map, scope.shadowed
+        statements = list(block.statements)
+        changed = False
+        for index, statement in enumerate(statements):
+            if isinstance(statement, frog_ast.IfStatement):
+                blocks = [self._block(b, scope, ctx) for b in statement.blocks]
+                if any(new is not old for new, old in zip(blocks, statement.blocks)):
+                    statements[index] = frog_ast.IfStatement(
+                        statement.conditions, blocks
+                    )
+                    changed = True
+        for j, statement in enumerate(statements):
+            value = _statement_value(statement)
+            if value is None:
+                continue
+            value_type = _get_expression_type(value, type_map)
+            if not isinstance(value_type, frog_ast.ModIntType):
+                continue
+            if not calls_are_deterministic(
+                value, ctx.proof_namespace, ctx.proof_let_types, type_map, shadowed
+            ):
+                continue
+            rewritten = self._rewrite(statements, j, value, scope, ctx)
+            if rewritten is not None:
+                statements[j] = _with_value(statement, rewritten)
+                changed = True
+        return frog_ast.Block(statements) if changed else block
+
+    def _rewrite(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        statements: list[frog_ast.Statement],
+        j: int,
+        value: frog_ast.Expression,
+        scope: _MethodScope,
+        ctx: PipelineContext,
+    ) -> Optional[frog_ast.Expression]:
+        type_map, shadowed = scope.type_map, scope.shadowed
+        current = value
+        improved = False
+        for i in range(j - 1, -1, -1):
+            definition = statements[i]
+            if not (
+                isinstance(definition, frog_ast.Assignment)
+                and definition.the_type is not None
+                and isinstance(definition.var, frog_ast.Variable)
+            ):
+                continue
+            local = definition.var.name
+            if local not in referenced_variable_names(current):
+                continue
+            if not _holds_its_value(definition, type_map):
+                continue
+            local_value = definition.value
+            if not calls_are_deterministic(
+                local_value,
+                ctx.proof_namespace,
+                ctx.proof_let_types,
+                type_map,
+                shadowed,
+            ):
+                continue
+            between = frog_ast.Block(statements[i + 1 : j])
+            if reassigns_or_rebinds(
+                referenced_variable_names(local_value) | {local}, between
+            ):
+                continue
+            normalizer = Normalizer(type_map)
+            candidate = normalizer.canonical(
+                _substitute_variable(current, local, local_value)
+            )
+            _note_kept_constants(normalizer, ctx, self.name)
+            if node_count(candidate) < node_count(current):
+                if scope.declines(
+                    ctx,
+                    self.name,
+                    {local}
+                    | referenced_variable_names(local_value)
+                    | referenced_variable_names(current),
+                ):
+                    continue
+                current = candidate
+                improved = True
+        return current if improved else None
+
+
+def _statement_value(statement: frog_ast.Statement) -> Optional[frog_ast.Expression]:
+    if isinstance(statement, frog_ast.Assignment):
+        return statement.value
+    if isinstance(statement, frog_ast.ReturnStatement):
+        return statement.expression
+    return None
+
+
+def _with_value(
+    statement: frog_ast.Statement, value: frog_ast.Expression
+) -> frog_ast.Statement:
+    if isinstance(statement, frog_ast.Assignment):
+        return frog_ast.Assignment(statement.the_type, statement.var, value)
+    assert isinstance(statement, frog_ast.ReturnStatement)
+    return frog_ast.ReturnStatement(value)
+
+
+# ---------------------------------------------------------------------------
+# Computing a blocked single-use value as early as possible
+# ---------------------------------------------------------------------------
+
+
+def _path_to(
+    node: frog_ast.ASTNode, target: frog_ast.ASTNode
+) -> Optional[list[frog_ast.ASTNode]]:
+    """The chain of nodes from *node* down to *target* (by identity)."""
+    if node is target:
+        return [node]
+    for value in vars(node).values():
+        children = value if isinstance(value, list) else [value]
+        for child in children:
+            if isinstance(child, frog_ast.ASTNode):
+                sub = _path_to(child, target)
+                if sub is not None:
+                    return [node] + sub
+    return None
+
+
+class BlockedLocalAbsorption(TransformPass):
+    """Let a blocked single-use local carry the value its use computes.
+
+    For ``T x = e;`` used exactly once, in a later return or assignment,
+    where some statement in between writes a variable of ``e`` (so ``x``
+    cannot be inlined), the largest non-tuple expression ``C`` around the use
+    whose other inputs nothing in between writes is computed in ``x``
+    instead, just before the first such write: ``T' x = C[x := e];`` and the
+    use becomes ``x``. Example::
+
+        GroupElem<G> x = g ^ (sk * u);  sk = sk + d;  return [.., d + H(x)];
+      becomes
+        ModInt<q> x = d + H(g ^ (sk * u));  sk = sk + d;  return [.., x];
+
+    Two games that cut a computation in front of a state update at different
+    places then agree. Exact: ``C`` is deterministic and its inputs have the
+    same values where it is now computed. Stops at tuple elements, so a
+    tuple is never moved into a local (which tuple expansion would undo).
+    """
+
+    name = "Blocked Local Absorption"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        new_methods = []
+        changed = False
+        for method in game.methods:
+            current = method
+            # One absorption at a time: it re-declares the local with the
+            # absorbed expression's type, so the method's types are rebuilt
+            # after each one (F-358).
+            while True:
+                scope = _MethodScope(
+                    build_method_type_map(game, current, ctx.proof_let_types),
+                    method_bound_names(current),
+                    redeclared_names(game, current),
+                    current.signature.name,
+                )
+                block = self._absorb_in_block(current.block, scope, ctx)
+                if block is None:
+                    break
+                current = frog_ast.Method(current.signature, block)
+            if current is not method:
+                changed = True
+            new_methods.append(current)
+        if not changed:
+            return game
+        return frog_ast.Game((game.name, game.parameters, game.fields, new_methods))
+
+    def _absorb_in_block(
+        self,
+        block: frog_ast.Block,
+        scope: _MethodScope,
+        ctx: PipelineContext,
+    ) -> Optional[frog_ast.Block]:
+        """*block* after one absorption in it, trying the blocks of its
+        ``if`` statements first, or None when there is none."""
+        statements = list(block.statements)
+        for index, statement in enumerate(statements):
+            if not isinstance(statement, frog_ast.IfStatement):
+                continue
+            for position, inner in enumerate(statement.blocks):
+                new_inner = self._absorb_in_block(inner, scope, ctx)
+                if new_inner is not None:
+                    blocks = list(statement.blocks)
+                    blocks[position] = new_inner
+                    statements[index] = frog_ast.IfStatement(
+                        statement.conditions, blocks
+                    )
+                    return frog_ast.Block(statements)
+        moved = self._absorb_one(statements, scope, ctx)
+        return frog_ast.Block(moved) if moved is not None else None
+
+    def _deterministic(
+        self,
+        expr: frog_ast.Expression,
+        ctx: PipelineContext,
+        shadowed: set[str],
+        type_map: NameTypeMap,
+    ) -> bool:
+        return calls_are_deterministic(
+            expr, ctx.proof_namespace, ctx.proof_let_types, type_map, shadowed
+        )
+
+    def _absorb_one(  # pylint: disable=too-many-locals,too-many-return-statements
+        self,
+        statements: list[frog_ast.Statement],
+        scope: _MethodScope,
+        ctx: PipelineContext,
+    ) -> Optional[list[frog_ast.Statement]]:
+        type_map, shadowed = scope.type_map, scope.shadowed
+        for i, definition in enumerate(statements):
+            if not (
+                isinstance(definition, frog_ast.Assignment)
+                and definition.the_type is not None
+                and isinstance(definition.var, frog_ast.Variable)
+            ):
+                continue
+            name = definition.var.name
+            value = definition.value
+            if not self._deterministic(value, ctx, shadowed, type_map):
+                continue
+            if not _holds_its_value(definition, type_map):
+                continue
+            users = [
+                j
+                for j in range(i + 1, len(statements))
+                if name in referenced_variable_names(statements[j])
+            ]
+            if len(users) != 1:
+                continue
+            j = users[0]
+            use = statements[j]
+            if not isinstance(use, (frog_ast.Assignment, frog_ast.ReturnStatement)):
+                continue
+            expression = (
+                use.value if isinstance(use, frog_ast.Assignment) else use.expression
+            )
+            # The one use must be in the value: a read in the l-value (an
+            # index M[x]) or in a declared type would see the new value of x.
+            if _count_all_variable_uses(name, expression) != 1:
+                continue
+            if _count_all_variable_uses(name, use) != 1:
+                continue
+            inputs = referenced_variable_names(value)
+            blockers = [
+                k
+                for k in range(i + 1, j)
+                if reassigns_or_rebinds(inputs, statements[k])
+            ]
+            if not blockers:
+                continue
+            k = blockers[0]
+            window = frog_ast.Block(statements[k:j])
+            declared_late = {
+                lvalue_base_name(s.var)
+                for s in statements[k:j]
+                if isinstance(s, (frog_ast.Assignment, frog_ast.Sample))
+                and s.the_type is not None
+            }
+
+            def is_use(node: frog_ast.ASTNode, wanted: str = name) -> bool:
+                return isinstance(node, frog_ast.Variable) and node.name == wanted
+
+            occurrence = SearchVisitor(is_use).visit(expression)
+            path = _path_to(expression, occurrence) if occurrence else None
+            if not path:
+                continue
+            chosen: Optional[frog_ast.Expression] = None
+            chosen_type: Optional[frog_ast.Type] = None
+            for ancestor in reversed(path[:-1]):
+                if not isinstance(
+                    ancestor,
+                    (
+                        frog_ast.BinaryOperation,
+                        frog_ast.UnaryOperation,
+                        frog_ast.FuncCall,
+                        frog_ast.ArrayAccess,
+                    ),
+                ):
+                    break
+                others = referenced_variable_names(ancestor) - {name}
+                if reassigns_or_rebinds(others, window) or (others & declared_late):
+                    break
+                if scope.declines(ctx, self.name, others):
+                    break
+                if not self._deterministic(ancestor, ctx, shadowed, type_map):
+                    break
+                ancestor_type = infer_type(ancestor, type_map)
+                if ancestor_type is None or isinstance(
+                    ancestor_type, frog_ast.ProductType
+                ):
+                    break
+                chosen, chosen_type = ancestor, ancestor_type
+            if chosen is None or chosen_type is None:
+                continue
+            # A second binding of x, or of a name of e, is invisible to the
+            # name-based scans above and has one type in the map (F-370).
+            if scope.declines(
+                ctx, self.name, {name} | referenced_variable_names(value)
+            ):
+                continue
+            absorbed = _substitute_variable(chosen, name, value)
+            new_use = ReplaceTransformer(chosen, frog_ast.Variable(name)).transform(use)
+            assert isinstance(new_use, frog_ast.Statement)
+            new_definition = frog_ast.Assignment(
+                copy.deepcopy(chosen_type), frog_ast.Variable(name), absorbed
+            )
+            result = list(statements)
+            result[j] = new_use
+            result.insert(k, new_definition)
+            del result[i]
+            return result
+        return None

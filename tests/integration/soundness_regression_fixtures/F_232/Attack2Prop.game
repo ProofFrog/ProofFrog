@@ -1,0 +1,59 @@
+// ExtractRepeatedTupleAccess (F-232). Each game reads the same slice
+// v[j : j + D.n] twice inside a branch, where j is a branch-local binding:
+// j = s in Real and j = s + D.n in Random. The slice phase hoisted the
+// repeated slice to the top of the method, outside the branch where j is
+// bound, and the now-unused bindings of j were removed, so the two games
+// canonicalized identically.
+//
+// Real.O(true, s) = v[s : s+n] || v[s : s+n];
+// Random.O(true, s) = v[s+n : s+2n] || v[s+n : s+2n].
+// Distinguisher: r = O(true, 0), w = Reveal(); output 1 iff
+// r[0 : n] == w[0 : n]. Real: always. Random: only if the halves of v
+// collide, probability 2^-n.
+import 'Dummy.primitive';
+
+Game Real(Dummy D) {
+    BitString<2 * D.n> v;
+
+    Void Initialize() {
+        v <- BitString<2 * D.n>;
+    }
+
+    BitString<2 * D.n> Reveal() {
+        return v;
+    }
+
+    BitString<2 * D.n> O(Bool b, Int s) {
+        if (b) {
+            Int j = s;
+            BitString<D.n> x = v[j : j + D.n];
+            BitString<D.n> y = v[j : j + D.n];
+            return x || y;
+        }
+        return 0^(2 * D.n);
+    }
+}
+
+Game Random(Dummy D) {
+    BitString<2 * D.n> v;
+
+    Void Initialize() {
+        v <- BitString<2 * D.n>;
+    }
+
+    BitString<2 * D.n> Reveal() {
+        return v;
+    }
+
+    BitString<2 * D.n> O(Bool b, Int s) {
+        if (b) {
+            Int j = s + D.n;
+            BitString<D.n> x = v[j : j + D.n];
+            BitString<D.n> y = v[j : j + D.n];
+            return x || y;
+        }
+        return 0^(2 * D.n);
+    }
+}
+
+export as Attack2Prop;

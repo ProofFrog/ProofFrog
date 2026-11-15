@@ -1,0 +1,15 @@
+// Export fixture: the threshold test at 1 and at q + 1.
+
+Game Low(Int q) {
+    Bool Test(Int x) {
+        return x < 1;
+    }
+}
+
+Game High(Int q) {
+    Bool Test(Int x) {
+        return x < q + 1;
+    }
+}
+
+export as Threshold;

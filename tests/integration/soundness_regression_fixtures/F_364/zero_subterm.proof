@@ -1,0 +1,15 @@
+// Target: ModInt Simplification. See ZeroSubterm.game.
+// Expected: Proof Failed.
+import 'ZeroSubterm.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    ZeroSubterm(q);
+
+games:
+    ZeroSubterm(q).Left against ZeroSubterm(q).Adversary;
+    ZeroSubterm(q).Right against ZeroSubterm(q).Adversary;

@@ -1,0 +1,19 @@
+// F-374: claims SchemeParamPair(T, q).Left and .Right are interchangeable
+// for T = ParamModTest(q, q). They are not (see ParamModTest.scheme). The
+// Int argument q for the ModInt<q> scheme parameter is now a type error.
+import 'ModTest.primitive';
+import 'ParamModTest.scheme';
+import 'SchemeParamPair.game';
+
+proof:
+
+let:
+    Int q;
+    ModTest T = ParamModTest(q, q);
+
+theorem:
+    SchemeParamPair(T, q);
+
+games:
+    SchemeParamPair(T, q).Left against SchemeParamPair(T, q).Adversary;
+    SchemeParamPair(T, q).Right against SchemeParamPair(T, q).Adversary;

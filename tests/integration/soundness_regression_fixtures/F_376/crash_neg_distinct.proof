@@ -1,0 +1,15 @@
+// F-376: claims CrashNegDistinct().Left and CrashNegDistinct().Right are
+// interchangeable. They are not (see CrashNegDistinct.game). The step
+// assumption 1 < 2 is true and plays no role in the hop; it only makes the
+// engine run Apply Assumptions on Left. Sound engine: Proof Failed!
+import 'CrashNegDistinct.game';
+
+proof:
+
+theorem:
+    CrashNegDistinct();
+
+games:
+    CrashNegDistinct().Left against CrashNegDistinct().Adversary;
+    assume 1 < 2;
+    CrashNegDistinct().Right against CrashNegDistinct().Adversary;

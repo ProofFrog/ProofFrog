@@ -1,0 +1,29 @@
+// Theorem game for the up-to-bad fixture: guessing a hidden target.
+Game Left(Set S) {
+    S target;
+
+    Void Initialize() {
+        target <- S;
+    }
+
+    Bool Eq(S c) {
+        if (c == target) {
+            return true;
+        }
+        return false;
+    }
+}
+
+Game Right(Set S) {
+    S target;
+
+    Void Initialize() {
+        target <- S;
+    }
+
+    Bool Eq(S c) {
+        return false;
+    }
+}
+
+export as TargetGuess;

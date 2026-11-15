@@ -1,0 +1,17 @@
+// F-356 support pair: Left runs the scheme's test, Right returns false.
+// With LiteralModField, Left returns true.
+import 'ModTest.primitive';
+
+Game Left(ModTest T) {
+    Bool Test() {
+        return T.Test();
+    }
+}
+
+Game Right(ModTest T) {
+    Bool Test() {
+        return false;
+    }
+}
+
+export as LiteralSchemeFieldPair;

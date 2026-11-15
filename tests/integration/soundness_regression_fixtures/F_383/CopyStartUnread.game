@@ -1,0 +1,27 @@
+// F-383 (field read only by an initializer): Left's Get returns n's
+// starting value, Right's returns m's; for n != m, one Get call tells them
+// apart. Each side writes the parameter it copies, and no method reads that
+// parameter, so its field is read only by the initializer of a. Remove
+// Unnecessary Fields used to drop that field and leave a's initializer
+// naming an undeclared field, the same on both sides.
+Game Left(Int n, Int m) {
+    Int a = n;
+    Void Bump() {
+        n = n + 1;
+    }
+    Int Get() {
+        return a;
+    }
+}
+
+Game Right(Int n, Int m) {
+    Int a = m;
+    Void Bump() {
+        m = m + 1;
+    }
+    Int Get() {
+        return a;
+    }
+}
+
+export as CopyStartUnread;

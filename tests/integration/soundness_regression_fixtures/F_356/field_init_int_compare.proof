@@ -1,0 +1,16 @@
+// F-356: FieldInitIntCompare.Left compares its ModInt<q> field with an Int,
+// which is a type error (see FieldInitIntCompare.game). Sound engine: the
+// proof fails type checking.
+import 'FieldInitIntCompare.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    FieldInitIntCompare(q);
+
+games:
+    FieldInitIntCompare(q).Left against FieldInitIntCompare(q).Adversary;
+    FieldInitIntCompare(q).Right against FieldInitIntCompare(q).Adversary;

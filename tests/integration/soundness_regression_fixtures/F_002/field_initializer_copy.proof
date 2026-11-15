@@ -1,0 +1,14 @@
+import 'FieldInitializerCopy.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+
+theorem:
+    FieldInitializerCopy(m, H);
+
+games:
+    FieldInitializerCopy(m, H).Real against FieldInitializerCopy(m, H).Adversary;
+    FieldInitializerCopy(m, H).Random against FieldInitializerCopy(m, H).Adversary;

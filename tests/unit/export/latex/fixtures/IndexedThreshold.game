@@ -1,0 +1,15 @@
+// Export fixture: a threshold test at index j; Right moves the threshold up by one.
+
+Game Left(Int j) {
+    Bool Test(Int x) {
+        return x < j;
+    }
+}
+
+Game Right(Int j) {
+    Bool Test(Int x) {
+        return x < j + 1;
+    }
+}
+
+export as IndexedThreshold;

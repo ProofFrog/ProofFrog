@@ -1,0 +1,21 @@
+// Target: ModInt Simplification (with Symbolic Computation).
+// x - x became the literal 0, which left the Int power 0 ^ 0, and Symbolic
+// Computation folded it to the Int literal 1; then 1 + 1 was folded to 2,
+// so the comparison became the Int comparison 2 == 0.
+// The games are distinguishable: (x - x)^0 is the ModInt one, so Left is
+// 2 == 0 mod q, true for q = 2, while Right is always false.
+// Expected: Proof Failed.
+
+Game Left(Int q) {
+    Bool Probe(ModInt<q> x, ModInt<q> y) {
+        return (x - x) ^ 0 + (x - x) ^ 0 == y - y;
+    }
+}
+
+Game Right(Int q) {
+    Bool Probe(ModInt<q> x, ModInt<q> y) {
+        return false;
+    }
+}
+
+export as ZeroBase;

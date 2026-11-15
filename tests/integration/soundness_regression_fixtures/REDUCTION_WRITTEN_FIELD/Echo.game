@@ -1,0 +1,14 @@
+// A trivial pair: both sides echo their argument.
+Game Real() {
+    Int Echo(Int x) {
+        return x;
+    }
+}
+
+Game Ideal() {
+    Int Echo(Int x) {
+        return x;
+    }
+}
+
+export as Echo;

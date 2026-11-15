@@ -1,0 +1,28 @@
+// The length m of BitString<m> is a field Grow writes, so the type would change between calls.
+Game Left(Int n) {
+    Int m = n;
+
+    Void Grow() {
+        m = m + 1;
+    }
+
+    BitString<m> Samp() {
+        BitString<m> r <- BitString<m>;
+        return r;
+    }
+}
+
+Game Right(Int n) {
+    Int m = n;
+
+    Void Grow() {
+        m = m + 1;
+    }
+
+    BitString<m> Samp() {
+        BitString<m> r <- BitString<m>;
+        return r;
+    }
+}
+
+export as WrittenFieldLength;

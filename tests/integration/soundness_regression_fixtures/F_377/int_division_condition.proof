@@ -1,0 +1,16 @@
+// F-377: claims IntDivisionCondition(q).Left and .Right are interchangeable.
+// They are not (see IntDivisionCondition.game).
+// Sound engine: Proof Failed!
+import 'IntDivisionCondition.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    IntDivisionCondition(q);
+
+games:
+    IntDivisionCondition(q).Left against IntDivisionCondition(q).Adversary;
+    IntDivisionCondition(q).Right against IntDivisionCondition(q).Adversary;

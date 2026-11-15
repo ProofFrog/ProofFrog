@@ -1,0 +1,47 @@
+// Call Fresh, then Size. Initialize inserted 0b00 and Fresh's draw
+// inserted v, so Left returns 2; Right never draws, so it returns 1.
+import 'P.primitive';
+
+Game Left(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> seen;
+    BitString<2> y;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+        seen = seen union {0b00};
+        y = H(0b00);
+    }
+    BitString<2> Reveal() {
+        return y;
+    }
+    Int Size() {
+        return |seen|;
+    }
+    BitString<2> Fresh() {
+        BitString<2> v <-uniq[seen] BitString<2>;
+        return H(v);
+    }
+}
+
+Game Right(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> seen;
+    BitString<2> y;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+        seen = seen union {0b00};
+        y = H(0b00);
+    }
+    BitString<2> Reveal() {
+        return y;
+    }
+    Int Size() {
+        return |seen|;
+    }
+    BitString<2> Fresh() {
+        BitString<2> z <- BitString<2>;
+        return z;
+    }
+}
+
+export as DroppedSize;

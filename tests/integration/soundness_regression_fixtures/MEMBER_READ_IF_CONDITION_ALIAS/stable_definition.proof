@@ -1,0 +1,13 @@
+// Positive control: the games of StableDefinition.game are interchangeable.
+import 'StableDefinition.game';
+
+proof:
+
+let:
+
+theorem:
+    StableDefinition();
+
+games:
+    StableDefinition().Left against StableDefinition().Adversary;
+    StableDefinition().Right against StableDefinition().Adversary;

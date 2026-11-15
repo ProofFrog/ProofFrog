@@ -1,0 +1,19 @@
+// Positive control: the argument of the deterministic call is a call to a
+// Function<D, R> from the proof's let: block, which is deterministic, so the
+// two calls return the same value and merging them is exact.
+import 'Rnd.primitive';
+
+Game Left(Rnd R, Int q, Function<ModInt<q>, ModInt<q>> H) {
+    [ModInt<q>, ModInt<q>] Probe(ModInt<q> x) {
+        return [R.Det(H(x)), R.Det(H(x))];
+    }
+}
+
+Game Right(Rnd R, Int q, Function<ModInt<q>, ModInt<q>> H) {
+    [ModInt<q>, ModInt<q>] Probe(ModInt<q> x) {
+        ModInt<q> v = R.Det(H(x));
+        return [v, v];
+    }
+}
+
+export as DedupLetFunctionArg;

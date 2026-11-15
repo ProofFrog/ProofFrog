@@ -1,0 +1,57 @@
+// Initialize overwrites H with K before evaluating H at the challenge
+// point. Call Challenge, then HashK(cf): in Left it equals y.
+import 'P.primitive';
+
+Game Left(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Function<BitString<2>, BitString<2>> K;
+    BitString<2> cf;
+    BitString<2> y;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+        K <- Function<BitString<2>, BitString<2>>;
+        cf <- BitString<2>;
+        H = K;
+        y = H(cf);
+    }
+    [BitString<2>, BitString<2>] Challenge() {
+        return [cf, y];
+    }
+    BitString<2>? Query(BitString<2> x) {
+        if (x == cf) {
+            return None;
+        }
+        return H(x);
+    }
+    BitString<2> HashK(BitString<2> x) {
+        return K(x);
+    }
+}
+
+Game Right(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Function<BitString<2>, BitString<2>> K;
+    BitString<2> cf;
+    BitString<2> y;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+        K <- Function<BitString<2>, BitString<2>>;
+        cf <- BitString<2>;
+        H = K;
+        y <- BitString<2>;
+    }
+    [BitString<2>, BitString<2>] Challenge() {
+        return [cf, y];
+    }
+    BitString<2>? Query(BitString<2> x) {
+        if (x == cf) {
+            return None;
+        }
+        return H(x);
+    }
+    BitString<2> HashK(BitString<2> x) {
+        return K(x);
+    }
+}
+
+export as InitChallenge;

@@ -1,0 +1,15 @@
+// SOUND -> the type checker rejects the assignment to M.keys.
+// UNSOUND -> prove reads M.keys = S; as no write to M, keeps the fact that
+// k is not in M.keys, deletes Left's second branch and ACCEPTS the hop.
+
+import './KeysWrite.game';
+
+proof:
+
+theorem:
+    KeysWrite();
+
+games:
+    KeysWrite().Left against KeysWrite().Adversary;
+
+    KeysWrite().Right against KeysWrite().Adversary;

@@ -1,0 +1,19 @@
+// F-356 (field initializer, the literal 0): `g - 1` subtracts an Int from a
+// ModInt<2>, which the type checker refuses when it checks this file on its
+// own. Instantiation used to read g as the literal 0, an Int, so in a proof
+// the type checker saw the integer comparison 0 - 1 == 0 + 1 instead, and
+// the engine proved it equal to false.
+Game Left() {
+    ModInt<2> g = 0;
+    Bool Test() {
+        return g - 1 == g + 1;
+    }
+}
+
+Game Right() {
+    Bool Test() {
+        return false;
+    }
+}
+
+export as FieldInitZero;

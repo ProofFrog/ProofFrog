@@ -1,0 +1,16 @@
+// F-356: claims CmpLocal.Left and CmpLocal.Right are interchangeable. They
+// are not: x holds b reduced modulo q (see cmp_local.game).
+
+import 'cmp_local.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    CmpLocal(q);
+
+games:
+    CmpLocal(q).Left against CmpLocal(q).Adversary;
+    CmpLocal(q).Right against CmpLocal(q).Adversary;

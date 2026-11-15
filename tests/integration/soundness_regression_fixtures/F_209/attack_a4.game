@@ -1,0 +1,53 @@
+// AUDIT ARTIFACT (HoistDuplicateBranchCall, Attack 4 -- PROSECUTION.md).
+// Hypothesis: VariableCollectionVisitor disables itself inside FieldAccess,
+// so the argument M.keys contributes NO argument variables and the
+// _args_available guard passes vacuously -- even though the plain top-level
+// reassignment `M = N;` after the hoist point is exactly what the guard's
+// write-ordering check (L3755-3756) exists to block, and _writes WOULD have
+// matched it had the collector reported M. Random below is the post-hoist
+// form of Real.
+// Real and Random are DISTINGUISHABLE: instantiate cardI as set cardinality.
+//   Adversary: output O(false).
+//   Real:   the branch is skipped, M becomes N, and O returns
+//           cardI({1, 2}) = 2 with probability 1.
+//   Random: __hoist_0__ is computed from the original M (keys {0}) and O
+//           returns cardI({0}) = 1 with probability 1.
+// Advantage 1.
+// If the engine is SOUND it must REJECT the interchangeability hop; if the
+// prosecution is right, the pass hoists Real's call above `M = N;` and the
+// engine ACCEPTS.
+
+import 'attack.primitive';
+
+Game Real(P F, Int n) {
+    Int O(Bool b) {
+        Map<Int, Int> M;
+        M[0] = 0;
+        Map<Int, Int> N;
+        N[1] = 1;
+        N[2] = 2;
+        if (b) {
+            return F.cardI(M.keys);
+        }
+        M = N;
+        return F.cardI(M.keys);
+    }
+}
+
+Game Random(P F, Int n) {
+    Int O(Bool b) {
+        Map<Int, Int> M;
+        M[0] = 0;
+        Map<Int, Int> N;
+        N[1] = 1;
+        N[2] = 2;
+        Int __hoist_0__ = F.cardI(M.keys);
+        if (b) {
+            return __hoist_0__;
+        }
+        M = N;
+        return __hoist_0__;
+    }
+}
+
+export as AttackA4;

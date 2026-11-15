@@ -1,0 +1,17 @@
+// Target: Blocked Local Absorption. See StaleType.game.
+// Expected: Proof Failed.
+import 'StaleType.game';
+
+proof:
+
+let:
+    Group G;
+    Int q;
+    Function<ModInt<q>, Int> H;
+
+theorem:
+    StaleType(G, q, H);
+
+games:
+    StaleType(G, q, H).Left against StaleType(G, q, H).Adversary;
+    StaleType(G, q, H).Right against StaleType(G, q, H).Adversary;

@@ -1,5 +1,6 @@
 """Tests for path traversal protections in web_server, mcp_server, and frog_parser."""
 
+import importlib.util
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +14,10 @@ try:
 
     _HAS_MCP = True
 except ImportError:
+    # Skip the mcp_server tests only when mcp is missing; with mcp installed,
+    # a failing import of mcp_server is a real error.
+    if importlib.util.find_spec("mcp") is not None:
+        raise
     _HAS_MCP = False
 
 

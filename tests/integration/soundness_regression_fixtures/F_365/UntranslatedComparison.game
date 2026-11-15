@@ -1,0 +1,23 @@
+// Target: the residual Z3 equivalence check (proof_engine.py).
+// Left compares two ModInt<q> values the Z3 translation does not model, so
+// it becomes one opaque atom of an uninterpreted sort; Right returns the Bool
+// literal false. Comparing the two sides raised a Z3 exception ("Z3
+// expression expected"), which aborted the whole proof instead of failing
+// the hop.
+// The games are distinguishable: Left computes 2 == 0 in ModInt<q>, true
+// for q = 2, while Right is always false.
+// Expected: Proof Failed (no crash).
+
+Game Left(Int q) {
+    Bool Probe(ModInt<q> x) {
+        return ((x + x ^ 0) + x ^ 0) - x == x - x;
+    }
+}
+
+Game Right(Int q) {
+    Bool Probe(ModInt<q> x) {
+        return false;
+    }
+}
+
+export as UntranslatedComparison;

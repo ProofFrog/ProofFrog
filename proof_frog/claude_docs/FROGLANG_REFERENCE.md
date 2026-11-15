@@ -1,0 +1,804 @@
+# FrogLang Semantics
+
+This document describes the formal semantics of FrogLang, the domain-specific language used by ProofFrog for expressing and verifying cryptographic game-hopping proofs.
+
+## 1. Overview
+
+FrogLang is a language for specifying cryptographic primitives, schemes, security definitions (as games), and game-hopping proofs. Its semantics are designed around the **provable security paradigm**, where security is formulated as the inability of any efficient adversary to distinguish between two games.
+
+The fundamental semantic unit is the **game**: a stateful interactive system that an adversary interacts with through oracle queries. The central question FrogLang answers is whether two games are **interchangeable** — that is, whether they induce identical probability distributions over all possible adversary outputs.
+
+## 2. Types
+
+### 2.1 Primitive Types
+
+- **`Int`**: Unbounded integers. Used for security parameters, lengths, loop bounds, and arithmetic.
+- **`Bool`**: Boolean values `true` and `false`.
+- **`Void`**: The unit type. Used only as the return type for methods that produce no value (typically `Initialize`).
+
+### 2.2 Parameterized Types
+
+- **`BitString<n>`**: The set of all bit strings of length `n`, where `n` is an `Int` expression. The cardinality of `BitString<n>` is `2^n`. An unparameterized `BitString` appears in primitive signatures as a placeholder to be instantiated later.
+
+- **`ModInt<q>`**: The set of integers modulo `q`, i.e., `{0, 1, ..., q-1}` with arithmetic operations performed modulo `q`. The cardinality of `ModInt<q>` is `q`.
+
+- **`Group`**: A finite cyclic group declaration. `Group` is a declaration type (like `Int` or `Set`) used to introduce a group parameter. A group `G` has three built-in accessors:
+  - `G.order` (`Int`): the order (number of elements) of the group.
+  - `G.generator` (`GroupElem<G>`): a designated generator of the group, i.e., an element whose powers enumerate every group element.
+  - `G.identity` (`GroupElem<G>`): the identity element of the group, i.e., the unique element `e` such that `e * g = g * e = g` for all `g` in the group. Equivalently, `G.generator ^ 0 = G.identity`.
+
+  The model is a **finite cyclic group**. All finite cyclic groups are abelian, so the group operation is commutative. The group is assumed to have the property that the map `G.generator ^ (·)` is a bijection from `ModInt<G.order>` to `GroupElem<G>` — this holds for any generator of a cyclic group by definition. In cryptographic applications, these are typically groups of prime order (e.g., prime-order subgroups of elliptic curve groups), though the engine's current transforms are sound for cyclic groups of any order.
+
+  **Prime-order opt-in.** By default a group's order is unconstrained, so transforms must be sound for any cyclic order. A proof or scheme may opt into prime-order reasoning by declaring `requires <group>.order is prime;` in its `requires` block (see the `requires` clauses note in section 5.2). Under prime order every nonzero exponent is invertible modulo `G.order`, so the map `x |-> x ^ k` (for `x : GroupElem<G>`) is a bijection on the group whenever `k` is nonzero. This is what licenses treating `x ^ k` as an **injective encoding** — e.g., deciding group-element equality by comparing exponents. Transforms that rely on it (the injective-exponent rewrites) fire only when the declaration is present and the exponent is provably nonzero; otherwise they decline and emit a near-miss requesting the declaration.
+
+- **`GroupElem<G>`**: The set of elements of the group `G`. Parameterized by a group identifier (not by order), so elements from different groups are type-incompatible even if the groups have the same order. The cardinality of `GroupElem<G>` is `G.order`.
+
+- **`Array<T, n>`**: Fixed-size arrays of `n` elements of type `T`, indexed from `0` to `n-1`.
+
+- **`Map<K, V>`**: Finite partial functions from keys of type `K` to values of type `V`. A map is initially empty (no keys are mapped). Looking up a key not in the domain returns an unspecified value of type `V` (section 6.9).
+
+- **`Set<T>`**: Finite sets of elements of type `T`. A set variable declared without a value starts empty. An unparameterized `Set` in a primitive signature is an abstract type placeholder.
+
+- **Sizes in types are constant**: a length, modulus or size in a type (`BitString<n>`, `ModInt<q>`, `Array<T, n>`) and the length of a literal `0^n` / `1^n` may name proof `let:` entries, and parameters and variables that are never written after their declaration (such as a scheme's `Int lambda = lambda;`), but not a parameter or variable that is assigned or sampled anywhere, so a type means the same thing throughout an execution. The type checker rejects the other cases.
+
+- **`Function<D, R>`**: The type of truly random functions from domain `D` to range `R`. A value of this type represents a lazily-evaluated random function: each distinct input independently maps to a uniformly random output, and repeated queries on the same input return the same result. This models the idealized random oracle / random function abstraction.
+
+- **`T?`** (Optional): Either a value of type `T` or `None`. Used for operations that may fail (e.g., decryption may return `Message?`). An optional variable declared without a value starts as `None`.
+
+### 2.3 Product Types (Tuples)
+
+- **`[T1, T2, ..., Tn]`**: An ordered heterogeneous collection. Tuple literals are written `[e1, e2, ..., en]` and elements are accessed by constant index: `t[0]`, `t[1]`, etc.
+
+### 2.4 Type Aliases and Set Fields
+
+Primitives and schemes define named `Set` fields that serve as type aliases:
+
+```
+Set Key = BitString<lambda>;
+```
+
+This makes `Key` (or `E.Key` when accessed through an instance `E`) usable as a type anywhere a type is expected. When a scheme is instantiated in a proof, these aliases resolve to concrete types.
+
+## 3. Expressions
+
+### 3.1 Literals
+
+- **Integer literals**: `0`, `42`, `1024`
+- **Binary literals**: `0bXYZ` where each digit is `0` or `1`. The declared bit length is the number of digits after `0b`, so `0b0` is a 1-bit literal, `0b01` is a 2-bit literal, `0b101` is a 3-bit literal. The value is the unsigned big-endian integer interpretation of the digits. Typed as `BitString<length>`. Unlike general programming languages, `0b0` is NOT length-polymorphic — for "all zeros of length $n$" (including symbolic $n$), use the bitstring-literal form below.
+- **Bitstring literals**: `0^n` (n-bit string of all zeros), `1^n` (n-bit string of all ones). The length `n` is an arbitrary length expression, concrete or symbolic.
+- **Boolean literals**: `true`, `false`
+- **`None`**: The null value for optional types
+- **`G.generator`**: The canonical generator of group `G` (type `GroupElem<G>`)
+- **`G.identity`**: The identity element of group `G` (type `GroupElem<G>`)
+- **Set literals**: `{e1, e2, e3}` or `{}` for the empty set
+- **Tuple literals**: `[e1, e2, e3]` or `[]` for the empty tuple
+
+### 3.2 Variables and Access
+
+- **Variable reference**: `x` — refers to a variable in scope (local, parameter, or field)
+- **Field access**: `obj.field` — accesses a named field of an object or type alias of a primitive/scheme instance
+- **Array/Map access**: `a[i]` — retrieves element at index `i` (for arrays) or key `i` (for maps)
+- **Slice**: `a[i : j]` — extracts a sub-bitstring from index `i` (inclusive) to `j` (exclusive), yielding a `BitString<j - i>`
+
+### 3.3 Function Calls
+
+- **Method call**: `obj.method(arg1, arg2, ...)` — invokes a method of a scheme or primitive instance
+- **Random function call**: `RF(x)` — evaluates a random function at input `x`
+- **`this.method(args)`**: Within a scheme body, calls another method of the same scheme. During proof verification, `this` is rewritten to the scheme's instance name.
+- **`challenger.method(args)`**: Within a reduction body, delegates to the composed security game's oracle.
+- **No calls of game methods**: A game or reduction may not call its own methods (`G.Inc()` inside `Game G`, `R.Query()` inside `Reduction R`, or `G().Inc()`), and may not call a method of any other game or reduction either: the other game of its pair, another intermediate game or reduction of the proof, or a game of an imported pair (`P(a).Left.M()`). The type checker rejects such a call. A game or reduction calls only primitive and scheme methods, plus `challenger` methods in a reduction; write a shared step inline instead. (`this.` is a scheme-only form.)
+
+### 3.4 Operators
+
+**Arithmetic** (on `Int` and `ModInt<q>`; `ModInt` arithmetic is performed mod `q`):
+- `+` (addition), `-` (subtraction), `*` (multiplication), `^` (exponentiation, right-associative)
+- `/` (division) on `ModInt<q>` only: `a / b` is `a * b^(-1)` mod `q`, and an unspecified value determined by `a` and `b` when `b` has no inverse mod `q` (section 6.9). `/` on `Int` is a type error.
+- Unary `-` (negation)
+
+**Group element operations** (on `GroupElem<G>`; both operands must belong to the same group):
+- `*` (multiplication): the abelian group operation; `a * b` produces a `GroupElem<G>`
+- `/` (division): `a / b` computes `a * b^(-1)`, yielding a `GroupElem<G>`
+- `^` (exponentiation): `h ^ x` where `h` is `GroupElem<G>` and `x` is `ModInt<G.order>` or `Int`, yielding `GroupElem<G>`. This computes the scalar power of a group element. An exponent of any other type, `ModInt<m>` with `m` not `G.order` included, is a type error.
+
+**Bitstring operations:**
+- `+` on `BitString<n>`: bitwise XOR (both operands must have the same length `n`)
+- `||` on bitstrings: concatenation; `a || b` produces a `BitString<|a| + |b|>`
+
+**Comparison** (on all comparable types):
+- `==`, `!=`, `<`, `>`, `<=`, `>=`
+
+**Logical** (on `Bool`):
+- `&&` (AND), `||` (OR), `!` (NOT)
+
+Note: `||` is overloaded — it is logical OR on `Bool` and concatenation on `BitString`.
+
+**Algebraic properties:**
+
+The following operators are commutative and associative:
+- `+` on `Int` and `ModInt<q>` (addition)
+- `+` on `BitString<n>` (XOR)
+- `*` on `Int`, `ModInt<q>`, and `GroupElem<G>` (multiplication / group operation)
+- `&&` on `Bool` (logical AND)
+- `||` on `Bool` (logical OR)
+
+The following are NOT commutative:
+- `-` (subtraction), `/` (division), `^` (exponentiation)
+- `||` on `BitString` (concatenation: `a || b` != `b || a` in general)
+
+**Set operations:**
+- `x in S` — membership test
+- `A subsets B` — subset test
+- `A union B` — set union
+- `A \ B` — set difference
+
+**Cardinality/size:**
+- `|x|` — cardinality of a set or map, or bit-length of a bitstring, or element count of an array
+
+**Operator precedence** (highest to lowest):
+1. Calls `f(x)`, slices `a[i : j]`, `!x`, `|x|`
+2. `^` (right-associative: `a ^ b ^ c` is `a ^ (b ^ c)`)
+3. `*`, `/` (one level, left-associative: `a / b * c` is `(a / b) * c`)
+4. Unary `-` (`-a * b` is `-(a * b)`, `-a + b` is `(-a) + b`)
+5. `+`, `-` (one level, left-associative: `a - b + c` is `(a - b) + c`)
+6. `union`, `\` (one level, left-associative: `S \ T union U` is `(S \ T) union U`)
+7. `<`, `<=`, `>`, `>=`, `in`, `subsets` (one level, left-associative; `x in S union T` is `x in (S union T)`)
+8. `==`, `!=` (one level, left-associative; `a < b == c < d` is `(a < b) == (c < d)`)
+9. `&&`
+10. `||`
+
+Every binary level is left-associative except `^`. The arithmetic levels match C, Java and Python, and the comparison and Boolean levels match C and Java; the set operators sit between the two.
+In a sampling statement `x <- T \ E;` the last `\` separates the type from the excluded set (`x <- T \ S \ U;` excludes `U` from `T \ S`), so parenthesize an excluded set that itself contains `\`: `x <- T \ (S \ U);`.
+`||` binds looser than the comparisons, including as bitstring concatenation: `k == a || b` is `(k == a) || b`.
+
+## 4. Statements
+
+### 4.1 Variable Declaration and Assignment
+
+- **Declaration only**: `Type x;` — declares a variable without a value. Until assigned it holds its type's default (section 6.9): empty for `Map` and `Set`, `None` for `T?`, and an unspecified value otherwise.
+- **Declaration with assignment**: `Type x = expr;` — declares and initializes.
+- **Assignment**: `x = expr;` or `a[i] = expr;` — assigns to an existing variable or updates an array/map element.
+- **Names**: a local declaration (`Type x = ...;`, `Type x <- ...;`, `Type x;`, a `for` binder) may not reuse the name of a parameter of its method, and an identifier of the form `__a<N>__` (the engine's fresh names) may not be written. The type checker rejects both.
+- **Assignment targets**: the target of an assignment or sample (`=`, `<-`, `<-uniq`) is a variable or an element `a[i]` / `M[k]` of one, at any depth (`M[k][0]`). A member access is read-only and cannot be a target, anywhere in it: `M.keys = S;`, `M.keys[0] = v;`, `E.lambda = 5;` or `this.x = v;` is a type error. An index may read a member (`M[|M.keys|] = v;` is fine).
+
+### 4.2 Sampling
+
+**Uniform sampling**: `Type x <- Type;`
+
+Draws a value uniformly at random from the specified type's domain. Each sampling statement produces an independent draw. Examples:
+- `BitString<n> r <- BitString<n>;` — sample a uniformly random n-bit string
+- `ModInt<q> r <- ModInt<q>;` — sample a uniformly random element of Z_q
+- `GroupElem<G> u <- GroupElem<G>;` — sample a uniformly random element of the group G
+- `Function<D, R> RF <- Function<D, R>;` — instantiate a fresh random function
+
+A sampled type must have a uniform distribution. `Int` (unbounded) and an optional type `T?` (no weight for `None`) do not, and neither does a product or array type with such a component, written directly or reached through an alias (`Set Pair = [BitString<n>?, BitString<n>];` then `Pair p <- Pair;`). The type checker rejects all of these, for both sampling forms.
+
+**Sampling from a variable**: `Type x <- someSetVariable;` — sample uniformly from the elements currently in a set or the values of a map.
+
+**Unique sampling**: `Type x <-uniq[S] Type;`
+
+Draws uniformly from `Type` conditioned on the result not being in the set `S`. Semantically equivalent to rejection sampling: repeatedly sample from `Type` until the result is not in `S`. This operation:
+- Produces a value uniformly distributed over `Type \ S`
+- Has an implicit collision/abort probability of `|S| / |Type|` per sample
+- Is used when freshness guarantees are needed (e.g., no repeated nonces)
+
+### 4.3 Return
+
+`return expr;` — exits the current method and returns the value of `expr`. The type of `expr` must match the method's declared return type.
+
+### 4.4 Conditional
+
+```
+if (condition) {
+    ...
+} else if (condition) {
+    ...
+} else {
+    ...
+}
+```
+
+Standard deterministic branching. The condition is a `Bool` expression evaluated at runtime. `else if` and `else` clauses are optional.
+
+### 4.5 For Loops
+
+**Numeric for**: `for (Int i = start to end) { ... }` — iterates `i` from `start` (inclusive) to `end` (exclusive), incrementing by 1.
+
+**Generic for**: `for (Type x in collection) { ... }` — iterates over all elements of a set, array, or map keys. For sets, the iteration order is unspecified.
+
+### 4.6 Function Call as Statement
+
+`obj.method(args);` — invokes a method and discards the return value. Used for void methods or when the return value is not needed.
+
+## 5. Program Components
+
+### 5.1 Primitives
+
+A **primitive** defines the abstract interface of a cryptographic operation:
+
+```
+Primitive SymEnc(Set MessageSpace, Set CiphertextSpace, Set KeySpace) {
+    Set Message = MessageSpace;
+    Set Ciphertext = CiphertextSpace;
+    Set Key = KeySpace;
+
+    Key KeyGen();
+    Ciphertext Enc(Key k, Message m);
+    Message? Dec(Key k, Ciphertext c);
+}
+```
+
+Primitives declare:
+- **Parameters**: Types (`Set`, `Int`, other primitives) that are provided upon instantiation.
+- **Fields**: Named type aliases (e.g., `Set Key = KeySpace`) that become accessible as `E.Key`.
+- **Method signatures**: Abstract method declarations with no bodies.
+
+Primitives represent the **syntactic interface** that schemes must implement. They carry no behavioral semantics of their own.
+
+### 5.2 Schemes
+
+A **scheme** is a concrete implementation of a primitive:
+
+```
+Scheme OTP(Int lambda) extends SymEnc {
+    Set Key = BitString<lambda>;
+    Set Message = BitString<lambda>;
+    Set Ciphertext = BitString<lambda>;
+
+    Key KeyGen() {
+        Key k <- Key;
+        return k;
+    }
+
+    Ciphertext Enc(Key k, Message m) {
+        return k + m;
+    }
+
+    Message? Dec(Key k, Ciphertext c) {
+        return c + k;
+    }
+}
+```
+
+Schemes provide:
+- **Field definitions**: Concrete types for the primitive's abstract type aliases.
+- **Method implementations**: Executable code for each method declared in the primitive.
+- **`requires` clauses** (optional): Preconditions on parameters that must hold for the scheme to be well-defined (e.g., `requires F.out >= lambda;`). `requires` may express type-level equalities (`requires E.Key == BitString<n>;`) or value-level numeric equalities (`requires F.in == 1;`); the latter propagate into typechecking, so a literal `BitString<1>` can unify with a symbolic `BitString<F.in>` under such a constraint. A `requires` clause may also assert that a **group's order is prime**: `requires <group>.order is prime;`. This is the prime-order opt-in described under `Group` above — it licenses the injective-exponent canonicalizations (treating `x ^ k` as injective for known-nonzero `k`) — and is consumed by the engine's transform layer rather than by typechecking. `requires` clauses appear in both scheme definitions and proof `requires:` blocks.
+- **Composition**: Schemes can take other primitives as parameters and call their methods (e.g., a scheme parameterized by `PRF F` can call `F.evaluate(k, x)`).
+- **Self-reference**: Within a scheme body, `this.MethodName(args)` calls another method of the same scheme. During proof verification, `this` is resolved to the scheme's instance name.
+
+### 5.3 Games
+
+A **game** is a stateful interactive system:
+
+```
+Game Left(SymEnc E) {
+    E.Key k;
+
+    Void Initialize() {
+        k = E.KeyGen();
+    }
+
+    E.Ciphertext Eavesdrop(E.Message mL, E.Message mR) {
+        return E.Enc(k, mL);
+    }
+}
+```
+
+Games define:
+- **Parameters**: Values provided upon instantiation.
+- **State fields**: Mutable variables that persist across oracle calls. May be declared with or without initializers. A field declared without one holds its type's default until assigned (section 6.9).
+- **Methods**: Oracle procedures callable by the adversary.
+  - **`Initialize`**: A distinguished method (when present) that is called exactly once before any other oracle. Typically has return type `Void`, though it may return a value in phased games.
+  - **Other methods**: Oracles that the adversary may call in any order, any number of times.
+  - Only the adversary calls a game's methods: a game may not call its own methods (`Left.Eavesdrop(...)` inside `Left`) or those of another game (section 3.3). Its methods call primitive and scheme methods only.
+
+### 5.4 Security Properties (Game Files)
+
+A **security property** is defined as a pair of games in a `.game` file:
+
+```
+Game Left(SymEnc E) { ... }
+Game Right(SymEnc E) { ... }
+export as CPA;
+```
+
+The two games (typically named `Left`/`Right` or `Real`/`Random`) represent the two sides of an indistinguishability challenge. A scheme satisfies the security property if no efficient adversary can distinguish between interacting with the left game versus the right game (with more than negligible advantage).
+
+FrogLang uses the **left/right (indistinguishability)** formulation exclusively, rather than win/lose games. Security properties from the literature that are naturally stated as win/lose (e.g., unforgeability) can be reformulated as left/right indistinguishability games.
+
+**Advantage clause (helper games).** A `.game` file may declare its statistical distinguishing bound with an optional `advantage <= <expr>;` clause between the two games and `export as`:
+
+```
+Game Left(Set S) { ... }
+Game Right(Set S) { ... }
+advantage <= count_Samp * count_Samp / |S|;
+export as DistinctSampling;
+```
+
+The bound is numeric arithmetic (`+ - * / ^`, `|S|` cardinality, literals) over the games' shared parameters and per-oracle query counts written `count_<Oracle>`, where `<Oracle>` names a (non-`Initialize`) method of the games. It is a *declared, unconditional* fact — the semantic checker enforces only well-formedness, and it is trusted like the helper game itself. So only helper games that encode statistical facts (e.g. `examples/Games/Helpers/`) carry a clause; genuine cryptographic assumptions get none. When such a helper is used in an assumption hop, the engine substitutes the clause to turn the hop's opaque advantage term into this concrete statistical expression, stated in the theorem game's own query counts.
+
+### 5.5 Phases
+
+Games may be organized into **phases** for security definitions that involve distinct stages of interaction (e.g., CCA security):
+
+```
+Phase {
+    Void Initialize() {
+        k = E.KeyGen();
+    }
+    oracles: [Enc, Dec];
+}
+
+Phase {
+    E.Ciphertext Initialize(E.Message mL, E.Message mR) {
+        cStar = E.Enc(k, mL);
+        return cStar;
+    }
+    oracles: [Enc, restrainedDec];
+}
+```
+
+Each phase has its own `Initialize` method (which transitions to the next phase) and a list of oracles available during that phase. The adversary interacts with one phase at a time: the first phase's `Initialize` runs, then the adversary calls the first phase's oracles, then the second phase's `Initialize` runs (triggered by the adversary), and the adversary calls the second phase's oracles, and so on.
+
+State fields are shared across all phases.
+
+### 5.6 Reductions
+
+A **reduction** adapts an adversary for one security game into an adversary for another:
+
+```
+Reduction R(PRG G, TriplingPRG T) compose Security(G)
+    against Security(T).Adversary {
+
+    BitString<T.lambda + T.stretch> Query() {
+        BitString<2 * T.lambda> result = challenger.Query();
+        BitString<T.lambda> x = result[0 : T.lambda];
+        BitString<T.lambda> y = result[T.lambda : 2 * T.lambda];
+        BitString<2 * T.lambda> result2 = G.evaluate(y);
+        return x || result2;
+    }
+}
+```
+
+A reduction specifies:
+- **`compose SecurityGame(params)`**: The assumed security game whose oracles the reduction delegates to via `challenger`.
+- **`against TheoremGame(params).Adversary`**: The theorem game whose adversary the reduction must simulate oracles for.
+- **Body**: Methods that implement the theorem game's oracle interface, using `challenger.Method(args)` to call the assumed security game's oracles. A reduction may not call its own methods (`R.Query()` inside `R`) or those of another game or reduction (section 3.3).
+- **State fields** (optional): The reduction may maintain its own state across oracle calls.
+- **Parameter rule**: The reduction's parameter list must include every parameter needed to instantiate the composed security game, even if some parameters are not referenced in the reduction body.
+
+## 6. Game Execution Semantics
+
+This section describes the semantics of executing a game in the context of an adversary. This is the core semantic model of FrogLang.
+
+### 6.1 The Adversary Model
+
+An **adversary** is an abstract, computationally bounded entity that interacts with a game through its oracle interface. The adversary is not explicitly represented in FrogLang — it is the implicit external entity that:
+
+1. Receives access to the game's oracles (methods other than `Initialize`, or in phased games, the oracles listed for each phase).
+2. Can call any available oracle, in any order, any number of times.
+3. Can choose the arguments to each oracle call adaptively — that is, based on the results of all previous oracle calls.
+4. Produces some output at the end of the interaction.
+
+The adversary has no direct access to the game's internal state (fields). It can only observe the game through the values returned by oracle calls.
+
+### 6.2 Game Execution Model
+
+The execution of a game `G` with an adversary `A` proceeds as follows:
+
+1. **Field initialization**: All state fields are initialized according to their declarations. Fields with explicit initializers (`Type x = expr;`) are set to the value of `expr`, converted to `Type` like any store (an `Int` stored in a `ModInt<q>` field is reduced modulo `q`). Fields without initializers (`Type x;`) start at their type's default (section 6.9). The initializers run once, in declaration order, and an initializer may read only the fields declared before it, at their current values: after `GroupElem<G> P; GroupElem<G> Q = P;`, `Q` holds `P`'s default even once `Initialize` assigns `P`, and a method call in an initializer is made once. The engine reads a field as its initializer only when evaluating the initializer again gives the same value (it makes no method call and reads no field that a method writes); otherwise the field stays a field.
+
+2. **Initialize phase**: If the game has an `Initialize` method, it is called exactly once. This typically performs setup operations like sampling cryptographic keys.
+
+3. **Oracle interaction phase**: The adversary `A` is given access to the game's oracle methods. The adversary may:
+   - Call any oracle, with any valid arguments, at any time.
+   - Call oracles in any order.
+   - Call each oracle any number of times (including zero times).
+   - Choose arguments adaptively based on previous oracle responses.
+
+4. **Termination**: The adversary eventually halts and produces an output value.
+
+For **phased games**, the execution is:
+1. Field initialization.
+2. Phase 1's `Initialize` runs.
+3. The adversary calls Phase 1's oracles (listed in `oracles: [...]`).
+4. The adversary triggers Phase 2 by calling Phase 2's `Initialize`.
+5. The adversary calls Phase 2's oracles.
+6. (And so on for additional phases.)
+7. The adversary halts and produces output.
+
+### 6.3 State Semantics
+
+- **Persistence**: State fields persist across all oracle calls within a game execution. A value written to a field in one oracle call is visible in subsequent calls.
+- **Isolation**: Each game execution is independent. There is no state shared between different game executions.
+- **Scope**: Local variables (declared within a method body) are scoped to that method invocation. Each oracle call gets fresh local variables. Parameters are scoped to the method body.
+
+### 6.4 Non-determinism and Sampling
+
+**Functions in FrogLang are by default non-deterministic.** When a scheme method like `F.evaluate(k, x)` is called, each invocation may in principle return a different result, even with the same arguments. This is the default semantic model because FrogLang does not assume anything about the implementation of a primitive's methods beyond their type signatures.
+
+**Method annotations** on primitive declarations can override this default:
+- `deterministic` — the method always returns the same output for the same inputs. The engine exploits this annotation in several ways:
+  - **Purity for inlining/aliasing**: Deterministic calls are treated as pure expressions for expression aliasing (`ForwardExpressionAlias`), field hoisting (`HoistFieldPureAlias`), assignment collapsing (`CollapseAssignment`), field inlining (`InlineSingleUseField`), and tuple index folding (`FoldTupleIndex`).
+  - **Same-method deduplication**: `DeduplicateDeterministicCalls` extracts duplicate deterministic calls with structurally equal arguments into a shared local variable. For example, `[F.evaluate(k, x), F.evaluate(k, x)]` becomes `v = F.evaluate(k, x); [v, v]`. The arguments must be deterministic too: `[F.evaluate(F.Gen()), F.evaluate(F.Gen())]` with `Gen` not annotated `deterministic` evaluates `Gen` twice, independently, and is left alone.
+  - **Cross-method field alias**: `CrossMethodFieldAlias` propagates field assignments of deterministic calls to other methods. If Initialize stores `field = F.evaluate(k)` and an oracle also calls `F.evaluate(k)`, the oracle's call is replaced with the field reference.
+- `injective` — the method maps distinct inputs to distinct outputs. The `ChallengeExclusionRFToUniform` transform uses this to see through encoding wrappers when checking whether RF arguments structurally differ.
+
+Example: `deterministic injective BitString<n> Encode(GroupElem g);`
+
+Together, these transforms eliminate the need for explicit `IsDeterministic` assumption games in proofs. Previously, proofs required workaround games (e.g., `PRFIsDeterministic` with `TwoCalls`/`OneCall` sides) to establish that calling a deterministic function twice yields the same result. The engine now handles this automatically via the `deterministic` annotation.
+
+**Sampling statements** (`<-`) are the explicit source of randomness. Each sampling statement draws an independent, uniformly random value from the specified domain. The semantics of sampling are:
+
+- **Independence**: Distinct sampling statements produce independent random values, even if they sample from the same type.
+- **Uniformity**: The distribution is uniform over the specified domain.
+- **Freshness**: Each execution of a sampling statement (including across multiple calls to the same oracle) produces a fresh independent value.
+
+### 6.5 Random Functions
+
+A `Function<D, R>` value represents a truly random function from `D` to `R`. Semantically:
+
+- It is a function chosen uniformly at random from the set of all functions from `D` to `R`.
+- It is **consistent**: calling `RF(x)` twice with the same `x` returns the same value.
+- It is **independent across inputs**: for distinct inputs `x1 != x2`, the outputs `RF(x1)` and `RF(x2)` are independently and uniformly distributed over `R`.
+- It can be thought of as a lazily-populated lookup table: the first time a new input `x` is queried, a fresh uniform value is sampled from `R` and stored; subsequent queries on `x` return the stored value.
+
+Random functions are the standard idealization used in cryptographic proofs. They commonly appear in the "Random" side of PRF security games, where the adversary's challenge is to distinguish a PRF from a truly random function.
+
+See §9.3 for the multi-map generalization (guarded two-map lazy lookup).
+
+### 6.6 Unique Sampling
+
+The statement `Type x <-uniq[S] Type;` has the following semantics:
+
+1. Sample `x` uniformly from `Type \ S` (the elements of `Type` not in `S`).
+2. The resulting `x` is guaranteed to be distinct from all elements currently in `S`.
+   The draw then adds `x` to `S` (as if followed by `S = S union {x}`), so later reads of `S` and later `<-uniq[S]` draws see it; the set-difference form `x <- T \ S` samples the same way but does not change `S`.
+3. Semantically, this is equivalent to rejection sampling: sample from `Type`, if the result is in `S` then resample, repeat until a fresh value is obtained.
+4. The probability of needing to resample (collision probability) is `|S| / |Type|` per trial.
+
+For a sampled `Function` `RF`, the exclusion set may be written `RF.domain`. It names a hidden set kept for that function: it starts empty and holds exactly the points drawn by `x <-uniq[RF.domain] T;`. Evaluating `RF(x)` does not add `x` to it, so such a draw avoids the earlier `<-uniq[RF.domain]` draws but not the points the game (or the adversary, through an oracle) queried `RF` on. `RF.domain` can be read but not assigned.
+
+This is used in contexts where freshness is important, such as ensuring nonces are never reused. The `UniqueSampling` helper game captures the assumption that sampling with replacement is indistinguishable from sampling without replacement (valid when the collision probability is negligible).
+
+### 6.7 Map Semantics
+
+Maps (`Map<K, V>`) are finite partial functions:
+
+- **Empty on creation**: A newly declared map has an empty domain.
+- **Lookup**: `M[k]` returns the value associated with key `k`. For a key not in the domain it returns an unspecified value of the value type (section 6.9); test `k in M` first when the difference matters.
+- **Update**: `M[k] = v;` associates key `k` with value `v`, extending or modifying the map.
+- **Sampling into map**: `M[k] <- Type;` samples a uniform value from `Type` and stores it at key `k`.
+- **Membership**: `k in M` tests whether `k` is in the map's domain.
+- **Size**: `|M|` returns the number of key-value pairs.
+- **Read-only members**: `M.keys`, `M.values` and `M.entries` can be read but not assigned (section 4.1); change a map through its elements.
+
+### 6.8 Optional Type Semantics
+
+Values of type `T?` are either a value of type `T` or `None`:
+
+- **Construction**: Any expression of type `T` implicitly converts to `T?`. The literal `None` has type `T?` for any `T`.
+- **Comparison**: `x == None` tests whether an optional value is null.
+- **Usage**: Typically used for operations that may fail, such as decryption returning `Message?` (where `None` indicates decryption failure).
+- **Default**: An optional variable declared without a value (`E.Ciphertext? ctStar;`) is `None` until assigned, the usual "not yet set" convention for a challenge value.
+
+### 6.9 Default Values and Total Expressions
+
+Evaluating an expression never fails: every read yields a value, and no expression has an "undefined" outcome, an abort or an error state.
+
+- **Variables declared without a value** (fields and locals, `Type x;`) hold their type's default until assigned: the empty map for `Map<K, V>`, the empty set for `Set<T>`, `None` for `T?`, and for every other type one fixed but unspecified value of that type. The unspecified value is the same every time it is read, in every game, but nothing else is known about it: an adversary may know it, so a proof may not assume it differs from, or equals, any particular value.
+- **Partial operations** return an unspecified value of their result type, determined by their operands: looking up a key not in a map's domain, indexing an array outside `0` to `n-1`, and division by zero (or by a `ModInt` with no inverse).
+- Every type is taken to be non-empty, so these values exist.
+- This section is about expressions. A sampling statement is different: a draw from a domain that may be empty (`x <- S` with `S` an empty set, or an exclusion that covers the whole type) produces no value, and the adversary can observe that it did not complete. A pass may not move such a draw to traces it did not run on, or off traces it ran on.
+
+This follows proof assistants such as Isabelle/HOL (`undefined`, an unspecified value of each type), Lean and Rocq (`x / 0 = 0`), which make every function total rather than partial. Because evaluation cannot fail, the engine may drop an unused read, or move a read above a `return`, without checking that what it reads has been assigned. A read that may see a default is usually a modelling slip worth fixing in the game, for instance by declaring a "not yet set" field as `T?` so that it starts as `None`.
+
+## 7. Composition Semantics
+
+### 7.1 Game Composition with Schemes
+
+When a security game is instantiated with a scheme, the scheme's methods become callable within the game body. For example, if `CPA(E)` is instantiated with `E = OTP(lambda)`, then calls to `E.Enc(k, m)` within the game body invoke the OTP scheme's `Enc` method.
+
+During proof verification, these method calls are **inlined**: the call `E.Enc(k, m)` is replaced by the body of OTP's `Enc` method with parameters substituted. This is the primary mechanism by which the proof engine reduces abstract game descriptions to concrete, comparable code.
+
+A scheme field with an initializer (`Int lambda = lambda;`) is read as its initializer, in the scheme's methods and as `E.lambda`. That is only exact when the initializer already has the field's type (or the field's type holds no `ModInt`), so the engine refuses, with a type error, a scheme whose field initializer would be converted: an `Int` stored in a `ModInt<q>` field, including an integer literal such as `0` (the field's arithmetic is modular, the literal's is not). A game field whose initializer is converted stays a field holding the converted value. Reading a field as its initializer is also only exact when evaluating the initializer again gives the value it had when it ran (section 6.2), so the engine also refuses a scheme whose field initializer calls a method or reads a field one of the scheme's methods writes.
+
+A parameter of a game, reduction, scheme or primitive receives its argument the same way: an `Int` argument for a `ModInt<q>` parameter (or a parameter with a `ModInt<q>` part) is reduced modulo `q`, an integer literal included. The engine replaces a parameter by its argument only when the argument already has the parameter's type there. Otherwise a game or reduction keeps the parameter as a field holding the converted argument, and a scheme or primitive is refused with a type error, for the same reason as a converted scheme field.
+
+Inside a game or reduction, a parameter is the game's own variable, starting out at its argument's value (arguments are passed by value, section 7.3). A game may assign it, draw into it, write an element of it or insert into it with `<-uniq`; later reads see the new value, and the caller's variable is unchanged. The engine keeps such a parameter as a field initialized with the argument (a method parameter, local or `for` binder of the same name shadows it and does not count), and a field whose initializer reads it holds its starting value. A scheme that writes its own parameter is refused with a type error, since a scheme's methods are inlined into the games that call them.
+
+### 7.2 Game Composition with Reductions
+
+When a game is composed with a reduction, the resulting system is a new game whose oracles are the reduction's methods. The reduction's `challenger` variable is bound to the composed security game.
+
+For example, `Security(G).Real compose R(G, T)` produces a game where:
+1. The adversary calls `R`'s oracle methods (which implement the interface of `Security(T)`).
+2. Inside `R`'s methods, calls to `challenger.Query()` invoke `Security(G).Real`'s `Query` oracle.
+3. The combined state includes both `R`'s fields and `Security(G).Real`'s fields.
+
+The composition merges the `Initialize` methods:
+- If both the reduction and the composed game have `Initialize`, the reduction's `Initialize` may explicitly call `challenger.Initialize()` to invoke the composed game's initialization.
+- The resulting game's initialization runs both, establishing the combined initial state.
+
+### 7.3 Inlining
+
+**Inlining** is the process of replacing a method call with the method's body, substituting parameters with arguments. This is the key mechanism by which the proof engine transforms composed games into flat, comparable code.
+
+**Arguments are passed by value.** A method call evaluates each argument once, before the callee's body, and the callee gets its own copy of each value, `Map`, `Array`, `Set` and tuple arguments included. A callee may assign its parameter (`x = e;`), draw into it, write an element of it (`X[k] = v;`) or insert into it with `<-uniq[X]`; none of these changes the caller's variable.
+
+When inlining `obj.method(arg1, arg2)`:
+1. A fresh copy of the method body is created.
+2. Each formal parameter is substituted with the corresponding argument expression, except where that would change what the call computes: an argument that calls a method or function (which may draw, change a challenger's state, or not complete, and must run exactly once whether the callee reads the parameter twice or never), a parameter the callee writes (substitution would turn the callee's write into a write to the caller's variable) and a parameter whose type contains a `ModInt` (which reduces an `Int` argument) are bound instead, by a declaration `T obj.method@param<i> = arg;` of the parameter's type placed before the body.
+3. Locally declared variables are renamed to avoid name collisions (using a scheme like `method@varname`).
+4. The method call expression is replaced by the return expression (or the call statement is replaced by the method body for void methods).
+
+Inlining is applied repeatedly in a fixed-point loop until no more method calls can be expanded. This converges because the call graph is finite and acyclic (recursive method calls are not supported in FrogLang).
+
+## 8. Proof Semantics
+
+### 8.1 Proof Structure
+
+A proof file establishes that a target security property holds for a scheme, under stated assumptions:
+
+```
+proof:
+
+let:
+    Int lambda;
+    PRG G = PRG(lambda, lambda);
+    TriplingPRG T = TriplingPRG(G);
+
+assume:
+    Security(G);
+
+theorem:
+    Security(T);
+
+games:
+    Security(T).Real against Security(T).Adversary;
+    Security(G).Real compose R1(G, T) against Security(T).Adversary;
+    Security(G).Random compose R1(G, T) against Security(T).Adversary;
+    ...
+    Security(T).Random against Security(T).Adversary;
+```
+
+- **`let:`** — Declares parameters and instantiates schemes. These definitions are in scope throughout the proof.
+- **`assume:`** — Lists security properties assumed to hold for underlying primitives/schemes. These justify assumption hops.
+- **`theorem:`** — The target security property to be proven.
+- **`bound:`** (optional, between `theorem:` and `games:`) — the advantage bound the author claims the proof establishes. Numeric arithmetic over `advantage(<notion> compose <reduction>)` terms (the reduction named from the proof's own declarations; `advantage(<notion>)` for a directly-played hop), per-oracle counts `count_<Oracle>` of the theorem game, cardinalities `|Type|`, and `let:` parameters. After the proof verifies, the engine checks the claim is a valid upper bound on the bound it synthesizes from the hops and reports `verified` / `NOT verified` / `undecided`; a `NOT verified` claim fails `prove` unless `--skip-bound` is passed. "verified" means the claim is a valid (possibly loose) upper bound, not an independent security proof.
+- **`games:`** — A sequence of game steps forming the proof.
+
+### 8.2 The Game Sequence
+
+The `games:` section lists a sequence of game configurations. The first game must be `Theorem.Side1 against Theorem.Adversary` and the last must be `Theorem.Side2 against Theorem.Adversary` (where Side1 and Side2 are the two sides of the theorem's security property, e.g., Left/Right or Real/Random).
+
+Each consecutive pair of games in the sequence must be justified as either:
+
+1. **An interchangeability hop**: The two games are code-equivalent (verified by the engine).
+2. **An assumption hop**: The two games differ only in which side of an assumed security property is used, and that assumption appears in the `assume:` section.
+
+### 8.3 Interchangeability
+
+Two games are **interchangeable** if, for all adversaries `A`:
+
+```
+Pr[A interacting with Game1 outputs 1] = Pr[A interacting with Game2 outputs 1]
+```
+
+That is, no adversary can distinguish between the two games — they induce identical probability distributions over adversary outputs.
+
+The ProofFrog engine verifies interchangeability by:
+
+1. **Canonicalization**: Both games are transformed through a deterministic pipeline of semantics-preserving rewrites (inlining, algebraic simplification, dead code elimination, sampling normalization, etc.) to arrive at a canonical form.
+2. **Structural comparison**: The canonical forms are compared structurally. If they are identical (up to alpha-equivalence of bound variables), the games are interchangeable.
+3. **SMT-assisted comparison**: If the canonical forms differ only in the conditions of `if` statements, the engine uses Z3 to check whether the differing conditions are logically equivalent. If so, the games are interchangeable.
+
+### 8.4 Assumption Hops
+
+An assumption hop transitions between two game steps that differ in which side of an assumed security property is composed with a reduction:
+
+```
+Security(G).Real compose R(...) against Adversary;    // step i
+Security(G).Random compose R(...) against Adversary;  // step i+1
+```
+
+This hop is justified by the assumption `Security(G)` in the `assume:` section. The direction is irrelevant — assumption hops are **bidirectional** because indistinguishability is symmetric.
+
+### 8.5 The Standard Reduction Pattern
+
+A typical use of a reduction in a proof follows a four-step pattern:
+
+```
+G_A against Adversary;                                  // (1) interchangeability
+Security(G).Side1 compose R against Adversary;          // (2) interchangeability
+Security(G).Side2 compose R against Adversary;          // (3) by assumption
+G_B against Adversary;                                  // (4) interchangeability
+```
+
+- Steps 1-2: Verified as interchangeable by the engine (the game `G_A` is equivalent to composing `Security.Side1` with the reduction `R`).
+- Steps 2-3: Justified by the assumption that `Security(G)` holds.
+- Steps 3-4: Verified as interchangeable by the engine.
+
+### 8.6 Induction
+
+Proofs may use **induction** for hybrid arguments that transition through a parameterized family of games:
+
+```
+induction(i from 1 to q) {
+    Security(F).Real compose R_Hybrid(F, i) against Adversary;
+    Security(F).Random compose R_Hybrid(F, i) against Adversary;
+}
+```
+
+This expands to `q` iterations, each replacing one oracle call with a random one (or vice versa). Induction is the mechanism for lifting single-call security (e.g., single-key PRF security) to multi-call security (e.g., multi-key PRF security).
+
+### 8.7 Step Assumptions
+
+`assume expr;` statements within the `games:` section assert predicates that constrain the proof context (e.g., bounding the number of oracle calls: `assume R.count >= 1;`). These are used alongside induction to express hybrid argument invariants.
+
+### 8.8 Event Theorems and Identical-until-Bad Hops
+
+Some hops cannot be shown by code equivalence or by a single assumption: the two games behave identically *until* a rare event happens, after which they may differ arbitrarily (Bellare-Rogaway 2006, "the fundamental lemma of game playing"; Shoup 2004, section 5). ProofFrog supports this with **identical-until-bad pairs** and **event theorems**.
+
+**The pair.** An ordinary two-game file whose games both declare a `Bool` flag field (conventionally `bad`) and are *identical until the flag is set*:
+
+```
+Game Left(Set S) {
+    S target;
+    Bool bad;
+    Void Initialize() { target <- S; bad = false; }
+    Bool Eq(S c) {
+        if (c == target) { bad = true; return true; }
+        return false;
+    }
+}
+
+Game Right(Set S) {
+    S target;
+    Bool bad;
+    Void Initialize() { target <- S; bad = false; }
+    Bool Eq(S c) {
+        if (c == target) { bad = true; }
+        return false;
+    }
+}
+
+export as BadGuess;
+```
+
+The engine checks the side condition syntactically, oracle by oracle:
+
+- Both games take the same parameters, declare the same fields and the same oracles (names, order, signatures).
+- **Flag discipline** on each side: the flag is reset by `bad = false;` as a top-level statement of `Initialize` before anything raises it or returns (or the field is declared `Bool bad = false;`), and is otherwise only ever assigned `bad = true;`. It is never sampled, never assigned anything else, never shadowed by a parameter or local. Reading it is fine.
+- **Lockstep**: the two bodies are walked statement by statement. They must agree, except that return values, assigned values and map indices may differ when the facts known on the path (branch conditions taken, `bad == false`, `x = e` assignments) entail that they are equal, and `if` arms those facts rule out (such as `if (bad) {...}` before the flag is raised) are ignored. When both sides reach `bad = true;` at the same statement, everything after it in that block is free to differ. Code containing a method call is compared syntactically, never by value. The flag must be raised at the same point on both sides; align the two sides if they are equivalent but written differently.
+
+**The hop.** A side flip over the pair,
+
+```
+BadGuess(S).Left  compose R(S) against TargetGuess(S).Adversary;
+BadGuess(S).Right compose R(S) against TargetGuess(S).Adversary;
+```
+
+is an **`upto` hop** when an event of the pair is in scope. It costs `Pr[bad]` in the pair against the constructed adversary, printed as `Pr[bad of BadGuess(S)](B1)`. There are three ways to put the event in scope:
+
+| Route | Syntax | Loss term |
+|---|---|---|
+| Event lemma | `lemma: event bad of BadGuess(S) by 'BadGuessEvent.proof';` | the lemma's event term |
+| Assumed event | `assume: event bad of BadGuess(S);` | the pair's `advantage <= e;` clause if it has one (read as a bound on `Pr[bad]`), else the opaque event term |
+| Assumed pair | `assume: BadGuess(S);` | an ordinary assumption hop; no side-condition check |
+
+Assuming the pair directly while an event of it is in scope is an error. If a side flip over a pair with a shared `Bool` field fails as an equivalence, `prove` prints a hint naming the event routes.
+
+**Event theorems.** A proof whose theorem is `event bad of P(a)` bounds `Pr[bad]`:
+
+```
+import 'BadGuess.game';
+import 'RandomTargetGuessing.game';
+
+proof:
+
+let:
+    Set S;
+
+assume:
+    RandomTargetGuessing(S);
+
+theorem:
+    event bad of BadGuess(S);
+
+games:
+    BadGuess(S).Right against BadGuess(S).Adversary;
+    RandomTargetGuessing(S).Real  compose R(S) against BadGuess(S).Adversary;
+    RandomTargetGuessing(S).Ideal compose R(S) against BadGuess(S).Adversary;
+
+Reduction R(Set S) compose RandomTargetGuessing(S) against BadGuess(S).Adversary {
+    Bool bad;
+    Void Initialize() { challenger.Initialize(); bad = false; }
+    Bool Eq(S c) {
+        if (challenger.Eq(c)) { bad = true; }
+        return false;
+    }
+}
+```
+
+Rules for an event proof:
+
+- The first step is a side of the pair (either side: in an identical-until-bad pair `Pr[bad]` is the same in both); the pair appears nowhere else in the games list, every step is played against the pair's adversary, and induction is not supported.
+- Every reduction and intermediate game in the proof declares a `Bool bad` field. The engine observes it as the event: each game in the chain gets an internal oracle revealing its `bad`, so every hop must preserve the flag together with the transcript. A reduction therefore tracks the event (it raises `bad` exactly when the pair would); it does not have to reproduce what the pair does *after* the flag is raised.
+- There is no final game to reach. The engine appends a last check, **flag unreachable**, which passes when the last game can no longer raise `bad` (in the example, `challenger.Eq` is constantly `false` in `RandomTargetGuessing.Ideal`). The summary table shows it as its own hop.
+- The bound prints as `Advantage bound: Pr[bad of BadGuess(S)](A) <= count_Eq/|S|`.
+
+**Flags decided in `Initialize`.** When every `bad = true;` of the pair is in `Initialize`, write `event bad of P(a) at Initialize`. The event then depends only on the pair's own coins, so the event proof is against a stripped game with `Initialize` alone (its return value dropped); its reductions and intermediate games define only `Initialize`. Required: the flag is raised only in `Initialize`, `Initialize` takes no parameters and returns only as its last statement, and (for any proof) a reduction calls `challenger.Initialize` at most once and only from its own `Initialize`.
+
+**Claimed bounds.** A `bound:` clause names the event term as `advantage(event bad of BadGuess(S) compose R)`.
+
+## 9. Semantic Equivalences
+
+The proof engine considers the following transformations to be semantics-preserving (i.e., they produce interchangeable games):
+
+### 9.1 Algebraic Identities
+
+- **XOR with uniform**: `u <- BitString<n>; return u + m;` is equivalent to `u <- BitString<n>; return u;` (XOR of a uniform value with any value is uniform), provided `u` is used only once.
+- **ModInt with uniform**: `u <- ModInt<q>; return u + m;` is equivalent to `u <- ModInt<q>; return u;` (addition of a uniform element modulo `q` with any value is uniform), provided `u` is used only once.
+- **GroupElem with uniform**: `u <- GroupElem<G>; return u * m;` is equivalent to `u <- GroupElem<G>; return u;` (multiplication of a uniform group element by any fixed element is uniform, since left-multiplication is a bijection on the group). Likewise for `m * u`, `m / u`. Requires `u` to be used only once.
+- **XOR cancellation**: `x + x` simplifies to `0^n` (XOR is self-inverse).
+- **XOR identity**: `x + 0^n` simplifies to `x`.
+- **ModInt identities**: Additive/multiplicative identity, multiplicative zero, additive inverse, double negation.
+- **GroupElem cancellation**: `x * m / x` simplifies to `m` (group element with its inverse cancels), when `x` is deterministic.
+- **GroupElem exponentiation identities**: `g ^ 0` simplifies to `G.identity`; `g ^ 1` simplifies to `g`.
+- **GroupElem multiplicative identity**: `G.identity * g` simplifies to `g`; `g * G.identity` simplifies to `g`; `g / G.identity` simplifies to `g`.
+- **GroupElem power-of-power**: `(h ^ a) ^ b` simplifies to `h ^ (a * b)`, when `a` and `b` have compatible types for multiplication.
+- **GroupElem exponent combination**: `g^a * g^b` simplifies to `g^(a + b)`; `g^a / g^b` simplifies to `g^(a - b)`, when the bases are structurally identical and deterministic.
+- **GroupElem power of a product**: `(a * b) ^ e` simplifies to `a ^ e * b ^ e` and `(a / b) ^ e` to `a ^ e / b ^ e` (the group is abelian), when `e` makes no call (the rewrite evaluates `e` once per factor).
+- **ModInt cancellation**: a `ModInt<q>` arithmetic expression is read as a polynomial over its atoms (variables, calls, accesses); when the rebuilt polynomial is strictly smaller, it replaces the expression, e.g. `sk + ((d + H(x)) - H(x))` becomes `sk + d`. Only when every call in it is deterministic (two evaluations of a non-deterministic call are different values). The same holds through a pure local defined earlier in the block and unchanged since, e.g. `v = d + H(x); sk = sk + (v - H(x));` with `v` also returned gives `sk = sk + d`.
+- **ModInt with uniform, repeated combination**: `u <- ModInt<q>; return [g ^ (s + u), s + u];` is equivalent to `u <- ModInt<q>; return [g ^ u, u];` when every use of `u` lies in copies of one `e + u` (or `u + e`, `e - u`, `u - e`) within a single return or assignment, with `e` deterministic: for that value of `e`, `u |-> e + u` is a bijection.
+- **Reflexive comparisons**: `x == x` simplifies to `true`; `x != x` to `false`.
+- **Injective-call equality**: for a primitive method `f` annotated `deterministic injective`, `f(a1, ..., an) == f(b1, ..., bn)` simplifies to `(a1 == b1) && ... && (an == bn)` (and the `!=` variant to the disjunction of per-argument disequalities). Sound because `injective` guarantees that distinct input tuples map to distinct outputs, so equal outputs imply equal input tuples; `deterministic` guarantees that repeated evaluation on the same input yields the same value. Does not apply to calls through sampled `Function<D, R>` variables (a random function is not injective in general).
+
+### 9.2 Sampling Transformations
+
+- **Merge uniform samples**: Independent uniform samples of `BitString<n>` and `BitString<m>` that are only used via concatenation can be merged into a single `BitString<n + m>` sample. Sound because concatenation of independent uniform bitstrings is a uniform bitstring of the combined length.
+- **Split uniform samples**: A single `BitString<n>` sample accessed only through non-overlapping slices can be split into independent samples of each slice's length. Sound because non-overlapping slices of a uniform bitstring are independent uniform bitstrings.
+- **Sample reordering**: Independent samples can be reordered without affecting semantics.
+- **Sample sinking**: A uniform sample before an if/else can be moved into the branch that uses it (when independent of the condition).
+- **Split product samples**: `[A, B] v <- [A, B];` used only through constant indices `v[0]`, `v[1]` (and never written again) is equivalent to independent samples `A v0 <- A; B v1 <- B;`. Sound because the uniform distribution on a product is the product of the uniform distributions.
+
+### 9.3 Random Function Simplification
+
+- When all inputs to a `Function` field are guaranteed to be pairwise distinct (via unique sampling), each output `RF(x)` is equivalent to an independent uniform sample. Sound because a random function on distinct inputs produces independent uniform outputs.
+- **Guarded two-map lazy lookup**: Two `Map<K, V>` fields accessed only through the lazy-sample idiom, with every write guarded by membership checks excluding both maps, and matching `V`-sampling, are equivalent to a single sampled `Function<K, V>` with each lazy-path occurrence rewritten as `F(k)`. Sound because the pair defines a single lazily-populated lookup table (see §6.5) partitioned across two storage locations, and the partition is adversary-invisible (§6.3).
+- **Local vs. let-bound random function interchangeability**: A game field `F : Function<K, V>` sampled once in `Initialize` (`F <- Function<K, V>;`), never otherwise assigned, and used only via `F(arg)` calls, is interchangeable with a let-bound sampled `H : Function<K, V>` of identical type, provided `H` is not otherwise referenced in the game. Sound because uniform random functions with no correlated observations produce identical output distributions.
+
+### 9.4 Code Simplifications
+
+- **Dead code elimination**: Unreachable code (after all paths return) and unused variables/fields are removed.
+- **Constant folding**: Compile-time evaluable expressions are reduced.
+- **Variable inlining**: Single-use variables whose initializers are pure expressions are inlined.
+- **Redundant copy elimination**: Variables that are trivial copies of other variables are eliminated.
+- **Branch elimination**: `if (true)` and `if (false)` branches are simplified.
+- **Tuple index folding**: `[e0, e1][1]` simplifies to `e1`.
+- **Guard facts**: inside `if (C) { ... } else { ... }` (a single condition that makes no non-deterministic call, in a branch that writes no variable of `C`), `C` is replaced by its known value, and each Boolean flag of `C` whose value that value forces is replaced by it: a false `a || b` makes `a` and `b` false, a true `a && b` makes both true, `!a` fixes `a`. After `if (C) { ...; return e; }`, up to the first statement that may change a variable of `C`, only the flags are replaced (`C` itself when it is a flag): `if (revealed || !challenged) { return 0; } if (revealed) { ... }` turns the second condition into `false`. A name counts as a flag only if every declaration of it is a `Bool`.
+- **Bare declaration merge**: `T v; ...; v = e;` becomes `...; T v = e;` when nothing in between mentions `v` and `e` does not read it.
+- **Literal field write forwarding**: after `f = c;` for a field `f` and a literal `c` that `f` holds exactly (a `Bool` in a `Bool`, an integer in an `Int`, `None` in an optional; bit-string literals are not forwarded), reads of `f` in the following statements of the block, up to the next statement that may write `f`, become `c`. A `ModInt` field holds `0` as the ring's zero, but the literal `0` is an `Int` (and any other integer is reduced mod `q`), so for a `ModInt` field only `0` is forwarded, and a statement is rewritten only if every read of `f` in it is an operand of `+`, or the right operand of `-`, next to a `ModInt` operand that reads neither `f` nor a name the method binds twice: `a + D` becomes `a + 0`, while `D ^ n` (which would be the `Int` power `0 ^ n`) and `D + D` stay.
+- **Express after update**: for `T v = e;` followed by an update `f = f + delta;` of a `ModInt` variable (no write to `f` or `e`'s names in between, `v` used only after the update, `delta` not reading `f`), `v` is computed after the update as `e[f := f - delta]` when that is strictly smaller than `e`'s own normal form, i.e. when `delta` cancels (e.g. `pk = g ^ (s + d); s = s + d;` becomes `s = s + d; pk = g ^ s;`).
+- **Blocked local absorption**: a pure local used once, whose inlining is blocked by a write to one of its inputs in between, takes over the largest non-tuple deterministic expression around its use whose other inputs that write leaves unchanged, computed just before the write (e.g. `x = g ^ (sk * u); sk = sk + d; return d + H(x);` becomes `x = d + H(g ^ (sk * u)); sk = sk + d; return x;`).
+
+### 9.5 Relations Between Fields Across Oracle Calls
+
+Canonicalization otherwise reasons about one method at a time. These rewrites use relations between fields that hold at every call boundary.
+
+- **Field invariant elimination**: a field `a`, written outside `Initialize`, is removed when `a == E` (for an expression `E` over the other fields, suggested by the state `Initialize` leaves) is *proved* to hold after `Initialize` and to be preserved by every oracle that writes `a` or a field of `E`. The proof executes each such method symbolically along every path (fields start as fresh names with `a` equal to `E` of them, parameters, samples and non-deterministic calls are fresh names, branch conditions add Boolean facts that rule out impossible paths, loops forget what they write) and requires `a` and `E` at every exit to have equal exact normal forms (ModInt polynomials and group products over atoms). Each method then starts from `a = E`. Example: `pk = g ^ x; sk = x;` with every update keeping `pk == g ^ sk` (even through a token masked with `H(pk ^ u)` and unmasked with `H((g ^ u) ^ sk)`) removes `pk`.
+- **Generator-power field to exponent**: a `GroupElem<G>` field written outside `Initialize` whose every write is `P = g ^ x` or `P = P * g ^ x` (up to the group algebra), set by `Initialize` before any read or return, is kept as a `ModInt<G.order>` exponent `p` (writes `p = x` / `p = p + x`, reads `g ^ p`). Exact by construction.
+- **Offset fusion** (random self-reducibility): a fixed `P = g ^ e` (written once, in `Initialize`) and a `ModInt<G.order>` offset `D` are replaced by one evolving field `s == e + D` (reads of `P` become `g ^ (s - D)`, each write of `D` moves `s` by the same amount), kept only if canonicalization then removes `D` too, i.e. `D` was only read together with `P` (as in `P * g ^ D`, `P ^ r * (g ^ r) ^ D`).
+
+## 10. What FrogLang Does Not Model
+
+FrogLang is designed for a specific class of cryptographic proofs. Several aspects of real cryptographic systems are outside its scope:
+
+- **Computational complexity**: FrogLang does not model the running time of adversaries or schemes. The notion of "efficient adversary" is implicit.
+- **Negligible quantities**: Security loss and advantage bounds are not tracked quantitatively. The proof establishes qualitative reduction (if the assumption holds, the theorem holds), not tight bounds.
+- **Concrete security parameters**: While type parameters like `lambda` appear, they are symbolic — no concrete instantiation or security level analysis is performed.
+- **Recursive or unbounded computation**: Methods cannot call themselves recursively. The language is not Turing-complete.
+- **Side channels**: Timing, power analysis, and other side-channel attacks are not modeled.
+- **Concurrency**: All oracle calls are sequential. There is no concurrent or parallel execution model.
+- **Explicit abort/failure**: There is no `abort` statement. Failure conditions are modeled through control flow (returning `None`, conditional returns) or implicitly through collision probabilities in unique sampling.

@@ -1,0 +1,46 @@
+// Positive control for BubbleDup.game: `d = d + d;` reads and writes only d,
+// so the field sorter may move it past the two equal `e = e + e;`
+// statements, and must still do so. Left has it between them, Right before
+// them; both sort to the two doublings of e first (e is read first, in Get,
+// so it gets the lower canonical name). The third field c only fixes the
+// canonical names; Upd never touches it.
+// Sound engine: Proof Succeeded!
+Game Left(Int q) {
+    ModInt<q> e;
+    ModInt<q> d;
+    ModInt<q> c;
+    Void Initialize() {
+        e <- ModInt<q>;
+        d <- ModInt<q>;
+        c <- ModInt<q>;
+    }
+    [ModInt<q>, ModInt<q>, ModInt<q>] Get() {
+        return [e, d, c];
+    }
+    Void Upd() {
+        e = e + e;
+        d = d + d;
+        e = e + e;
+    }
+}
+
+Game Right(Int q) {
+    ModInt<q> e;
+    ModInt<q> d;
+    ModInt<q> c;
+    Void Initialize() {
+        e <- ModInt<q>;
+        d <- ModInt<q>;
+        c <- ModInt<q>;
+    }
+    [ModInt<q>, ModInt<q>, ModInt<q>] Get() {
+        return [e, d, c];
+    }
+    Void Upd() {
+        d = d + d;
+        e = e + e;
+        e = e + e;
+    }
+}
+
+export as SortPastDup;

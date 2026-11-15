@@ -459,8 +459,9 @@ def test_xor_cancellation_skips_nondeterministic_pairs() -> None:
 def test_f267_shadowed_let_function_not_reflexive() -> None:
     """F-267: a proof-let `Function<Int,Int> H` is deterministic, but a
     method-LOCAL `Function<Int,Int> H;` (declared, unassigned) shadows it.
-    Calling the local is an undefined read, so `H(0) == H(0)` must NOT
-    simplify to `true` (the flat proof_let_types lookup misclassified it)."""
+    The local is not the let-function, so the pass must not use the
+    let-function's determinism for it, and `H(0) == H(0)` is left alone
+    (the flat proof_let_types lookup misclassified it)."""
     from proof_frog.visitors import NameTypeMap
 
     let_types = NameTypeMap()

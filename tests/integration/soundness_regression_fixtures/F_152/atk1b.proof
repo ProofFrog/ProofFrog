@@ -1,0 +1,21 @@
+// AUDIT ATTACK FILE -- target pass: InlineLocalTupleLiteral (inlining.py L1271-1279).
+// ATK-1b proof-level probe: single no-assumption hop between
+// Atk1BTupleLvalue.Real (write to a local tuple copy; O() returns 0 always)
+// and .Random (hand-applied pass output: the write punched through to field
+// `a`; O() returns 1 always). One-query distinguisher outputs the reply.
+// Advantage 1.
+// Expected if pass is SOUND: prove rejects. Expected if UNSOUND: "Proof Succeeded!".
+
+import 'atk1b_tuple_lvalue_distinct.game';
+
+proof:
+
+let:
+    Int lambda;
+
+theorem:
+    Atk1BTupleLvalue(lambda);
+
+games:
+    Atk1BTupleLvalue(lambda).Real against Atk1BTupleLvalue(lambda).Adversary;
+    Atk1BTupleLvalue(lambda).Random against Atk1BTupleLvalue(lambda).Adversary;

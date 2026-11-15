@@ -1,0 +1,37 @@
+// Reset replaces H by an adversary-chosen function F. Call Reset with a
+// constant function, then Q: Left returns F's constant.
+import 'P.primitive';
+
+Game Left(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> T;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+    }
+    Void Reset(Function<BitString<2>, BitString<2>> F) {
+        H = F;
+    }
+    BitString<2> Q() {
+        BitString<2> r <-uniq[T] BitString<2>;
+        BitString<2> z = H(r);
+        return z;
+    }
+}
+
+Game Right(P S) {
+    Function<BitString<2>, BitString<2>> H;
+    Set<BitString<2>> T;
+    Void Initialize() {
+        H <- Function<BitString<2>, BitString<2>>;
+    }
+    Void Reset(Function<BitString<2>, BitString<2>> F) {
+        H = F;
+    }
+    BitString<2> Q() {
+        BitString<2> r <-uniq[T] BitString<2>;
+        BitString<2> z <- BitString<2>;
+        return z;
+    }
+}
+
+export as ResetParam;

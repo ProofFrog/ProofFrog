@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'ConstQuery.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    ConstQuery(S);
+
+games:
+    ConstQuery(S).Left against ConstQuery(S).Adversary;
+    ConstQuery(S).Right against ConstQuery(S).Adversary;

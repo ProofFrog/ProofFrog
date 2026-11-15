@@ -1,0 +1,19 @@
+// Positive control: both sides compute the same values under left-associative
+// shared levels for + / - and, on ModInt<q>, * / /.
+import 'SameLevelModInt.game';
+
+proof:
+
+let:
+    Int lambda;
+    Int n;
+    Int q;
+
+assume:
+
+theorem:
+    SameLevelModInt(lambda, n, q);
+
+games:
+    SameLevelModInt(lambda, n, q).Left against SameLevelModInt(lambda, n, q).Adversary;
+    SameLevelModInt(lambda, n, q).Right against SameLevelModInt(lambda, n, q).Adversary;

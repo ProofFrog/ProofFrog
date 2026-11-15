@@ -1,0 +1,21 @@
+// Positive control for F-305: the same local set, but the dead draw is from
+// the type BitString<1>, which is never empty. The draw and the local set
+// are dead code and are still dropped.
+
+Game Real() {
+    Int Draw() {
+        Set<BitString<1>> E;
+        E = E union {0b0};
+        E = E union {0b1};
+        BitString<1> junk <- BitString<1>;
+        return 0;
+    }
+}
+
+Game Ideal() {
+    Int Draw() {
+        return 0;
+    }
+}
+
+export as TypeDrawControl;

@@ -1,0 +1,4 @@
+// A primitive with a non-deterministic method: each call is a fresh draw.
+Primitive Rnd(Group GG) {
+    ModInt<GG.order> Draw();
+}

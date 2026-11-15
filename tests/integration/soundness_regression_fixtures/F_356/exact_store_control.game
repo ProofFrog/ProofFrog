@@ -1,0 +1,19 @@
+// Positive control for F-356: a store of a ModInt<q> value into a
+// ModInt<q> local keeps the value, so x is still read as a and the games
+// are interchangeable.
+Game Left(Int q) {
+    Bool O(ModInt<q> a) {
+        ModInt<q> x = a;
+        ModInt<q> z = 0;
+        return x == z;
+    }
+}
+
+Game Right(Int q) {
+    Bool O(ModInt<q> a) {
+        ModInt<q> z = 0;
+        return a == z;
+    }
+}
+
+export as ExactStore;

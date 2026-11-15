@@ -253,3 +253,112 @@ def test_f285_genuine_group_identity_still_cancelled() -> None:
     tm = {"G": frog_ast.GroupType(), "x": frog_ast.GroupElemType(frog_ast.Variable("G"))}
     out = GroupElemSimplificationTransformer(tm).transform(method)
     assert "G.identity" not in str(out)  # cancelled -> return x
+
+
+@pytest.mark.parametrize(
+    "method,expected",
+    [
+        # (pk * m) ^ r  -->  pk ^ r * m ^ r   (abelian group)
+        (
+            """
+            GroupElem<G> f(GroupElem<G> pk, GroupElem<G> m, ModInt<G.order> r) {
+                return (pk * m) ^ r;
+            }
+            """,
+            """
+            GroupElem<G> f(GroupElem<G> pk, GroupElem<G> m, ModInt<G.order> r) {
+                return pk ^ r * m ^ r;
+            }
+            """,
+        ),
+        # (pk / m) ^ r  -->  pk ^ r / m ^ r
+        (
+            """
+            GroupElem<G> f(GroupElem<G> pk, GroupElem<G> m, ModInt<G.order> r) {
+                return (pk / m) ^ r;
+            }
+            """,
+            """
+            GroupElem<G> f(GroupElem<G> pk, GroupElem<G> m, ModInt<G.order> r) {
+                return pk ^ r / m ^ r;
+            }
+            """,
+        ),
+        # (pk * g ^ a) ^ r  -->  pk ^ r * g ^ (a * r): distribution, then
+        # power-of-power on the generator term.
+        (
+            """
+            GroupElem<G> f(GroupElem<G> pk, ModInt<G.order> a, ModInt<G.order> r) {
+                return (pk * G.generator ^ a) ^ r;
+            }
+            """,
+            """
+            GroupElem<G> f(GroupElem<G> pk, ModInt<G.order> a, ModInt<G.order> r) {
+                return pk ^ r * G.generator ^ (a * r);
+            }
+            """,
+        ),
+        # Three factors: (pk * m * x) ^ r  -->  pk ^ r * m ^ r * x ^ r
+        (
+            """
+            GroupElem<G> f(GroupElem<G> pk, GroupElem<G> m, GroupElem<G> x, ModInt<G.order> r) {
+                return (pk * m * x) ^ r;
+            }
+            """,
+            """
+            GroupElem<G> f(GroupElem<G> pk, GroupElem<G> m, GroupElem<G> x, ModInt<G.order> r) {
+                return pk ^ r * m ^ r * x ^ r;
+            }
+            """,
+        ),
+        # No fire: the exponent contains a call, which the rewrite would
+        # evaluate twice.
+        (
+            """
+            GroupElem<G> f(GroupElem<G> pk, GroupElem<G> m) {
+                return (pk * m) ^ F.Sample();
+            }
+            """,
+            """
+            GroupElem<G> f(GroupElem<G> pk, GroupElem<G> m) {
+                return (pk * m) ^ F.Sample();
+            }
+            """,
+        ),
+        # No fire: ModInt multiplication raised to a power is not a group
+        # product.
+        (
+            """
+            ModInt<G.order> f(ModInt<G.order> a, ModInt<G.order> b, Int n) {
+                return (a * b) ^ n;
+            }
+            """,
+            """
+            ModInt<G.order> f(ModInt<G.order> a, ModInt<G.order> b, Int n) {
+                return (a * b) ^ n;
+            }
+            """,
+        ),
+    ],
+    ids=[
+        "distribute-product",
+        "distribute-quotient",
+        "distribute-then-power-of-power",
+        "distribute-three-factors",
+        "no-fire-exponent-with-call",
+        "no-fire-modint-product",
+    ],
+)
+def test_groupelem_power_distribution(method: str, expected: str) -> None:
+    method_ast = frog_parser.parse_method(method)
+    expected_ast = frog_parser.parse_method(expected)
+
+    tm = _type_map()
+    transformed = method_ast
+    while True:
+        new = GroupElemSimplificationTransformer(tm).transform(transformed)
+        if new == transformed:
+            break
+        transformed = new
+
+    assert transformed == expected_ast

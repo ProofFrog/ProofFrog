@@ -7,7 +7,9 @@ from . import advantage
 from . import frog_ast
 from . import frog_parser
 from . import proof_engine
+from . import structural_rules
 from . import suggestions as _suggestions
+from . import upto
 from . import visitors
 
 
@@ -66,6 +68,21 @@ def _collect_claim_variables(node: frog_ast.ASTNode) -> list[frog_ast.Variable]:
 
 
 def check_well_formed(
+    root: frog_ast.Root,
+    file_name: str,
+    allowed_root: Optional[str] = None,
+) -> None:
+    try:
+        _check_well_formed(root, file_name, allowed_root)
+    except visitors.InstantiationError as e:
+        # A scheme/primitive field would capture a name in its instantiation
+        # arguments (F-341), or a scheme field's initializer (F-356) or a
+        # scheme or primitive parameter (F-374) converts the value it
+        # stores: report it as an ordinary type error.
+        print_error(root, str(e), file_name)
+
+
+def _check_well_formed(
     root: frog_ast.Root,
     file_name: str,
     allowed_root: Optional[str] = None,
@@ -136,6 +153,9 @@ def name_resolution(
                 name = imp.rename if imp.rename else parsed_file.get_export_name()
                 import_namespace[name] = parsed_file
                 all_imports[resolved] = parsed_file
+        violations = structural_rules.check_structural_rules(root)
+        if violations:
+            print_error(violations[0].node, violations[0].message, file_name)
         NameResolutionVisitor(import_namespace, file_name).visit(root)
 
     do_name_resolution(initial_root, initial_file_name)
@@ -190,7 +210,12 @@ class VariableTypeVisitor(visitors.Visitor[None]):
     ) -> visitors.InstantiableType:
         return get_type_from_instantiable(
             name,
-            proof_engine.instantiate(root, args, self.instantiation_namespace),
+            proof_engine.instantiate(
+                root,
+                args,
+                self.instantiation_namespace,
+                arg_types=self._argument_types(args),
+            ),
             just_methods,
         )
 
@@ -251,6 +276,7 @@ class VariableTypeVisitor(visitors.Visitor[None]):
                         root,
                         field.value.args,
                         self.instantiation_namespace,
+                        arg_types=self._argument_types(field.value.args),
                     )
                     instantiated_type = get_type_from_instantiable(
                         field.value.func.name, instantiated_scheme
@@ -367,6 +393,23 @@ class VariableTypeVisitor(visitors.Visitor[None]):
     def leave_generic_for(self, _: frog_ast.GenericFor) -> None:
         self.variable_type_map_stack.pop()
 
+    def _argument_types(
+        self, args: list[frog_ast.Expression]
+    ) -> list[Optional[frog_ast.Type]]:
+        """The type of each argument that is a name or an integer literal
+        (None for any other argument, or a name whose type is not a type):
+        instantiation needs them to tell an argument its parameter would
+        convert (an Int into a ModInt, F-374)."""
+        types: list[Optional[frog_ast.Type]] = []
+        for arg in args:
+            found: PossibleType = None
+            if isinstance(arg, frog_ast.Variable):
+                found = self.get_type(arg.name)
+            elif isinstance(arg, frog_ast.Integer):
+                found = frog_ast.IntType()
+            types.append(found if isinstance(found, frog_ast.Type) else None)
+        return types
+
     def get_type(self, name: str) -> PossibleType:
         for the_map in reversed(self.variable_type_map_stack):
             if name in the_map:
@@ -404,6 +447,12 @@ class NameResolutionVisitor(VariableTypeVisitor):
         self.in_field_access = False
         self.in_parameter_type = False
         self.defining_variable: Optional[frog_ast.Expression] = None
+        # The game or reduction whose body is being walked, and the type this
+        # walk registered for each game and reduction name it has entered, with
+        # its node. A call on a name bound to one of these types reaches a
+        # game's methods rather than a primitive's or scheme's.
+        self.enclosing_game: Optional[frog_ast.Game] = None
+        self.game_types: list[tuple[PossibleType, frog_ast.Game]] = []
 
     def _check_duplicate_names(
         self, node: frog_ast.Primitive | frog_ast.Scheme | frog_ast.Game
@@ -435,6 +484,29 @@ class NameResolutionVisitor(VariableTypeVisitor):
         parameter_names = [param.name for param in method_signature.parameters]
         if len(parameter_names) != len(set(parameter_names)):
             print_error(method_signature, "Duplicated parameter name", self.file_name)
+        # F-340: a signature's types may not name one of the method's own
+        # parameters (`O(Int n, BitString<n> m)`). The typechecker would bind
+        # that `n` to the parameter (a type depending on the call's argument),
+        # while the engine binds it to the outer name when it instantiates the
+        # game, so the two layers would disagree about the method's type.
+        signature_type_names: set[str] = set()
+        for param in method_signature.parameters:
+            signature_type_names |= visitors.referenced_variable_names(param.type)
+        signature_type_names |= visitors.referenced_variable_names(
+            method_signature.return_type
+        )
+        for name in parameter_names:
+            if name in signature_type_names:
+                print_error(
+                    method_signature,
+                    f"Parameter '{name}' of method '{method_signature.name}' is "
+                    "used in the method signature's types",
+                    self.file_name,
+                    hint=(
+                        "A method's parameter and return types may not depend "
+                        "on its own parameters; rename the parameter"
+                    ),
+                )
 
     def visit_game_file(self, game_file: frog_ast.GameFile) -> None:
         for index, game in enumerate(game_file.games):
@@ -618,8 +690,10 @@ class NameResolutionVisitor(VariableTypeVisitor):
         assert claim is not None
         bound = claim.bound
 
-        assumption_names = {a.name for a in proof_file.assumptions}
-        assumption_names |= {lemma.game.name for lemma in proof_file.lemmas}
+        assumption_names = {frog_ast.notion_key(a).name for a in proof_file.assumptions}
+        assumption_names |= {
+            frog_ast.notion_key(lemma.game).name for lemma in proof_file.lemmas
+        }
         reductions = {
             helper.name: helper
             for helper in proof_file.helpers
@@ -627,7 +701,8 @@ class NameResolutionVisitor(VariableTypeVisitor):
         }
         let_names = {field.name for field in proof_file.lets}
         theorem_oracles: set[str] = set()
-        theorem_def = self.import_namespace.get(proof_file.theorem.name)
+        theorem_game = frog_ast.notion_game(proof_file.theorem)
+        theorem_def = self.import_namespace.get(theorem_game.name)
         if isinstance(theorem_def, frog_ast.GameFile):
             theorem_oracles = {
                 method.signature.name
@@ -637,7 +712,10 @@ class NameResolutionVisitor(VariableTypeVisitor):
             }
 
         for ref in _collect_advantage_references(bound):
-            notion = ref.notion
+            # An event reference `advantage(event f of P(a) compose R)` is keyed
+            # on the event's synthetic notion; its reduction composes `P`.
+            notion = frog_ast.notion_key(ref.notion)
+            composed = frog_ast.notion_game(ref.notion)
             if ref.reduction is not None:
                 reduction = reductions.get(ref.reduction.name)
                 if reduction is None:
@@ -648,12 +726,12 @@ class NameResolutionVisitor(VariableTypeVisitor):
                         self.file_name,
                     )
                     continue
-                if reduction.to_use.name != notion.name:
+                if reduction.to_use.name != composed.name:
                     print_error(
                         claim,
                         f"reduction '{ref.reduction.name}' composes"
                         f" '{reduction.to_use.name}', not the referenced notion"
-                        f" '{notion.name}'",
+                        f" '{composed.name}'",
                         self.file_name,
                     )
             if notion.name not in assumption_names:
@@ -664,7 +742,7 @@ class NameResolutionVisitor(VariableTypeVisitor):
                 )
                 print_error(
                     claim,
-                    f"claimed bound references '{notion.name}', which is not an"
+                    f"claimed bound references '{ref.notion}', which is not an"
                     f" assumed or lemma security notion{hint}",
                     self.file_name,
                 )
@@ -679,7 +757,7 @@ class NameResolutionVisitor(VariableTypeVisitor):
                         claim,
                         f"claimed bound references count of unknown oracle"
                         f" '{oracle}'; no such oracle in the theorem game"
-                        f" {proof_file.theorem.name}",
+                        f" {theorem_game.name}",
                         self.file_name,
                     )
                 continue
@@ -735,7 +813,122 @@ class NameResolutionVisitor(VariableTypeVisitor):
     def leave_parameter(self, _: frog_ast.Parameter) -> None:
         self.in_parameter_type = False
 
+    def visit_game(self, game: frog_ast.Game) -> None:
+        super().visit_game(game)
+        # super() registered the game's name, then opened the body's scope.
+        self.game_types.append((self.variable_type_map_stack[-2][game.name], game))
+        self.enclosing_game = game
+
+    def leave_game(self, game: frog_ast.Game) -> None:
+        super().leave_game(game)
+        self.enclosing_game = None
+
+    def visit_reduction(self, reduction: frog_ast.Reduction) -> None:
+        super().visit_reduction(reduction)
+        self.game_types.append(
+            (self.variable_type_map_stack[-2][reduction.name], reduction)
+        )
+        self.enclosing_game = reduction
+
+    def leave_reduction(self, reduction: frog_ast.Reduction) -> None:
+        super().leave_reduction(reduction)
+        self.enclosing_game = None
+
+    def _denoted_game(self, node: frog_ast.Expression) -> Optional[str]:
+        """The kind of game ``node`` names ("game" or "reduction"), if any.
+
+        ``node`` names a game when it is the name of a game or reduction this
+        walk has entered (``G``, ``G(a)``; no inner binding shadowing it) or
+        a game pair (``P``, ``P(a)``, ``P(a).Left``).
+        """
+        name: Optional[str] = None
+        if isinstance(node, frog_ast.ConcreteGame):
+            return "game"
+        if isinstance(node, (frog_ast.Variable, frog_ast.ParameterizedGame)):
+            name = node.name
+        if name is None:
+            return None
+        the_type = self.get_type(name)
+        if isinstance(the_type, list):
+            return "game"
+        for game_type, game in self.game_types:
+            if the_type is game_type:
+                return "reduction" if isinstance(game, frog_ast.Reduction) else "game"
+        return None
+
+    def visit_func_call(self, func_call: frog_ast.FuncCall) -> None:
+        # A game or reduction may not call a game's methods: neither its own
+        # (`G.M()` inside G, or a reduction's own oracle) nor another game's.
+        # The engine resolves no such call, so it treated one as a
+        # side-effect-free opaque call and dropped it.
+        if self.enclosing_game is None:
+            return
+        func = func_call.func
+        target: frog_ast.Expression
+        if isinstance(func, frog_ast.FieldAccess):
+            target, method_name = func.the_object, func.name
+        elif isinstance(func, frog_ast.ConcreteGame):
+            target, method_name = func.game, func.which
+        else:
+            return
+        base = target
+        while isinstance(base, frog_ast.FieldAccess):
+            base = base.the_object
+        target_kind = self._denoted_game(base)
+        if target_kind is None:
+            return
+        enclosing = self.enclosing_game
+        kind = "Reduction" if isinstance(enclosing, frog_ast.Reduction) else "Game"
+        target_name = (
+            target.name
+            if isinstance(target, (frog_ast.Variable, frog_ast.ParameterizedGame))
+            else str(target)
+        )
+        hint = (
+            "a game or reduction may call the methods of primitives and "
+            "schemes (and a reduction those of its challenger), not the "
+            "methods of a game; write the method's body inline instead"
+        )
+        if target is base and target_name == enclosing.name:
+            print_error(
+                func_call,
+                f"{kind} '{enclosing.name}' may not call its own method "
+                f"'{method_name}': a {kind.lower()} may not call its own methods",
+                self.file_name,
+                hint=hint,
+            )
+        print_error(
+            func_call,
+            f"{kind} '{enclosing.name}' may not call method '{method_name}' "
+            f"of {target_kind} '{target_name}'",
+            self.file_name,
+            hint=hint,
+        )
+
+    def _check_assignment_target(
+        self, statement: frog_ast.Statement, target: frog_ast.Expression
+    ) -> None:
+        # The target of an assignment or sample is a variable, or an element
+        # a[i] / M[k] of one, at any depth. A member access (`M.keys`, a
+        # scheme's field `E.x`, `G.generator`) is read-only: the engine reads
+        # a write to `M.keys` as no write to `M`.
+        node = target
+        while isinstance(node, frog_ast.ArrayAccess):
+            node = node.the_array
+        if isinstance(node, frog_ast.FieldAccess):
+            print_error(
+                statement,
+                f"Cannot assign to '{target}': '{node}' is a member access, "
+                "and members are read-only",
+                self.file_name,
+                hint=(
+                    "the target of an assignment or sample must be a "
+                    "variable or an element (a[i], M[k]) of one"
+                ),
+            )
+
     def visit_assignment(self, assignment: frog_ast.Assignment) -> None:
+        self._check_assignment_target(assignment, assignment.var)
         if assignment.the_type is not None:
             self.defining_variable = assignment.var
 
@@ -744,6 +937,7 @@ class NameResolutionVisitor(VariableTypeVisitor):
         self.defining_variable = None
 
     def visit_sample(self, sample: frog_ast.Sample) -> None:
+        self._check_assignment_target(sample, sample.var)
         if sample.the_type is not None:
             self.defining_variable = sample.var
 
@@ -752,6 +946,7 @@ class NameResolutionVisitor(VariableTypeVisitor):
         self.defining_variable = None
 
     def visit_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
+        self._check_assignment_target(unique_sample, unique_sample.var)
         self.defining_variable = unique_sample.var
 
     def leave_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
@@ -994,9 +1189,9 @@ def check_proof_well_formed(
         # Always visit to register the type in the checker's scope
         type_check_visitor.visit(let)
     for assumption in proof.assumptions:
-        type_check_visitor.visit(assumption)
+        type_check_visitor.visit(frog_ast.notion_game(assumption))
     for lemma in proof.lemmas:
-        type_check_visitor.visit(lemma.game)
+        type_check_visitor.visit(frog_ast.notion_game(lemma.game))
         lemma_path = os.path.join(os.path.dirname(file_name), lemma.proof_path)
         if not os.path.isfile(lemma_path):
             print_error(
@@ -1006,7 +1201,11 @@ def check_proof_well_formed(
             )
             raise FailedTypeCheck()
 
-    type_check_visitor.visit(proof.theorem)
+    type_check_visitor.visit(frog_ast.notion_game(proof.theorem))
+    _check_event_notions(proof, import_namespace, file_name)
+    if isinstance(proof.theorem, frog_ast.EventTheorem):
+        if proof.theorem.at_initialize:
+            type_check_visitor.stripped_adversaries.add(proof.theorem.game.name)
 
     for req in proof.requirements:
         type_check_visitor.visit(req.target)
@@ -1028,8 +1227,202 @@ def check_proof_well_formed(
 
     for helper in proof.helpers:
         import_namespace[helper.name] = helper
+    _check_reduction_placement(proof, file_name)
+    _check_upto_hops(proof, import_namespace, file_name)
+    if isinstance(proof.theorem, frog_ast.EventTheorem):
+        _check_event_chain(proof, proof.theorem, file_name)
     for step in proof.steps:
         type_check_visitor.visit(step)
+
+
+def _event_notions(proof: frog_ast.ProofFile) -> list[frog_ast.EventTheorem]:
+    notions: list[frog_ast.Notion] = [
+        *proof.assumptions,
+        *(lemma.game for lemma in proof.lemmas),
+        proof.theorem,
+    ]
+    return [n for n in notions if isinstance(n, frog_ast.EventTheorem)]
+
+
+def _check_event_notions(
+    proof: frog_ast.ProofFile,
+    import_namespace: dict[str, frog_ast.Root | frog_ast.Game],
+    file_name: str,
+) -> None:
+    """E1 (and the pair half of E4) on every event, plus the both-routes rule."""
+    for event in _event_notions(proof):
+        pair = import_namespace.get(event.game.name)
+        if not isinstance(pair, frog_ast.GameFile):
+            print_error(
+                event, f"{event.game.name} is not an imported game pair", file_name
+            )
+            return
+        for game in pair.games:
+            err = upto.check_flag_field(game, event.flag)
+            if err is not None:
+                print_error(event, f"{event}: {err}", file_name)
+            if event.at_initialize:
+                _check_initialize_event_game(event, game, file_name)
+    plain = {
+        str(notion): notion
+        for notion in proof.assumptions
+        if isinstance(notion, frog_ast.ParameterizedGame)
+    }
+    for event in _event_notions(proof):
+        if event is proof.theorem:
+            continue
+        clash = plain.get(str(event.game))
+        if clash is not None:
+            print_error(
+                clash,
+                f"{event.game} is assumed directly (line {clash.line_num}) and"
+                f" '{event}' is also in scope (line {event.line_num}); use one"
+                f" route, not both",
+                file_name,
+            )
+
+
+def _check_initialize_event_game(
+    event: frog_ast.EventTheorem, game: frog_ast.Game, file_name: str
+) -> None:
+    """E4, pair half: flag raised only in an argument-free Initialize."""
+    if not upto.raised_only_in_initialize(game, event.flag):
+        print_error(
+            event,
+            f"{event}: {game.name} raises `{event.flag}` outside Initialize; the"
+            f" `at Initialize` form requires it to be raised only in Initialize",
+            file_name,
+        )
+    if not game.has_method("Initialize"):
+        print_error(event, f"{event}: {game.name} has no Initialize", file_name)
+    init = game.get_method("Initialize")
+    if init.signature.parameters:
+        print_error(
+            event,
+            f"{event}: {game.name}.Initialize must take no parameters",
+            file_name,
+        )
+    body = list(init.block.statements)
+    if body and isinstance(body[-1], frog_ast.ReturnStatement):
+        body = body[:-1]
+    if visitors.SearchVisitor(
+        lambda node: isinstance(node, frog_ast.ReturnStatement)
+    ).visit(frog_ast.Block(body)):
+        print_error(
+            event,
+            f"{event}: {game.name}.Initialize has an early return; the"
+            f" `at Initialize` form needs it to return only as its last statement",
+            file_name,
+        )
+
+
+def _check_upto_hops(
+    proof: frog_ast.ProofFile,
+    import_namespace: dict[str, frog_ast.Root | frog_ast.Game],
+    file_name: str,
+) -> None:
+    """Run the identical-until-bad side condition at every upto hop.
+
+    A side flip over a pair with an event in scope is an upto hop; checking
+    the pair here, and not only in `prove`, lets `check` and the LSP report a
+    pair that is not identical until its flag while the proof is edited.
+    """
+    events = {
+        str(n.game): n
+        for n in [*proof.assumptions, *(lemma.game for lemma in proof.lemmas)]
+        if isinstance(n, frog_ast.EventTheorem)
+    }
+    if not events:
+        return
+    game_steps = [s for s in proof.steps if isinstance(s, frog_ast.Step)]
+    for current, following in zip(game_steps, game_steps[1:]):
+        flip = advantage.side_flip_game(current, following)
+        event = events.get(str(flip)) if flip is not None else None
+        if event is None:
+            continue
+        pair = import_namespace.get(event.game.name)
+        if not isinstance(pair, frog_ast.GameFile):
+            continue
+        err = upto.identical_until_bad(pair, event.flag)
+        if err is not None:
+            print_error(
+                following,
+                f"{event.game.name} is not identical until {event.flag}: {err}",
+                file_name,
+            )
+
+
+def _check_reduction_placement(proof: frog_ast.ProofFile, file_name: str) -> None:
+    for helper in proof.helpers:
+        if isinstance(helper, frog_ast.Reduction):
+            message = upto.check_challenger_init_placement(helper)
+            if message is not None:
+                print_error(helper, message, file_name)
+
+
+def _check_event_chain(
+    proof: frog_ast.ProofFile, event: frog_ast.EventTheorem, file_name: str
+) -> None:
+    """E2-E4 on the games list and helpers of an event theorem's proof."""
+    first = proof.steps[0]
+    if not (
+        isinstance(first, frog_ast.Step)
+        and first.reduction is None
+        and isinstance(first.challenger, frog_ast.ConcreteGame)
+        and first.challenger.game == event.game
+    ):
+        print_error(
+            first,
+            f"the first step must be a side of {event.game} (theorem '{event}')",
+            file_name,
+        )
+    for step in proof.steps:
+        if isinstance(step, frog_ast.Induction):
+            print_error(step, "induction is not supported in an event proof", file_name)
+        if not isinstance(step, frog_ast.Step):
+            continue
+        if step.adversary != event.game:
+            print_error(
+                step,
+                f"every step of this event proof must be played against"
+                f" {event.game}.Adversary",
+                file_name,
+            )
+        if step is first:
+            continue
+        uses_pair = (
+            isinstance(step.challenger, frog_ast.ConcreteGame)
+            and step.challenger.game.name == event.game.name
+        ) or (
+            isinstance(step.challenger, frog_ast.ParameterizedGame)
+            and step.challenger.name == event.game.name
+        )
+        if uses_pair:
+            print_error(
+                step,
+                f"{event.game.name} may appear only as the first step of the"
+                f" proof of '{event}'",
+                file_name,
+            )
+    for helper in proof.helpers:
+        kind = "reduction" if isinstance(helper, frog_ast.Reduction) else "game"
+        field = next((f for f in helper.fields if f.name == event.flag), None)
+        if field is None or not isinstance(field.type, frog_ast.BoolType):
+            print_error(
+                helper,
+                f"{kind} {helper.name} in the proof of '{event}' must declare"
+                f" `Bool {event.flag}`; the engine observes it as the event",
+                file_name,
+            )
+        if event.at_initialize and [m.signature.name for m in helper.methods] != [
+            "Initialize"
+        ]:
+            print_error(
+                helper,
+                f"{kind} {helper.name} in the proof of '{event}' must define"
+                f" only Initialize (the `at Initialize` game has no other oracle)",
+                file_name,
+            )
 
 
 def _format_type(t: PossibleType) -> str:
@@ -1187,6 +1580,9 @@ class CheckTypeVisitor(VariableTypeVisitor):
     ) -> None:
         super().__init__(import_namespace, variable_type_map_stack, field_value_map)
         self.import_namespace = import_namespace
+        # Games whose adversary interface is stripped to `Initialize` alone:
+        # the game of an `event f of P(a) at Initialize` theorem.
+        self.stripped_adversaries: set[str] = set()
         self.ast_type_map = frog_ast.ASTMap[PossibleType]()
         self.file_name = file_name
         self.file_name_mapping = file_name_mapping
@@ -1202,7 +1598,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             tuple[frog_ast.Expression, frog_ast.Expression]
         ] = []
         self._instantiation_cache: dict[
-            tuple[str, tuple[str, ...]], frog_ast.Instantiable
+            tuple[str, tuple[str, ...], tuple[str, ...]], frog_ast.Instantiable
         ] = {}
 
     def result(self) -> None:
@@ -1691,9 +2087,14 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 adversary_definition.games[0],
                 reduction.play_against.args,
                 combined_ns,
+                arg_types=self._argument_types(reduction.play_against.args),
             ),
             True,
         )
+        if reduction.play_against.name in self.stripped_adversaries:
+            # The chain of an `at Initialize` event theorem plays the stripped
+            # game, whose only oracle is Initialize (checked by E4).
+            return
         reduction_type = get_type_from_instantiable(reduction.name, reduction, True)
         non_matching_method = has_matching_methods(adversary_type, reduction_type)
         if non_matching_method is not True:
@@ -1744,6 +2145,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             ),
             challenger.args,
             self.instantiation_namespace,
+            arg_types=self._argument_types(challenger.args),
         )
         instantiated_methods = get_type_from_instantiable(
             challenger.name,
@@ -1754,7 +2156,12 @@ class CheckTypeVisitor(VariableTypeVisitor):
         non_matching_method = has_matching_methods(
             adversary_methods, instantiated_methods
         )
-        if non_matching_method is not True:
+        # The stripped adversary of an `at Initialize` event only calls
+        # Initialize, so the other oracles of its game need not be provided.
+        if (
+            non_matching_method is not True
+            and step.adversary.name not in self.stripped_adversaries
+        ):
             self.print_error(
                 step,
                 f"Method {non_matching_method} required by adversary not found in challenger",
@@ -1893,6 +2300,18 @@ class CheckTypeVisitor(VariableTypeVisitor):
     def visit_variable(self, variable: frog_ast.Variable) -> None:
         my_type = self.get_type(variable.name)
         self.ast_type_map.set(variable, my_type)
+
+    def leave_bool_type(self, bool_type: frog_ast.BoolType) -> None:
+        self.ast_type_map.set(bool_type, bool_type)
+
+    def leave_int_type(self, int_type: frog_ast.IntType) -> None:
+        self.ast_type_map.set(int_type, int_type)
+
+    def leave_optional_type(self, optional_type: frog_ast.OptionalType) -> None:
+        # T? is only a type when T is: this rejects Set? and Group? the same
+        # way bare Set and Group are rejected (both are kinds, not types).
+        self.get_type_from_ast(optional_type.the_type)
+        self.ast_type_map.set(optional_type, optional_type)
 
     def leave_bit_string_type(self, bit_string_type: frog_ast.BitStringType) -> None:
         if bit_string_type.parameterization is not None:
@@ -2083,7 +2502,14 @@ class CheckTypeVisitor(VariableTypeVisitor):
                     )
                 self.ast_type_map.set(bin_op, left_type)
             elif left_type == frog_ast.IntType() and right_type == frog_ast.IntType():
-                self.ast_type_map.set(bin_op, frog_ast.IntType())
+                # Division on Int has no meaning in FrogLang: '/' is
+                # multiplication by the inverse on ModInt<q> and GroupElem<G>.
+                self.print_error(
+                    bin_op,
+                    "Cannot use operator / on Int: division is defined only on"
+                    " ModInt<q> (multiplication by the inverse) and GroupElem<G>",
+                    hint="compute in a ModInt<q> type instead",
+                )
             elif isinstance(left_type, frog_ast.GroupElemType) and isinstance(
                 right_type, frog_ast.GroupElemType
             ):
@@ -2106,6 +2532,21 @@ class CheckTypeVisitor(VariableTypeVisitor):
             elif isinstance(left_type, frog_ast.GroupElemType) and isinstance(
                 right_type, (frog_ast.ModIntType, frog_ast.IntType)
             ):
+                # A group exponent is read modulo the group's order, so a
+                # ModInt exponent must live in ModInt<G.order>; an exponent of
+                # another modulus has no meaning as a scalar of G.
+                group_order = frog_ast.ModIntType(
+                    frog_ast.FieldAccess(left_type.group, "order")
+                )
+                if isinstance(right_type, frog_ast.ModIntType) and not (
+                    self.check_types(group_order, right_type)
+                ):
+                    self.print_error(
+                        bin_op,
+                        f"Exponent of a {left_type} must have type Int or"
+                        f" {group_order}, got {right_type}",
+                        hint=f"declare the exponent as {group_order}",
+                    )
                 self.ast_type_map.set(bin_op, left_type)
             else:
                 self.print_error(
@@ -2426,6 +2867,78 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 f"{_truncate_expr(assignment.value)} has type {found_type}, expected {expected_type}",
             )
 
+    def _check_samplable(
+        self, location: frog_ast.ASTNode, sampled_from: PossibleType
+    ) -> None:
+        """Reject sampling domains that carry no uniform distribution.
+
+        Bool, BitString<n>, ModInt<q> and friends are finite, so a uniform
+        draw is well defined. Int is unbounded, and an optional type has no
+        natural weight for None, so neither admits one. Applies to both
+        sampling forms ('<-' and '<-uniq[S]' / '<- T \\ E'), and to every
+        component of a product or array type, written directly or reached
+        through an alias: a draw of '[BitString<n>?, BitString<n>]' draws its
+        first component from an optional type.
+        """
+        resolved = self._resolve_type_alias(sampled_from)
+        component = self._unsamplable_component(resolved, frozenset())
+        if component is not None and component is not resolved:
+            self.print_error(
+                location,
+                f"Cannot sample from {resolved}: its component {component}"
+                " has no uniform distribution (uniform sampling requires a"
+                " finite type)",
+                hint="sample each component from a finite type",
+            )
+        if isinstance(resolved, frog_ast.IntType):
+            self.print_error(
+                location,
+                "Cannot sample from Int: uniform sampling requires a finite type",
+                hint="use a bounded type such as BitString<n> or ModInt<q>",
+            )
+        if isinstance(resolved, frog_ast.OptionalType):
+            self.print_error(
+                location,
+                f"Cannot sample from optional type {resolved}:"
+                " uniform sampling requires a finite type",
+                hint=f"sample from {resolved.the_type} instead",
+            )
+
+    def _unsamplable_component(
+        self, the_type: PossibleType | frog_ast.Expression, seen: frozenset[str]
+    ) -> Optional[frog_ast.Type]:
+        """The first part of a sampled type that has no uniform distribution:
+        the type itself when it is Int or optional, else such a component of a
+        product or array type at any depth, each part resolved through its
+        aliases (a 'Set P = [A, [Int, B]];' alias holds a tuple of types);
+        None if there is none."""
+        if isinstance(the_type, frog_ast.Variable):
+            if the_type.name in seen:
+                return None
+            seen = seen | {the_type.name}
+            alias = self.instantiation_namespace.get(the_type.name)
+            if isinstance(alias, frog_ast.Tuple):
+                the_type = alias
+            else:
+                resolved = self._resolve_type_alias(the_type)
+                if resolved is the_type or not isinstance(resolved, frog_ast.Type):
+                    return None
+                the_type = resolved
+        if isinstance(the_type, (frog_ast.IntType, frog_ast.OptionalType)):
+            return the_type
+        parts: list[PossibleType | frog_ast.Expression] = []
+        if isinstance(the_type, frog_ast.ProductType):
+            parts = list(the_type.types)
+        elif isinstance(the_type, frog_ast.Tuple):
+            parts = list(the_type.values)
+        elif isinstance(the_type, frog_ast.ArrayType):
+            parts = [the_type.element_type]
+        for part in parts:
+            found = self._unsamplable_component(part, seen)
+            if found is not None:
+                return found
+        return None
+
     def leave_sample(self, sample: frog_ast.Sample) -> None:
         super().leave_sample(sample)
         if not isinstance(sample.sampled_from, frog_ast.Type):
@@ -2441,6 +2954,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             else self.get_type_from_ast(sample.var)
         )
         found_type = self.get_type_from_ast(sample.sampled_from)
+        self._check_samplable(sample, found_type)
         if not self.check_types(expected_type, found_type):
             self.print_error(
                 sample,
@@ -2449,6 +2963,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
     def leave_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
         super().leave_unique_sample(unique_sample)
+        self._check_samplable(unique_sample, unique_sample.sampled_from)
         # Check that unique_set has type Set<D> and sampled_from has type D
         set_type = self.get_type_from_ast(unique_sample.unique_set)
         if not isinstance(set_type, frog_ast.SetType):
@@ -2571,6 +3086,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
             target_game,
             concrete_game.game.args,
             self.instantiation_namespace,
+            arg_types=self._argument_types(concrete_game.game.args),
         )
         self.ast_type_map.set(
             concrete_game,
@@ -2624,8 +3140,20 @@ class CheckTypeVisitor(VariableTypeVisitor):
             if isinstance(arg_t, frog_ast.Type):
                 param_bindings[param.name] = arg_t  # type: ignore[assignment]
 
+        # The argument types decide whether a parameter stores its argument
+        # with a change of value (an Int into a ModInt, F-374), which
+        # instantiation binds as a game field or refuses for a scheme.
+        known_arg_types: list[Optional[frog_ast.Type]] = [
+            arg_type if isinstance(arg_type, frog_ast.Type) else None
+            for arg_type in arg_types
+        ]
+
         # Check cache to avoid redundant instantiation and type-checking
-        cache_key = (scheme.name, tuple(str(a) for a in args))
+        cache_key = (
+            scheme.name,
+            tuple(str(a) for a in args),
+            tuple(str(t) for t in known_arg_types),
+        )
         cached = self._instantiation_cache.get(cache_key)
         if cached is not None:
             # Re-propagate subsets constraints from the cached result
@@ -2648,7 +3176,9 @@ class CheckTypeVisitor(VariableTypeVisitor):
             },
         }
 
-        instantiated_scheme = proof_engine.instantiate(scheme, args, combined_ns)
+        instantiated_scheme = proof_engine.instantiate(
+            scheme, args, combined_ns, arg_types=known_arg_types
+        )
 
         # Extract subsets constraints from requires clauses
         subsets_pairs = _extract_subsets_pairs(instantiated_scheme)
@@ -2660,14 +3190,16 @@ class CheckTypeVisitor(VariableTypeVisitor):
             if variable_type_map_stack is not None
             else [dict(self.variable_type_map_stack[0])]
         )
-        CheckTypeVisitor(
+        nested = CheckTypeVisitor(
             self.import_namespace,
             file_name,
             self.file_name_mapping,
             stack,
             dict(combined_ns),
             self.subsets_pairs,
-        ).visit(instantiated_scheme)
+        )
+        nested.stripped_adversaries = self.stripped_adversaries
+        nested.visit(instantiated_scheme)
 
         self._instantiation_cache[cache_key] = instantiated_scheme
         return instantiated_scheme
@@ -2691,6 +3223,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
                     definition.games[0],
                     func_call.args,
                     self.instantiation_namespace,
+                    arg_types=self._argument_types(func_call.args),
                 )
                 self.ast_type_map.set(
                     func_call,
@@ -2702,6 +3235,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
                     definition,
                     func_call.args,
                     self.instantiation_namespace,
+                    arg_types=self._argument_types(func_call.args),
                 )
                 self.ast_type_map.set(
                     func_call,

@@ -1,0 +1,24 @@
+// Both sides count the adversary's queries: the n-th call to Next returns
+// n. Interchangeable.
+Game Left() {
+    Int c = 0;
+    Void Initialize() {
+    }
+    Int Next() {
+        c = c + 1;
+        return c;
+    }
+}
+
+Game Right() {
+    Int c = 0;
+    Void Initialize() {
+    }
+    Int Next() {
+        Int n = c + 1;
+        c = n;
+        return n;
+    }
+}
+
+export as CountPair;

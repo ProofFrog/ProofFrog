@@ -1,0 +1,4 @@
+// F-356: a primitive with one test on an Int input.
+Primitive Tester(Int q) {
+    Bool Test(Int b);
+}

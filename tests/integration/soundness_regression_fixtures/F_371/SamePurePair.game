@@ -1,0 +1,16 @@
+// Positive control: a deterministic argument read twice is one value.
+import 'Caller.primitive';
+
+Game Left(Caller T, Int n) {
+    Bool O(BitString<n> y) {
+        return T.SamePure(y);
+    }
+}
+
+Game Right(Caller T, Int n) {
+    Bool O(BitString<n> y) {
+        return true;
+    }
+}
+
+export as SamePurePair;

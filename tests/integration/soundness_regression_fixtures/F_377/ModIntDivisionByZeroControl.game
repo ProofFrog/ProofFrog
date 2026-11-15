@@ -1,0 +1,49 @@
+// F-377 control on ModInt<q>: the true equivalences of
+// DivisionByZeroControl.game, written with ModInt<q> division (division on
+// Int is a type error). A division by zero is an unspecified value determined
+// by its operands, so two divisions with the same operands are equal.
+// Value: (x - x) / (y - y) against the division of locals holding x - x and
+// y - y. Condition: the same, read in an if condition (the Z3 layer).
+// Stored: the division stored in a ModInt local of its own type against the
+// division returned directly.
+// Expected: Proof Succeeded!
+Game Left(Int q) {
+    ModInt<q> Value(ModInt<q> x, ModInt<q> y) {
+        return (x - x) / (y - y);
+    }
+
+    Int Condition(ModInt<q> x, ModInt<q> y, ModInt<q> a) {
+        if ((x - x) / (y - y) == a) {
+            return 1;
+        }
+        return 0;
+    }
+
+    ModInt<q> Stored(ModInt<q> x, ModInt<q> y) {
+        ModInt<q> z = (x - x) / (y - y);
+        return z;
+    }
+}
+
+Game Right(Int q) {
+    ModInt<q> Value(ModInt<q> x, ModInt<q> y) {
+        ModInt<q> u = x - x;
+        ModInt<q> v = y - y;
+        return u / v;
+    }
+
+    Int Condition(ModInt<q> x, ModInt<q> y, ModInt<q> a) {
+        ModInt<q> u = x - x;
+        ModInt<q> v = y - y;
+        if (u / v == a) {
+            return 1;
+        }
+        return 0;
+    }
+
+    ModInt<q> Stored(ModInt<q> x, ModInt<q> y) {
+        return (x - x) / (y - y);
+    }
+}
+
+export as ModIntDivisionByZeroControl;

@@ -1,0 +1,17 @@
+// F-191: Real and Random claimed interchangeable. They are not: GetQ()
+// returns 1 in Real and 5 in Random (see field_init_read.game).
+import 'sampler.primitive';
+import 'field_init_read.game';
+
+proof:
+
+let:
+    Sampler S = Sampler();
+
+theorem:
+    FieldInitReadProp(S);
+
+games:
+
+    FieldInitReadProp(S).Real against FieldInitReadProp(S).Adversary;
+    FieldInitReadProp(S).Random against FieldInitReadProp(S).Adversary;

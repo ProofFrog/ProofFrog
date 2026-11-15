@@ -1,0 +1,35 @@
+// Positive control: the checks of SameLevel.game, with the * and / check on
+// ModInt<q>, since division on Int is a type error.
+// E: a + 3 - b is (a + 3) - b, equal to a - b + 3, which is (a - b) + 3.
+// F: x / y * z is (x / y) * z, equal to z * (x / y); read as x / (y * z) it
+// would differ.
+// G: 20 - 4 - 3 is (20 - 4) - 3 = 13, not 20 - (4 - 3) = 19.
+Game Left(Int a, Int b, Int q) {
+    Int E() {
+        return a + 3 - b;
+    }
+
+    ModInt<q> F(ModInt<q> x, ModInt<q> y, ModInt<q> z) {
+        return x / y * z;
+    }
+
+    Int G() {
+        return 20 - 4 - 3;
+    }
+}
+
+Game Right(Int a, Int b, Int q) {
+    Int E() {
+        return a - b + 3;
+    }
+
+    ModInt<q> F(ModInt<q> x, ModInt<q> y, ModInt<q> z) {
+        return z * (x / y);
+    }
+
+    Int G() {
+        return 13;
+    }
+}
+
+export as SameLevelModInt;

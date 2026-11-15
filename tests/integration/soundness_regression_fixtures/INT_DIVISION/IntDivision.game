@@ -1,0 +1,14 @@
+// Division of two Int values.
+Game Left(Int n) {
+    Int Halve(Int a) {
+        return a / 2;
+    }
+}
+
+Game Right(Int n) {
+    Int Halve(Int a) {
+        return a / 2;
+    }
+}
+
+export as IntDivision;

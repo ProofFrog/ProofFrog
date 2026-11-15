@@ -1,0 +1,47 @@
+// Positive control for F-362: Left keeps state in a field n, named like the
+// proof's let n that the scheme reads; Right is the same game with the field
+// named m. A field's name is internal to its game, so they are
+// interchangeable: Q returns the let n in both, R the field.
+import 'Flag.primitive';
+
+Game Left(Flag S) {
+    Bool n;
+
+    Void Initialize() {
+        n = false;
+    }
+
+    Void Flip() {
+        n = true;
+    }
+
+    Bool Q() {
+        return S.Get();
+    }
+
+    Bool R() {
+        return n;
+    }
+}
+
+Game Right(Flag S) {
+    Bool m;
+
+    Void Initialize() {
+        m = false;
+    }
+
+    Void Flip() {
+        m = true;
+    }
+
+    Bool Q() {
+        return S.Get();
+    }
+
+    Bool R() {
+        return m;
+    }
+}
+
+export as CollisionControl;

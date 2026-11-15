@@ -1,0 +1,25 @@
+// Target pass: DeduplicateDeterministicCalls (pre-existing, inlining.py).
+// Hypothesis: two calls R.Det(R.Draw()) are merged into one because Det is
+// deterministic, although each evaluates its own non-deterministic argument
+// R.Draw(), so the two results are independent.
+// Left returns two independently computed values; Right returns one value
+// twice. With Draw uniform over ModInt<q> (q >= 2) and Det the identity, an
+// adversary calling Probe once sees two equal components with probability
+// 1/q in Left and 1 in Right.
+// Expected if sound: Proof Failed. If unsound: Proof Succeeded!
+import 'Rnd.primitive';
+
+Game Left(Rnd R, Int q) {
+    [ModInt<q>, ModInt<q>] Probe() {
+        return [R.Det(R.Draw()), R.Det(R.Draw())];
+    }
+}
+
+Game Right(Rnd R, Int q) {
+    [ModInt<q>, ModInt<q>] Probe() {
+        ModInt<q> v = R.Det(R.Draw());
+        return [v, v];
+    }
+}
+
+export as DedupNondetArg;

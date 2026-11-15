@@ -14,6 +14,7 @@ from .sampling import (
     SliceOfInlineConcat,
     MergeUniformSamples,
     MergeProductSamples,
+    SplitProductSample,
 )
 from .sampling import (
     SplitUniformSamples,
@@ -36,6 +37,7 @@ from .random_functions import (
 from .map_iteration import LazyMapScan
 from .map_reindex import MapKeyReindex
 from .inlining import (
+    MergeBareDeclaration,
     RedundantCopy,
     IfSplitBranchAssignment,
     InlineSingleUseVariable,
@@ -65,6 +67,11 @@ from .algebraic import (
     XorCancellation,
     XorIdentity,
     ModIntSimplification,
+    ModIntCancellation,
+    UniformModIntRepeatedMask,
+    ExpressAfterUpdate,
+    CancelThroughLocal,
+    BlockedLocalAbsorption,
     NormalizeCommutativeChains,
     FlattenConcatChain,
     ReflexiveComparison,
@@ -92,20 +99,30 @@ from .control_flow import (
     DeadGuardedAssignmentElimination,
     IfFalseReturnToConjunction,
     FoldEquivalentReturnBranch,
+    FoldLiteralConditions,
     BranchElimination,
     UniqExclusionBranchElimination,
     ElseUnwrap,
     SimplifyReturn,
     SimplifyIf,
     RemoveUnreachable,
+    RemoveEmptyIf,
+    FlagSetToAssignment,
 )
 from .types import DeadNullGuardElimination, SubsetTypeNormalization
+from .state_relations import (
+    FieldInvariantElimination,
+    GeneratorPowerFieldToExponent,
+    OffsetFusion,
+    ForwardLiteralFieldWrite,
+)
 from .tuples import (
     FoldTupleIndex,
     ExpandTuple,
     SimplifyTuple,
     CollapseSingleIndexTuple,
     NormalizeProductLiteral,
+    SplitBareTupleDeclarations,
 )
 from .standardization import (
     VariableStandardize,
@@ -119,6 +136,13 @@ from .standardization import (
 CORE_PIPELINE: list[TransformPass] = [
     AlphaRename(),
     NormalizeProductLiteral(),
+    # Must run before Topological Sorting (which prunes dead bare declarations)
+    # and Collapse Assignment (which folds their assignments into use
+    # sites): once either fires, the split-declaration tuple spelling can
+    # no longer be normalized to the decl-with-initializer route (#255).
+    SplitBareTupleDeclarations(),
+    SplitProductSample(),
+    MergeBareDeclaration(),
     SingleCallFieldToLocal(),
     CounterGuardedFieldToLocal(),
     SymbolicComputation(),
@@ -149,6 +173,7 @@ CORE_PIPELINE: list[TransformPass] = [
     ForwardExpressionAlias(),
     UniformXorSimplification(),
     UniformModIntSimplification(),
+    UniformModIntRepeatedMask(),
     UniformGroupElemSimplification(),
     TopologicalSort(),
     HoistFieldPureAlias(),
@@ -161,6 +186,7 @@ CORE_PIPELINE: list[TransformPass] = [
     IfToBooleanAssignment(),
     RedundantConditionalReturn(),
     UniqExclusionBranchElimination(),
+    FoldLiteralConditions(),
     BranchElimination(),
     InlineLocalTupleLiteral(),
     ElseUnwrap(),
@@ -181,6 +207,10 @@ CORE_PIPELINE: list[TransformPass] = [
     XorCancellation(),
     XorIdentity(),
     ModIntSimplification(),
+    ModIntCancellation(),
+    ExpressAfterUpdate(),
+    CancelThroughLocal(),
+    BlockedLocalAbsorption(),
     HoistGroupExpToInitialize(),
     RefactorGroupElemFieldExp(),
     GroupElemSimplification(),
@@ -196,12 +226,18 @@ CORE_PIPELINE: list[TransformPass] = [
     RedundantFieldCopy(),
     SimplifyTuple(),
     RemoveUnreachable(),
+    RemoveEmptyIf(),
+    FlagSetToAssignment(),
     AbsorbRedundantEarlyReturn(),
     FactorCommonGuard(),
     MergeNestedGuard(),
     DeadGuardedAssignmentElimination(),
     IfFalseReturnToConjunction(),
     FoldEquivalentReturnBranch(),
+    ForwardLiteralFieldWrite(),
+    FieldInvariantElimination(),
+    GeneratorPowerFieldToExponent(),
+    OffsetFusion(),
 ]
 
 STANDARDIZATION_PIPELINE: list[TransformPass] = [
@@ -227,7 +263,7 @@ STANDARDIZATION_PIPELINE: list[TransformPass] = [
     BubbleSortFieldAssignments(),
     StabilizeIndependentStatements(),
     # Final VariableStandardize: StabilizeIndependentStatements may have
-    # reordered typed-local declarations after the previous
+    # reordered local declarations after the previous
     # VariableStandardize, leaving locals out of v1, v2, ... order.
     # Re-number locals so canonical forms with the same final declaration
     # order use the same names.

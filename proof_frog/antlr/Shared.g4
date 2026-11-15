@@ -48,24 +48,18 @@ expression:
 
 	| <assoc=right> expression CARET expression #exponentiationExp
 
-	| expression TIMES expression #multiplyExp
-	| expression DIVIDE expression #divideExp
+	// Binary operators sharing a level are one alternative each, so the level
+	// is left-associative (a - b + c is (a - b) + c); earlier alternatives
+	// bind tighter. Tightest first: `*` `/`, unary `-`, `+` `-`, `union` `\`,
+	// the relational tests, `==` `!=`, `&&`, `||`.
+	| expression op=(TIMES | DIVIDE) expression #multiplyDivideExp
 	| SUBTRACT expression #minusExp
-	| expression PLUS expression #addExp
-	| expression SUBTRACT expression #subtractExp
-	| expression EQUALSCOMPARE expression #equalsExp
-	| expression NOTEQUALS expression #notEqualsExp
-	| expression R_ANGLE expression # gtExp
-	| expression L_ANGLE expression # ltExp
-	| expression GEQ expression #geqExp
-	| expression LEQ expression #leqExp
-	| expression IN expression #inExp
-	| expression SUBSETS expression #subsetsExp
-
+	| expression op=(PLUS | SUBTRACT) expression #addSubtractExp
+	| expression op=(UNION | BACKSLASH) expression #unionSetMinusExp
+	| expression op=(L_ANGLE | LEQ | R_ANGLE | GEQ | IN | SUBSETS) expression #relationalExp
+	| expression op=(EQUALSCOMPARE | NOTEQUALS) expression #equalityExp
 	| expression AND expression #andExp
 	| expression OR expression #orExp
-	| expression UNION expression #unionExp
-	| expression BACKSLASH expression #setMinusExp
 
 	| lvalue # lvalueExp
 	| L_SQUARE (expression (COMMA expression)*)? R_SQUARE #createTupleExp
@@ -103,10 +97,8 @@ type: type QUESTION #optionalType
 	;
 
 integerExpression
-	: integerExpression TIMES integerExpression
-	| integerExpression DIVIDE integerExpression
-	| integerExpression PLUS integerExpression
-	| integerExpression SUBTRACT integerExpression
+	: integerExpression op=(TIMES | DIVIDE) integerExpression
+	| integerExpression op=(PLUS | SUBTRACT) integerExpression
 	| lvalue
 	| INT
 	| BINARYNUM

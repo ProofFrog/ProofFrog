@@ -1,0 +1,16 @@
+// Proof for WrittenQ.game (target, hypothesis and expected outcome in its
+// header).
+import 'sampler.primitive';
+import 'WrittenQ.game';
+
+proof:
+
+let:
+    Sampler S = Sampler();
+
+theorem:
+    WrittenQProp(S);
+
+games:
+    WrittenQProp(S).Real against WrittenQProp(S).Adversary;
+    WrittenQProp(S).Random against WrittenQProp(S).Adversary;

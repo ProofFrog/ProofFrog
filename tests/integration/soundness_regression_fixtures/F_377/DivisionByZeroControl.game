@@ -1,0 +1,44 @@
+// F-377 control: true equivalences around division by zero, each of which
+// used to abort the proof. A division by zero is an unspecified value
+// determined by its operands, so two divisions with the same operands are
+// equal. IntValue: (q - q) / (q - q) and 0 / 0 are the same Int division.
+// IntCondition: the same, read in an if condition (the Z3 layer). ModValue:
+// a ModInt division by zero stored in a ModInt local of its own type is the
+// same as the division returned directly.
+// Expected: Proof Succeeded!
+Game Left(Int q) {
+    Int IntValue() {
+        return (q - q) / (q - q);
+    }
+
+    Int IntCondition(Int a) {
+        if ((q - q) / (q - q) == a) {
+            return 1;
+        }
+        return 0;
+    }
+
+    ModInt<q> ModValue(ModInt<q> x, ModInt<q> y) {
+        ModInt<q> z = (x - x) / (y - y);
+        return z;
+    }
+}
+
+Game Right(Int q) {
+    Int IntValue() {
+        return 0 / 0;
+    }
+
+    Int IntCondition(Int a) {
+        if (0 / 0 == a) {
+            return 1;
+        }
+        return 0;
+    }
+
+    ModInt<q> ModValue(ModInt<q> x, ModInt<q> y) {
+        return (x - x) / (y - y);
+    }
+}
+
+export as DivisionByZeroControl;

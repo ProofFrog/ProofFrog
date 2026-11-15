@@ -28,29 +28,66 @@ from ..visitors import (
     lvalue_base_name,
 )
 from ._base import (
+    method_bound_names as _method_bound_names,
     TransformPass,
     PipelineContext,
     has_nondeterministic_call,
     NearMiss,
     _lookup_primitive_method,
+    may_return_before,
+)
+from ._coercion import coercing_store_names_for, note_coercing_store
+from ._definedness import (
+    calls_game_method,
+    initialize_unassigned_fields,
+    method_binder_counts,
 )
 
 
 def _contains_potential_undefined_read(node: frog_ast.ASTNode) -> bool:
     """True if *node* contains a map/array index access ``M[k]``.
 
-    Reading an absent map key or an out-of-bounds array index is an observable
-    undefined-read abort (SEMANTICS 6.7). Relocating an evaluation that can
-    perform such a read to a position with BROADER reachability -- hoisting it
-    before a branch it only ran inside, forcing it onto a never-taken branch,
-    or making it unconditional -- changes the set of traces on which the abort
-    occurs, so a pass that hoists or duplicates an expression across control
-    flow must decline when it contains one (ruling 7.A.1).
+    Reading an absent map key or an out-of-bounds array index returns an
+    unspecified value and cannot fail (FROGLANG_REFERENCE.md section 6.9), so
+    relocating such a read across control flow is sound. The passes that
+    consult this helper (HoistDuplicateBranchCall, InlineLocalTupleLiteral)
+    still decline to hoist, drop or move one, a caution from before that rule
+    was stated that costs only completeness.
     """
     return (
         SearchVisitor(lambda n: isinstance(n, frog_ast.ArrayAccess)).visit(node)
         is not None
     )
+
+
+def _projected_in_next_statement(
+    remaining: frog_ast.Block, name: str, index: int
+) -> bool:
+    """True if ``name[index]`` is read by the first statement of *remaining*,
+    and that statement is not a branch or a loop.
+
+    An expression substituted for such a use is evaluated on exactly the
+    traces that reach the statement before it, so moving it there from the
+    preceding statement keeps a map or array read where it was.
+    """
+    if not remaining.statements:
+        return False
+    first = remaining.statements[0]
+    if isinstance(
+        first, (frog_ast.IfStatement, frog_ast.NumericFor, frog_ast.GenericFor)
+    ):
+        return False
+
+    def is_projection(node: frog_ast.ASTNode) -> bool:
+        return (
+            isinstance(node, frog_ast.ArrayAccess)
+            and isinstance(node.the_array, frog_ast.Variable)
+            and node.the_array.name == name
+            and isinstance(node.index, frog_ast.Integer)
+            and node.index.num == index
+        )
+
+    return SearchVisitor(is_projection).visit(first) is not None
 
 
 def _use_inside_loop(node: frog_ast.ASTNode, name: str) -> bool:
@@ -105,6 +142,78 @@ def _binder_captures_free_var(
     return SearchVisitor(_check).visit(use_stmt) is not None
 
 
+def _holds_variable(node: frog_ast.ASTNode, name: str) -> bool:
+    """True if *node* contains a reference to the variable *name*."""
+    return (
+        SearchVisitor(
+            lambda n: isinstance(n, frog_ast.Variable) and n.name == name
+        ).visit(node)
+        is not None
+    )
+
+
+def written_before_use_within(
+    statement: frog_ast.Statement, var_name: str, names: set[str]
+) -> bool:
+    """True if a write to a name in *names* can run, inside *statement*,
+    before the read of *var_name* that *statement* holds.
+
+    A scan of the statements strictly between a definition and the statement
+    holding its use stops before that statement, but a compound statement
+    can itself run a write before the use (F-149). See
+    :func:`written_before_reached_within` for the region.
+    """
+    return written_before_reached_within(
+        statement, functools.partial(_holds_variable, name=var_name), names
+    )
+
+
+def written_before_reached_within(
+    statement: frog_ast.Statement,
+    holds: Callable[[frog_ast.ASTNode], bool],
+    names: set[str],
+) -> bool:
+    """True if a write to a name in *names* can run, inside *statement*,
+    before one of the evaluation points that *statement* holds, where
+    ``holds(node)`` tells whether *node* holds such a point (a use of a
+    variable, or one of a group of calls):
+
+    - in a block, a statement before the last one holding a point (each runs
+      before that point);
+    - in an ``if``, a statement earlier in a branch that holds a point
+      (evaluating a condition writes nothing, and only one branch runs);
+    - in a loop, a write anywhere in the loop (or a binder of the name),
+      since an iteration's writes run before the next iteration's points. A
+      point in the loop header counts too: the reference does not say that a
+      bound or the iterated collection is evaluated only once.
+
+    Any other statement evaluates everything it reads before its own write.
+    Writes are found by :func:`reassigns_or_rebinds` (element and field
+    writes, ``<-uniq`` insertions, rebinding declarations and binders).
+    """
+    if isinstance(statement, frog_ast.Block):
+        holding = [
+            index for index, inner in enumerate(statement.statements) if holds(inner)
+        ]
+        last = holding[-1] if holding else len(statement.statements)
+        if any(
+            reassigns_or_rebinds(names, inner) for inner in statement.statements[:last]
+        ):
+            return True
+        return bool(holding) and written_before_reached_within(
+            statement.statements[last], holds, names
+        )
+    if isinstance(statement, frog_ast.IfStatement):
+        return any(
+            written_before_reached_within(block, holds, names)
+            for block in statement.blocks
+            if holds(block)
+        )
+    if isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
+        return reassigns_or_rebinds(names, statement)
+    return False
+
+
 def _is_loop_binder(node: frog_ast.ASTNode, name: str) -> bool:
     """True if *name* is bound by a ``for`` binder anywhere within *node*."""
 
@@ -114,37 +223,6 @@ def _is_loop_binder(node: frog_ast.ASTNode, name: str) -> bool:
         )
 
     return SearchVisitor(_check).visit(node) is not None
-
-
-def _method_bound_names(method: frog_ast.Method) -> set[str]:
-    """The set of names *method* binds locally, i.e. introduces a NEW binding
-    for: signature parameters, typed local declarations / samples
-    (``T x = ...`` / ``T x <- ...``), and ``for`` binders.
-
-    A plain write to an existing name (``x = ...`` / ``M[k] <- ...`` with no
-    declared type) is NOT a binding -- it mutates the field/local already in
-    scope and does not create a capturing shadow. A name in this set, when it
-    occurs inside *method*, refers to the local binding rather than any
-    same-named game field/parameter, so a name-based mover that trusts
-    field/param membership must treat it as shadowed (audit RC4:
-    F-173/F-178/F-190/F-228)."""
-    names = {p.name for p in method.signature.parameters}
-
-    def _collect(n: frog_ast.ASTNode) -> bool:
-        if isinstance(n, frog_ast.NumericFor):
-            names.add(n.name)
-        elif isinstance(n, frog_ast.GenericFor):
-            names.add(n.var_name)
-        elif (
-            isinstance(n, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample))
-            and getattr(n, "the_type", None) is not None
-            and isinstance(n.var, frog_ast.Variable)
-        ):
-            names.add(n.var.name)
-        return False
-
-    SearchVisitor(_collect).visit(method.block)
-    return names
 
 
 def _name_shadowed_in_method(method: frog_ast.Method, name: str) -> bool:
@@ -216,9 +294,13 @@ class _VarCountVisitor(Visitor[int]):
 class RedundantCopyTransformer(BlockTransformer):
     """Eliminates redundant variable copies by substituting the original.
 
-    When a typed assignment ``Type v = w`` creates a simple copy and neither
-    ``v`` nor ``w`` is reassigned afterward, all uses of ``v`` are replaced
-    with ``w`` and the copy assignment is removed.
+    When a typed assignment ``Type v = w`` creates a simple copy, ``v`` is
+    never reassigned afterward, and ``w`` still holds the copied value at
+    every read of ``v``, all uses of ``v`` are replaced with ``w`` and the
+    copy assignment is removed. ``w`` may be written later: the reads of
+    ``v`` must then all come before the first statement that writes or
+    rebinds ``w``, or sit in the value of that statement when it is the
+    plain overwrite ``w = e;`` (``e`` is evaluated before the store).
 
     Example::
 
@@ -226,7 +308,26 @@ class RedundantCopyTransformer(BlockTransformer):
         return ct;
       becomes:
         return c;
+
+    and (the copy an inlined callee makes of the value it updates)::
+
+        ModInt<q> old = s;
+        s = old + d;
+      becomes:
+        s = s + d;
+
+    A copy that converts its source (``ModInt<q> v = w;`` with ``w : Int``
+    holds ``w`` reduced modulo ``q``) is not redundant; the names such a
+    store writes are passed in *coercing* (F-356).
     """
+
+    def __init__(
+        self,
+        coercing: frozenset[str] = frozenset(),
+        ctx: PipelineContext | None = None,
+    ) -> None:
+        self.coercing = coercing
+        self.ctx = ctx
 
     def _transform_block_wrapper(
         self,
@@ -253,6 +354,13 @@ class RedundantCopyTransformer(BlockTransformer):
             else:
                 continue
 
+            # F-356: `ModInt<q> v = w;` with `w : Int` holds `w mod q`.
+            if copy_name in self.coercing:
+                note_coercing_store(
+                    self.ctx, "Remove Redundant Copies", copy_name, statement.origin
+                )
+                continue
+
             # Self-assignment (e.g., r = r after inlining): just remove it
             if copy_name == original_name:
                 return self.transform_block(
@@ -267,44 +375,112 @@ class RedundantCopyTransformer(BlockTransformer):
                 # the copy source S: both via the shared `_stmt_mutates_var`.
                 return _stmt_mutates_var(node, copy_name)
 
-            remaining_block = frog_ast.Block(
-                copy.deepcopy(block.statements[index + 1 :])
-            )
+            remaining_block = frog_ast.Block(list(block.statements[index + 1 :]))
             was_written = SearchVisitor[frog_ast.Variable](
                 functools.partial(written_to, copy_name)
             ).visit(remaining_block)
+            if was_written:
+                continue
             original_reassigned = SearchVisitor[frog_ast.Variable](
                 functools.partial(written_to, original_name)
             ).visit(remaining_block)
-            # If the copy was reassigned, or the original was reassigned
-            # (making the substitution unsafe), skip.
-            if was_written or original_reassigned:
-                continue
+            # When the original is written later, the copy still holds the
+            # original's value up to that write. The copy is then redundant
+            # only if every read of it happens before the write.
+            span = len(remaining_block.statements)
+            if original_reassigned:
+                read_span = _copy_reads_before_overwrite(
+                    remaining_block.statements, copy_name, original_name
+                )
+                if read_span is None:
+                    if self.ctx is not None:
+                        self.ctx.near_misses.append(
+                            NearMiss(
+                                transform_name="Remove Redundant Copies",
+                                reason=(
+                                    f"Cannot remove copy '{copy_name}' of "
+                                    f"'{original_name}': the copy is read after "
+                                    f"'{original_name}' is written"
+                                ),
+                                location=statement.origin,
+                                suggestion=(
+                                    f"Read '{copy_name}' only before the write to "
+                                    f"'{original_name}' (or in the value that "
+                                    f"overwrites it)"
+                                ),
+                                variable=copy_name,
+                                method=None,
+                            )
+                        )
+                    continue
+                span = read_span
 
             def copy_used(copy_name: str, node: frog_ast.ASTNode) -> bool:
                 return isinstance(node, frog_ast.Variable) and node.name == copy_name
 
+            head = frog_ast.Block(list(remaining_block.statements[:span]))
             while True:
                 copy_found = SearchVisitor[frog_ast.Variable](
                     functools.partial(copy_used, copy_name)
-                ).visit(remaining_block)
+                ).visit(head)
                 if copy_found is None:
                     break
-                remaining_block = ReplaceTransformer(
+                head = ReplaceTransformer(
                     copy_found, frog_ast.Variable(original_name)
-                ).transform(remaining_block)
+                ).transform(head)
 
             return self.transform_block(
-                frog_ast.Block(copy.deepcopy(block.statements[:index]))
-                + remaining_block
+                frog_ast.Block(
+                    list(block.statements[:index])
+                    + list(head.statements)
+                    + list(remaining_block.statements[span:])
+                )
             )
         return block
 
 
+def _copy_reads_before_overwrite(
+    statements: Sequence[frog_ast.Statement], copy_name: str, original_name: str
+) -> int | None:
+    """How many of *statements* (those after ``T copy = original;``) read the
+    copy while the original still holds the copied value, or ``None``.
+
+    The original is written by a later statement. Let ``S_j`` be the first
+    statement that writes or rebinds it (nested writes count). Reading
+    ``original`` in place of ``copy`` is exact in ``S_0 .. S_{j-1}``, and in
+    the value of ``S_j`` when ``S_j`` is the plain overwrite ``original = e;``
+    (``e`` is evaluated before the store). The copy may not be read anywhere
+    after that. Returns the length of the prefix to rewrite (``j`` or
+    ``j + 1``), or ``None`` when some read of the copy sees a changed
+    original.
+    """
+
+    def reads_copy(node: frog_ast.ASTNode) -> bool:
+        return copy_name in referenced_variable_names(node)
+
+    for j, statement in enumerate(statements):
+        if not reassigns_or_rebinds({original_name}, statement):
+            continue
+        if not any(reads_copy(later) for later in statements[j:]):
+            return j
+        if any(reads_copy(later) for later in statements[j + 1 :]):
+            return None
+        if (
+            isinstance(statement, frog_ast.Assignment)
+            and statement.the_type is None
+            and isinstance(statement.var, frog_ast.Variable)
+            and statement.var.name == original_name
+        ):
+            return j + 1
+        return None
+    return None
+
+
 class InlineSingleUseVariableTransformer(BlockTransformer):
     """Inlines a declaration `Type v = expr` when v is used exactly once in
-    subsequent statements and no variable free in expr is modified between
-    the declaration and that single use site.
+    subsequent statements and no variable free in expr can be modified
+    between the declaration and that single use site, including inside the
+    branch or loop that holds the use (F-149).
 
     This is more general than RedundantCopyTransformer, which only handles
     simple variable copies (where expr is a plain Variable).
@@ -316,8 +492,13 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
         return v1 + G.evaluate(v2) + mL;
     """
 
-    def __init__(self, ctx: PipelineContext | None = None) -> None:
+    def __init__(
+        self,
+        ctx: PipelineContext | None = None,
+        coercing: frozenset[str] = frozenset(),
+    ) -> None:
         self.ctx = ctx
+        self.coercing = coercing
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -335,12 +516,19 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
             var_name = statement.var.name
             expr = statement.value
 
+            # F-356: `ModInt<q> v = e;` with `e : Int` holds `e mod q`.
+            if var_name in self.coercing:
+                note_coercing_store(
+                    self.ctx, "Inline Single-Use Variable", var_name, statement.origin
+                )
+                continue
+
             def uses_var(name: str, node: frog_ast.ASTNode) -> bool:
                 return isinstance(node, frog_ast.Variable) and node.name == name
 
-            remaining_block = frog_ast.Block(
-                copy.deepcopy(list(block.statements[index + 1 :]))
-            )
+            # The scans below only read the suffix. ReplaceTransformer builds
+            # new nodes on a hit, so the original statements can be shared.
+            remaining_block = frog_ast.Block(list(block.statements[index + 1 :]))
 
             # Skip if var is reassigned anywhere in remaining (element/field
             # writes and <-uniq insertion count too, via the shared scanner).
@@ -473,6 +661,41 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
                     )
                 continue
 
+            # F-149: the scan above also stops before the statement holding
+            # the use. When that statement is a branch or a loop, a write to
+            # a free variable of expr inside it can run before the use: then
+            # the inlined expression would read the new value. Decline.
+            written_inside = [
+                name
+                for name in sorted(free_var_names)
+                if written_before_use_within(
+                    remaining_block.statements[first_use_idx], var_name, {name}
+                )
+            ]
+            if written_inside:
+                if self.ctx is not None:
+                    names_text = ", ".join(repr(v) for v in written_inside)
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Variable",
+                            reason=(
+                                f"Cannot inline '{var_name}': free variable(s) "
+                                f"{names_text} may be modified inside the "
+                                f"statement that uses '{var_name}', before the use "
+                                f"(earlier in its branch, or in the loop body "
+                                f"around it)"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Keep '{var_name}' as a local, or move the write "
+                                f"to {names_text} after the use of '{var_name}'"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+
             # Perform the inlining: replace every occurrence of var in
             # remaining_block with expr (there is exactly one, verified above)
             expr_copy = copy.deepcopy(expr)
@@ -516,6 +739,7 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
         self,
         ctx: PipelineContext | None = None,
         field_names: set[str] | None = None,
+        coercing: frozenset[str] = frozenset(),
     ) -> None:
         self.ctx = ctx
         # Game field names. The rewrite drops each branch's trailing `x = A`
@@ -523,6 +747,9 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
         # across oracle calls and is observable, so dropping it is unsound
         # (F-159); the pass fires only for locals.
         self._field_names: set[str] = field_names or set()
+        # F-356: names some store converts into a ModInt; `x = A` then holds
+        # `A` reduced modulo the modulus, so `A` cannot replace `x`.
+        self._coercing = coercing
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -560,6 +787,12 @@ class IfSplitBranchAssignmentTransformer(BlockTransformer):
             # store. If `var` is a game field, that store is observable across
             # oracle calls, so dropping it changes behaviour -- decline.
             if var_name in self._field_names:
+                continue
+
+            if var_name in self._coercing:
+                note_coercing_store(
+                    self.ctx, "If-Split Branch Assignment", var_name, statement.origin
+                )
                 continue
 
             # Must have subsequent statements
@@ -685,9 +918,17 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
         return F(a || b, a || b);
     """
 
-    def __init__(self, function_var_names: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        function_var_names: set[str] | None = None,
+        coercing: frozenset[str] = frozenset(),
+        ctx: PipelineContext | None = None,
+    ) -> None:
         super().__init__()
         self._function_var_names = function_var_names or set()
+        # F-356: names some store converts into a ModInt.
+        self._coercing = coercing
+        self.ctx = ctx
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -702,6 +943,15 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
 
             var_name = statement.var.name
             expr = statement.value
+
+            if var_name in self._coercing:
+                note_coercing_store(
+                    self.ctx,
+                    "Inline Multi-Use Pure Expressions",
+                    var_name,
+                    statement.origin,
+                )
+                continue
 
             # Skip function calls in general — multi-use inlining
             # duplicates the call at every use site, changing the
@@ -938,11 +1188,20 @@ class RedundantFieldCopyTransformer(BlockTransformer):
         fieldName <- Type;
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        coercing: frozenset[str] = frozenset(),
+        ctx: PipelineContext | None = None,
+    ) -> None:
         self.fields: list[str] = []
+        self._field_types: dict[str, frog_ast.Type] = {}
+        # F-356: names some store converts into a ModInt.
+        self._coercing = coercing
+        self.ctx = ctx
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.fields = [field.name for field in game.fields]
+        self._field_types = {field.name: field.type for field in game.fields}
         new_game = copy.deepcopy(game)
         new_game.methods = [self.transform(method) for method in new_game.methods]
         return new_game
@@ -1009,6 +1268,21 @@ class RedundantFieldCopyTransformer(BlockTransformer):
                 # / drop statements, the block never shrinks, and the
                 # self-recursive transform diverges. Require the ordering.
                 if not no_other_uses or decl_index == -1 or decl_index >= index:
+                    continue
+                # F-356: `T v = e; f = v;` becomes `f = e;`, which converts `e`
+                # to the field's type directly. When `v` holds `e` converted
+                # (an Int reduced into a ModInt), that is the same value only
+                # if the field has exactly the type `T`.
+                local_name = statement.value.name
+                if local_name in self._coercing and (
+                    self._field_types.get(statement.var.name) != decl_statement.the_type
+                ):
+                    note_coercing_store(
+                        self.ctx,
+                        "Remove redundant variables for fields",
+                        local_name,
+                        decl_statement.origin,
+                    )
                     continue
                 # Check that the field is not accessed (read or written)
                 # between the declaration and the field assignment.
@@ -1087,10 +1361,17 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
         self,
         proof_namespace: frog_ast.Namespace | None = None,
         proof_let_types: NameTypeMap | None = None,
+        coercing: frozenset[str] = frozenset(),
+        ctx: PipelineContext | None = None,
     ) -> None:
         self.fields: list[str] = []
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
+        # F-356: names some store converts into a ModInt. `v = expr` then
+        # holds `expr` reduced modulo the modulus, so neither stands for the
+        # other.
+        self._coercing = coercing
+        self.ctx = ctx
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.fields = [field.name for field in game.fields]
@@ -1100,6 +1381,18 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
+            if (
+                isinstance(statement, frog_ast.Assignment)
+                and isinstance(statement.var, frog_ast.Variable)
+                and statement.var.name in self._coercing
+            ):
+                note_coercing_store(
+                    self.ctx,
+                    "Forward Expression Alias",
+                    statement.var.name,
+                    statement.origin,
+                )
+                continue
             is_typed_decl = (
                 isinstance(statement, frog_ast.Assignment)
                 and statement.the_type is not None
@@ -1259,6 +1552,33 @@ class ForwardExpressionAliasTransformer(BlockTransformer):
         return block
 
 
+class _TupleLiteralUseClassifier(Visitor[None]):
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.total_var_refs = 0
+        self.array_access_refs = 0
+        self.has_non_constant = False
+        self.counts: dict[int, int] = {}
+
+    def result(self) -> None:
+        pass
+
+    def visit_variable(self, var: frog_ast.Variable) -> None:
+        if var.name == self.name:
+            self.total_var_refs += 1
+
+    def visit_array_access(self, aa: frog_ast.ArrayAccess) -> None:
+        if (
+            isinstance(aa.the_array, frog_ast.Variable)
+            and aa.the_array.name == self.name
+        ):
+            self.array_access_refs += 1
+            if isinstance(aa.index, frog_ast.Integer):
+                self.counts[aa.index.num] = self.counts.get(aa.index.num, 0) + 1
+            else:
+                self.has_non_constant = True
+
+
 class InlineLocalTupleLiteralTransformer(BlockTransformer):
     """Inline a local typed tuple-literal binding when the variable is used
     only at constant indices and not reassigned, substituting each ``v[k]``
@@ -1271,7 +1591,15 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
     ``InlineSingleUseVariableTransformer`` (which skips Tuple RHS to avoid
     breaking the tuple-expansion pipeline).
 
-    Preconditions for firing on ``[T0,...,Tn-1] v = [e0,...,en-1];``:
+    Fires on ``[T0,...,Tn-1] v = [e0,...,en-1];`` and on the optional form
+    ``[T0,...,Tn-1]? v = [e0,...,en-1];``.  A tuple literal is never
+    ``None``, so the optional local holds the same value as the
+    non-optional one and the same preconditions apply.  A null guard
+    ``if (v == None)`` is a bare use of ``v`` (precondition 1), so the
+    optional form is inlined only once ``DeadNullGuardElimination`` has
+    removed the guard.
+
+    Preconditions:
 
     1. No bare reference to ``v`` in the remaining block (every reference
        is the ``the_array`` child of an ``ArrayAccess`` node).
@@ -1283,6 +1611,15 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
        never used, ``e_i`` must also be deterministic (so dropping it is
        safe). When ``v[i]`` is used exactly once, ``e_i`` may have any
        side effects (single substitution preserves the evaluation count).
+    5. No ``e_i`` that indexes a map or array (F-157) is dropped or moved:
+       it must be projected by the statement right after the declaration,
+       and that statement must not be a branch or a loop. Such a read
+       cannot fail (FROGLANG_REFERENCE.md section 6.9), so this is more
+       cautious than soundness requires.
+    6. No ``e_i`` mentions ``v``. Such an element reads a same-named outer
+       binding that the declaration shadows; substituting it would put a
+       new ``v[...]`` access into the block for the substitution to find
+       again.
     """
 
     def __init__(
@@ -1290,10 +1627,14 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
         proof_namespace: frog_ast.Namespace | None = None,
         proof_let_types: NameTypeMap | None = None,
         ctx: PipelineContext | None = None,
+        coercing: frozenset[str] = frozenset(),
     ) -> None:
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
         self.ctx = ctx
+        # F-356: names some store converts into a ModInt (here: an Int
+        # element of the literal stored into a ModInt component).
+        self._coercing = coercing
 
     @staticmethod
     def _classify_uses(
@@ -1306,33 +1647,7 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
         for constant integer ``k``.
         """
 
-        class _Classifier(Visitor[None]):
-            def __init__(self, name: str) -> None:
-                self.name = name
-                self.total_var_refs = 0
-                self.array_access_refs = 0
-                self.has_non_constant = False
-                self.counts: dict[int, int] = {}
-
-            def result(self) -> None:
-                pass
-
-            def visit_variable(self, var: frog_ast.Variable) -> None:
-                if var.name == self.name:
-                    self.total_var_refs += 1
-
-            def visit_array_access(self, aa: frog_ast.ArrayAccess) -> None:
-                if (
-                    isinstance(aa.the_array, frog_ast.Variable)
-                    and aa.the_array.name == self.name
-                ):
-                    self.array_access_refs += 1
-                    if isinstance(aa.index, frog_ast.Integer):
-                        self.counts[aa.index.num] = self.counts.get(aa.index.num, 0) + 1
-                    else:
-                        self.has_non_constant = True
-
-        visitor = _Classifier(var_name)
+        visitor = _TupleLiteralUseClassifier(var_name)
         visitor.visit(block)
         has_bare = visitor.total_var_refs > visitor.array_access_refs
         return has_bare, visitor.has_non_constant, visitor.counts
@@ -1341,19 +1656,28 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
         for index, statement in enumerate(block.statements):
             if not (
                 isinstance(statement, frog_ast.Assignment)
-                and statement.the_type is not None
-                and isinstance(statement.the_type, frog_ast.ProductType)
                 and isinstance(statement.var, frog_ast.Variable)
                 and isinstance(statement.value, frog_ast.Tuple)
             ):
                 continue
+            declared = statement.the_type
+            # A tuple literal is never None, so [T0, T1]? binds like [T0, T1].
+            if isinstance(declared, frog_ast.OptionalType):
+                declared = declared.the_type
+            if not isinstance(declared, frog_ast.ProductType):
+                continue
 
             tuple_values = statement.value.values
-            unfolded_types = statement.the_type.types
+            unfolded_types = declared.types
             if len(tuple_values) != len(unfolded_types):
                 continue
 
             var_name = statement.var.name
+            if var_name in self._coercing:
+                note_coercing_store(
+                    self.ctx, "Inline Local Tuple Literal", var_name, statement.origin
+                )
+                continue
             remaining = frog_ast.Block(
                 copy.deepcopy(list(block.statements[index + 1 :]))
             )
@@ -1407,6 +1731,32 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
             if counts and (
                 max(counts.keys()) >= len(tuple_values) or min(counts.keys()) < 0
             ):
+                continue
+
+            # An element that mentions `v` reads a same-named outer binding
+            # (a field or an enclosing local the declaration shadows).
+            # Substituting it for `v[k]` would put a fresh `v[...]` into the
+            # block, which the substitution loop below would pick up again
+            # and never finish. AlphaRename renames the local first, so this
+            # is not reached from the pipeline.
+            if any(var_name in referenced_variable_names(e_i) for e_i in tuple_values):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Local Tuple Literal",
+                            reason=(
+                                f"Cannot inline '{var_name}': a tuple element "
+                                f"refers to an outer variable also named "
+                                f"'{var_name}'"
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                f"Give the local a name other than '{var_name}'"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
                 continue
 
             def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
@@ -1496,6 +1846,53 @@ class InlineLocalTupleLiteralTransformer(BlockTransformer):
             if purity_blocked:
                 continue
 
+            # F-157: an element that indexes a map or array is kept where it
+            # is evaluated (more cautious than needed: such a read cannot
+            # fail, FROGLANG_REFERENCE.md section 6.9). Inlining drops an
+            # element that is never projected, and moves a projected one
+            # from the declaration to its uses. Either changes the traces on
+            # which the read happens, unless a use sits in the statement
+            # right after the declaration, outside any branch or loop.
+            undefined_read_index = next(
+                (
+                    i
+                    for i, e_i in enumerate(tuple_values)
+                    if _contains_potential_undefined_read(e_i)
+                    and not (
+                        counts.get(i, 0) >= 1
+                        and _projected_in_next_statement(remaining, var_name, i)
+                    )
+                ),
+                None,
+            )
+            if undefined_read_index is not None:
+                if self.ctx is not None:
+                    dropped = counts.get(undefined_read_index, 0) == 0
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Local Tuple Literal",
+                            reason=(
+                                f"Cannot inline '{var_name}': element "
+                                f"{undefined_read_index} indexes a map or "
+                                f"array, and inlining would "
+                                + (
+                                    "drop that read (the element is never used)"
+                                    if dropped
+                                    else "move that read past a branch, loop "
+                                    "or other statement"
+                                )
+                            ),
+                            location=statement.origin,
+                            suggestion=(
+                                "Bind the indexed value to its own local "
+                                "before building the tuple"
+                            ),
+                            variable=var_name,
+                            method=None,
+                        )
+                    )
+                continue
+
             # Substitute every v[k] occurrence with a deep copy of e_k.
             def matches_indexed_use(target_name: str, node: frog_ast.ASTNode) -> bool:
                 return (
@@ -1534,7 +1931,9 @@ class RedundantCopy(TransformPass):
     name = "Remove Redundant Copies"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return RedundantCopyTransformer().transform(game)
+        return RedundantCopyTransformer(
+            coercing_store_names_for(game, ctx), ctx
+        ).transform(game)
 
 
 class IfSplitBranchAssignment(TransformPass):
@@ -1542,7 +1941,9 @@ class IfSplitBranchAssignment(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return IfSplitBranchAssignmentTransformer(
-            ctx, field_names={f.name for f in game.fields}
+            ctx,
+            field_names={f.name for f in game.fields},
+            coercing=coercing_store_names_for(game, ctx),
         ).transform(game)
 
 
@@ -1550,7 +1951,9 @@ class InlineSingleUseVariable(TransformPass):
     name = "Inline Single-Use Variables"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return InlineSingleUseVariableTransformer(ctx).transform(game)
+        return InlineSingleUseVariableTransformer(
+            ctx, coercing_store_names_for(game, ctx)
+        ).transform(game)
 
 
 class CollapseAssignment(TransformPass):
@@ -1571,6 +1974,8 @@ class ForwardExpressionAlias(TransformPass):
         return ForwardExpressionAliasTransformer(
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
+            coercing=coercing_store_names_for(game, ctx),
+            ctx=ctx,
         ).transform(game)
 
 
@@ -1582,6 +1987,7 @@ class InlineLocalTupleLiteral(TransformPass):
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
             ctx=ctx,
+            coercing=coercing_store_names_for(game, ctx),
         ).transform(game)
 
 
@@ -1589,11 +1995,12 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
     """Extract repeated ``var[constant]`` accesses and slice expressions.
 
     **Tuple phase.** When ``v[i]`` (variable + integer index) appears
-    2+ times in a block and ``v`` is declared with a product (tuple)
-    type, inserts ``Ti __cse_v_i__ = v[i];`` right after ``v``'s
-    assignment and replaces every occurrence with the new variable.
-    Also fires when ``v`` is a ``GenericFor`` loop binder, inserting the
-    extraction at the top of the loop body. This symmetrises games whose
+    2+ times *after ``v``'s definition* in a block and ``v`` is declared
+    with a product (tuple) type, inserts ``Ti __cse_v_i__ = v[i];`` right
+    after ``v``'s assignment and replaces every occurrence with the new
+    variable. Also fires when ``v`` is a ``GenericFor`` loop binder,
+    inserting the extraction at the top of the loop body. This
+    symmetrises games whose
     loop body source writes ``m = e[0]`` explicitly against games whose
     loop body obtains the same accesses via inlining a helper method.
 
@@ -1603,8 +2010,27 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
     inline (a block-local declaration of the same name still shadows the
     parameter).
 
+    Game fields of product type are eligible too, in methods other than
+    ``Initialize``, so a game that re-derives a tuple an oracle reads at one
+    index (``v = f[1]`` after inlining) matches one that reads ``f[1]``
+    inline. Moving a field read to the top of the block is sound if the read
+    returns the value every later read in the block returns; a field is used
+    only when (a) it is definitely assigned before any oracle runs (a
+    declared initializer, or a top-level ``Initialize`` assignment that no
+    earlier ``return`` can skip and no call to a method of the game
+    precedes: ``initialize_unassigned_fields``), a caution that soundness
+    does not need, since an unassigned read yields the type's default and
+    cannot fail (FROGLANG_REFERENCE.md section 6.9); (b) the method binds
+    no parameter, local or loop binder of the same name; (c) the block
+    writes or rebinds the field nowhere (element writes included); and (d)
+    the block calls no method of the game, which could write the field
+    between two reads. When these conditions are all that stand in the way
+    of an extraction, the first that fails (in the order b, c, d, a) is
+    reported as a near miss.
+
     **Slice phase.** When a ``v[A:B]`` slice expression (variable base,
-    syntactically-equal bounds) appears 2+ times in a block, inserts
+    syntactically-equal bounds) appears 2+ times *after ``v``'s
+    definition* in a block, inserts
     ``BitString<B - A> __cse_slice_v_N__ = v[A:B];`` at the definition
     point (after ``v``'s block-local assignment, or at position 0 for
     method parameters / fields / enclosing-scope bases) and replaces
@@ -1616,19 +2042,166 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
     ``k2enc`` in multiple branches) against games whose scan-loop body
     obtains the same slice via inlining a helper + concat-equality
     decomposition.
+
+    **Why both phases count only post-definition occurrences.** The
+    replacement step rewrites only the statements following the base's
+    definition, so an occurrence at or before it -- e.g. inside an
+    earlier branch block that redeclares the same name, which is a
+    *different* variable -- can never be replaced. Counting such an
+    occurrence makes the hoist fire without reducing the count: the
+    inserted extraction itself contains a fresh ``v[i]`` / ``v[A:B]``,
+    which pairs with the unreachable occurrence and re-fires the hoist
+    on the next pass, recursing until the interpreter's recursion
+    limit. Restricting the count to the region replacement reaches can
+    only ever *decline* a hoist -- and it cannot change the outcome of
+    any run that previously terminated, since every configuration it
+    declines is exactly one that used to diverge.
     """
 
     def __init__(
         self,
         proof_namespace: frog_ast.Namespace | None = None,
         proof_let_types: NameTypeMap | None = None,
+        ctx: PipelineContext | None = None,
     ) -> None:
         super().__init__()
+        self.ctx = ctx
         # Loop-binder types visible from the enclosing ``GenericFor``.
         # Extraction for these is inserted at position 0 of the loop body.
         self._scope_types: dict[str, frog_ast.Type] = {}
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
+        # The game being transformed, its product-typed fields, and why each
+        # one an oracle may find unassigned is (reported, never used).
+        self._game: Optional[frog_ast.Game] = None
+        self._field_types: dict[str, frog_ast.ProductType] = {}
+        self._field_gaps: dict[str, str] = {}
+        # In the current method: the fields every read of that name refers
+        # to, the fields whose name the method also binds as a local or loop
+        # binder, and the method name.
+        self._field_scope: set[str] = set()
+        self._shadowed_fields: set[str] = set()
+        self._method_name: Optional[str] = None
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        saved = (self._game, self._field_types, self._field_gaps)
+        self._game = game
+        self._field_types = {
+            field.name: field.type
+            for field in game.fields
+            if isinstance(field.type, frog_ast.ProductType)
+        }
+        gaps = initialize_unassigned_fields(game)
+        self._field_gaps = {
+            name: gaps[name] for name in self._field_types if name in gaps
+        }
+        try:
+            return self._transform_children(game)
+        finally:
+            self._game, self._field_types, self._field_gaps = saved
+
+    def _field_near_miss(self, field: str, idx_val: int, reason: str) -> None:
+        """Report a repeated ``field[idx_val]`` left unextracted."""
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Extract Repeated Tuple Access",
+                reason=f"Cannot extract field access '{field}[{idx_val}]': {reason}",
+                location=None,
+                suggestion=None,
+                variable=field,
+                method=self._method_name,
+            )
+        )
+
+    def _field_extractable(
+        self,
+        field: str,
+        idx_val: int,
+        block: frog_ast.Block,
+        block_facts: dict[str, bool],
+    ) -> bool:
+        """Whether the repeated read ``field[idx_val]`` in *block* may be
+        extracted to the top of the block.
+
+        Called after every check that declines silently for any base, so a
+        near miss names a condition that actually blocks the extraction.
+        *block_facts* caches, per block, whether it calls a method of the
+        game (key ``""``) and whether it writes or rebinds each field (key:
+        the field name).
+        """
+        if field in self._shadowed_fields:
+            self._field_near_miss(
+                field,
+                idx_val,
+                f"the method also binds a local or loop binder named '{field}',"
+                " and the pass does not take a field whose name the method"
+                " binds",
+            )
+            return False
+        if field not in block_facts:
+            block_facts[field] = reassigns_or_rebinds({field}, block)
+        if block_facts[field]:
+            self._field_near_miss(
+                field, idx_val, "the block writes or rebinds the field"
+            )
+            return False
+        if "" not in block_facts:
+            assert self._game is not None
+            block_facts[""] = calls_game_method(self._game, block)
+        if block_facts[""]:
+            self._field_near_miss(
+                field,
+                idx_val,
+                "the block calls a method of the game, which may write the field",
+            )
+            return False
+        gap = self._field_gaps.get(field)
+        if gap is not None:
+            self._field_near_miss(
+                field,
+                idx_val,
+                f"the field may be unassigned when the oracle runs, because {gap}",
+            )
+            return False
+        return True
+
+    def _record_unreachable_occurrences(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        block: frog_ast.Block,
+        target: str,
+        var_name: str,
+        def_idx: int,
+        total: int,
+        reachable: int,
+    ) -> None:
+        """Report a hoist declined because too few occurrences of ``target``
+        follow ``var_name``'s definition, so the rest are unreachable to the
+        replacement step (see the class docstring).
+
+        ``def_idx >= 0`` holds at every call site: a scope-external base has
+        ``def_idx == -1``, and then every occurrence index exceeds it, so
+        ``reachable == total >= 2`` and the decline cannot trigger. The guard
+        below is kept regardless -- a negative index would silently resolve to
+        the *last* statement of the block and report a misleading location if
+        that invariant is ever broken.
+        """
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Extract Repeated Tuple Access",
+                reason=(
+                    f"Cannot extract {target}: appears {total} times but only"
+                    f" {reachable} after the definition of '{var_name}'"
+                ),
+                location=(block.statements[def_idx].origin if def_idx >= 0 else None),
+                suggestion=None,
+                variable=var_name,
+                method=None,
+            )
+        )
 
     def transform_generic_for(self, gf: frog_ast.GenericFor) -> frog_ast.GenericFor:
         new_over = self.transform(gf.over)
@@ -1675,21 +2248,47 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
         return SearchVisitor(is_full_recon).visit(block) is not None
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
-        """Expose ProductType method parameters for tuple-extraction.
+        """Expose ProductType method parameters and game fields for
+        tuple-extraction.
 
         Symmetrises games whose source-level code already extracts
         ``v = ct0[1]`` against games whose source uses the param access
         ``ct0[1]`` inline.  Block-local declarations still shadow params
         on name collision.
+
+        Outside ``Initialize``, a product-typed field whose name the method
+        does not bind (as a parameter, local or loop binder) is in scope for
+        the whole method; one that an oracle may find unassigned is tracked
+        for its near miss but never used as a base. A field whose name the
+        method binds is left out altogether: every read of the name is then
+        of the parameter, or may be of the local. (In the pipeline
+        ``AlphaRename`` runs first and renames every such binder.)
         """
         saved = dict(self._scope_types)
+        saved_fields = (self._field_scope, self._shadowed_fields, self._method_name)
         try:
+            self._method_name = method.signature.name
+            self._field_scope = set()
+            self._shadowed_fields = set()
+            if method.signature.name != "Initialize":
+                bound = method_binder_counts(method)
+                parameters = {param.name for param in method.signature.parameters}
+                for name, field_type in self._field_types.items():
+                    if name in parameters:
+                        continue
+                    if name in bound:
+                        self._shadowed_fields.add(name)
+                        continue
+                    self._field_scope.add(name)
+                    if name not in self._field_gaps:
+                        self._scope_types[name] = field_type
             for param in method.signature.parameters:
                 if isinstance(param.type, frog_ast.ProductType):
                     self._scope_types[param.name] = param.type
             new_block = self.transform(method.block)
         finally:
             self._scope_types = saved
+            self._field_scope, self._shadowed_fields, self._method_name = saved_fields
         if new_block is method.block:
             return method
         return frog_ast.Method(method.signature, new_block)
@@ -1698,6 +2297,10 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
         var_types: dict[str, frog_ast.Type] = dict(self._scope_types)
         # Sentinel -1 = scope-external (insert at top of this block).
         var_def_idx: dict[str, int] = {name: -1 for name in var_types}
+        # NOTE: this loop keeps the LAST block-local declaration of a name,
+        # whereas the slice phase below stops at the FIRST. Each phase is
+        # self-consistent -- the same index drives both the occurrence count
+        # and the insertion point -- but the two are not interchangeable.
         for idx, stmt in enumerate(block.statements):
             if (
                 isinstance(stmt, frog_ast.Assignment)
@@ -1707,32 +2310,56 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
                 var_types[stmt.var.name] = stmt.the_type
                 var_def_idx[stmt.var.name] = idx
 
-        # Count occurrences of each (var_name, index) ArrayAccess pattern
-        access_counts: dict[tuple[str, int], int] = {}
-        for stmt in block.statements:
+        # Count occurrences of each (var_name, index) ArrayAccess pattern,
+        # tracking the statement index of each so that only those after the
+        # base's definition count toward the threshold (class docstring:
+        # "Why both phases count only post-definition occurrences").
+        access_stmt_idxs: dict[tuple[str, int], list[int]] = {}
+        for stmt_idx, stmt in enumerate(block.statements):
 
-            def counter(node: frog_ast.ASTNode) -> bool:
+            def counter(node: frog_ast.ASTNode, stmt_idx: int = stmt_idx) -> bool:
                 if (
                     isinstance(node, frog_ast.ArrayAccess)
                     and isinstance(node.the_array, frog_ast.Variable)
                     and isinstance(node.index, frog_ast.Integer)
                 ):
                     key = (node.the_array.name, node.index.num)
-                    access_counts[key] = access_counts.get(key, 0) + 1
+                    access_stmt_idxs.setdefault(key, []).append(stmt_idx)
                 return False
 
             SearchVisitor(counter).visit(stmt)
 
-        # Find first pattern with 2+ uses whose base var has a product type
-        for (var_name, idx_val), count in access_counts.items():
-            if count < 2:
+        # Find first pattern with 2+ replaceable uses whose base var has a
+        # product type
+        block_facts: dict[str, bool] = {}
+        for (var_name, idx_val), occurrence_idxs in access_stmt_idxs.items():
+            if len(occurrence_idxs) < 2:
                 continue
-            if var_name not in var_types:
-                continue
-            base_type = var_types[var_name]
+            # A read of a game field: one in scope for the whole method, or
+            # one whose name the method binds, but not in this block. Either
+            # way the base is scope-external here.
+            is_field = var_name in self._field_scope or (
+                var_name in self._shadowed_fields and var_name not in var_types
+            )
+            def_idx = var_def_idx.get(var_name, -1)
+            base_type = (
+                self._field_types[var_name] if is_field else var_types.get(var_name)
+            )
             if not isinstance(base_type, frog_ast.ProductType):
                 continue
             if idx_val < 0 or idx_val >= len(base_type.types):
+                continue
+
+            count = sum(1 for i in occurrence_idxs if i > def_idx)
+            if count < 2:
+                self._record_unreachable_occurrences(
+                    block,
+                    f"'{var_name}[{idx_val}]'",
+                    var_name,
+                    def_idx,
+                    len(occurrence_idxs),
+                    count,
+                )
                 continue
 
             # Skip if the base variable is reassigned after its definition
@@ -1752,11 +2379,13 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
                     and lvalue_base_name(node.var) == name
                 )
 
-            remaining_after_def = frog_ast.Block(
-                list(block.statements[var_def_idx[var_name] + 1 :])
-            )
+            # A field is checked over the whole block by _field_extractable
+            # below, with reassigns_or_rebinds, which catches every write this
+            # scan does.
+            remaining_after_def = frog_ast.Block(list(block.statements[def_idx + 1 :]))
             if (
-                SearchVisitor(functools.partial(_is_reassigned, var_name)).visit(
+                not is_field
+                and SearchVisitor(functools.partial(_is_reassigned, var_name)).visit(
                     remaining_after_def
                 )
                 is not None
@@ -1769,6 +2398,13 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
             # ``SimplifyTuple``'s ``[v[0], v[1], ...] -> v`` fold-back,
             # leaving the canonical form less reduced.
             if self._has_full_reconstruction(var_name, base_type, block):
+                continue
+
+            # The field conditions come last, so a near miss is recorded only
+            # when nothing above declines.
+            if is_field and not self._field_extractable(
+                var_name, idx_val, block, block_facts
+            ):
                 continue
 
             elem_type = base_type.types[idx_val]
@@ -1785,7 +2421,7 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
             )
 
             # Insert after the base variable's definition
-            insert_at = var_def_idx[var_name] + 1
+            insert_at = def_idx + 1
 
             # Replace all occurrences of var[idx] with the CSE variable
             new_stmts = list(block.statements[:insert_at])
@@ -1818,30 +2454,34 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
         # Unlike the tuple path, method parameters are eligible as
         # bases (SimplifyTuple only folds ArrayAccess, not Slice, so
         # hoisting a slice of a param doesn't interact).
-        slice_occurrences: list[frog_ast.Slice] = []
-        for stmt in block.statements:
+        # As in the tuple phase, track the statement index of each occurrence
+        # so that only post-definition ones count toward the threshold.
+        slice_occurrences: list[tuple[int, frog_ast.Slice]] = []
+        for stmt_idx, stmt in enumerate(block.statements):
 
-            def slice_collector(node: frog_ast.ASTNode) -> bool:
+            def slice_collector(
+                node: frog_ast.ASTNode, stmt_idx: int = stmt_idx
+            ) -> bool:
                 if isinstance(node, frog_ast.Slice) and isinstance(
                     node.the_array, frog_ast.Variable
                 ):
-                    slice_occurrences.append(node)
+                    slice_occurrences.append((stmt_idx, node))
                 return False
 
             SearchVisitor(slice_collector).visit(stmt)
 
         # Group by structural equality.
-        slice_groups: list[tuple[frog_ast.Slice, int]] = []
-        for sl in slice_occurrences:
-            for idx, (rep, cnt) in enumerate(slice_groups):
+        slice_groups: list[tuple[frog_ast.Slice, list[int]]] = []
+        for stmt_idx, sl in slice_occurrences:
+            for idx, (rep, idxs) in enumerate(slice_groups):
                 if sl == rep:
-                    slice_groups[idx] = (rep, cnt + 1)
+                    idxs.append(stmt_idx)
                     break
             else:
-                slice_groups.append((sl, 1))
+                slice_groups.append((sl, [stmt_idx]))
 
-        for rep_slice, count in slice_groups:
-            if count < 2:
+        for rep_slice, occurrence_idxs in slice_groups:
+            if len(occurrence_idxs) < 2:
                 continue
             # F-235: the slice BOUNDS must be deterministic. A non-deterministic
             # call in a bound (`v[I.Cut():j]`) means two structurally-equal
@@ -1875,6 +2515,20 @@ class ExtractRepeatedTupleAccessTransformer(BlockTransformer):
                 ):
                     def_idx = idx
                     break
+
+            # Only occurrences the replacement step can actually reach may
+            # count toward the 2+ threshold.
+            count = sum(1 for i in occurrence_idxs if i > def_idx)
+            if count < 2:
+                self._record_unreachable_occurrences(
+                    block,
+                    f"the slice '{rep_slice}'",
+                    var_name,
+                    def_idx,
+                    len(occurrence_idxs),
+                    count,
+                )
+                continue
 
             # Skip if any of the slice's free variables -- the base AND the
             # bound expressions' variables -- is reassigned or rebound after
@@ -1953,6 +2607,7 @@ class ExtractRepeatedTupleAccess(TransformPass):
         return ExtractRepeatedTupleAccessTransformer(
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
+            ctx=ctx,
         ).transform(game)
 
 
@@ -1966,7 +2621,9 @@ class InlineMultiUsePureExpression(TransformPass):
                 if isinstance(pair.type, frog_ast.FunctionType):
                     function_var_names.add(pair.name)
         return InlineMultiUsePureExpressionTransformer(
-            function_var_names=function_var_names
+            function_var_names=function_var_names,
+            coercing=coercing_store_names_for(game, ctx),
+            ctx=ctx,
         ).transform(game)
 
 
@@ -1974,7 +2631,9 @@ class RedundantFieldCopy(TransformPass):
     name = "Remove redundant variables for fields"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return RedundantFieldCopyTransformer().transform(game)
+        return RedundantFieldCopyTransformer(
+            coercing_store_names_for(game, ctx), ctx
+        ).transform(game)
 
 
 class HoistFieldPureAliasTransformer(BlockTransformer):
@@ -2004,10 +2663,15 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
         self,
         proof_namespace: frog_ast.Namespace | None = None,
         proof_let_types: NameTypeMap | None = None,
+        coercing: frozenset[str] = frozenset(),
+        ctx: PipelineContext | None = None,
     ) -> None:
         self.fields: list[str] = []
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types: NameTypeMap | None = proof_let_types
+        # F-356: names some store converts into a ModInt.
+        self._coercing = coercing
+        self.ctx = ctx
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self.fields = [field.name for field in game.fields]
@@ -2027,6 +2691,13 @@ class HoistFieldPureAliasTransformer(BlockTransformer):
                 continue
             expr = statement.value
             field_name = statement.var.name
+            # F-356: the field holds `expr` reduced into its ModInt type, so
+            # it cannot replace an earlier occurrence of `expr`.
+            if field_name in self._coercing:
+                note_coercing_store(
+                    self.ctx, "Hoist Field Pure Alias", field_name, statement.origin
+                )
+                continue
             # Skip tuples, literals, and field-to-field copies
             if isinstance(
                 expr,
@@ -2235,6 +2906,8 @@ class HoistFieldPureAlias(TransformPass):
         return HoistFieldPureAliasTransformer(
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
+            coercing=coercing_store_names_for(game, ctx),
+            ctx=ctx,
         ).transform(game)
 
 
@@ -2415,6 +3088,17 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
         if assign_count != 1 or assign_expr is None:
             return None
 
+        # 1a. F-356: a ModInt field assigned an Int holds it reduced modulo
+        # the modulus, not the assigned expression.
+        if field_name in coercing_store_names_for(game, self.ctx):
+            note_coercing_store(
+                self.ctx,
+                "Inline Single-Use Field",
+                field_name,
+                method=game.methods[assign_method_idx].signature.name,
+            )
+            return None
+
         # 1b. A self-referential assignment (``c = c + 1``) is accumulator
         # state, not a single-use alias: the field reads its own previous value,
         # so it cannot be eliminated by substituting the definition into uses
@@ -2577,6 +3261,29 @@ class InlineSingleUseFieldTransformer(BlockTransformer):
                             suggestion=None,
                             variable=field_name,
                             method=None,
+                        )
+                    )
+                return None
+            # F-349: Initialize may return before the definition, leaving the
+            # field at its initial value for every later oracle.
+            if may_return_before(
+                game.methods[assign_method_idx].block.statements, assign_stmt_idx
+            ):
+                if self.ctx is not None:
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Inline Single-Use Field",
+                            reason=(
+                                f"Cannot inline field '{field_name}' across "
+                                f"methods: Initialize may return before its "
+                                f"definition"
+                            ),
+                            location=None,
+                            suggestion=(
+                                "Move the definition above any return in " "Initialize"
+                            ),
+                            variable=field_name,
+                            method="Initialize",
                         )
                     )
                 return None
@@ -3535,9 +4242,10 @@ class RefactorGroupElemFieldExpTransformer:
         # F-224: if Initialize has an early return (nested in if/for), the
         # field assignments this pass reasons over may run on only some
         # traces, and moving f2 across the early return changes which traces
-        # define it -- turning a guarded/undefined read into an always-defined
-        # one (attack A5). Three sibling Initialize-targeting passes carry this
-        # guard; refuse to refactor when Initialize can return early.
+        # define it -- turning a read of the default into a read of the
+        # assigned value (attack A5). Three sibling Initialize-targeting
+        # passes carry this guard; refuse to refactor when Initialize can
+        # return early.
         if _has_early_return_in_init(init_stmts):
             return None
         gen_field_assigns: dict[
@@ -3596,6 +4304,7 @@ class RefactorGroupElemFieldExpTransformer:
                     )
                 continue
             matched_any = False
+            diagnosed = False
             for f2_name, (f2_idx, f2_exp, f2_group) in gen_field_assigns.items():
                 if f2_name == f1_name:
                     continue
@@ -3633,14 +4342,45 @@ class RefactorGroupElemFieldExpTransformer:
                 # DIFFERENT values -- rewriting `Field1 = Field2 ^ other` then
                 # conflates two independent draws (attack2 re-samples `x`
                 # between `A = g^(x*x)` and `B = g^x`). `_defined_before` only
-                # checks defined-before, not unchanged-since.
+                # checks defined-before, not unchanged-since. F-386: a write
+                # nested in an `if` or a loop between them counts too, so each
+                # statement is searched (`reassigns_or_rebinds`), not just its
+                # own node.
                 lo, hi = sorted((f1_idx, f2_idx))
                 factor_free = referenced_variable_names(f2_exp)
-                if any(
-                    _stmt_mutates_var(init_stmts[k], name)
-                    for k in range(lo + 1, hi)
-                    for name in factor_free
-                ):
+                writer = next(
+                    (
+                        k
+                        for k in range(lo + 1, hi)
+                        if reassigns_or_rebinds(factor_free, init_stmts[k])
+                    ),
+                    None,
+                )
+                if writer is not None:
+                    diagnosed = True
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name=("Refactor GroupElem Field Exponent"),
+                            reason=(
+                                f"Fields {f1_name!r} and {f2_name!r} share "
+                                f"the exponent factor {f2_exp}, but a "
+                                "statement between their assignments can "
+                                f"write {', '.join(sorted(factor_free))} "
+                                "(possibly inside a branch or loop), so the "
+                                "factor may differ at the two assignments "
+                                f"and {f1_name!r} cannot be rewritten as "
+                                f"{f2_name!r} ^ {other}."
+                            ),
+                            location=init_stmts[writer].origin,
+                            suggestion=(
+                                "Assign both fields on the same side of the "
+                                "statement that changes the factor, or give "
+                                "the new value a variable of its own."
+                            ),
+                            variable=f1_name,
+                            method="Initialize",
+                        )
+                    )
                     continue
                 matched_any = True
                 # Soundness: at f1's def, f2 must already hold its value.
@@ -3662,9 +4402,9 @@ class RefactorGroupElemFieldExpTransformer:
                     # F-225: moving f2's assignment up past an intervening
                     # statement that READS f2 changes that read's value -- it
                     # would see f2's new (assigned) value instead of the
-                    # prior/undefined one. Attack A6: `A=g^(x*3); C=B; B=g^x;`
-                    # -- `C=B` reads an unassigned B; hoisting B above it turns
-                    # an observable undefined read into a defined value.
+                    # prior one. Attack A6: `A=g^(x*3); C=B; B=g^x;` -- `C=B`
+                    # reads an unassigned B (its unspecified default); hoisting
+                    # B above it makes C read g^x instead.
                     if any(
                         f2_name in referenced_variable_names(init_stmts[k])
                         for k in range(f1_idx, f2_idx)
@@ -3688,9 +4428,12 @@ class RefactorGroupElemFieldExpTransformer:
             # No peer ``Field2 = g ^ a`` exists with ``a`` structurally
             # equal to either operand of ``f1_exp = a * b``.  Only
             # diagnose when there is another candidate field at all —
-            # otherwise the transform is structurally inapplicable.
-            if not matched_any and any(
-                other_name != f1_name for other_name in gen_field_assigns
+            # otherwise the transform is structurally inapplicable — and
+            # when no peer was already diagnosed above.
+            if (
+                not matched_any
+                and not diagnosed
+                and any(other_name != f1_name for other_name in gen_field_assigns)
             ):
                 self.ctx.near_misses.append(
                     NearMiss(
@@ -3799,6 +4542,8 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
     Within a single block, finds duplicate calls to ``deterministic`` primitive
     methods with structurally equal arguments, extracts the first occurrence
     into a fresh ``__determ_N__`` variable, and replaces all occurrences.
+    The arguments must themselves be deterministic (no call to a method not
+    annotated ``deterministic``) and keep their value between the calls.
 
     Scans top-level statements *and* if-statement conditions. If-conditions
     are always evaluated when the if-statement is reached, so extracting a
@@ -3876,11 +4621,18 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         dup_group: list[frog_ast.FuncCall] | None = None
         for group in groups:
             if len(group) >= 2:
-                # Verify no argument variable is reassigned between the
-                # first and last statement containing a call from this group.
+                # F-363 / F-202: each occurrence evaluates its own arguments,
+                # so equal calls return the same value only if the arguments
+                # do too. `[R.Det(R.Draw()), R.Det(R.Draw())]` draws twice.
+                if self._has_nondeterministic_argument(group[0]):
+                    self._note_nondeterministic_argument(group[0])
+                    continue
+                # Verify no variable the calls read can be written between
+                # the merged call's place and any call of this group.
                 if self._args_stable_across_calls(block, group):
                     dup_group = group
                     break
+                self._note_argument_written(group[0])
 
         if dup_group is None:
             return block
@@ -3968,97 +4720,122 @@ class DeduplicateDeterministicCallsTransformer(BlockTransformer):
         # Recurse to handle remaining duplicate groups
         return self.transform_block(frog_ast.Block(new_stmts))
 
+    def _has_nondeterministic_argument(self, call: frog_ast.FuncCall) -> bool:
+        """True if an argument of *call* calls a method that is not
+        deterministic, so two occurrences of *call* may receive different
+        argument values.
+
+        The proof's let types are passed so that a call to a ``let:``-bound
+        ``Function<D, R>`` counts as deterministic. A method-local binding of
+        the same name needs no special case: whatever ``Function`` value it
+        holds is also deterministic, and a write to it between the two calls
+        is caught by ``_args_stable_across_calls``, which reads the callee
+        name as an argument variable."""
+        let_types = self._proof_let_types
+        if let_types is None and self._ctx is not None:
+            let_types = self._ctx.proof_let_types
+        return any(
+            has_nondeterministic_call(arg, self.proof_namespace, let_types)
+            for arg in call.args
+        )
+
+    def _note_nondeterministic_argument(self, call: frog_ast.FuncCall) -> None:
+        if self._ctx is None:
+            return
+        self._ctx.near_misses.append(
+            NearMiss(
+                transform_name="Deduplicate Deterministic Calls",
+                reason=(
+                    f"Duplicate deterministic call {call} not merged: an "
+                    "argument calls a method that is not annotated "
+                    "deterministic, so each occurrence evaluates it "
+                    "independently"
+                ),
+                location=None,
+                suggestion=(
+                    "If both calls are meant to use the same argument value, "
+                    "compute it once into a local variable and pass that"
+                ),
+                variable=None,
+                method=None,
+            )
+        )
+
     def _args_stable_across_calls(
         self,
         block: frog_ast.Block,
         call_group: list[frog_ast.FuncCall],
     ) -> bool:
-        """Check that no argument variable of the call group is reassigned
-        between the first and last statement containing a call."""
-        # Collect all free variable names from call arguments
+        """True if every free variable of the calls in *call_group* keeps its
+        value from the merged call's place (just before the first statement
+        of *block* holding one of the calls) to every evaluation of every
+        call in the group.
+
+        Each statement from the first one holding a call up to the last one
+        holding a call runs before that last call, so a write anywhere in
+        them breaks stability: the first statement's own write
+        (``k = F.Eval(k);``, F-201), and a branch body after a call in its
+        ``if`` condition. Inside the last statement holding a call, a write
+        breaks it when it can run before one of the calls there
+        (:func:`written_before_reached_within`): an earlier statement of its
+        branch, or anywhere in a loop around a call, since an iteration's
+        writes run before the next iteration's calls (F-385: both calls in
+        one loop that writes the argument). Writes are found by
+        :func:`reassigns_or_rebinds`, so an element write (F-203), a
+        ``<-uniq[S]`` draw growing a set the argument reads, and a loop
+        binder or declaration of the name (whose scope the merged call would
+        leave) count too.
+        """
         representative = call_group[0]
         # F-204: use `referenced_variable_names` (not VariableCollectionVisitor,
         # which suppresses variables under a FieldAccess), so an argument like
         # `|M.keys|` contributes `M` and a later `M[w]=v` write is detected.
-        arg_vars: set[str] = set()
+        # The callee's names count as well (a local Function variable).
+        names = referenced_variable_names(representative.func)
         for arg in representative.args:
-            arg_vars |= referenced_variable_names(arg)
-        if not arg_vars:
+            names |= referenced_variable_names(arg)
+        if not names:
             return True
 
-        # Find first and last statement indices containing a call from the
-        # group. Scan top-level statements and if-conditions.
-        first_idx: int | None = None
-        last_idx: int | None = None
-        for idx, stmt in enumerate(block.statements):
-            collector = _DeterministicCallCollector(
-                self.proof_namespace, self._function_var_names
-            )
-            if isinstance(stmt, frog_ast.IfStatement):
-                for cond in stmt.conditions:
-                    collector.visit(cond)
-            else:
-                collector.visit(stmt)
-            if any(c == representative for c in collector.result()):
-                if first_idx is None:
-                    first_idx = idx
-                last_idx = idx
-        if first_idx is None or last_idx is None or first_idx == last_idx:
-            return True
-
-        # Check that no argument variable is reassigned or element-mutated
-        def is_written_to(name: str, node: frog_ast.ASTNode) -> bool:
-            # F-203: peel the full l-value via `lvalue_base_name` so a nested
-            # element write (`M[a][b] = v`) between two deduplicated calls is
-            # seen -- the manual depth-1 ArrayAccess check missed it.
-            if not isinstance(
-                node,
-                (frog_ast.Sample, frog_ast.Assignment, frog_ast.UniqueSample),
-            ):
-                return False
-            return lvalue_base_name(node.var) == name
-
-        # The intermediate region (between the first and last call's evaluation
-        # points) excludes the call statements themselves. When the first
-        # statement is an IfStatement with the call in its condition, the
-        # if-body executes *after* the condition's call but *before* any
-        # subsequent call, so include those branch blocks in the scan.
-        intermediate_stmts: list[frog_ast.Statement] = list(
-            block.statements[first_idx + 1 : last_idx]
-        )
-        first_stmt = block.statements[first_idx]
-        if isinstance(first_stmt, frog_ast.IfStatement):
-            for branch in first_stmt.blocks:
-                intermediate_stmts.extend(branch.statements)
-        intermediate = frog_ast.Block(intermediate_stmts)
-        for var_name in arg_vars:
-            if (
-                SearchVisitor(functools.partial(is_written_to, var_name)).visit(
-                    intermediate
-                )
+        def holds_call(node: frog_ast.ASTNode) -> bool:
+            return (
+                SearchVisitor(
+                    lambda inner: any(inner is call for call in call_group)
+                ).visit(node)
                 is not None
-            ):
-                return False
+            )
 
-        # F-201: the first occurrence's OWN statement is excluded from the
-        # intermediate region, but when it writes an argument variable
-        # (`k = F.Eval(k);`) the write happens AFTER the first call is evaluated
-        # and BEFORE the second, so the two calls read different argument values
-        # (`F(k0)` vs `F(F(k0))`) and must not be merged. An IfStatement first
-        # statement carries the call in its CONDITION (evaluated before any
-        # branch write), and its branch writes are already folded into the
-        # intermediate region above; a plain assignment/sample/uniq is not, so
-        # scan it here.
-        if not isinstance(first_stmt, frog_ast.IfStatement):
-            for var_name in arg_vars:
-                if (
-                    SearchVisitor(functools.partial(is_written_to, var_name)).visit(
-                        first_stmt
-                    )
-                    is not None
-                ):
-                    return False
-        return True
+        holding = [
+            index
+            for index, statement in enumerate(block.statements)
+            if holds_call(statement)
+        ]
+        if not holding:
+            return True
+        region = frog_ast.Block(list(block.statements[holding[0] : holding[-1] + 1]))
+        return not written_before_reached_within(region, holds_call, names)
+
+    def _note_argument_written(self, call: frog_ast.FuncCall) -> None:
+        if self._ctx is None:
+            return
+        self._ctx.near_misses.append(
+            NearMiss(
+                transform_name="Deduplicate Deterministic Calls",
+                reason=(
+                    f"Duplicate deterministic call {call} not merged: a "
+                    "variable it reads may be written between the calls "
+                    "(between the statements holding them, earlier in the "
+                    "branch holding one, or in a loop around one)"
+                ),
+                location=None,
+                suggestion=(
+                    "If both calls are meant to read the same value, compute "
+                    "the call once into a local variable before the write"
+                ),
+                variable=None,
+                method=None,
+            )
+        )
 
     def _report_nondet_near_misses(self, block: frog_ast.Block) -> None:
         """Report near-misses for duplicate non-deterministic calls."""
@@ -4314,22 +5091,24 @@ class HoistDuplicateBranchCallTransformer(BlockTransformer):
         return None
 
 
+class _MatchingNodeCollector(Visitor[list[frog_ast.ASTNode]]):
+    def __init__(self, predicate: Callable[[frog_ast.ASTNode], bool]) -> None:
+        self.predicate = predicate
+        self.found: list[frog_ast.ASTNode] = []
+
+    def result(self) -> list[frog_ast.ASTNode]:
+        return self.found
+
+    def leave_ast_node(self, node: frog_ast.ASTNode) -> None:
+        if self.predicate(node):
+            self.found.append(node)
+
+
 def _iter_matches(
     node: frog_ast.ASTNode, predicate: Callable[[frog_ast.ASTNode], bool]
 ) -> list[frog_ast.ASTNode]:
     """Return every descendant (and *node* itself) satisfying *predicate*."""
-    found: list[frog_ast.ASTNode] = []
-
-    class _Collector(Visitor[None]):
-        def result(self) -> None:
-            return None
-
-        def leave_ast_node(self, n: frog_ast.ASTNode) -> None:
-            if predicate(n):
-                found.append(n)
-
-    _Collector().visit(node)
-    return found
+    return _MatchingNodeCollector(predicate).visit(node)
 
 
 def _max_hoist_index(node: frog_ast.ASTNode) -> int:
@@ -4456,6 +5235,7 @@ def _is_stable_arg(  # pylint: disable=too-many-arguments, too-many-positional-a
             function_var_names is not None
             and isinstance(expr.func, frog_ast.Variable)
             and expr.func.name in function_var_names
+            and (shadowed_names is None or expr.func.name not in shadowed_names)
         )
         if not (is_det_primitive or is_function_var):
             return False
@@ -4551,6 +5331,7 @@ def _build_local_stable_alias_map(  # pylint: disable=too-many-arguments, too-ma
     proof_namespace: frog_ast.Namespace | None,
     function_var_names: set[str] | None,
     proof_let_names: set[str] | None,
+    coercing: frozenset[str] = frozenset(),
 ) -> dict[str, frog_ast.Expression]:
     """Return a map from local variable name -> RHS expression for top-level
     single-assignment locals in *method* whose RHS is stable.
@@ -4564,63 +5345,82 @@ def _build_local_stable_alias_map(  # pylint: disable=too-many-arguments, too-ma
     Excluded:
     - Locals re-assigned more than once.
     - Sampled / UniqueSample-bound locals (their value is non-deterministic).
-    - Locals shadowed by fields or parameters.
+    - Names with an outer binding: game fields, game parameters, proof-level
+      let names, and the method's own parameters. Before its one top-level
+      write such a name still holds the outer value (a reassigned parameter
+      holds the caller's argument), so expanding an earlier use through the
+      RHS would be wrong (F-338).
     - Self-assignments (``x = x``), which are no-ops left by other transforms.
+    - A RHS that reads a name the method binds locally (parameter, typed
+      local, ``for`` binder) other than an earlier verified alias. Such a name
+      is per-call even when it collides with a field name, and the expanded
+      call is later evaluated at game scope, where it would mean the field
+      (F-338; the alias-RHS sibling of F-173).
+    - A RHS that reads a field written again later in the method: expanding a
+      later use through the RHS would read the stale value (F-338).
+    - Locals read before their one top-level write (``Int t; r = P.f(t);
+      t = x0;``). There the local still holds its type's default
+      (FROGLANG_REFERENCE.md section 6.9), not the RHS, so expanding that
+      earlier use through the RHS would be wrong (F-177).
+    - Names in *coercing*: a store converts an Int into their ModInt type,
+      so they hold the RHS reduced modulo the modulus (F-356).
     """
-    counts: dict[str, int] = {}
+    method_params = {p.name for p in method.signature.parameters}
+    outer_names = field_names | param_names | method_params | (proof_let_names or set())
+    bound_names = _method_bound_names(method)
     bindings: dict[str, frog_ast.Expression] = {}
-    sampled: set[str] = set()
-    for stmt in method.block.statements:
-        if isinstance(stmt, (frog_ast.Sample, frog_ast.UniqueSample)) and isinstance(
-            stmt.var, frog_ast.Variable
-        ):
-            sampled.add(stmt.var.name)
-            counts[stmt.var.name] = counts.get(stmt.var.name, 0) + 1
-            continue
+    def_index: dict[str, int] = {}
+    statements = method.block.statements
+    for idx, stmt in enumerate(statements):
         if not isinstance(stmt, frog_ast.Assignment):
             continue
         if not isinstance(stmt.var, frog_ast.Variable):
             continue
         name = stmt.var.name
-        if name in field_names or name in param_names:
+        if name in outer_names or name in coercing:
             continue
         if isinstance(stmt.value, frog_ast.Variable) and stmt.value.name == name:
             # Skip self-assignments.
             continue
-        counts[name] = counts.get(name, 0) + 1
         bindings[name] = stmt.value
+        def_index[name] = idx
 
-    # Also count writes hidden inside nested blocks (if-branches, for-loop
-    # bodies, including the loop variable's per-iteration binding).  A name
-    # with even one such hidden write is not actually single-assignment and
-    # must be disqualified from the alias map.  Without this, a top-level
-    # `x = E_stable;` followed by an `if cond { x = h; }` would falsely admit
-    # `x -> E_stable`, and the cross-method matcher would expand uses of `x`
-    # in either branch through the stale RHS.
-    def _bump_nested(stmts: Sequence[frog_ast.Statement]) -> None:
-        for s in stmts:
-            if isinstance(
-                s, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
-            ) and isinstance(s.var, frog_ast.Variable):
-                counts[s.var.name] = counts.get(s.var.name, 0) + 1
-            if isinstance(s, frog_ast.IfStatement):
-                for blk in s.blocks:
-                    _bump_nested(blk.statements)
-            elif isinstance(s, frog_ast.NumericFor):
-                counts[s.name] = counts.get(s.name, 0) + 1
-                _bump_nested(s.block.statements)
-            elif isinstance(s, frog_ast.GenericFor):
-                counts[s.var_name] = counts.get(s.var_name, 0) + 1
-                _bump_nested(s.block.statements)
+    # Count every write anywhere in the method (nested if/for bodies, samples,
+    # element/slice/field writes via ``lvalue_base_name``, ``<-uniq[S]``
+    # growth of S, and ``for`` binders), ignoring ``x = x`` no-ops. A name
+    # with any write besides its one top-level definition is not a stable
+    # alias: expanding a use of ``x`` through a stale RHS would be wrong in
+    # either branch of an ``if (c) { x = h; }`` or after ``x[0] = v``.
+    def _write_count(name: str) -> int:
+        count = 0
 
-    for stmt in method.block.statements:
-        if isinstance(stmt, frog_ast.IfStatement):
-            for blk in stmt.blocks:
-                _bump_nested(blk.statements)
-        elif isinstance(stmt, frog_ast.NumericFor):
-            _bump_nested(stmt.block.statements)
-        elif isinstance(stmt, frog_ast.GenericFor):
-            _bump_nested(stmt.block.statements)
+        def _counter(n: frog_ast.ASTNode) -> bool:
+            nonlocal count
+            if (
+                isinstance(n, frog_ast.Assignment)
+                and isinstance(n.var, frog_ast.Variable)
+                and isinstance(n.value, frog_ast.Variable)
+                and n.var.name == n.value.name
+            ):
+                return False
+            if _stmt_mutates_var(n, name):
+                count += 1
+            return False
+
+        SearchVisitor(_counter).visit(method.block)
+        return count
+
+    single_assignment = {name for name in bindings if _write_count(name) == 1}
+    # Any earlier mention of a single-assignment local is a read: an earlier
+    # write would make it a second write.
+    single_assignment = {
+        name
+        for name in single_assignment
+        if not any(
+            name in referenced_variable_names(earlier)
+            for earlier in statements[: def_index[name]]
+        )
+    }
 
     aliases: dict[str, frog_ast.Expression] = {}
     while True:
@@ -4628,11 +5428,9 @@ def _build_local_stable_alias_map(  # pylint: disable=too-many-arguments, too-ma
         for name, expr in bindings.items():
             if name in aliases:
                 continue
-            if counts.get(name, 0) != 1:
+            if name not in single_assignment:
                 continue
-            if name in sampled:
-                continue
-            if _is_stable_arg(
+            if not _is_stable_arg(
                 expr,
                 field_names,
                 param_names,
@@ -4640,9 +5438,26 @@ def _build_local_stable_alias_map(  # pylint: disable=too-many-arguments, too-ma
                 function_var_names,
                 proof_let_names,
                 local_alias_names=set(aliases),
+                shadowed_names=bound_names,
             ):
-                aliases[name] = expr
-                changed = True
+                continue
+            # Every alias the RHS reads must be defined before it.
+            if any(
+                def_index[dep] >= def_index[name]
+                for dep in referenced_variable_names(expr) & set(aliases)
+            ):
+                continue
+            # Aliases the RHS reads were checked the same way at their own
+            # (earlier) definitions, so checking the RHS's direct field reads
+            # covers the whole expansion.
+            if _fields_assigned_after(
+                statements,
+                def_index[name],
+                _collect_field_names_in_args(expr, field_names),
+            ):
+                continue
+            aliases[name] = expr
+            changed = True
         if not changed:
             break
     return aliases
@@ -4669,6 +5484,46 @@ def _expand_aliases(
             sm.set(frog_ast.Variable(n), copy.deepcopy(v))
         current = SubstitutionTransformer(sm).transform(current)
     return current
+
+
+def _call_resolves_at_game_scope(  # pylint: disable=too-many-arguments, too-many-positional-arguments
+    call: frog_ast.FuncCall,
+    method: frog_ast.Method,
+    aliases: dict[str, frog_ast.Expression],
+    field_names: set[str],
+    param_names: set[str],
+    proof_namespace: frog_ast.Namespace | None,
+    function_var_names: set[str] | None,
+    proof_let_names: set[str] | None,
+) -> bool:
+    """True if *call*, as written in *method*, denotes the same value as its
+    alias-expanded form evaluated at game scope (in a field cached by
+    Initialize).
+
+    Every free name must be either a verified stable alias of *method* (see
+    :func:`_build_local_stable_alias_map`) or a field / game parameter / proof
+    let name that *method* does not rebind. The cross-method passes match calls
+    structurally, so a call ``E.f(k)`` in a method with a parameter ``k`` looks
+    identical to the game-scope ``E.f(k)`` over the field ``k`` while meaning
+    something else (F-338; F-173 guarded only the method a candidate was found
+    in, not the methods it was replaced in).
+    """
+    shadowed = _method_bound_names(method)
+    if isinstance(call.func, frog_ast.Variable) and call.func.name in shadowed:
+        return False
+    return all(
+        _is_stable_arg(
+            a,
+            field_names,
+            param_names,
+            proof_namespace=proof_namespace,
+            function_var_names=function_var_names,
+            proof_let_names=proof_let_names,
+            local_alias_names=set(aliases),
+            shadowed_names=shadowed,
+        )
+        for a in call.args
+    )
 
 
 class CrossMethodFieldAliasTransformer:
@@ -4712,6 +5567,7 @@ class CrossMethodFieldAliasTransformer:
         # Common case: CSE introduces ``v1 = NG.Generator();`` and reuses v1
         # in multiple field RHSs and oracle expressions; expanding through v1
         # makes the cross-method match succeed.
+        coercing = coercing_store_names_for(game, self._ctx)
         method_aliases: list[dict[str, frog_ast.Expression]] = [
             _build_local_stable_alias_map(
                 m,
@@ -4720,6 +5576,7 @@ class CrossMethodFieldAliasTransformer:
                 self.proof_namespace,
                 None,
                 proof_let_names,
+                coercing,
             )
             for m in game.methods
         ]
@@ -4743,6 +5600,18 @@ class CrossMethodFieldAliasTransformer:
                 if m is None or not m.deterministic:
                     continue
                 if not call.args:
+                    continue
+                # F-356: a ModInt field assigned an Int-valued call holds the
+                # call's value reduced modulo the modulus, so it cannot
+                # replace the call.
+                if stmt.var.name in coercing:
+                    note_coercing_store(
+                        self._ctx,
+                        "Cross-Method Field Alias",
+                        stmt.var.name,
+                        stmt.origin,
+                        method.signature.name,
+                    )
                     continue
                 if not all(
                     _is_stable_arg(
@@ -4862,6 +5731,13 @@ class CrossMethodFieldAliasTransformer:
         ``expand(c, target_aliases) == expand(alias_call, init_aliases)``.
         """
         del alias_call  # alias_call is referenced only via expanded_call now
+        field_names = {f.name for f in game.fields}
+        param_names = {p.name for p in game.parameters}
+        proof_let_names: set[str] = (
+            {pair.name for pair in self._proof_let_types.type_map}
+            if self._proof_let_types is not None
+            else set()
+        )
         for midx, method in enumerate(game.methods):
             if midx == alias_midx:
                 continue
@@ -4876,16 +5752,52 @@ class CrossMethodFieldAliasTransformer:
                 self.proof_namespace, self._function_var_names
             )
             collector.visit(method.block)
+            matches = [
+                c
+                for c in collector.result()
+                if _expand_aliases(copy.deepcopy(c), target_aliases) == expanded_call
+            ]
+            # F-338: a structural match is only the field's value if every
+            # name in the call means in this method what it means in
+            # Initialize (no parameter / local / binder rebinds it).
             target_call = next(
                 (
                     c
-                    for c in collector.result()
-                    if _expand_aliases(copy.deepcopy(c), target_aliases)
-                    == expanded_call
+                    for c in matches
+                    if _call_resolves_at_game_scope(
+                        c,
+                        method,
+                        target_aliases,
+                        field_names,
+                        param_names,
+                        self.proof_namespace,
+                        self._function_var_names,
+                        proof_let_names,
+                    )
                 ),
                 None,
             )
             if target_call is None:
+                if matches and self._ctx is not None:
+                    self._ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Cross Method Field Alias",
+                            reason=(
+                                f"Call matches field {alias_field_name!r} "
+                                "cached in Initialize, but a name in it is "
+                                "rebound in this method (parameter, local or "
+                                "loop binder), so it does not denote the "
+                                "field's value"
+                            ),
+                            location=matches[0].origin,
+                            suggestion=(
+                                "Rename the method's parameter or local so it "
+                                "does not reuse a game field's name"
+                            ),
+                            variable=alias_field_name,
+                            method=method.signature.name,
+                        )
+                    )
                 continue
             # Found a match — replace and return
             new_game = copy.deepcopy(game)
@@ -4894,10 +5806,7 @@ class CrossMethodFieldAliasTransformer:
             )
             new_collector.visit(new_game.methods[midx].block)
             for new_call in new_collector.result():
-                if (
-                    _expand_aliases(copy.deepcopy(new_call), target_aliases)
-                    == expanded_call
-                ):
+                if new_call == target_call:
                     new_game.methods[midx] = ReplaceTransformer(
                         new_call,
                         frog_ast.Variable(alias_field_name),
@@ -5018,6 +5927,9 @@ class HoistDeterministicCallToInitializeTransformer:
             if self._proof_let_types is not None
             else set()
         )
+        # F-356: no local that holds its RHS converted into a ModInt is
+        # expanded through that RHS.
+        coercing = coercing_store_names_for(game, self._ctx)
 
         init_idx = _locate_initialize_index(game)
         if init_idx is None:
@@ -5057,7 +5969,19 @@ class HoistDeterministicCallToInitializeTransformer:
         ):
             init_terminal_return_idx = len(init_block_stmts) - 1
 
-        existing_aliased_calls: list[frog_ast.FuncCall] = []
+        # Calls already cached in a field, compared in alias-expanded form so
+        # that ``field8 = NG.Exp(v1, x);`` (with ``v1 = NG.Generator();``) is
+        # recognised as caching ``NG.Exp(NG.Generator(), x)``.
+        init_aliases = _build_local_stable_alias_map(
+            game.methods[init_idx],
+            field_names,
+            param_names,
+            self.proof_namespace,
+            function_var_names,
+            proof_let_names,
+            coercing,
+        )
+        existing_aliased_calls: list[frog_ast.ASTNode] = []
         for stmt in game.methods[init_idx].block.statements:
             if (
                 isinstance(stmt, frog_ast.Assignment)
@@ -5066,13 +5990,33 @@ class HoistDeterministicCallToInitializeTransformer:
                 and stmt.var.name in field_names
                 and isinstance(stmt.value, frog_ast.FuncCall)
             ):
-                existing_aliased_calls.append(stmt.value)
+                existing_aliased_calls.append(
+                    _expand_aliases(copy.deepcopy(stmt.value), init_aliases)
+                )
 
         candidate: frog_ast.FuncCall | None = None
         candidate_return_type: frog_ast.Type | None = None
         for midx, method in enumerate(game.methods):
             if midx == init_idx:
                 continue
+            # See through the oracle's own stable locals: a top-level
+            # single-assignment local whose RHS is stable (typically the
+            # ``v = NG.Generator();`` that CSE leaves behind) does not make a
+            # call unstable, and the call is hoisted in its alias-expanded
+            # form (``NG.Exp(NG.Generator(), x)``) so Initialize never refers
+            # to an oracle local. Without this, whether ``NG.Exp(g, x)`` got
+            # cached depended on whether some *other* method happened to
+            # already hold it in a field, and the two sides of a hop could
+            # canonicalize differently.
+            oracle_aliases = _build_local_stable_alias_map(
+                method,
+                field_names,
+                param_names,
+                self.proof_namespace,
+                function_var_names,
+                proof_let_names,
+                coercing,
+            )
             collector = _DeterministicCallCollector(
                 self.proof_namespace, function_var_names=function_var_names
             )
@@ -5092,32 +6036,67 @@ class HoistDeterministicCallToInitializeTransformer:
                     continue
                 if not call.args:
                     continue
-                if not all(
-                    _is_stable_arg(
-                        a,
-                        field_names,
-                        param_names,
-                        proof_namespace=self.proof_namespace,
-                        function_var_names=function_var_names,
-                        proof_let_names=proof_let_names,
-                        shadowed_names=_method_bound_names(method),
-                    )
-                    for a in call.args
+                if not _call_resolves_at_game_scope(
+                    call,
+                    method,
+                    oracle_aliases,
+                    field_names,
+                    param_names,
+                    self.proof_namespace,
+                    function_var_names,
+                    proof_let_names,
                 ):
                     continue
-                if any(call == ea for ea in existing_aliased_calls):
+                expanded_node = _expand_aliases(copy.deepcopy(call), oracle_aliases)
+                assert isinstance(expanded_node, frog_ast.FuncCall)
+                expanded_call = expanded_node
+                if any(expanded_call == ea for ea in existing_aliased_calls):
+                    continue
+                # F-338: the hoisted assignment is evaluated in Initialize,
+                # so no name in the call may be rebound there either (an
+                # Initialize local `k` would capture the field `k`).
+                if not _call_resolves_at_game_scope(
+                    expanded_call,
+                    game.methods[init_idx],
+                    {},
+                    field_names,
+                    param_names,
+                    self.proof_namespace,
+                    function_var_names,
+                    proof_let_names,
+                ):
+                    if self._ctx is not None:
+                        self._ctx.near_misses.append(
+                            NearMiss(
+                                transform_name=(
+                                    "Hoist Deterministic Call to Initialize"
+                                ),
+                                reason=(
+                                    "Cannot hoist call: Initialize rebinds a "
+                                    "name it reads (parameter or local with a "
+                                    "field's name)"
+                                ),
+                                location=call.origin,
+                                suggestion=(
+                                    "Rename the Initialize local or parameter "
+                                    "so it does not reuse a game field's name"
+                                ),
+                                variable=None,
+                                method="Initialize",
+                            )
+                        )
                     continue
                 arg_fields: set[str] = set()
-                for a in call.args:
+                for a in expanded_call.args:
                     arg_fields |= _collect_field_names_in_args(a, field_names)
                 # For Function<D,R> calls, the callee variable itself is state
                 # we depend on — if it's a game field it must not be mutated
                 # outside Initialize, same requirement as the arguments.
                 if (
-                    isinstance(call.func, frog_ast.Variable)
-                    and call.func.name in field_names
+                    isinstance(expanded_call.func, frog_ast.Variable)
+                    and expanded_call.func.name in field_names
                 ):
-                    arg_fields.add(call.func.name)
+                    arg_fields.add(expanded_call.func.name)
                 mutated = self._fields_mutated_outside_init(game, init_idx, arg_fields)
                 if mutated:
                     if self._ctx is not None:
@@ -5141,7 +6120,7 @@ class HoistDeterministicCallToInitializeTransformer:
                             )
                         )
                     continue
-                candidate = call
+                candidate = expanded_call
                 candidate_return_type = return_type
                 break
             if candidate is not None:
@@ -5193,62 +6172,24 @@ class HoistDeterministicCallToInitializeTransformer:
             new_stmts = list(new_init.block.statements)
             ret_stmt = new_stmts[-1]
             assert isinstance(ret_stmt, frog_ast.ReturnStatement)
-            # Build alias map: local single-assignment bindings in Initialize
-            # (before the hoisted/terminal statements).
-            aliases: dict[str, frog_ast.Expression] = {}
-            alias_assign_counts: dict[str, int] = {}
-            for stmt in new_stmts[:-1]:
-                if stmt is hoisted_stmt:
-                    continue
-                if (
-                    isinstance(stmt, frog_ast.Assignment)
-                    and isinstance(stmt.var, frog_ast.Variable)
-                    and stmt.var.name not in field_names
-                    and stmt.var.name not in param_names
-                ):
-                    # Ignore self-assignments (``x = x;``) which are no-ops
-                    # that other transforms sometimes leave behind; counting
-                    # them would disqualify x from being treated as a stable
-                    # alias.
-                    if (
-                        isinstance(stmt.value, frog_ast.Variable)
-                        and stmt.value.name == stmt.var.name
-                    ):
-                        continue
-                    name = stmt.var.name
-                    alias_assign_counts[name] = alias_assign_counts.get(name, 0) + 1
-                    aliases[name] = stmt.value
-            # Only use aliases for variables assigned exactly once.
-            # F-170: the loop above counts only TOP-LEVEL Assignment nodes, so
-            # it misses a re-binding nested in an if/for (`if (b) { x = k2; }`)
-            # or a top-level Sample (`x <- ...`). Such a name is coin-dependent,
-            # not a stable alias -- expanding `F(x)` to `F(<top-level RHS>)`
-            # would then match a hoisted `F(k)` unsoundly. Require the COMPLETE
-            # recursive write count (nested + samples, peeling l-values) to be
-            # exactly 1.
-            init_prefix = frog_ast.Block(list(new_stmts[:-1]))
-            stable_aliases = {
-                n: v
-                for n, v in aliases.items()
-                if alias_assign_counts[n] == 1
-                and _count_assigns_recursive(init_prefix, n) == 1
-            }
+            # Stable single-assignment aliases of the original Initialize
+            # (before the hoisted statement was spliced in). The shared
+            # helper requires the complete write count to be 1 (F-170) and
+            # rejects an alias whose RHS reads a field Initialize writes again
+            # before the return (F-338: ``x = k; k = 2; return f(x);`` must
+            # not become ``return f(k)`` evaluated after ``k = 2``).
+            stable_aliases = _build_local_stable_alias_map(
+                game.methods[init_idx],
+                field_names,
+                param_names,
+                self.proof_namespace,
+                function_var_names,
+                proof_let_names,
+                coercing,
+            )
 
             def _expand(expr: frog_ast.ASTNode) -> frog_ast.ASTNode:
-                """Recursively expand local aliases in *expr* to a fixed point."""
-                prev: frog_ast.ASTNode | None = None
-                current: frog_ast.ASTNode = expr
-                for _ in range(32):  # bound in case of pathological aliases
-                    if prev is not None and prev == current:
-                        break
-                    prev = current
-                    sm: frog_ast.ASTMap[frog_ast.ASTNode] = frog_ast.ASTMap(
-                        identity=False
-                    )
-                    for n, v in stable_aliases.items():
-                        sm.set(frog_ast.Variable(n), copy.deepcopy(v))
-                    current = SubstitutionTransformer(sm).transform(current)
-                return current
+                return _expand_aliases(expr, stable_aliases)
 
             expanded_candidate = _expand(copy.deepcopy(candidate))
 
@@ -5265,16 +6206,50 @@ class HoistDeterministicCallToInitializeTransformer:
             if midx == init_idx:
                 continue
             while True:
+                method = new_game.methods[midx]
+                # The candidate is alias-expanded; match each oracle call in
+                # its own expanded form (``NG.Exp(v, x)`` with a top-level
+                # ``v = NG.Generator();`` matches ``NG.Exp(NG.Generator(), x)``).
+                # F-338: replace only where the call means what the hoisted
+                # field caches. A method that rebinds a name the call reads
+                # (e.g. a parameter ``k`` shadowing the field ``k``) keeps it.
+                method_aliases = _build_local_stable_alias_map(
+                    method,
+                    field_names,
+                    param_names,
+                    self.proof_namespace,
+                    function_var_names,
+                    proof_let_names,
+                    coercing,
+                )
                 collector = _DeterministicCallCollector(
                     self.proof_namespace, function_var_names=function_var_names
                 )
-                collector.visit(new_game.methods[midx].block)
-                target = next((c for c in collector.result() if c == candidate), None)
+                collector.visit(method.block)
+                target = next(
+                    (
+                        c
+                        for c in collector.result()
+                        if _expand_aliases(copy.deepcopy(c), method_aliases)
+                        == candidate
+                        and _call_resolves_at_game_scope(
+                            c,
+                            method,
+                            method_aliases,
+                            field_names,
+                            param_names,
+                            self.proof_namespace,
+                            function_var_names,
+                            proof_let_names,
+                        )
+                    ),
+                    None,
+                )
                 if target is None:
                     break
                 new_game.methods[midx] = ReplaceTransformer(
                     target, frog_ast.Variable(new_name)
-                ).transform(new_game.methods[midx])
+                ).transform(method)
 
         return new_game
 
@@ -5442,11 +6417,12 @@ class SplitOpaqueTupleFieldTransformer:
                 return None
 
         # F-189: an INITIALIZED tuple field must not silently become an
-        # undefined read. A tuple-literal initializer (`[1, 2]`) is decomposed
+        # unassigned one. A tuple-literal initializer (`[1, 2]`) is decomposed
         # into per-component initializers below; a non-decomposable initializer
         # (an opaque call) cannot be split into components without duplicating
-        # it, so decline rather than drop the initializer (which would turn a
-        # readable initialized field into an undefined read -- attack init_drop).
+        # it, so decline rather than drop the initializer (which would replace
+        # the initial value by the type's unspecified default -- attack
+        # init_drop).
         if field.value is not None and not isinstance(field.value, frog_ast.Tuple):
             if self._ctx is not None:
                 self._ctx.near_misses.append(
@@ -5703,3 +6679,91 @@ class SplitOpaqueTupleField(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return SplitOpaqueTupleFieldTransformer(ctx=ctx).transform(game)
+
+
+class MergeBareDeclaration(TransformPass):
+    """``T v; ... v = e;`` becomes ``... T v = e;``.
+
+    The bare declaration's default value is never read when nothing between
+    it and the first assignment (in the same block, at the top level)
+    mentions ``v`` and ``e`` does not read ``v``; the two forms are then the
+    same program. Inlining a method with an early return leaves exactly this
+    shape once all but one of the result variable's assignments have been
+    removed, and the merged form is what the rest of the pipeline expects.
+    """
+
+    name = "Merge Bare Declaration"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return _MergeBareDeclarationTransformer(ctx).transform(game)
+
+
+def _is_plain_assignment_to(statement: frog_ast.Statement, name: str) -> bool:
+    return (
+        isinstance(statement, frog_ast.Assignment)
+        and statement.the_type is None
+        and statement.var == frog_ast.Variable(name)
+    )
+
+
+class _MergeBareDeclarationTransformer(BlockTransformer):
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+
+    def _note_not_merged(self, name: str, reason: str) -> None:
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Merge Bare Declaration",
+                reason=f"Bare declaration not merged with its assignment: {reason}",
+                location=None,
+                suggestion=None,
+                variable=name,
+                method=None,
+            )
+        )
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        statements = list(block.statements)
+        for index, statement in enumerate(statements):
+            if not isinstance(statement, frog_ast.VariableDeclaration):
+                continue
+            name = statement.name
+            for later in range(index + 1, len(statements)):
+                candidate = statements[later]
+                if _is_plain_assignment_to(candidate, name):
+                    assert isinstance(candidate, frog_ast.Assignment)
+                    if name in referenced_variable_names(candidate.value):
+                        self._note_not_merged(
+                            name,
+                            "the assigned value reads the variable, i.e. the "
+                            "declaration's default value",
+                        )
+                        break
+                    merged = frog_ast.Assignment(
+                        copy.deepcopy(statement.type),
+                        frog_ast.Variable(name),
+                        candidate.value,
+                    )
+                    return frog_ast.Block(
+                        statements[:index]
+                        + statements[index + 1 : later]
+                        + [merged]
+                        + statements[later + 1 :]
+                    )
+                if name in referenced_variable_names(candidate):
+                    # Near miss only for a read of the default value before
+                    # the assignment; a statement that writes the variable
+                    # is its first write, and a later assignment an update.
+                    if not reassigns_or_rebinds({name}, candidate) and any(
+                        _is_plain_assignment_to(rest, name)
+                        for rest in statements[later + 1 :]
+                    ):
+                        self._note_not_merged(
+                            name,
+                            "a statement between the declaration and the "
+                            "assignment reads the variable",
+                        )
+                    break
+        return block

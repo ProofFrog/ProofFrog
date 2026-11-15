@@ -1,0 +1,14 @@
+// Two identical games: the proof below establishes advantage 0.
+Game Left(Int a) {
+    Int E() {
+        return a;
+    }
+}
+
+Game Right(Int a) {
+    Int E() {
+        return a;
+    }
+}
+
+export as Identical;

@@ -1,0 +1,47 @@
+// Positive control for Nested.game: the branch between the two assignments
+// writes only c, not the shared exponent x, so A = g^(x*x) equals B^x and the
+// rewrite is sound. Expected: Proof Succeeded!
+Game Left(Group G) {
+    GroupElem<G> A;
+    GroupElem<G> B;
+    Bool c;
+
+    Void Initialize() {
+        c <- Bool;
+        ModInt<G.order> x <- ModInt<G.order>;
+        A = G.generator ^ (x * x);
+        if (c) {
+            c = false;
+        }
+        B = G.generator ^ x;
+    }
+
+    GroupElem<G> GetA() {
+        return A;
+    }
+    GroupElem<G> GetB() {
+        return B;
+    }
+}
+
+Game Right(Group G) {
+    GroupElem<G> A;
+    GroupElem<G> B;
+    Bool c;
+
+    Void Initialize() {
+        c <- Bool;
+        ModInt<G.order> x <- ModInt<G.order>;
+        B = G.generator ^ x;
+        A = B ^ x;
+    }
+
+    GroupElem<G> GetA() {
+        return A;
+    }
+    GroupElem<G> GetB() {
+        return B;
+    }
+}
+
+export as NestedControl;

@@ -197,3 +197,173 @@ def test_control_fires(name: str) -> None:
     assert "if (true)" in after or "if (false)" in after, (
         f"{name}: inner guard not substituted\n{after}"
     )
+
+
+# --- Implied facts of a compound guard -------------------------------------
+
+
+def test_false_disjunction_makes_each_disjunct_false() -> None:
+    out = _run(
+        """
+        Int O(Bool a, Bool b) {
+            if (a || !b) {
+                return 0;
+            } else {
+                if (a) {
+                    return 1;
+                }
+                if (b) {
+                    return 2;
+                }
+                return 3;
+            }
+        }
+        """
+    )
+    assert "if (false)" in out
+    assert "if (true)" in out
+
+
+def test_true_conjunction_makes_each_conjunct_true() -> None:
+    out = _run(
+        """
+        Int O(Bool a, Bool b) {
+            if (a && b) {
+                if (b) {
+                    return 1;
+                }
+                return 2;
+            }
+            return 3;
+        }
+        """
+    )
+    assert "if (true)" in out
+
+
+def test_true_disjunction_fixes_no_disjunct() -> None:
+    # a || b true says nothing about a alone.
+    out = _run(
+        """
+        Int O(Bool a, Bool b) {
+            if (a || b) {
+                if (a) {
+                    return 1;
+                }
+                return 2;
+            }
+            return 3;
+        }
+        """
+    )
+    assert "if (a)" in out
+
+
+def test_implied_fact_not_used_when_its_variable_is_reassigned() -> None:
+    out = _run(
+        """
+        Int O(Bool a, Bool b) {
+            if (a || b) {
+                return 0;
+            } else {
+                a = true;
+                if (a) {
+                    return 1;
+                }
+                return 2;
+            }
+        }
+        """
+    )
+    assert "if (a)" in out
+
+
+def test_early_return_guard_is_false_afterwards() -> None:
+    out = _run(
+        """
+        Int O(Bool a, Bool b) {
+            if (a || !b) {
+                return 0;
+            }
+            if (a) {
+                return 1;
+            }
+            return 2;
+        }
+        """
+    )
+    assert "if (false)" in out
+
+
+def test_early_return_guard_not_used_after_reassignment() -> None:
+    out = _run(
+        """
+        Int O(Bool a, Bool b) {
+            if (a) {
+                return 0;
+            }
+            a = b;
+            if (a) {
+                return 1;
+            }
+            return 2;
+        }
+        """
+    )
+    assert "if (false)" not in out
+
+
+def test_guard_without_return_says_nothing_afterwards() -> None:
+    out = _run(
+        """
+        Int O(Bool a, Int x) {
+            if (a) {
+                x = 1;
+            }
+            if (a) {
+                return x;
+            }
+            return 2;
+        }
+        """
+    )
+    assert out.count("if (a)") == 2
+
+
+def test_early_return_guard_holds_until_the_reassignment() -> None:
+    out = _run(
+        """
+        Int O(Bool a) {
+            if (a) {
+                return 0;
+            }
+            if (a) {
+                return 1;
+            }
+            a = true;
+            if (a) {
+                return 2;
+            }
+            return 3;
+        }
+        """
+    )
+    assert "if (false)" in out
+    assert "if (a) {\nreturn 2;" in out or out.count("if (a)") == 2
+
+
+def test_early_return_comparison_guard_is_left_alone() -> None:
+    # After an early return the guard's implied facts are used only for
+    # Boolean flags; a comparison stays for the passes that reason about it
+    # (FoldEquivalentReturnBranch folds `if (P) return X; return P;`).
+    out = _run(
+        """
+        Bool O(Int x, Int y, Bool flag) {
+            if (x == y) {
+                return flag;
+            }
+            return x == y;
+        }
+        """
+    )
+    assert "return x == y;" in out

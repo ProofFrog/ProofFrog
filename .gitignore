@@ -7,20 +7,19 @@ proofOutput.txt
 .vscode
 .worktrees
 extras
-proof_frog/claude_docs
+*~
 
-# EasyCrypt compilation artifacts (created next to .ec files on compile)
-.ec-tmp
-*.eco
+# Emacs
+emacs/*.elc
 
 # VSCode extension
 vscode-extension/node_modules/
 vscode-extension/out/
 vscode-extension/*.vsix
 
-# Emacs
-*~
-emacs/*.elc
+# EasyCrypt working
+.ec-tmp
+*.eco
 
 # EasyCrypt dashboard compile scratch (regenerated; never a source artifact)
 .dashboard-ec-tmp/

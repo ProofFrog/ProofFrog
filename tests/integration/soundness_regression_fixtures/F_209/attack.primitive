@@ -1,0 +1,13 @@
+// AUDIT ARTIFACT (HoistDuplicateBranchCall -- PROSECUTION.md).
+// Shared abstract primitive for the proof-level attacks. All methods are
+// annotated `deterministic` so they are eligible for HoistDuplicateBranchCall
+// (the wrapper passes no function_var_names, so only deterministic primitive
+// methods can be hoisted). The distinguishers instantiate eval/enc as
+// injective (e.g. identity) and card/cardI as set cardinality; a single
+// distinguishing instantiation of the abstract primitive suffices.
+Primitive P(Int n) {
+    deterministic BitString<n> eval(BitString<n> x);
+    deterministic Int card(Set<BitString<n>> s);
+    deterministic Int cardI(Set<Int> s);
+    deterministic Int enc(Int i);
+}

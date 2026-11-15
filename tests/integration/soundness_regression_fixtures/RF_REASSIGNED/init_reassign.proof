@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'InitReassign.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    InitReassign(S);
+
+games:
+    InitReassign(S).Left against InitReassign(S).Adversary;
+    InitReassign(S).Right against InitReassign(S).Adversary;

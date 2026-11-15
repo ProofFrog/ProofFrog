@@ -1,0 +1,15 @@
+// F-384: claims CopySource().Left and CopySource().Right are
+// interchangeable. They are not (see CopySource.game). Sound engine:
+// Proof Failed!
+import 'CopySource.game';
+
+proof:
+
+let:
+
+theorem:
+    CopySource();
+
+games:
+    CopySource().Left against CopySource().Adversary;
+    CopySource().Right against CopySource().Adversary;

@@ -1,0 +1,18 @@
+// F-374 (game parameter): ParamStore(q, q) passes the Int q for the
+// parameter x : ModInt<q>, which stores it reduced modulo q, so x is 0 and
+// Left's Test (x + x == x) returns true. Right's returns q == 0, false for
+// q = 1. Instantiation used to replace x by the Int q, which made Left's
+// Test the integer comparison q + q == q, that is q == 0.
+Game Left(Int q, ModInt<q> x) {
+    Bool Test() {
+        return x + x == x;
+    }
+}
+
+Game Right(Int q, ModInt<q> x) {
+    Bool Test() {
+        return q == 0;
+    }
+}
+
+export as ParamStore;

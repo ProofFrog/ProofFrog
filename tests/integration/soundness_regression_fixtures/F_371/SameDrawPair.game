@@ -1,0 +1,19 @@
+// Left always returns true (one draw compared with itself); Right compares
+// two independent draws, true with probability 2^-n.
+import 'Caller.primitive';
+
+Game Left(Caller T, Int n) {
+    Bool O() {
+        return T.SameDraw();
+    }
+}
+
+Game Right(Caller T, Int n) {
+    Bool O() {
+        BitString<n> a <- BitString<n>;
+        BitString<n> b <- BitString<n>;
+        return a == b;
+    }
+}
+
+export as SameDrawPair;

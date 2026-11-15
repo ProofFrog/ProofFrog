@@ -1,0 +1,52 @@
+// Target: the algebra normalizer's canonical rebuild, reached through
+// Express After Update. Left computes pk before the update f = f + d; the
+// pass moves it after the update and writes back the canonical form of the
+// moved value. The first factor's exponent (written with y^0 so that it type
+// checks) is the ModInt<q> value 5 mod q (1 mod q in Get1); the normalizer
+// rebuilt it as the Int literal 5 (1), dropping the reduction mod q, so
+// Left's canonical form became Right's.
+// The games are distinguishable: take q = 4 and a group of order 3. Call
+// Get5(0, 1) and Get1(0, 1) and compare the answers. On the left the first
+// factors are g^(5 mod 4) = g and g^(1 mod 4) = g, so the answers are
+// equal; on the right they are g^5 = g^2 and g, so they differ.
+// Expected: Proof Failed.
+
+Game Left(Group G, Int q) {
+    ModInt<q> f;
+
+    Void Initialize() {
+        f <- ModInt<q>;
+    }
+
+    GroupElem<G> Get5(ModInt<q> d, ModInt<q> y) {
+        GroupElem<G> pk = G.generator ^ ((y ^ 0 + (y ^ 0 + (y ^ 0 + (y ^ 0 + (y ^ 0 + y))))) - y) * G.generator ^ (f + d);
+        f = f + d;
+        return pk;
+    }
+
+    GroupElem<G> Get1(ModInt<q> d, ModInt<q> y) {
+        GroupElem<G> pk = G.generator ^ ((y ^ 0 + y) - y) * G.generator ^ (f + d);
+        f = f + d;
+        return pk;
+    }
+}
+
+Game Right(Group G, Int q) {
+    ModInt<q> f;
+
+    Void Initialize() {
+        f <- ModInt<q>;
+    }
+
+    GroupElem<G> Get5(ModInt<q> d, ModInt<q> y) {
+        f = f + d;
+        return G.generator ^ 5 * G.generator ^ f;
+    }
+
+    GroupElem<G> Get1(ModInt<q> d, ModInt<q> y) {
+        f = f + d;
+        return G.generator * G.generator ^ f;
+    }
+}
+
+export as ExpressAfterUpdateConstant;

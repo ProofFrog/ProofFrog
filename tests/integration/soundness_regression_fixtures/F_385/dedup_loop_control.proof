@@ -1,0 +1,16 @@
+// Positive control: the two games of DedupLoopControl.game are interchangeable. Expected: Proof Succeeded!
+import 'DetPrimS.primitive';
+import 'DedupLoopControl.game';
+
+proof:
+
+let:
+    Int n;
+    DetPrimS F = DetPrimS(BitString<n>);
+
+theorem:
+    DedupLoopControl(F);
+
+games:
+    DedupLoopControl(F).Left against DedupLoopControl(F).Adversary;
+    DedupLoopControl(F).Right against DedupLoopControl(F).Adversary;

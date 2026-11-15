@@ -1,0 +1,17 @@
+// OneQuery holds only for adversaries making at most one query.
+import 'OneQuery.game';
+
+proof:
+
+let:
+    Int n;
+
+assume:
+    calls <= 1;
+
+theorem:
+    OneQuery(n);
+
+games:
+    OneQuery(n).Left against OneQuery(n).Adversary;
+    OneQuery(n).Right against OneQuery(n).Adversary;

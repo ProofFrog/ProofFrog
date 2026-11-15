@@ -1,0 +1,16 @@
+// Positive control: the games of StableConcat.game are interchangeable.
+import 'DetEv.primitive';
+import 'StableConcat.game';
+
+proof:
+
+let:
+    Int n;
+    DetEv F = DetEv(n);
+
+theorem:
+    StableConcat(F);
+
+games:
+    StableConcat(F).Left against StableConcat(F).Adversary;
+    StableConcat(F).Right against StableConcat(F).Adversary;

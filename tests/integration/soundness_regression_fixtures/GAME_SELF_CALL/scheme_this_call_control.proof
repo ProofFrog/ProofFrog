@@ -1,0 +1,20 @@
+// Positive control: a scheme method calling the scheme's own method through
+// `this.` is still accepted, and the hop verifies.
+
+import './Twice.primitive';
+import './TwiceScheme.scheme';
+import './AgainUniform.game';
+
+proof:
+
+let:
+    Int n;
+    TwiceScheme T = TwiceScheme(n);
+
+theorem:
+    AgainUniform(T);
+
+games:
+    AgainUniform(T).Real against AgainUniform(T).Adversary;
+
+    AgainUniform(T).Random against AgainUniform(T).Adversary;

@@ -1,0 +1,15 @@
+// Target: ModInt Simplification. See PowerOfZeroSum.game.
+// Expected: Proof Failed.
+import 'PowerOfZeroSum.game';
+
+proof:
+
+let:
+    Int q;
+
+theorem:
+    PowerOfZeroSum(q);
+
+games:
+    PowerOfZeroSum(q).Left against PowerOfZeroSum(q).Adversary;
+    PowerOfZeroSum(q).Right against PowerOfZeroSum(q).Adversary;

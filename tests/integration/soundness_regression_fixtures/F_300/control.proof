@@ -1,0 +1,14 @@
+// Positive control for Remove Duplicate Fields: f2 is a copy of f1 made in
+// Initialize, and neither field is written again, so the two are always
+// equal and Left is interchangeable with Right, which keeps f1 alone. The
+// proof must still verify.
+import 'control.game';
+
+proof:
+
+theorem:
+    ControlRDF();
+
+games:
+    ControlRDF().Left against ControlRDF().Adversary;
+    ControlRDF().Right against ControlRDF().Adversary;

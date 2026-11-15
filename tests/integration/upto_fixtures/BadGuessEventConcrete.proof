@@ -1,0 +1,38 @@
+// Proves the event only for the concrete set U = BitString<8>, so it cannot
+// discharge an event of BadGuess over an arbitrary set.
+import 'BadGuess.game';
+import 'RandomTargetGuessing.game';
+
+proof:
+
+let:
+    Set S;
+    Set U = BitString<8>;
+
+assume:
+    RandomTargetGuessing(U);
+
+theorem:
+    event bad of BadGuess(U);
+
+games:
+    BadGuess(U).Right against BadGuess(U).Adversary;
+    RandomTargetGuessing(U).Real  compose R(U) against BadGuess(U).Adversary;
+    RandomTargetGuessing(U).Ideal compose R(U) against BadGuess(U).Adversary;
+
+// R: forwards each guess to the challenger and raises bad on a hit.
+Reduction R(Set U) compose RandomTargetGuessing(U) against BadGuess(U).Adversary {
+    Bool bad;
+
+    Void Initialize() {
+        challenger.Initialize();
+        bad = false;
+    }
+
+    Bool Eq(U c) {
+        if (challenger.Eq(c)) {
+            bad = true;
+        }
+        return false;
+    }
+}

@@ -1,0 +1,8 @@
+// A primitive whose methods take an optional state or plain values, so that
+// inlining a scheme call with literal arguments leaves `None == <literal>`,
+// `!<literal>` and `<int> >= <int>` conditions in the game.
+Primitive Chan(Int lambda) {
+    Bool IsNone([Int, Bool]? s);
+    Bool Neg(Bool f);
+    Bool Ge(Int a, Int b);
+}

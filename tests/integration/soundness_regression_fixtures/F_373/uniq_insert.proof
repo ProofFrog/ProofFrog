@@ -1,0 +1,17 @@
+// Proof for UniqInsert.game (target, hypothesis and expected outcome in its header).
+import 'Writer2.primitive';
+import 'Writer2Impl.scheme';
+import 'UniqInsert.game';
+
+proof:
+
+let:
+    Int n;
+    Writer2 T = Writer2Impl(n);
+
+theorem:
+    UniqInsert(T, n);
+
+games:
+    UniqInsert(T, n).Left against UniqInsert(T, n).Adversary;
+    UniqInsert(T, n).Right against UniqInsert(T, n).Adversary;

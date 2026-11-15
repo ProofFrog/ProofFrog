@@ -1,0 +1,21 @@
+// F-371 positive control: a bound argument calling a deterministic method,
+// read twice, is still forwarded, so Same(H.Eval(y)) is true. Sound engine:
+// Proof Succeeded!
+import 'Caller.primitive';
+import 'Hash.primitive';
+import 'Callers.scheme';
+import 'SameDetPair.game';
+
+proof:
+
+let:
+    Int n;
+    Hash H;
+    Caller T = Callers(n, H);
+
+theorem:
+    SameDetPair(T, n);
+
+games:
+    SameDetPair(T, n).Left against SameDetPair(T, n).Adversary;
+    SameDetPair(T, n).Right against SameDetPair(T, n).Adversary;

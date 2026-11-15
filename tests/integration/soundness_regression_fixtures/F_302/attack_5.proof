@@ -1,0 +1,12 @@
+// F-302: Left and Right claimed interchangeable. They are not: a first
+// GetTwo() returns 5 in Left and 0 in Right (see attack_5.game).
+import 'attack_5.game';
+
+proof:
+
+theorem:
+    Attack5RDF();
+
+games:
+    Attack5RDF().Left against Attack5RDF().Adversary;
+    Attack5RDF().Right against Attack5RDF().Adversary;

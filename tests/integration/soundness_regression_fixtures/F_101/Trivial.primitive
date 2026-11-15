@@ -1,0 +1,6 @@
+// Target pass: DeadGuardedAssignmentElimination (control_flow.py L2269-2273).
+// Support file: trivial primitive so the attack proofs have a scheme to be
+// "about". Carries no behavior; the attacks live entirely in the game code.
+Primitive Trivial() {
+    Int Id(Int x);
+}

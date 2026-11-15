@@ -1,0 +1,31 @@
+// AUDIT ARTIFACT (ConcatEqualityDecompose, attack 5 proof-level probe).
+// Target pass: ConcatEqualityDecompose (proof_frog/transforms/algebraic.py).
+// Left.O1 == Right.O1 is a TRUE equivalence (Right is the sound
+// decomposition of Left's concat comparison). At pass level, the flat
+// game-wide type map lets O2's `p : BitString<2>` overwrite O1's
+// `p : BitString<1>`, so the pass emits corrupted slices
+// x[0:2]/x[2:3] inside Left.O1.
+// Expected if the corruption is pipeline-reachable: the engine REJECTS
+// this true equivalence (completeness failure witnessing the corrupt
+// canonical form). Expected if defused (e.g. AlphaRename uniquifies
+// names before this pass): the engine accepts.
+
+Game Left() {
+    Bool O1(BitString<1> p, BitString<1> q, BitString<2> x) {
+        return x == (p || q);
+    }
+    BitString<2> O2(BitString<2> p) {
+        return p;
+    }
+}
+
+Game Right() {
+    Bool O1(BitString<1> p, BitString<1> q, BitString<2> x) {
+        return x[0 : 1] == p && x[1 : 2] == q;
+    }
+    BitString<2> O2(BitString<2> p) {
+        return p;
+    }
+}
+
+export as TypeMapCollision;

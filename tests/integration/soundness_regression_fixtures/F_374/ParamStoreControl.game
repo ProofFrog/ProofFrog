@@ -1,0 +1,20 @@
+// F-374 positive control: Left reads its ModInt<q> parameter x; Right
+// copies x into a ModInt<q> local first, which keeps the value. The two are
+// interchangeable for every argument, including an Int argument (stored in
+// x reduced modulo q). Instantiation used to replace x by the Int argument
+// a, so Left became the integer comparison a + a == a while Right kept the
+// converting copy, and the true hop failed.
+Game Left(Int q, ModInt<q> x) {
+    Bool Test() {
+        return x + x == x;
+    }
+}
+
+Game Right(Int q, ModInt<q> x) {
+    Bool Test() {
+        ModInt<q> y = x;
+        return y + y == y;
+    }
+}
+
+export as ParamStoreControl;

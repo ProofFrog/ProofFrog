@@ -1,0 +1,4 @@
+Primitive Writer(Int n) {
+    BitString<n> Reset(BitString<n> y);
+    Bool Clear(Map<BitString<n>, BitString<n>> M, BitString<n> k);
+}

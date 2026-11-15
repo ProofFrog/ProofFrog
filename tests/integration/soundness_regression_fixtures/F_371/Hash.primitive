@@ -1,0 +1,3 @@
+Primitive Hash(Int n) {
+    deterministic BitString<n> Eval(BitString<n> x);
+}

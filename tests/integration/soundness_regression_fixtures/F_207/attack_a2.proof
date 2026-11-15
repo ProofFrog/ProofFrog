@@ -1,0 +1,23 @@
+// AUDIT ARTIFACT (HoistDuplicateBranchCall, Attack 2 -- PROSECUTION.md).
+// Claims AttackA2(F, n).Real and .Random are interchangeable in a SINGLE
+// no-assumption interchangeability hop, for EVERY instantiation of the
+// deterministic F.eval(). They are not: with eval the identity, the
+// adversary Store(0, w); O(false, 0, v) (v != w) gets v from Real and w from
+// Random (see attack_a2.game). Engine acceptance of this proof is the
+// CONFIRMED-UNSOUND artifact.
+
+import 'attack.primitive';
+import 'attack_a2.game';
+
+proof:
+
+let:
+    Int n;
+    P F = P(n);
+
+theorem:
+    AttackA2(F, n);
+
+games:
+    AttackA2(F, n).Real against AttackA2(F, n).Adversary;
+    AttackA2(F, n).Random against AttackA2(F, n).Adversary;

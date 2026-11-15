@@ -1,0 +1,19 @@
+// Audit artifact: CrossMethodFieldAlias ATTACK 3 proof harness.
+// Hypothesis: engine certifies Real ~ Ideal even though Update(5)
+// distinguishes (Real: f(5); Ideal: f(0)).
+// Expected if sound: proof fails. Expected if unsound: proof succeeds.
+import 'Det.primitive';
+import 'Attack3.game';
+
+proof:
+
+let:
+    Int lambda;
+    Det P = Det(lambda);
+
+theorem:
+    Attack3(P);
+
+games:
+    Attack3(P).Real against Attack3(P).Adversary;
+    Attack3(P).Ideal against Attack3(P).Adversary;

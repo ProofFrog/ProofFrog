@@ -1,0 +1,16 @@
+// Positive control: locals that do not reuse a parameter's name stay well formed.
+import 'DistinctNames.game';
+
+proof:
+
+let:
+    Int n;
+
+assume:
+
+theorem:
+    DistinctNames(n);
+
+games:
+    DistinctNames(n).Left against DistinctNames(n).Adversary;
+    DistinctNames(n).Right against DistinctNames(n).Adversary;

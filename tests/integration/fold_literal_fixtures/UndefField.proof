@@ -1,0 +1,21 @@
+// Single-hop claim UndefField.Real -> UndefField.Random with no assumptions.
+// See UndefField.game for the expected outcome.
+import 'Chan.primitive';
+import 'ChanImpl.scheme';
+import 'UndefField.game';
+
+proof:
+
+let:
+    Int lambda;
+    ChanImpl C = ChanImpl(lambda);
+
+assume:
+
+theorem:
+    UndefField(C);
+
+games:
+    UndefField(C).Real against UndefField(C).Adversary;
+
+    UndefField(C).Random against UndefField(C).Adversary;

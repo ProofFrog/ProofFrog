@@ -257,3 +257,66 @@ def test_f320_loop_carried_write_not_deleted() -> None:
     out = str(result)
     assert "x = x + 1" in out, "the loop-carried increment must not be deleted"
     assert "y = y + x" in out
+
+
+def test_f383_field_read_only_by_an_initializer_stays_declared() -> None:
+    """F-383: ``Int a = b;`` reads ``b``'s starting value, and no method reads
+    ``b``. Dropping ``b`` left the initializer naming an undeclared field, so
+    the starting value was lost (two games copying different starting values
+    then compared equal). ``b`` stays declared; its write in ``Bump`` comes
+    after every initializer and nothing reads it, so the write still goes."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int b = 5;
+            Int a = b;
+            Void Bump() { b = b + 1; }
+            Int Get() { return a; }
+        }
+        """)
+    expected = frog_parser.parse_game("""
+        Game G() {
+            Int b = 5;
+            Int a = b;
+            Int Get() { return a; }
+        }
+        """)
+    assert dependencies.remove_unnecessary_fields(game) == expected
+
+
+def test_f383_initializer_reads_are_followed_transitively() -> None:
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int c = 1;
+            Int b = c + 1;
+            Int a = b;
+            Int Get() { return a; }
+        }
+        """)
+    result = dependencies.remove_unnecessary_fields(game)
+    assert [field.name for field in result.fields] == ["c", "b", "a"]
+
+
+def test_f383_field_read_by_an_unneeded_initializer_is_still_removed() -> None:
+    """Positive control: only the initializers of kept fields count."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int b = 5;
+            Int a = b;
+            Int c = 2;
+            Int Get() { return c; }
+        }
+        """)
+    result = dependencies.remove_unnecessary_fields(game)
+    assert [field.name for field in result.fields] == ["c"]
+
+
+def test_f383_field_read_by_an_initializer_and_a_method_keeps_its_writes() -> None:
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int b = 5;
+            Int a = b;
+            Void Bump() { b = b + 1; }
+            Int Get() { return a + b; }
+        }
+        """)
+    assert dependencies.remove_unnecessary_fields(game) == game

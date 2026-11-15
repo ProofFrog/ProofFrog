@@ -1,0 +1,14 @@
+// Two identical games, so Echo(n) is a true assumption.
+Game Real(Int n) {
+    Int Val() {
+        return n;
+    }
+}
+
+Game Ideal(Int n) {
+    Int Val() {
+        return n;
+    }
+}
+
+export as Echo;

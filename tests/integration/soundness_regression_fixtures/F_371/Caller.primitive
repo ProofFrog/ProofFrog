@@ -1,0 +1,9 @@
+// F-371: each method passes an argument to a helper method of the scheme.
+Primitive Caller(Int n) {
+    Bool SameDraw();
+    BitString<n> Dropped(Set<BitString<n>> S);
+    Bool SamePure(BitString<n> y);
+    Bool SameDet(BitString<n> y);
+    BitString<n> OnceDraw();
+    BitString<n> IgnoreDraw();
+}

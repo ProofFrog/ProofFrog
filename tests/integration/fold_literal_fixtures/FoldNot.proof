@@ -1,0 +1,21 @@
+// Single-hop claim FoldNot.Real -> FoldNot.Random with no assumptions.
+// See FoldNot.game for the expected outcome.
+import 'Chan.primitive';
+import 'ChanImpl.scheme';
+import 'FoldNot.game';
+
+proof:
+
+let:
+    Int lambda;
+    ChanImpl C = ChanImpl(lambda);
+
+assume:
+
+theorem:
+    FoldNot(C);
+
+games:
+    FoldNot(C).Real against FoldNot(C).Adversary;
+
+    FoldNot(C).Random against FoldNot(C).Adversary;

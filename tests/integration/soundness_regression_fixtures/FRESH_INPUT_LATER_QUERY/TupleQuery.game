@@ -1,0 +1,38 @@
+// Eval records only the first component of its query. Call Challenge(x),
+// then Eval([c', x]) for all four c': in Left one answer equals
+// Challenge's, since [c, x] is one of those queries.
+import 'P.primitive';
+
+Game Left(P S) {
+    Function<[BitString<2>, BitString<2>], BitString<2>> H;
+    Set<BitString<2>> seen;
+    Void Initialize() {
+        H <- Function<[BitString<2>, BitString<2>], BitString<2>>;
+    }
+    BitString<2> Eval([BitString<2>, BitString<2>] q) {
+        seen = seen union {q[0]};
+        return H(q);
+    }
+    BitString<2> Challenge(BitString<2> x) {
+        BitString<2> c <-uniq[seen] BitString<2>;
+        return H([c, x]);
+    }
+}
+
+Game Right(P S) {
+    Function<[BitString<2>, BitString<2>], BitString<2>> H;
+    Set<BitString<2>> seen;
+    Void Initialize() {
+        H <- Function<[BitString<2>, BitString<2>], BitString<2>>;
+    }
+    BitString<2> Eval([BitString<2>, BitString<2>] q) {
+        seen = seen union {q[0]};
+        return H(q);
+    }
+    BitString<2> Challenge(BitString<2> x) {
+        BitString<2> z <- BitString<2>;
+        return z;
+    }
+}
+
+export as TupleQuery;

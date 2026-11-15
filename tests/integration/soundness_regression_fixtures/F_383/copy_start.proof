@@ -1,0 +1,16 @@
+// F-383: claims CopyStart(n).Left and CopyStart(n).Right are
+// interchangeable. They are not (see CopyStart.game). Sound engine:
+// Proof Failed!
+import 'CopyStart.game';
+
+proof:
+
+let:
+    Int n;
+
+theorem:
+    CopyStart(n);
+
+games:
+    CopyStart(n).Left against CopyStart(n).Adversary;
+    CopyStart(n).Right against CopyStart(n).Adversary;

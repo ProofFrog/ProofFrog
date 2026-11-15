@@ -1,0 +1,17 @@
+// Target pass: DeduplicateDeterministicCalls. See DedupNondetArg.game.
+// Expected if sound: Proof Failed. If unsound: Proof Succeeded!
+import 'Rnd.primitive';
+import 'DedupNondetArg.game';
+
+proof:
+
+let:
+    Int q;
+    Rnd R = Rnd(q);
+
+theorem:
+    DedupNondetArg(R, q);
+
+games:
+    DedupNondetArg(R, q).Left against DedupNondetArg(R, q).Adversary;
+    DedupNondetArg(R, q).Right against DedupNondetArg(R, q).Adversary;

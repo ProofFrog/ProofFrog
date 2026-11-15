@@ -1,0 +1,14 @@
+// Positive control (see NestedControl.game's header). Expected: Proof Succeeded!
+import 'NestedControl.game';
+
+proof:
+
+let:
+    Group G;
+
+theorem:
+    NestedControl(G);
+
+games:
+    NestedControl(G).Left against NestedControl(G).Adversary;
+    NestedControl(G).Right against NestedControl(G).Adversary;

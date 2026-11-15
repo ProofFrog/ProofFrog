@@ -1,0 +1,60 @@
+// F-371: a call evaluates its argument once and stores it in the parameter.
+// The method inliner used to substitute the argument expression for every
+// read of the parameter instead, so an argument that draws was drawn once
+// per read (SameDraw), and not at all when the parameter is never read
+// (Dropped).
+import 'Caller.primitive';
+import 'Hash.primitive';
+
+Scheme Callers(Int n, Hash H) extends Caller {
+    // One draw compared with itself: always true.
+    Bool SameDraw() {
+        return this.Same(this.Draw());
+    }
+
+    // The draw from outside S does not complete when S holds every
+    // BitString<n>, although Ignore never reads it.
+    BitString<n> Dropped(Set<BitString<n>> S) {
+        return this.Ignore(this.PickOutside(S));
+    }
+
+    // Positive controls: deterministic arguments read twice, a draw read
+    // once, and a draw from a type that is never read.
+    Bool SamePure(BitString<n> y) {
+        return this.Same(y + 1^n);
+    }
+
+    Bool SameDet(BitString<n> y) {
+        return this.Same(H.Eval(y));
+    }
+
+    BitString<n> OnceDraw() {
+        return this.Id(this.Draw());
+    }
+
+    BitString<n> IgnoreDraw() {
+        return this.Ignore(this.Draw());
+    }
+
+    Bool Same(BitString<n> x) {
+        return x == x;
+    }
+
+    BitString<n> Id(BitString<n> x) {
+        return x;
+    }
+
+    BitString<n> Ignore(BitString<n> x) {
+        return 0^n;
+    }
+
+    BitString<n> Draw() {
+        BitString<n> r <- BitString<n>;
+        return r;
+    }
+
+    BitString<n> PickOutside(Set<BitString<n>> S) {
+        BitString<n> r <-uniq[S] BitString<n>;
+        return r;
+    }
+}

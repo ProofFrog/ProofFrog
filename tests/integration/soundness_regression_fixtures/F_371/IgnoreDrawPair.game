@@ -1,0 +1,16 @@
+// Positive control: an unread draw from a type has no effect.
+import 'Caller.primitive';
+
+Game Left(Caller T, Int n) {
+    BitString<n> O() {
+        return T.IgnoreDraw();
+    }
+}
+
+Game Right(Caller T, Int n) {
+    BitString<n> O() {
+        return 0^n;
+    }
+}
+
+export as IgnoreDrawPair;

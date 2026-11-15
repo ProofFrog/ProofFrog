@@ -13,6 +13,7 @@ from typing import Optional, cast
 
 from sympy import Symbol, simplify as sympy_simplify
 
+from .. import dependencies
 from .. import frog_ast
 from .. import frog_parser
 from ..visitors import (
@@ -31,7 +32,10 @@ from ._base import (
     TransformPass,
     PipelineContext,
     NearMiss,
+    fresh_name,
+    game_names,
     has_nondeterministic_call,
+    may_return_before,
 )
 
 # ---------------------------------------------------------------------------
@@ -1538,6 +1542,12 @@ def _single_call_field_to_local(
         if init_sample is None or init_sample_count > 1 or field_used_elsewhere_in_init:
             continue
 
+        # F-349: Initialize may return before the sample, leaving the field
+        # at its initial value; the relocated sample would draw it anyway.
+        assert init_sample_idx is not None
+        if may_return_before(init_method.block.statements, init_sample_idx):
+            continue
+
         # Reject if any oracle shadows the field name with a parameter/local:
         # name-only reference detection cannot tell field from binding, and the
         # prepended local sample would clobber the binding (F-055).
@@ -2258,6 +2268,12 @@ def _counter_guarded_field_to_local(game: frog_ast.Game) -> frog_ast.Game:
         if init_sample is None or init_sample_count > 1 or field_used_elsewhere_in_init:
             continue
 
+        # F-349: Initialize may return before the sample, leaving the field
+        # at its initial value; the relocated sample would draw it anyway.
+        assert init_sample_idx is not None
+        if may_return_before(init_method.block.statements, init_sample_idx):
+            continue
+
         # Reject if any oracle shadows the field name with a parameter/local
         # (F-050): name-only reference detection conflates the field with the
         # binding, and the prepended local sample would clobber it.
@@ -2393,6 +2409,15 @@ class SinkUniformSampleTransformer(BlockTransformer):
     def __init__(self, ctx: PipelineContext | None = None) -> None:
         self.ctx = ctx
         self._current_method: frog_ast.Method | None = None
+        # Names bound to runtime values in the game (fields, parameters,
+        # locals): a draw from one of them may have an empty domain.
+        self._value_names: set[str] | None = None
+
+    def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        self._value_names = dependencies.game_value_names(game)
+        result = self._transform_children(game)
+        assert isinstance(result, frog_ast.Game)
+        return result
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
         # Capture the enclosing method so the sink guard can tell whether a
@@ -2402,6 +2427,34 @@ class SinkUniformSampleTransformer(BlockTransformer):
         result = self._transform_children(method)
         assert isinstance(result, frog_ast.Method)
         return result
+
+    def _method_value_names(self) -> set[str]:
+        if self._value_names is not None:
+            return self._value_names
+        method = self._current_method
+        if method is None:
+            return set()
+        return {
+            param.name for param in method.signature.parameters
+        } | dependencies.bound_value_names(method.block)
+
+    def _decline_empty_domain_near_miss(self, var_name: str) -> None:
+        if self.ctx is not None:
+            self.ctx.near_misses.append(
+                NearMiss(
+                    transform_name="Sink Uniform Sample",
+                    reason=(
+                        f"Sample '{var_name}' not sunk: its domain is a runtime "
+                        f"value that may be empty, so the draw may not complete, "
+                        f"and moving it would change the traces on which it "
+                        f"fails to"
+                    ),
+                    location=None,
+                    suggestion=None,
+                    variable=var_name,
+                    method=None,
+                )
+            )
 
     def _variable_escapes_block(self, block: frog_ast.Block, var_name: str) -> bool:
         """Defense-in-depth scope guard (F-042).
@@ -2514,6 +2567,19 @@ class SinkUniformSampleTransformer(BlockTransformer):
             # parameterization. Determine the region the sample is moved across.
             sample_stmt = stmt
 
+            if (len(using_branches) == 1 and not after_uses) or (
+                not using_branches and after_uses
+            ):
+                # A draw from a runtime set value may have an empty domain and
+                # then does not complete, which is observable: sinking it into
+                # a branch, or past an `if` that may return, changes the traces
+                # on which that happens. Draws from types are unaffected.
+                if dependencies.is_possibly_empty_draw(
+                    sample_stmt, self._method_value_names()
+                ):
+                    self._decline_empty_domain_near_miss(var_name)
+                    continue
+
             if len(using_branches) == 1 and not after_uses:
                 # F-042 scope guard: never sink a variable that escapes this
                 # block (only reachable via a malformed, out-of-scope AST).
@@ -2620,3 +2686,93 @@ class SplitUniformSamples(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return SplitUniformSampleTransformer(ctx.variables, ctx).transform(game)
+
+
+class _IndexToComponent(Transformer):
+    """Replaces ``v[i]`` (constant ``i``) by the component variable ``names[i]``."""
+
+    def __init__(self, var_name: str, names: list[str]) -> None:
+        self.var_name = var_name
+        self.names = names
+
+    def transform_ast_node(self, exp: frog_ast.ASTNode) -> Optional[frog_ast.ASTNode]:
+        if (
+            isinstance(exp, frog_ast.ArrayAccess)
+            and isinstance(exp.the_array, frog_ast.Variable)
+            and exp.the_array.name == self.var_name
+            and isinstance(exp.index, frog_ast.Integer)
+            and 0 <= exp.index.num < len(self.names)
+        ):
+            return frog_ast.Variable(self.names[exp.index.num])
+        return None
+
+
+class SplitProductSampleTransformer(BlockTransformer):
+    """Splits ``[T0, ..., Tn] v <- [T0, ..., Tn];`` into one sample per
+    component when every later use of ``v`` is ``v[i]`` with a constant
+    ``i`` and ``v`` is never written again.
+
+    Sound: the uniform distribution on a product of types is the product of
+    the uniform distributions on the components, so the components of one
+    product draw are independent uniform draws.
+
+    Each component is a new local named ``v@i``, or another fresh name when
+    the game already binds or mentions ``v@i`` (a field ExpandTuple made from
+    a product field ``v``, a bare declaration from SplitBareTupleDeclarations):
+    reusing it would capture that binding's reads (F-369).
+    """
+
+    def __init__(self, names_in_game: set[str]) -> None:
+        self.names_in_game = names_in_game
+        self.taken: set[str] = set(names_in_game)
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        # The components are locals of this method: fresh against every name
+        # of the game and the components already made in this method.
+        self.taken = set(self.names_in_game)
+        return self._transform_children(method)
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        statements = list(block.statements)
+        for index, statement in enumerate(statements):
+            if not (
+                isinstance(statement, frog_ast.Sample)
+                and isinstance(statement.var, frog_ast.Variable)
+                and isinstance(statement.the_type, frog_ast.ProductType)
+            ):
+                continue
+            # The domain is the product type itself (a ProductType, or a
+            # Tuple of types when written in the source), never a value.
+            components = frog_ast.tuple_literal_values(statement.sampled_from)
+            if components is None or list(components) != list(statement.the_type.types):
+                continue
+            name = statement.var.name
+            types = list(statement.the_type.types)
+            rest = frog_ast.Block(statements[index + 1 :])
+            if reassigns_or_rebinds({name}, rest):
+                continue
+            taken = set(self.taken)
+            names = [fresh_name(f"{name}@{i}", taken) for i in range(len(types))]
+            new_rest = _IndexToComponent(name, names).transform(rest)
+            if name in referenced_variable_names(new_rest):
+                continue
+            self.taken = taken
+            samples: list[frog_ast.Statement] = [
+                frog_ast.Sample(
+                    copy.deepcopy(component),
+                    frog_ast.Variable(n),
+                    cast(frog_ast.Expression, copy.deepcopy(component)),
+                )
+                for n, component in zip(names, types)
+            ]
+            return self.transform_block(
+                frog_ast.Block(statements[:index] + samples + list(new_rest.statements))
+            )
+        return frog_ast.Block([self.transform(statement) for statement in statements])
+
+
+class SplitProductSample(TransformPass):
+    name = "Split Product Sample"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return SplitProductSampleTransformer(game_names(game)).transform(game)

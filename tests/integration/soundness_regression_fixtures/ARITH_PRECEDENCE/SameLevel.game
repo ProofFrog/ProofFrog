@@ -1,0 +1,33 @@
+// Positive control: + and - share one left-associative level, as do * and /.
+// E: a + 3 - b is (a + 3) - b, equal to a - b + 3, which is (a - b) + 3.
+// F: 12 / 2 * 3 is (12 / 2) * 3 = 18, not 12 / (2 * 3) = 2.
+// G: 20 - 4 - 3 is (20 - 4) - 3 = 13, not 20 - (4 - 3) = 19.
+Game Left(Int a, Int b) {
+    Int E() {
+        return a + 3 - b;
+    }
+
+    Int F() {
+        return 12 / 2 * 3;
+    }
+
+    Int G() {
+        return 20 - 4 - 3;
+    }
+}
+
+Game Right(Int a, Int b) {
+    Int E() {
+        return a - b + 3;
+    }
+
+    Int F() {
+        return 18;
+    }
+
+    Int G() {
+        return 13;
+    }
+}
+
+export as SameLevel;

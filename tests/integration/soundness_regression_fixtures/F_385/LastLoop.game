@@ -1,0 +1,37 @@
+// Target: Deduplicate Deterministic Calls (the argument stability scan).
+// The first call F.Eval(k) is before the loop, the second inside a loop that
+// writes k after it. The scan never looked inside the statement holding the
+// last call, so the pass merged the calls into one F.Eval(k) before the
+// first: Right. But Left's second iteration calls F.Eval on the new k.
+// Distinguisher: call Probe(k0), output 1 iff the two components are equal.
+// Left returns [F(k0), F(F(k0))], Right [F(k0), F(k0)]. Advantage 1 for an F
+// with F(F(x)) != F(x).
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+import 'DetPrimS.primitive';
+
+Game Left(DetPrimS F) {
+    [F.Block, F.Block] Probe(F.Block k) {
+        F.Block a = F.Eval(k);
+        F.Block b = k;
+        for (Int i = 0 to 2) {
+            b = F.Eval(k);
+            k = b;
+        }
+        return [a, b];
+    }
+}
+
+Game Right(DetPrimS F) {
+    [F.Block, F.Block] Probe(F.Block k) {
+        F.Block d = F.Eval(k);
+        F.Block a = d;
+        F.Block b = k;
+        for (Int i = 0 to 2) {
+            b = d;
+            k = b;
+        }
+        return [a, b];
+    }
+}
+
+export as LastLoop;

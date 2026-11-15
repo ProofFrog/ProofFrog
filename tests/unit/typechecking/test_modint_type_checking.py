@@ -385,3 +385,58 @@ class TestModIntComparison:
                 }
             }
             """)
+
+    # FoldLiteralConditions folds <, >, <=, >= on Int literals as integers.
+    # That is sound only while ordering on ModInt stays a type error.
+    # The message is asserted so the tests fail if the game starts being
+    # rejected for some other reason while ordering itself is accepted.
+    @pytest.mark.parametrize("op", ["<", ">", "<=", ">="])
+    def test_ordering_same_modulus_fails(
+        self, op: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _check_game_fails(f"""
+            Game G(Int q) {{
+                Bool Test(ModInt<q> a, ModInt<q> b) {{
+                    return a {op} b;
+                }}
+            }}
+            """)
+        captured = capsys.readouterr()
+        assert (
+            "Can only compare Int types, types are ModInt<q>, ModInt<q>"
+            in captured.out + captured.err
+        )
+
+    @pytest.mark.parametrize("op", ["<", ">", "<=", ">="])
+    def test_ordering_against_int_literal_fails(
+        self, op: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _check_game_fails(f"""
+            Game G(Int q) {{
+                Bool Test(ModInt<q> a) {{
+                    return a {op} 3;
+                }}
+            }}
+            """)
+        captured = capsys.readouterr()
+        assert (
+            "Can only compare Int types, types are ModInt<q>, Int"
+            in captured.out + captured.err
+        )
+
+    @pytest.mark.parametrize("op", ["<", ">", "<=", ">="])
+    def test_ordering_int_literal_against_modint_fails(
+        self, op: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _check_game_fails(f"""
+            Game G(Int q) {{
+                Bool Test(ModInt<q> a) {{
+                    return 3 {op} a;
+                }}
+            }}
+            """)
+        captured = capsys.readouterr()
+        assert (
+            "Can only compare Int types, types are Int, ModInt<q>"
+            in captured.out + captured.err
+        )

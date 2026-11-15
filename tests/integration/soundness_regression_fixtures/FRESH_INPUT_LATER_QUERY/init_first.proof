@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'InitFirst.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    InitFirst(S);
+
+games:
+    InitFirst(S).Left against InitFirst(S).Adversary;
+    InitFirst(S).Right against InitFirst(S).Adversary;

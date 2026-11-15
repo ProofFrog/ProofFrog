@@ -1,0 +1,14 @@
+import 'Chal.game';
+
+proof:
+
+let:
+    Int n;
+    Function<BitString<n>, BitString<n>> F0;
+
+theorem:
+    Chal(n, F0);
+
+games:
+    Chal(n, F0).Left against Chal(n, F0).Adversary;
+    Chal(n, F0).Right against Chal(n, F0).Adversary;

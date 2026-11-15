@@ -1,0 +1,13 @@
+// F-305: claims Attack3.Real and Attack3.Ideal are interchangeable. They are
+// not: Real's Draw never completes, Ideal's returns 0 (see attack_3.game).
+
+import 'attack_3.game';
+
+proof:
+
+theorem:
+    Attack3();
+
+games:
+    Attack3().Real against Attack3().Adversary;
+    Attack3().Ideal against Attack3().Adversary;

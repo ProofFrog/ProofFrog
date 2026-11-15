@@ -1,0 +1,23 @@
+// Target: the residual Z3 equivalence check (proof_engine.py).
+// Both oracles return ModInt<q>. Left returns its Int parameter (reduced
+// mod q on return), Right its ModInt<q> parameter. The Z3 translation models
+// an Int as a Z3 integer and a ModInt as an opaque value of an uninterpreted
+// sort, so the two returns have different sorts and comparing them raised a
+// Z3 exception ("sort mismatch"), aborting the whole proof.
+// The games are distinguishable: Probe(1, 0) returns 1 in Left and 0 in
+// Right (q >= 2).
+// Expected: Proof Failed (no crash).
+
+Game Left(Int q) {
+    ModInt<q> Probe(Int n, ModInt<q> x) {
+        return n;
+    }
+}
+
+Game Right(Int q) {
+    ModInt<q> Probe(Int n, ModInt<q> x) {
+        return x;
+    }
+}
+
+export as IntReturnedAsModInt;

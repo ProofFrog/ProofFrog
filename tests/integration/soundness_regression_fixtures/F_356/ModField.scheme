@@ -1,0 +1,11 @@
+// F-356 support scheme: the field f stores q in ModInt<q>, so it holds
+// q mod q = 0, and f + f == f holds for every q. Read as its initializer q,
+// the test is the integer q + q == q, which holds only for q = 0.
+import 'ModTest.primitive';
+
+Scheme ModField(Int q) extends ModTest {
+    ModInt<q> f = q;
+    Bool Test() {
+        return f + f == f;
+    }
+}

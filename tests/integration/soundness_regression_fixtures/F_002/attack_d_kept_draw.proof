@@ -1,0 +1,14 @@
+import 'attack_d_kept_draw.game';
+
+proof:
+
+let:
+    Int n;
+    Int m;
+
+theorem:
+    AttackDKeptDraw(n, m);
+
+games:
+    AttackDKeptDraw(n, m).Real against AttackDKeptDraw(n, m).Adversary;
+    AttackDKeptDraw(n, m).Random against AttackDKeptDraw(n, m).Adversary;

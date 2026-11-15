@@ -1,0 +1,48 @@
+// Middle game for gpfe_initializer.proof. Both sides are the same game: Q is
+// initialized from the field h before Initialize runs, so Q starts at h's
+// default value (one fixed unspecified value of GroupElem<G>). h is a
+// generator-power key that Generator Power Field To Exponent replaces by its
+// exponent. The pass copied Q's initializer verbatim, so it still named h,
+// which then read the proof's let entry h: Q seemed to start at the let
+// element, as in GpfeEnds.
+Game Left(Group G) {
+    GroupElem<G> h;
+    GroupElem<G> Q = h;
+
+    Void Initialize() {
+        ModInt<G.order> e <- ModInt<G.order>;
+        h = G.generator ^ e;
+    }
+
+    GroupElem<G> Upd(ModInt<G.order> d) {
+        h = h * G.generator ^ d;
+        Q = Q * G.generator;
+        return h;
+    }
+
+    GroupElem<G> GetQ() {
+        return Q;
+    }
+}
+
+Game Right(Group G) {
+    GroupElem<G> h;
+    GroupElem<G> Q = h;
+
+    Void Initialize() {
+        ModInt<G.order> e <- ModInt<G.order>;
+        h = G.generator ^ e;
+    }
+
+    GroupElem<G> Upd(ModInt<G.order> d) {
+        h = h * G.generator ^ d;
+        Q = Q * G.generator;
+        return h;
+    }
+
+    GroupElem<G> GetQ() {
+        return Q;
+    }
+}
+
+export as GpfeMid;

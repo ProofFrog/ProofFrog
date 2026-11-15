@@ -1,0 +1,15 @@
+import 'D.primitive';
+import 'Loc.game';
+
+proof:
+
+let:
+    Int n;
+    D F;
+
+theorem:
+    Loc(F, n);
+
+games:
+    Loc(F, n).Left against Loc(F, n).Adversary;
+    Loc(F, n).Right against Loc(F, n).Adversary;

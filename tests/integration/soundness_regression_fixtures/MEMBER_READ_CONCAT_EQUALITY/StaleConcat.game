@@ -1,0 +1,28 @@
+// Concat Equality Decompose resolved the local v to its concatenation
+// F.Ev(|M.keys|) || u at the comparison and decomposed v == (t || u) termwise
+// into F.Ev(|M.keys|) == t && u == u. The concatenation reads M only through
+// the member access M.keys, so the check that its values are unchanged since
+// the binding never saw the write M[y] = true in between.
+// For an F with F.Ev(0) != F.Ev(1), the first call O(0, F.Ev(0), u) returns
+// true in Left and false in Right.
+import 'DetEv.primitive';
+
+Game Left(DetEv F) {
+    Map<Int, Bool> M;
+    Bool O(Int y, BitString<F.n> t, BitString<F.n> u) {
+        BitString<2 * F.n> v = F.Ev(|M.keys|) || u;
+        M[y] = true;
+        return v == (t || u);
+    }
+}
+
+Game Right(DetEv F) {
+    Map<Int, Bool> M;
+    Bool O(Int y, BitString<F.n> t, BitString<F.n> u) {
+        M[y] = true;
+        BitString<F.n> e = F.Ev(|M.keys|);
+        return e == t;
+    }
+}
+
+export as StaleConcat;

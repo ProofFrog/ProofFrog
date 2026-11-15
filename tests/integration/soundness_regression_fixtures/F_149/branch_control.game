@@ -1,0 +1,39 @@
+// Positive control for attack2a_property.game: the branch writes another
+// field before the use, so inlining `ctr + 1` into the branch is sound and
+// must still happen. Sound engine: Proof Succeeded!
+import 'dummy.primitive';
+
+Game Left(Dummy D) {
+    Int ctr;
+    Int other;
+    Void Initialize() {
+        ctr = 0;
+        other = 0;
+    }
+    Int Probe(Bool b) {
+        Int v = ctr + 1;
+        if (b) {
+            other = 100;
+            return v;
+        }
+        return other;
+    }
+}
+
+Game Right(Dummy D) {
+    Int ctr;
+    Int other;
+    Void Initialize() {
+        ctr = 0;
+        other = 0;
+    }
+    Int Probe(Bool b) {
+        if (b) {
+            other = 100;
+            return ctr + 1;
+        }
+        return other;
+    }
+}
+
+export as BranchControl;

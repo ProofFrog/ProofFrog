@@ -1,0 +1,21 @@
+// Single-hop claim WrongBranch.Real -> WrongBranch.Random with no assumptions.
+// See WrongBranch.game for the expected outcome.
+import 'Chan.primitive';
+import 'ChanImpl.scheme';
+import 'WrongBranch.game';
+
+proof:
+
+let:
+    Int lambda;
+    ChanImpl C = ChanImpl(lambda);
+
+assume:
+
+theorem:
+    WrongBranch(C);
+
+games:
+    WrongBranch(C).Real against WrongBranch(C).Adversary;
+
+    WrongBranch(C).Random against WrongBranch(C).Adversary;

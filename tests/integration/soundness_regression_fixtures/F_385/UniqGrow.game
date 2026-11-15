@@ -1,0 +1,31 @@
+// Target: Deduplicate Deterministic Calls (the argument stability scan).
+// Both calls read |S|, and the draw x <-uniq[S] F.Block between them adds x
+// to S. The scan looked only at the variable each statement assigns, so it
+// missed the insertion and merged the calls: Right.
+// Distinguisher: call Probe() once, output 1 iff the two components are
+// equal. S starts empty, so Left returns [F(0), F(1)] and Right
+// [F(0), F(0)]. Advantage 1 for an F with F(0) != F(1).
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+import 'DetPrimS.primitive';
+
+Game Left(DetPrimS F) {
+    Set<F.Block> S;
+    [F.Block, F.Block] Probe() {
+        F.Block a = F.EvalInt(|S|);
+        F.Block x <-uniq[S] F.Block;
+        F.Block b = F.EvalInt(|S|);
+        return [a, b];
+    }
+}
+
+Game Right(DetPrimS F) {
+    Set<F.Block> S;
+    [F.Block, F.Block] Probe() {
+        F.Block a = F.EvalInt(|S|);
+        F.Block x <-uniq[S] F.Block;
+        F.Block b = a;
+        return [a, b];
+    }
+}
+
+export as UniqGrow;

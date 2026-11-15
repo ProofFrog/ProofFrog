@@ -1,0 +1,21 @@
+// F-362: claims CollisionNoGuard.Left and CollisionNoGuard.Right are
+// interchangeable. They are not (see CollisionNoGuard.game).
+// Sound engine: Proof Failed!
+import 'Flag.primitive';
+import 'FlagImpl.scheme';
+import 'CollisionNoGuard.game';
+
+proof:
+
+let:
+    Bool n;
+    Flag S = FlagImpl(n);
+
+assume:
+
+theorem:
+    CollisionNoGuard(S);
+
+games:
+    CollisionNoGuard(S).Left against CollisionNoGuard(S).Adversary;
+    CollisionNoGuard(S).Right against CollisionNoGuard(S).Adversary;

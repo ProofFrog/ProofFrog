@@ -1,0 +1,4 @@
+// A primitive carrying only a length parameter n.
+Primitive Dummy(Int n) {
+    Int n = n;
+}

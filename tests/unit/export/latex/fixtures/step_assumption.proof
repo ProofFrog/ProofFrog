@@ -1,0 +1,43 @@
+// Export fixture: INDOT$ implies INDOT, with a step assumption before the
+// equivalence hop between the two reductions.
+
+import '../../../../../examples/Primitives/SymEnc.primitive';
+import '../../../../../examples/Games/SymEnc/INDOT.game';
+import '../../../../../examples/Games/SymEnc/INDOT$.game';
+
+proof:
+
+let:
+    Set ProofMessageSpace;
+    Set ProofCiphertextSpace;
+    Set ProofKeySpace;
+    Int n;
+
+    SymEnc proofE = SymEnc(ProofMessageSpace, ProofCiphertextSpace, ProofKeySpace);
+
+assume:
+    INDOT$(proofE);
+
+theorem:
+    INDOT(proofE);
+
+games:
+    INDOT(proofE).Left against INDOT(proofE).Adversary;
+    INDOT$(proofE).Real compose R1(proofE) against INDOT(proofE).Adversary;
+    INDOT$(proofE).Random compose R1(proofE) against INDOT(proofE).Adversary;
+    assume n >= 1;
+    INDOT$(proofE).Random compose R2(proofE) against INDOT(proofE).Adversary;
+    INDOT$(proofE).Real compose R2(proofE) against INDOT(proofE).Adversary;
+    INDOT(proofE).Right against INDOT(proofE).Adversary;
+
+Reduction R1(SymEnc se) compose INDOT$(se) against INDOT(se).Adversary {
+    se.Ciphertext Eavesdrop(se.Message mL, se.Message mR) {
+        return challenger.CTXT(mL);
+    }
+}
+
+Reduction R2(SymEnc se2) compose INDOT$(se2) against INDOT(se2).Adversary {
+    se2.Ciphertext Eavesdrop(se2.Message mL, se2.Message mR) {
+        return challenger.CTXT(mR);
+    }
+}

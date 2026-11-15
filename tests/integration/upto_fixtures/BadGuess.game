@@ -1,0 +1,37 @@
+// Identical-until-bad pair: Left reveals the guess, Right records it.
+Game Left(Set S) {
+    S target;
+    Bool bad;
+
+    Void Initialize() {
+        target <- S;
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (c == target) {
+            bad = true;
+            return true;
+        }
+        return false;
+    }
+}
+
+Game Right(Set S) {
+    S target;
+    Bool bad;
+
+    Void Initialize() {
+        target <- S;
+        bad = false;
+    }
+
+    Bool Eq(S c) {
+        if (c == target) {
+            bad = true;
+        }
+        return false;
+    }
+}
+
+export as BadGuess;

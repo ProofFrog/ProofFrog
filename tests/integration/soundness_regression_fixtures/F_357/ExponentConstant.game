@@ -1,0 +1,23 @@
+// Target: the algebra normalizer's canonical rebuild, reached through
+// ModInt Cancellation. Left's exponent ((x + x^0) + x^0) - x is the
+// ModInt<q> value 2 mod q; the normalizer rebuilt it as the Int literal 2,
+// dropping the reduction mod q, so Left's canonical form became Right's.
+// The games are distinguishable: with q = 2 and a group of order at least 3,
+// Probe(1) returns the identity on the left (2 mod 2 = 0) and g^2 on the
+// right.
+// Expected: Proof Failed.
+
+Game Left(Int q, Group G) {
+    GroupElem<G> Probe(ModInt<q> x) {
+        return G.generator ^ (((x + x ^ 0) + x ^ 0) - x);
+    }
+}
+
+Game Right(Int q, Group G) {
+    GroupElem<G> Probe(ModInt<q> x) {
+        Int two = 2;
+        return G.generator ^ two;
+    }
+}
+
+export as ExponentConstant;

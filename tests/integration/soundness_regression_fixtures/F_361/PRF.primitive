@@ -1,0 +1,9 @@
+// Pseudorandom Function (PRF) primitive parameterized by seed length, input length, and output length.
+// Provides a deterministic evaluate operation mapping a seed and input to a fixed-length output.
+Primitive PRF(Int lambda, Int in, Int out) {
+    Int lambda = lambda;
+    Int in = in;
+    Int out = out;
+
+    deterministic BitString<out> evaluate(BitString<lambda> seed, BitString<in> input);
+}

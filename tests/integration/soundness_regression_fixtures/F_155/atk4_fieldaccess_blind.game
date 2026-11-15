@@ -1,0 +1,49 @@
+// AUDIT ATTACK FILE -- target pass: InlineLocalTupleLiteral (inlining.py L1271-1279).
+// ATK-4: the pass computes each element's read-set with
+// VariableCollectionVisitor, which DISABLES collection inside any FieldAccess
+// (visitors.py visit_field_access), so e_0 = |M.keys| has an empty computed
+// read-set and even the whole-variable reassignment `M = N;` (which
+// is_written_to WOULD catch, had M been collected) goes unchecked.
+//
+// Real: v[0] = |M.keys| = 1 is captured before `M = N;` -> O() returns 1.
+// Random is, verbatim, the hand-applied pass output: returns |M.keys| after
+// the reassignment = |N.keys| = 2. Distinguisher: call O() once; output 1 iff
+// the reply == 2. Advantage 1.
+//
+// Expected if the pass is SOUND: the hop Real -> Random is rejected.
+// Expected if UNSOUND: prove reports "Proof Succeeded!".
+
+Game Real(Int lambda) {
+    Map<Int, Int> M;
+    Map<Int, Int> N;
+
+    Void Initialize() {
+        M[0] = 0;
+        N[0] = 0;
+        N[1] = 0;
+    }
+
+    Int O() {
+        [Int, Int] v = [|M.keys|, 0];
+        M = N;
+        return v[0];
+    }
+}
+
+Game Random(Int lambda) {
+    Map<Int, Int> M;
+    Map<Int, Int> N;
+
+    Void Initialize() {
+        M[0] = 0;
+        N[0] = 0;
+        N[1] = 0;
+    }
+
+    Int O() {
+        M = N;
+        return |M.keys|;
+    }
+}
+
+export as Atk4FieldAccessBlind;

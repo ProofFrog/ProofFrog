@@ -1,0 +1,25 @@
+// Must FAIL. The local f is declared without a value and assigned only when
+// c holds, so Query(0, false) reads an unassigned local in Real and
+// returns [0, true] in Random.
+import 'Chan.primitive';
+
+Game Real(Chan C) {
+    [Int, Bool]? Query(Int x, Bool c) {
+        Bool f;
+        if (c) {
+            f = true;
+        }
+        if (C.IsNone([x, f])) {
+            return None;
+        }
+        return [x, true];
+    }
+}
+
+Game Random(Chan C) {
+    [Int, Bool]? Query(Int x, Bool c) {
+        return [x, true];
+    }
+}
+
+export as UndefLocal;

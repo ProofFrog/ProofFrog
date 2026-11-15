@@ -1,0 +1,11 @@
+// F-383 (scheme parameter): Next writes the scheme's parameter n. A scheme's
+// methods are inlined into the games that call them, where the write would
+// land on the caller's name, so the engine refuses such a scheme.
+import 'Counter.primitive';
+
+Scheme BumpCounter(Int n) extends Counter {
+    Int Next() {
+        n = n + 1;
+        return n;
+    }
+}

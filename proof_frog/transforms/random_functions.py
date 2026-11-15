@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 import functools
 from dataclasses import dataclass, field
+from typing import Sequence
 from sympy import Rational, Symbol, simplify as sympy_simplify
 
 from .. import frog_ast
@@ -36,7 +37,9 @@ from ._base import (
     NearMiss,
     _lookup_primitive_method,
     has_nondeterministic_call,
+    may_return_before,
 )
+from ._coercion import coercing_store_names_for
 
 
 @dataclass
@@ -46,6 +49,18 @@ class _RFCallSite:
     rf_name: str
     arg_name: str
     unique_set_name: str
+    call: frog_ast.FuncCall | None = None
+    method: str | None = None
+
+
+@dataclass
+class _OverwrittenDraw:
+    """A call ``RF(r)`` refused because ``r`` may be written after its
+    ``<-uniq[S]`` draw."""
+
+    unique_set_name: str
+    method: str | None
+    origin: frog_ast.SourceOrigin | None
 
 
 @dataclass
@@ -55,6 +70,10 @@ class _RFAnalysis:
     eligible: bool = True
     call_sites: list[_RFCallSite] = field(default_factory=list)
     unique_set_name: str | None = None
+    overwritten_draws: list[_OverwrittenDraw] = field(default_factory=list)
+    # A call the per-statement walk does not analyze (not a standalone
+    # ``z = RF(r)``), which made the RF ineligible.
+    unanalyzed_call: frog_ast.FuncCall | None = None
 
 
 def _get_unique_set_name(expr: frog_ast.Expression) -> str:
@@ -75,19 +94,17 @@ def _exclusion_set_modified(game: frog_ast.Game, set_name: str) -> bool:
     ``<-uniq[S]`` statements.  If user code explicitly assigns to the
     set variable, the implicit maintenance is compromised.
 
-    For dotted names like ``RF.domain``, the domain is implicitly
-    maintained by the random function's own semantics (querying RF(r)
-    adds r to RF.domain).  The RF itself may be initialized via a
-    Sample statement — that is not a modification.  Only plain set
-    fields (non-dotted names) are checked for modifications.
+    ``RF.domain`` is a hidden set that holds exactly the points
+    ``<-uniq[RF.domain]`` has drawn (evaluating ``RF(r)`` does not add
+    ``r``), and nothing else can write it: a member access is not an
+    assignment target.  The RF itself may be initialized via a Sample
+    statement — that is not a modification.
 
     Returns True if a problematic modification is found.
     """
-    # An ``RF.domain`` exclusion set is implicitly maintained by the RF's
-    # own semantics (querying ``RF(r)`` adds ``r`` to ``RF.domain``), so an
-    # explicit assignment is neither expected nor needed -- exempt it.  But
-    # only ``.domain`` is auto-maintained: any OTHER dotted set (e.g. a plain
-    # field accessed as ``obj.field``) must still be checked for an explicit
+    # An ``RF.domain`` exclusion set changes only by ``<-uniq[RF.domain]``
+    # draws, so it is exempt.  Any OTHER dotted set (e.g. a plain field
+    # accessed as ``obj.field``) must still be checked for an explicit
     # modification that would break the implicit-maintenance assumption (F-020).
     if set_name.endswith(".domain"):
         return False
@@ -119,6 +136,25 @@ def _exclusion_set_modified(game: frog_ast.Game, set_name: str) -> bool:
     return False
 
 
+def _initializers_reaching_rf(
+    game: frog_ast.Game, rf_name: str
+) -> list[tuple[str, frog_ast.Expression]]:
+    """Each field, with its initializer, whose initializer sees *rf_name*
+    as the random function.
+
+    Field initializers run before Initialize.  A game field is sampled in
+    Initialize, so its initializers see an earlier value and none counts; a
+    sampled ``let:`` function is sampled outside the game, so every
+    initializer sees it."""
+    if any(game_field.name == rf_name for game_field in game.fields):
+        return []
+    return [
+        (game_field.name, game_field.value)
+        for game_field in game.fields
+        if game_field.value is not None
+    ]
+
+
 def _rf_value_escapes(game: frog_ast.Game, rf_name: str) -> bool:
     """True if the function field *rf_name* appears anywhere other than a
     safe position, i.e. it may be copied/passed and evaluated through an
@@ -135,6 +171,9 @@ def _rf_value_escapes(game: frog_ast.Game, rf_name: str) -> bool:
     set/tuple element -- lets the function value escape: an unguarded
     evaluation through the alias would survive while a guarded site is
     rewritten to an independent sample, breaking same-input consistency.
+    For a sampled ``let:`` function, field initializers count as well as
+    method bodies: a field ``Function<D, R> G = RF;`` is a copy like
+    ``G = RF;`` in Initialize (see :func:`_initializers_reaching_rf`).
     """
     counts = {"total": 0, "calls": 0, "field_access": 0, "init_target": 0}
 
@@ -166,6 +205,8 @@ def _rf_value_escapes(game: frog_ast.Game, rf_name: str) -> bool:
 
     for method in game.methods:
         SearchVisitor(visit).visit(method.block)
+    for _, value in _initializers_reaching_rf(game, rf_name):
+        SearchVisitor(visit).visit(value)
     safe = counts["calls"] + counts["field_access"] + counts["init_target"]
     return counts["total"] > safe
 
@@ -183,7 +224,9 @@ def _analyze_rf_eligibility(
     field_names = {f.name for f in game.fields}
 
     for method in game.methods:
-        _analyze_block(method.block, analysis, rf_types, field_names)
+        _analyze_block(
+            method.block, analysis, rf_types, field_names, method.signature.name
+        )
 
     # Post-analysis: reject any RF whose function value escapes to a position
     # the call-site walk cannot see (a copy/alias/argument), which could carry
@@ -191,6 +234,30 @@ def _analyze_rf_eligibility(
     for rf_name, rf_analysis in analysis.items():
         if rf_analysis.eligible and _rf_value_escapes(game, rf_name):
             rf_analysis.eligible = False
+
+    # Post-analysis: every call to the RF must be one of the analyzed call
+    # sites.  The walk only checks standalone ``z = RF(r)`` assignments; a call
+    # left in an else-if condition, a loop header or a larger expression (which
+    # ExtractRFCalls does not hoist) queries RF on an unchecked input, perhaps
+    # the very point a rewritten site was drawn at.
+    for rf_name, rf_analysis in analysis.items():
+        if not rf_analysis.eligible:
+            continue
+        calls = [
+            call
+            for method in game.methods
+            for call in _collect_rf_call_sites(method.block, rf_name)
+        ]
+        if len(calls) != len(rf_analysis.call_sites):
+            rf_analysis.eligible = False
+            rf_analysis.unanalyzed_call = next(
+                (
+                    call
+                    for call in calls
+                    if not any(call is site.call for site in rf_analysis.call_sites)
+                ),
+                None,
+            )
 
     # Post-analysis: reject RFs where any argument variable is used more
     # than once across call sites (RF is a function, so same input must
@@ -225,28 +292,25 @@ def _analyze_block(
     analysis: dict[str, _RFAnalysis],
     rf_types: dict[str, frog_ast.FunctionType],
     field_names: set[str] | None = None,
+    method: str | None = None,
 ) -> None:
     """Analyze a block for RF calls and their <-uniq guards."""
     # Build map: variable name -> unique set name (from <-uniq in this block)
     uniq_guards: dict[str, str] = {}
+    # Guards dropped by a write, for the near-miss report.
+    overwritten: dict[str, str] = {}
 
     for statement in block.statements:
-        # F-022: any write to a guarded variable other than a fresh
-        # `<-uniq[S]` draw destroys the freshness that draw established -- after
-        # `r <-uniq[S]; r = c;` the variable holds an arbitrary, possibly
-        # previously-queried value, so `RF(r)` is no longer a distinct input.
-        # Invalidate the guard before this statement's RF-call check below.
-        if isinstance(
-            statement,
-            (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
-        ):
-            written_base = lvalue_base_name(statement.var)
-            is_fresh_uniq = (
-                isinstance(statement, frog_ast.UniqueSample)
-                and statement.surface_form == "uniq"
-            )
-            if written_base in uniq_guards and not is_fresh_uniq:
-                del uniq_guards[written_base]
+        # F-022: after `r <-uniq[S]; r = c;`, `r` may hold an earlier query, so
+        # `RF(r)` is no longer fresh.  Any write of `r` counts, at any depth,
+        # including element writes, loop binders and redeclarations.  A
+        # top-level `<-uniq[S]` redraw from a field set re-seeds the guard below.
+        # An assignment `x = RF(r)` evaluates its call, reading `r`, before it
+        # writes `x`, so the call is checked against the guards held as the
+        # statement starts: `r = RF(r)` straight after the draw is fresh.
+        guards_at_call = dict(uniq_guards)
+        for name in [n for n in uniq_guards if reassigns_or_rebinds({n}, statement)]:
+            overwritten[name] = uniq_guards.pop(name)
 
         # Track <-uniq bindings. Only the stateful `<-uniq[S]` form
         # accumulates draws into S (S = S union {x}); the pure `x <- T \ E`
@@ -269,6 +333,7 @@ def _analyze_block(
                     # (handled below by not adding to uniq_guards).
                     continue
             uniq_guards[statement.var.name] = set_name
+            overwritten.pop(statement.var.name, None)
 
         # Check RF calls in assignments
         if (
@@ -286,11 +351,17 @@ def _analyze_block(
                 rf_analysis.eligible = False
                 continue
 
-            if arg.name not in uniq_guards:
+            if arg.name not in guards_at_call:
                 rf_analysis.eligible = False
+                if arg.name in overwritten:
+                    rf_analysis.overwritten_draws.append(
+                        _OverwrittenDraw(
+                            overwritten[arg.name], method, statement.origin
+                        )
+                    )
                 continue
 
-            set_name = uniq_guards[arg.name]
+            set_name = guards_at_call[arg.name]
 
             # If RF.domain is the set, verify it matches this RF
             if "." in set_name:
@@ -311,15 +382,17 @@ def _analyze_block(
                     rf_name=rf_name,
                     arg_name=arg.name,
                     unique_set_name=set_name,
+                    call=statement.value,
+                    method=method,
                 )
             )
 
         # Recurse into nested blocks
         if isinstance(statement, frog_ast.IfStatement):
             for nested_block in statement.blocks:
-                _analyze_block(nested_block, analysis, rf_types, field_names)
+                _analyze_block(nested_block, analysis, rf_types, field_names, method)
         elif isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
-            _analyze_block(statement.block, analysis, rf_types, field_names)
+            _analyze_block(statement.block, analysis, rf_types, field_names, method)
 
 
 def _collect_names_in_scope(node: frog_ast.ASTNode) -> set[str]:
@@ -345,6 +418,64 @@ def _collect_names_in_scope(node: frog_ast.ASTNode) -> set[str]:
     return names
 
 
+def _is_rf_call(rf_names: set[str], node: frog_ast.ASTNode) -> bool:
+    return (
+        isinstance(node, frog_ast.FuncCall)
+        and isinstance(node.func, frog_ast.Variable)
+        and node.func.name in rf_names
+    )
+
+
+def _hoistable_rf_call(
+    statement: frog_ast.Statement, rf_names: set[str]
+) -> frog_ast.FuncCall | None:
+    """The first call to one of *rf_names* that may be hoisted to just before
+    *statement*, or ``None``.
+
+    Hoisting is exact only for a call evaluated when *statement* starts, before
+    anything in it runs: the expressions of a simple statement and the first
+    condition of an ``if``.  A call in a branch or loop body may follow a write
+    to its argument (``if (b) { r = 0b00; return RF(r); }`` would query ``RF``
+    on the old ``r``) and is not evaluated on every path, and a call in a later
+    ``else if`` condition is not evaluated when an earlier branch is taken.  A
+    loop header is left alone too.  Such calls are extracted inside their own
+    block instead, where the statements before them run first.
+    """
+    search = functools.partial(_is_rf_call, rf_names)
+    target: frog_ast.ASTNode
+    if isinstance(statement, frog_ast.IfStatement):
+        target = statement.conditions[0]
+    elif isinstance(
+        statement, (frog_ast.NumericFor, frog_ast.GenericFor, frog_ast.Block)
+    ):
+        return None
+    else:
+        target = statement
+    found = SearchVisitor[frog_ast.FuncCall](search).visit(target)
+    return found
+
+
+def _unhoisted_rf_call(
+    statement: frog_ast.Statement, rf_names: set[str]
+) -> frog_ast.FuncCall | None:
+    """A call to one of *rf_names* in *statement* that ``_hoistable_rf_call``
+    never reaches: one in a nested block, a later ``else if`` condition or a
+    loop header."""
+    search = functools.partial(_is_rf_call, rf_names)
+    parts: list[frog_ast.ASTNode]
+    if isinstance(statement, frog_ast.IfStatement):
+        parts = [*statement.conditions[1:], *statement.blocks]
+    elif isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
+        parts = [statement]
+    else:
+        return None
+    for part in parts:
+        found = SearchVisitor[frog_ast.FuncCall](search).visit(part)
+        if found is not None:
+            return found
+    return None
+
+
 class _RFCallExtractor(BlockTransformer):
     """Extract RF calls embedded in expressions into separate assignments.
 
@@ -354,6 +485,10 @@ class _RFCallExtractor(BlockTransformer):
         return [v1, m + __rf_extract_0];
 
     This enables ``_RFCallReplacer`` to detect and simplify the call.
+
+    Only a call evaluated at the start of its statement is hoisted (see
+    :func:`_hoistable_rf_call`); a call inside a branch or loop body is
+    extracted within that body when the transformer reaches it.
 
     The minted temporary name is freshened against *avoid* (every
     identifier in scope) so it cannot capture an existing parameter,
@@ -393,14 +528,7 @@ class _RFCallExtractor(BlockTransformer):
             ):
                 continue
 
-            def is_rf_call(node: frog_ast.ASTNode) -> bool:
-                return (
-                    isinstance(node, frog_ast.FuncCall)
-                    and isinstance(node.func, frog_ast.Variable)
-                    and node.func.name in self.rf_names
-                )
-
-            found = SearchVisitor(is_rf_call).visit(statement)
+            found = _hoistable_rf_call(statement, self.rf_names)
             if found is None:
                 continue
 
@@ -432,13 +560,30 @@ class _RFCallExtractor(BlockTransformer):
 
 
 class _RFCallReplacer(BlockTransformer):
-    """Replace ``z = RF(r)`` with ``z <- R`` for eligible RF fields."""
+    """Replace ``z = RF(r)`` with ``z <- R`` for eligible RF fields.
+
+    Given *avoid* (every identifier in scope), a call that overwrites its own
+    argument, ``r = RF(r)``, becomes ``R __rf_sample_0__ <- R; r =
+    __rf_sample_0__;`` instead, so the fresh value has a variable of its own
+    that later passes can propagate, as they do for ``z = RF(r)``.
+    """
 
     def __init__(
         self,
         eligible_rfs: dict[str, frog_ast.FunctionType],
+        avoid: set[str] | None = None,
     ) -> None:
         self.eligible_rfs = eligible_rfs
+        self.avoid = avoid
+        self.counter = 0
+
+    def _fresh_name(self, avoid: set[str]) -> str:
+        while True:
+            name = f"__rf_sample_{self.counter}__"
+            self.counter += 1
+            if name not in avoid:
+                avoid.add(name)
+                return name
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -453,16 +598,37 @@ class _RFCallReplacer(BlockTransformer):
             rf_name = statement.value.func.name
             range_type = self.eligible_rfs[rf_name].range_type
 
-            # Type is used as Expression in sampling (DSL convention)
-            new_sample = frog_ast.Sample(
-                statement.the_type,
-                copy.deepcopy(statement.var),
-                copy.deepcopy(range_type),  # type: ignore[arg-type]
-            )
+            replacement: list[frog_ast.Statement]
+            if (
+                self.avoid is not None
+                and statement.the_type is None
+                and lvalue_base_name(statement.var)
+                in referenced_variable_names(statement.value)
+            ):
+                fresh = self._fresh_name(self.avoid)
+                replacement = [
+                    frog_ast.Sample(
+                        copy.deepcopy(range_type),
+                        frog_ast.Variable(fresh),
+                        copy.deepcopy(range_type),  # type: ignore[arg-type]
+                    ),
+                    frog_ast.Assignment(
+                        None, copy.deepcopy(statement.var), frog_ast.Variable(fresh)
+                    ),
+                ]
+            else:
+                # Type is used as Expression in sampling (DSL convention)
+                replacement = [
+                    frog_ast.Sample(
+                        statement.the_type,
+                        copy.deepcopy(statement.var),
+                        copy.deepcopy(range_type),  # type: ignore[arg-type]
+                    )
+                ]
 
             new_stmts = (
                 list(block.statements[:index])
-                + [new_sample]
+                + replacement
                 + list(block.statements[index + 1 :])
             )
             return self.transform_block(frog_ast.Block(new_stmts))
@@ -514,14 +680,29 @@ class UniqueRFSimplification(TransformPass):
         # and rewriting a unique-input evaluation of it to a fresh uniform draw
         # is unsound. Restrict to genuinely-sampled fields, mirroring
         # FreshInputRFToUniform's gate.
-        sampled_fields = _sampled_function_fields_in_init(game)
+        # A sampled field must also pass the shared eligibility rule: written
+        # only by its sample and never escaping into another name (F-019).
+        sampled_fields = _classify_sampled_function_fields(game)
         rf_types: dict[str, frog_ast.FunctionType] = {}
         for rf_field in game.fields:
-            if (
+            if not (
                 isinstance(rf_field.type, frog_ast.FunctionType)
                 and rf_field.name in sampled_fields
             ):
+                continue
+            problem = sampled_fields[rf_field.name]
+            if problem is None:
                 rf_types[rf_field.name] = rf_field.type
+                continue
+            for method in game.methods:
+                if _collect_rf_call_sites(method.block, rf_field.name):
+                    _report_ineligible_rf(
+                        ctx,
+                        "Unique RF Simplification",
+                        rf_field.name,
+                        problem,
+                        method.signature.name,
+                    )
 
         if not rf_types:
             return game
@@ -531,34 +712,65 @@ class UniqueRFSimplification(TransformPass):
             name: rf_types[name] for name, result in analysis.items() if result.eligible
         }
 
-        # Near-miss: an RF that has a guarded call but escapes via a copy /
-        # argument / alias cannot be soundly simplified (F-019).
         if ctx is not None:
             for rf_name, result in analysis.items():
-                if not result.eligible and _rf_value_escapes(game, rf_name):
+                if result.unanalyzed_call is None:
+                    continue
+                # Reported where the guarded calls it blocks are; fields are
+                # renamed in canonical diffs, so no variable filter.
+                for method_name in dict.fromkeys(
+                    site.method for site in result.call_sites
+                ):
                     ctx.near_misses.append(
                         NearMiss(
                             transform_name="Unique RF Simplification",
                             reason=(
-                                f"Random function '{rf_name}' not simplified: its "
-                                "function value escapes (copied, aliased, or passed "
-                                "as an argument), so an unguarded evaluation may "
-                                "survive"
+                                f"Random function '{rf_name}' not simplified: "
+                                f"the call '{result.unanalyzed_call}' is not a "
+                                f"standalone assignment 'z = {rf_name}(r)' (it "
+                                "is in an else-if condition, a loop header, "
+                                "or a larger expression), so it is not "
+                                "checked to query a fresh <-uniq draw and may "
+                                "repeat a rewritten query"
                             ),
-                            location=None,
+                            location=result.unanalyzed_call.origin,
                             suggestion=(
-                                "Avoid copying or passing the random function "
-                                "value; call it directly at each use site"
+                                "Evaluate the random function into a local "
+                                "before the if or loop, so every call is a "
+                                "standalone assignment"
                             ),
-                            variable=rf_name,
-                            method=None,
+                            variable=None,
+                            method=method_name,
+                        )
+                    )
+            for rf_name, result in analysis.items():
+                for draw in result.overwritten_draws:
+                    ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Unique RF Simplification",
+                            reason=(
+                                f"Random function '{rf_name}' not simplified: "
+                                f"its argument, drawn by '<-uniq["
+                                f"{draw.unique_set_name}]', may be written "
+                                "between the draw and the call, so the call "
+                                "may repeat an earlier query"
+                            ),
+                            location=draw.origin,
+                            suggestion=(
+                                "Call the random function before writing the "
+                                "drawn variable, or write a different variable"
+                            ),
+                            # Canonical diffs rename fields, so a variable
+                            # filter would hide this near miss.
+                            variable=None,
+                            method=draw.method,
                         )
                     )
 
         if not eligible:
             return game
 
-        return _RFCallReplacer(eligible).transform(game)
+        return _RFCallReplacer(eligible, _collect_names_in_scope(game)).transform(game)
 
 
 class ExtractRFCalls(TransformPass):
@@ -575,8 +787,66 @@ class ExtractRFCalls(TransformPass):
         if not rf_types:
             return game
 
+        rf_names = set(rf_types.keys())
+        if ctx is not None:
+            for method in game.methods:
+                _report_unhoisted_rf_calls(method, rf_names, ctx)
+
         avoid = _collect_names_in_scope(game)
-        return _RFCallExtractor(set(rf_types.keys()), rf_types, avoid).transform(game)
+        return _RFCallExtractor(rf_names, rf_types, avoid).transform(game)
+
+
+def _report_unhoisted_rf_calls(
+    method: frog_ast.Method, rf_names: set[str], ctx: PipelineContext
+) -> None:
+    """Near miss for each RF call ``ExtractRFCalls`` keeps inside an ``if`` or
+    ``for`` although its argument is drawn by ``<-uniq`` in the method:
+    ``UniqueRFSimplification`` only treats a call in the draw's own block as
+    a fresh query."""
+    drawn: set[str] = set()
+    compounds: list[frog_ast.Statement] = []
+
+    def collect(node: frog_ast.ASTNode) -> bool:
+        if (
+            isinstance(node, frog_ast.UniqueSample)
+            and node.surface_form == "uniq"
+            and isinstance(node.var, frog_ast.Variable)
+        ):
+            drawn.add(node.var.name)
+        elif isinstance(
+            node, (frog_ast.IfStatement, frog_ast.NumericFor, frog_ast.GenericFor)
+        ):
+            compounds.append(node)
+        return False
+
+    SearchVisitor(collect).visit(method.block)
+    for statement in compounds:
+        call = _unhoisted_rf_call(statement, rf_names)
+        if call is None or not referenced_variable_names(call) & drawn:
+            continue
+        assert isinstance(call.func, frog_ast.Variable)
+        ctx.near_misses.append(
+            NearMiss(
+                transform_name="Extract RF Calls",
+                reason=(
+                    f"Call to random function '{call.func.name}' not hoisted "
+                    "out of its enclosing if/for: it may follow a write to "
+                    "its argument or not run on every path, so a call on a "
+                    "'<-uniq' draw made outside that block is not recognised "
+                    "as a fresh query"
+                ),
+                location=statement.origin,
+                suggestion=(
+                    "If the call runs on every path and its argument is not "
+                    "written before it, compute it before the if/for"
+                ),
+                # Canonical diffs rename fields and locals, so a variable
+                # filter would hide this near miss.
+                variable=None,
+                method=method.signature.name,
+            )
+        )
+        return
 
 
 # ---------------------------------------------------------------------------
@@ -1184,24 +1454,55 @@ def _find_rf_call_of_var(
 # guarantee this:
 #
 #   (A) ``S`` is the called RF's own domain ``RF.domain`` (whole-argument
-#       case only): RF.domain by construction holds every prior query, and the
-#       RF's semantics keep it in sync (including adversary oracle queries).
+#       case only), and every RF call site queries a ``<-uniq[RF.domain]``
+#       draw (draw-recorded, below).  ``RF.domain`` is a hidden set that
+#       holds exactly the points ``<-uniq[RF.domain]`` has drawn; evaluating
+#       ``RF(x)`` does not add ``x`` to it.  So an oracle
+#       ``Probe(x) { return RF(x); }`` may query the point ``v`` will be
+#       drawn at, or query ``v`` after it is drawn (audit F-002).  Nothing
+#       else can insert into ``RF.domain`` (a member access is not an
+#       assignment target), so no call site is union-recorded.
 #
-#   (B) ``S`` is a persistent game field, never reset, into which EVERY RF
-#       call site inserts its argument's k-th projection (either the projection
-#       is itself ``<-uniq[S]`` sampled, or the call's method does
-#       ``S = S union {proj}``).  This is the projection-tracking idiom (e.g.
-#       an ``Eval``/``Hash`` oracle doing ``seen = seen union {x[0]}`` before
-#       ``KDF(x)``).
+#   (B) ``S`` is a persistent game field, never reset, and every RF call
+#       site's k-th projection is recorded in ``S`` before the call, in a way
+#       that keeps it away from ``v``:
+#
+#       - draw-recorded: the projection is itself a ``<-uniq[S]`` draw.  If
+#         that draw runs after ``v``'s, ``v`` is already in ``S`` and the draw
+#         avoids it; if before, ``v`` avoids the draw.  Such a site counts
+#         wherever it is.
+#       - union-recorded: an earlier ``S = S union {proj}`` in the call's
+#         method.  This only says the queried point is in ``S``; the point can
+#         be anything, so it is kept away from ``v`` only if the call runs
+#         before ``v`` is drawn.  Every method other than Initialize is an
+#         oracle the adversary may call after any draw, so such a site counts
+#         only when it is in Initialize and, if ``v`` is drawn in Initialize
+#         too, comes before the draw in program order (``v`` is never drawn
+#         in a loop).
+#
+#       The recording must precede the call on every path, and nothing
+#       ``proj`` reads may be written in between, so the call queries the
+#       value ``S`` holds.  An inserted element may call only methods
+#       annotated ``deterministic``: any other call can return a different
+#       value at the insertion and at the RF call.
+#
+# In both regimes "every RF call site" includes, for a sampled ``let:``
+# function, the calls in the field initializers of the game being checked,
+# and such a call never counts.  (A game field RF is sampled in Initialize,
+# after its initializers run, so they query an earlier value and are not
+# checked.)
 #
 # The previously-missing check is what made an own-outputs-only exclusion set
 # (which does NOT track an adversary Hash oracle's queries) wrongly eligible.
+# An oracle that records an adversary-chosen point before querying it
+# (``Hash(x) { seen = seen union {x}; return H(x); }``) is refused as well:
+# a Hash query made after the draw can land on ``v``.
 
 
 def _all_rf_call_args(
-    method: frog_ast.Method, rf_name: str
+    node: frog_ast.ASTNode, rf_name: str
 ) -> list[frog_ast.Expression]:
-    """Every single argument expression of a call ``rf_name(arg)`` in *method*."""
+    """Every single argument expression of a call ``rf_name(arg)`` in *node*."""
     args: list[frog_ast.Expression] = []
 
     def collector(node: frog_ast.ASTNode) -> bool:
@@ -1214,7 +1515,7 @@ def _all_rf_call_args(
             args.append(node.args[0])
         return False
 
-    SearchVisitor(collector).visit(method.block)
+    SearchVisitor(collector).visit(node)
     return args
 
 
@@ -1269,19 +1570,51 @@ def _index_of_var_in_arg(arg: frog_ast.Expression, var_name: str) -> int | None 
     return False
 
 
-def _contains_return(node: frog_ast.ASTNode) -> bool:
-    """True if *node* contains a ``return`` statement anywhere."""
-    return (
-        SearchVisitor(lambda n: isinstance(n, frog_ast.ReturnStatement)).visit(node)
-        is not None
-    )
-
-
-def _is_union_add(
-    stmt: frog_ast.Statement, set_name: str, proj: frog_ast.Expression
+def _calls_only_deterministic(
+    expr: frog_ast.Expression, proof_namespace: frog_ast.Namespace
 ) -> bool:
-    """True if *stmt* is exactly ``set_name = set_name union {... proj ...}``."""
-    return (
+    """True if every call in *expr* is to a primitive method annotated
+    ``deterministic``.
+
+    Any other call (an unannotated primitive or scheme method, a game method,
+    a ``Function``) may return a different value each time it is evaluated, or
+    is not known here not to, so two evaluations of *expr* need not agree.
+    """
+
+    def unstable(node: frog_ast.ASTNode) -> bool:
+        if not isinstance(node, frog_ast.FuncCall):
+            return False
+        method = _lookup_primitive_method(node.func, proof_namespace)
+        return method is None or not method.deterministic
+
+    return SearchVisitor(unstable).visit(expr) is None
+
+
+def _inserted_projections(
+    stmt: frog_ast.Statement, set_name: str
+) -> list[frog_ast.Expression]:
+    """Expressions whose values *stmt* inserts into *set_name*, read after it.
+
+    Two forms insert:
+
+    - ``v <-uniq[set_name] T``: the draw is the insertion.  Only ``<-uniq[S]``
+      inserts; ``x <- T \\ S`` does not.  *set_name* may be a field set
+      ``S`` or a random function's hidden set ``RF.domain``.
+    - ``set_name = set_name union {e, ...}``.  An element that reads the set
+      changes with this write, so it is not returned.
+
+    An element may contain calls; :func:`_unrecorded_rf_query` decides whether
+    re-evaluating it gives the inserted value.
+    """
+    if (
+        isinstance(stmt, frog_ast.UniqueSample)
+        and stmt.surface_form == "uniq"
+        and isinstance(stmt.var, frog_ast.Variable)
+        and isinstance(stmt.unique_set, (frog_ast.Variable, frog_ast.FieldAccess))
+        and _get_unique_set_name(stmt.unique_set) == set_name
+    ):
+        return [stmt.var]
+    if (
         isinstance(stmt, frog_ast.Assignment)
         and isinstance(stmt.var, frog_ast.Variable)
         and stmt.var.name == set_name
@@ -1291,53 +1624,251 @@ def _is_union_add(
         and isinstance(stmt.value.left_expression, frog_ast.Variable)
         and stmt.value.left_expression.name == set_name
         and isinstance(stmt.value.right_expression, frog_ast.Set)
-        and any(elem == proj for elem in stmt.value.right_expression.elements)
-    )
+    ):
+        return [
+            elem
+            for elem in stmt.value.right_expression.elements
+            if set_name not in referenced_variable_names(elem)
+        ]
+    return []
 
 
-def _proj_tracked_in_set(
-    method: frog_ast.Method, set_name: str, proj: frog_ast.Expression
-) -> bool:
-    """True if *proj* is guaranteed to be in *set_name* on EVERY path through
-    *method* (path-sensitive -- audit F-001).
+def _statement_parts(
+    stmt: frog_ast.Statement,
+) -> tuple[list[frog_ast.ASTNode], list[frog_ast.Block]]:
+    """Split *stmt* into what it evaluates itself and its nested blocks."""
+    if isinstance(stmt, frog_ast.IfStatement):
+        return list(stmt.conditions), list(stmt.blocks)
+    if isinstance(stmt, frog_ast.NumericFor):
+        return [stmt.start, stmt.end], [stmt.block]
+    if isinstance(stmt, frog_ast.GenericFor):
+        return [stmt.over], [stmt.block]
+    if isinstance(stmt, frog_ast.Block):
+        return [], [stmt]
+    return [stmt], []
 
-    Two tracking forms qualify:
 
-    - *proj* is a variable sampled ``<-uniq[set_name]``: the draw IS the
-      insertion and the RF call uses the same drawn value, so the two are
-      path-consistent wherever the draw occurs.
-    - an UNCONDITIONAL top-level ``set_name = set_name union {... proj ...}``
-      that runs on every invocation.  A conditional add (nested under an
-      ``if``) or one placed after an early return lets an RF query slip
-      through untracked, so only a top-level add reached before any
-      early-return-bearing statement counts.
+@dataclass
+class _UnrecordedQuery:
+    """An RF call whose queried projection the exclusion set may not hold,
+    or may hold only after the draw the rewrite relies on."""
+
+    proj: frog_ast.Expression
+    # The method inserted ``proj`` earlier but may change it before the call.
+    rewritten: bool
+    # The method inserted ``proj``, but ``proj`` calls a method that is not
+    # annotated ``deterministic``, so the call may query another value.
+    unstable: bool = False
+    # The method inserted ``proj`` with ``S = S union {proj}`` before the
+    # call, but the call may run after the draw, so it may query the drawn
+    # point.
+    late: bool = False
+    # The call is in a field initializer; such a call never counts.
+    initializer: bool = False
+
+
+@dataclass
+class _InsertionScan:
+    """Insertions into the exclusion set seen while walking a method."""
+
+    proof_namespace: frog_ast.Namespace
+    # The ``<-uniq`` draw the rewrite relies on.
+    draw: frog_ast.Statement | None = None
+    # Whether a call recorded by ``S = S union {..}`` counts at the current
+    # point of the walk: only in Initialize, and only before ``draw``.
+    union_counts: bool = False
+    # Inserted, then possibly changed by a write.
+    dropped: list[frog_ast.Expression] = field(default_factory=list)
+    # Inserted, but a re-evaluation may differ (a non-deterministic call).
+    unstable: list[frog_ast.Expression] = field(default_factory=list)
+
+
+@dataclass
+class _Recorded:
+    """Projections recorded in the exclusion set before a point of a method."""
+
+    # Values drawn by ``<-uniq[S]``.
+    drawn: list[frog_ast.Expression] = field(default_factory=list)
+    # Elements inserted by ``S = S union {..}``.
+    inserted: list[frog_ast.Expression] = field(default_factory=list)
+
+
+def _unrecorded_rf_query(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    block: frog_ast.Block,
+    rf_name: str,
+    set_name: str,
+    proj_index: int | None,
+    recorded: _Recorded,
+    scan: _InsertionScan,
+) -> _UnrecordedQuery | None:
+    """The first ``rf_name`` call in *block* whose projection *set_name* may
+    not hold, or may hold only by an insertion that does not keep it away
+    from the draw, or ``None`` (audit F-001).
+
+    A call counts only when a recording of the same expression runs before
+    it on every path, and nothing that expression reads is written in
+    between.  *recorded* holds the recordings made before *block*.  A
+    statement's writes, at any depth, count before its own calls.  An
+    inserted element that calls a method not annotated ``deterministic``
+    never counts: the insertion and the call each evaluate it, and the two
+    values may differ.  A ``<-uniq[set_name]`` draw of the projection always
+    counts; an ``S = S union {..}`` insertion counts only while
+    ``scan.union_counts`` holds, which the walk clears on reaching
+    ``scan.draw``.
     """
+    dropped = scan.dropped
+    drawn = list(recorded.drawn)
+    inserted = list(recorded.inserted)
+    for stmt in block.statements:
+        if stmt is scan.draw:
+            scan.union_counts = False
+        for kept_list in (drawn, inserted):
+            kept = [
+                proj
+                for proj in kept_list
+                if not reassigns_or_rebinds(referenced_variable_names(proj), stmt)
+            ]
+            dropped += [proj for proj in kept_list if proj not in kept]
+            kept_list[:] = kept
+        header, nested = _statement_parts(stmt)
+        for node in header:
+            for arg in _all_rf_call_args(node, rf_name):
+                proj = _projection_expr(arg, proj_index)
+                if proj is None:
+                    return _UnrecordedQuery(arg, False)
+                if proj in drawn or (proj in inserted and scan.union_counts):
+                    continue
+                if proj in inserted:
+                    return _UnrecordedQuery(proj, False, late=True)
+                return _UnrecordedQuery(proj, proj in dropped, proj in scan.unstable)
+        for inner in nested:
+            query = _unrecorded_rf_query(
+                inner,
+                rf_name,
+                set_name,
+                proj_index,
+                _Recorded(list(drawn), list(inserted)),
+                scan,
+            )
+            if query is not None:
+                return query
+        is_draw = isinstance(stmt, frog_ast.UniqueSample)
+        for proj in _inserted_projections(stmt, set_name):
+            if is_draw:
+                drawn.append(proj)
+            elif _calls_only_deterministic(proj, scan.proof_namespace):
+                inserted.append(proj)
+            else:
+                scan.unstable.append(proj)
+    return None
 
-    # Form 1: <-uniq[set_name] draw (anywhere -- path-consistent with its use).
-    def is_uniq_draw(node: frog_ast.ASTNode) -> bool:
-        return (
-            isinstance(node, frog_ast.UniqueSample)
-            # Only `<-uniq[S]` inserts the draw into S; `x <- T \ S` does not.
-            and node.surface_form == "uniq"
-            and isinstance(node.var, frog_ast.Variable)
-            and isinstance(proj, frog_ast.Variable)
-            and node.var.name == proj.name
-            and isinstance(node.unique_set, frog_ast.Variable)
-            and node.unique_set.name == set_name
+
+def _method_queries(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    game: frog_ast.Game,
+    rf_name: str,
+    set_name: str,
+    proj_index: int | None,
+    proof_namespace: frog_ast.Namespace,
+    draw: frog_ast.UniqueSample,
+) -> list[tuple[str, _UnrecordedQuery | None]]:
+    """For each field whose initializer queries *rf_name* (see
+    :func:`_initializers_reaching_rf`), and for each method, the first
+    *rf_name* call the gate does not count (see :func:`_unrecorded_rf_query`),
+    or ``None`` for a method with none.
+
+    A field initializer's call never counts.  Initialize runs once, before any oracle, so a call it
+    records with ``S = S union {..}`` precedes a draw made in an oracle, and
+    precedes a draw made in Initialize if it comes first in program order.
+    A draw is never in a loop (the pass skips loop bodies), so a call
+    written before it cannot also run after it.
+    """
+    result: list[tuple[str, _UnrecordedQuery | None]] = []
+    for field_name, value in _initializers_reaching_rf(game, rf_name):
+        args = _all_rf_call_args(value, rf_name)
+        if args:
+            proj = _projection_expr(args[0], proj_index)
+            result.append(
+                (
+                    field_name,
+                    _UnrecordedQuery(
+                        args[0] if proj is None else proj, False, initializer=True
+                    ),
+                )
+            )
+    for method in game.methods:
+        query = _unrecorded_rf_query(
+            method.block,
+            rf_name,
+            set_name,
+            proj_index,
+            _Recorded(),
+            _InsertionScan(
+                proof_namespace,
+                draw=draw,
+                union_counts=method.signature.name == "Initialize",
+            ),
         )
+        result.append((method.signature.name, query))
+    return result
 
-    if SearchVisitor(is_uniq_draw).visit(method.block) is not None:
-        return True
 
-    # Form 2: an unconditional top-level union-add, reached before any
-    # statement that can return early on some path.
-    for stmt in method.block.statements:
-        if _is_union_add(stmt, set_name, proj):
-            return True
-        if _contains_return(stmt):
-            # An early return here would skip a later add on some path.
-            break
-    return False
+def _explained_unrecorded_query(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    game: frog_ast.Game,
+    rf_name: str,
+    set_name: str,
+    proj_index: int | None,
+    proof_namespace: frog_ast.Namespace,
+    draw: frog_ast.UniqueSample,
+) -> tuple[str, _UnrecordedQuery] | None:
+    """A method and an *rf_name* call in it on a projection the method
+    inserts into *set_name*, but which may differ from the inserted value
+    (rewritten, or calling a non-deterministic method), or else which may
+    run after *draw*; ``None`` if there is neither."""
+    queries = [
+        (name, query)
+        for name, query in _method_queries(
+            game, rf_name, set_name, proj_index, proof_namespace, draw
+        )
+        if query is not None
+    ]
+    for name, query in queries:
+        if query.rewritten or query.unstable:
+            return name, query
+    for name, query in queries:
+        if query.late:
+            return name, query
+    return None
+
+
+def _first_unrecorded_query(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+    game: frog_ast.Game,
+    rf_name: str,
+    set_name: str,
+    proj_index: int | None,
+    proof_namespace: frog_ast.Namespace,
+    draw: frog_ast.UniqueSample,
+) -> tuple[str, _UnrecordedQuery] | None:
+    """The first field or method, with its *rf_name* call, that the gate
+    does not count; ``None`` if there is none."""
+    for name, query in _method_queries(
+        game, rf_name, set_name, proj_index, proof_namespace, draw
+    ):
+        if query is not None:
+            return name, query
+    return None
+
+
+def _occurrences(node: frog_ast.ASTNode, target: frog_ast.ASTNode) -> int:
+    """How many times the object *target* itself appears in *node*."""
+    count = [0]
+
+    def same(child: frog_ast.ASTNode) -> bool:
+        if child is target:
+            count[0] += 1
+        return False
+
+    SearchVisitor(same).visit(node)
+    return count[0]
 
 
 def _set_only_monotone(game: frog_ast.Game, set_name: str) -> bool:
@@ -1391,40 +1922,163 @@ def _set_only_monotone(game: frog_ast.Game, set_name: str) -> bool:
     return ok[0]
 
 
-def _exclusion_adequate(
+def _exclusion_adequate(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     game: frog_ast.Game,
     rf_name: str,
     set_name: str,
     proj_index: int | None,
     field_names: set[str],
+    proof_namespace: frog_ast.Namespace,
+    draw: frog_ast.UniqueSample,
 ) -> bool:
-    """Whether ``v <-uniq[set_name]`` at projection *proj_index* of an
-    ``rf_name(arg)`` call guarantees the queried point is fresh for ``rf_name``.
-    See the regime (A)/(B) discussion above."""
-    # Regime (A): the exclusion set is the called RF's own domain.  Whether
-    # `RF.domain` tracks plain `RF(x)` evaluations (standard ROM table) or only
-    # `<-uniq[RF.domain]` draws (USER-ATTENTION sec 1.b) is a CONTESTED semantics
-    # ruling and the crux of F-002/F-003: tightening regime A to require every
-    # RF query to be a tracked fresh draw rejects standard ROM proofs (the
-    # adversary `Hash(x){ return H(x); }` oracle) that the example corpus relies
-    # on.  Per Principle 6/7 this is left as-is pending the user's ruling; F-002
-    # is ESCALATED.
-    if set_name == f"{rf_name}.domain" and proj_index is None:
-        return True
-    # Regime (B): persistent, never-reset field that tracks the k-th
-    # projection of every RF call site.
-    if set_name not in field_names:
+    """Whether the draw *draw* (``v <-uniq[set_name]``), at projection
+    *proj_index* of an ``rf_name(arg)`` call, guarantees the queried point is
+    fresh for ``rf_name``.  See the regime (A)/(B) discussion above."""
+    if set_name == f"{rf_name}.domain":
+        # Regime (A): the exclusion set is the called RF's own hidden set,
+        # which holds only `<-uniq[RF.domain]` draws, not RF's queries
+        # (F-002), and which nothing but such a draw changes.  The walk below
+        # then accepts only if every RF query is on such a draw.
+        if proj_index is not None:
+            return False
+    else:
+        # Regime (B): persistent, never-reset field that tracks the k-th
+        # projection of every RF call site.
+        if set_name not in field_names:
+            return False
+        if not _set_only_monotone(game, set_name):
+            return False
+    # The walk finds the draw by identity to tell which Initialize calls
+    # precede it; anything but one occurrence leaves that unknown.
+    if _occurrences(game, draw) != 1:
         return False
-    if not _set_only_monotone(game, set_name):
-        return False
-    for method in game.methods:
-        for arg in _all_rf_call_args(method, rf_name):
-            proj = _projection_expr(arg, proj_index)
-            if proj is None:
-                return False
-            if not _proj_tracked_in_set(method, set_name, proj):
-                return False
-    return True
+    return all(
+        query is None
+        for _, query in _method_queries(
+            game, rf_name, set_name, proj_index, proof_namespace, draw
+        )
+    )
+
+
+def _shown_point(proj: frog_ast.Expression) -> str | None:
+    """*proj* quoted for a message, or ``None`` when it names a variable the
+    engine minted (an alpha-renamed local ``__a0__``, an inlined parameter
+    ``E.f@x0``), which is not a name the user wrote."""
+    minted = SearchVisitor(
+        lambda node: isinstance(node, frog_ast.Variable)
+        and (
+            (node.name.startswith("__") and node.name.endswith("__"))
+            or "@" in node.name
+        )
+    ).visit(proj)
+    return None if minted is not None else f"'{proj}'"
+
+
+def _unrecorded_miss(  # pylint: disable=too-many-arguments
+    rf_name: str,
+    set_name: str,
+    where: str,
+    query: _UnrecordedQuery,
+    *,
+    own_domain: bool,
+) -> tuple[str, str]:
+    """Reason and suggestion for a draw declined because of *query*, a call
+    the gate does not count, made in the method or field initializer
+    *where*: any such call for a ``<-uniq[rf_name.domain]`` draw, and a
+    field initializer's call for another set."""
+    shown = _shown_point(query.proj)
+    point = shown if shown is not None else "a point"
+    if query.initializer:
+        reason = (
+            f"the initializer of field '{where}' queries '{rf_name}' on "
+            f"{point}, and a query in a field initializer never counts, so "
+            f"'{rf_name}' is not shown to be fresh at the point drawn here"
+        )
+        if own_domain:
+            suggestion = (
+                f"Make the query in a method, on a point drawn there with "
+                f"<-uniq[{set_name}]; otherwise account for the collision "
+                "explicitly, e.g. with a ROFreshSampling helper game or an "
+                "identical-until-bad hop"
+            )
+        else:
+            suggestion = (
+                f"Make the query in a method, on a point drawn there with "
+                f"<-uniq[{set_name}], or in Initialize after inserting the "
+                f"point into '{set_name}', before the draw"
+            )
+        return reason, suggestion
+    which = f"{shown}, which" if shown is not None else "a point that"
+    again = shown if shown is not None else "that point"
+    reason = (
+        f"'{where}' queries '{rf_name}' on {which} no earlier "
+        f"<-uniq[{set_name}] draw in '{where}' fixes (one in the call's block "
+        "or an enclosing block, not written since); "
+        f"'{set_name}' holds only the points <-uniq[{set_name}] has drawn, so "
+        f"{again} may be the point drawn here and '{rf_name}' need not be "
+        "fresh there"
+    )
+    suggestion = (
+        f"Query '{rf_name}' only on points drawn with <-uniq[{set_name}] "
+        "earlier in the same method; otherwise account for the collision "
+        "explicitly, e.g. with a ROFreshSampling helper game or an "
+        "identical-until-bad hop"
+    )
+    return reason, suggestion
+
+
+def _explained_miss(
+    stmt: frog_ast.UniqueSample,
+    rf_name: str,
+    set_name: str,
+    method_name: str,
+    query: _UnrecordedQuery,
+) -> tuple[str, str]:
+    """Reason and suggestion for a draw declined because of *query*, an
+    insertion-recorded call (see :func:`_explained_unrecorded_query`)."""
+    if query.late:
+        drawn = str(stmt.var)
+        when = (
+            f"Initialize calls it after drawing '{drawn}'"
+            if method_name == "Initialize"
+            else f"the adversary may call '{method_name}' after '{drawn}' is drawn"
+        )
+        reason = (
+            f"'{method_name}' inserts '{query.proj}' into '{set_name}' "
+            f"before calling '{rf_name}' on it, but {when}, so "
+            f"'{query.proj}' may equal '{drawn}' and '{rf_name}' need not "
+            f"be fresh at '{drawn}'; only a query made in Initialize "
+            "before the draw is kept away from it by an insertion"
+        )
+        suggestion = (
+            "Make the query in Initialize before the draw, or draw the "
+            f"queried point itself with <-uniq[{set_name}]; otherwise "
+            "account for the collision explicitly, e.g. with a "
+            "ROFreshSampling helper game or an identical-until-bad hop"
+        )
+    elif query.unstable:
+        reason = (
+            f"'{method_name}' inserts '{query.proj}' into '{set_name}' "
+            f"and calls '{rf_name}' on it, but it calls a method not "
+            "annotated deterministic, so the call may query a value "
+            f"'{set_name}' does not hold"
+        )
+        suggestion = (
+            "Evaluate the value once into a local, then insert the local "
+            "and call the random function on it"
+        )
+    else:
+        reason = (
+            f"'{method_name}' inserts '{query.proj}' into '{set_name}' "
+            f"but may change it before calling '{rf_name}' on it, so "
+            f"'{set_name}' need not hold the point '{rf_name}' is "
+            "queried on"
+        )
+        suggestion = (
+            "Do not reassign the inserted value, or anything it reads, "
+            "before the random-function call"
+        )
+    return reason, suggestion
 
 
 class _FreshInputRFTransformer(BlockTransformer):
@@ -1441,20 +2095,35 @@ class _FreshInputRFTransformer(BlockTransformer):
     injective, so a fresh leaf yields a fresh composite argument.
     """
 
-    def __init__(
+    def __init__(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         self,
         rf_types: dict[str, frog_ast.FunctionType],
         ctx: PipelineContext | None = None,
         game: frog_ast.Game | None = None,
         field_names: set[str] | None = None,
+        ineligible: dict[str, _RFIneligibility] | None = None,
     ) -> None:
         self.rf_types = rf_types
+        # Sampled functions that fail the shared eligibility rule; a draw
+        # queried on one of them gets a near miss instead of a rewrite.
+        self.ineligible = ineligible if ineligible is not None else {}
         self.ctx = ctx
         # Original game and its field names, used by the soundness gate to
-        # verify the <-uniq exclusion set provably covers the RF's domain.
+        # verify that no other query of the RF can be on the <-uniq draw.
         self.game = game
         self.field_names = field_names if field_names is not None else set()
         self._loop_depth = 0
+        # The method being transformed, for near-miss reports.
+        self._method: str | None = None
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        """Track the enclosing method for near-miss reports."""
+        saved = self._method
+        self._method = method.signature.name
+        try:
+            return self._transform_children(method)
+        finally:
+            self._method = saved
 
     def transform_numeric_for(  # type: ignore[override]
         self, node: frog_ast.NumericFor
@@ -1482,6 +2151,85 @@ class _FreshInputRFTransformer(BlockTransformer):
         new_node.block = new_block
         return new_node
 
+    def _record_near_miss(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        stmt: frog_ast.UniqueSample,
+        rf_name: str,
+        set_name: str,
+        explained: tuple[str, _UnrecordedQuery] | None,
+        unrecorded: tuple[str, _UnrecordedQuery] | None = None,
+    ) -> None:
+        """Record why ``rf_name`` on the ``stmt`` draw was kept.
+
+        *explained* is as :func:`_explained_unrecorded_query` returns (only
+        for a set other than ``rf_name.domain``); *unrecorded* is the first
+        query the gate does not count, when nothing is explained."""
+        if self.ctx is None:
+            return
+        own_domain = set_name == f"{rf_name}.domain"
+        variable: str | None = rf_name
+        method: str | None = None
+        unsuitable = (
+            None if own_domain else self._unsuitable_set_miss(rf_name, set_name)
+        )
+        if explained is not None:
+            reason, suggestion = _explained_miss(stmt, rf_name, set_name, *explained)
+        elif unsuitable is not None:
+            reason, suggestion = unsuitable
+        elif unrecorded is not None and (own_domain or unrecorded[1].initializer):
+            reason, suggestion = _unrecorded_miss(
+                rf_name, set_name, *unrecorded, own_domain=own_domain
+            )
+            # Fields are renamed in canonical diffs, so a variable filter
+            # would hide this near miss; it sits on the method of the draw.
+            variable, method = None, self._method
+        else:
+            reason = (
+                f"RF '{rf_name}' input is sampled <-uniq[{set_name}], but "
+                f"'{set_name}' need not hold every point '{rf_name}' is "
+                "queried on (its relevant projection): some RF call site does "
+                "not add its argument to the exclusion set, so RF(input) may "
+                "not be fresh"
+            )
+            suggestion = (
+                "Draw every point the random function is queried on (its "
+                f"matching component) with <-uniq[{set_name}], or insert it "
+                f"into '{set_name}' in Initialize before the draw"
+            )
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Fresh Input RF To Uniform",
+                reason=reason,
+                location=stmt.origin,
+                suggestion=suggestion,
+                variable=variable,
+                method=method,
+            )
+        )
+
+    def _unsuitable_set_miss(
+        self, rf_name: str, set_name: str
+    ) -> tuple[str, str] | None:
+        """Reason and suggestion when the exclusion set itself rules the
+        rewrite out (not a game field, or reset); ``None`` otherwise."""
+        if "." in set_name or set_name not in self.field_names:
+            return (
+                f"'{set_name}' is neither '{rf_name}.domain' nor a game field, "
+                f"so it need not hold the points '{rf_name}' is queried on",
+                f"Draw the input with <-uniq[{rf_name}.domain], or from a "
+                f"never-reset field set, and query '{rf_name}' elsewhere only "
+                "on points drawn from the same set",
+            )
+        if self.game is not None and not _set_only_monotone(self.game, set_name):
+            return (
+                f"'{set_name}' is assigned other than by '{set_name} = "
+                f"{set_name} union {{..}}', so it need not still hold the "
+                f"earlier queries of '{rf_name}'",
+                f"Only add to '{set_name}', with '{set_name} = {set_name} "
+                "union {..}'",
+            )
+        return None
+
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         # Don't transform inside loop bodies — the same <-uniq sample
         # would be evaluated multiple times per game execution.
@@ -1508,13 +2256,22 @@ class _FreshInputRFTransformer(BlockTransformer):
 
             # That single use must be as the sole argument to an RF call
             rf_call = _find_rf_call_of_var(
-                remaining, var_name, set(self.rf_types.keys())
+                remaining, var_name, set(self.rf_types) | set(self.ineligible)
             )
             if rf_call is None:
                 continue
 
             assert isinstance(rf_call.func, frog_ast.Variable)
             rf_name = rf_call.func.name
+            if rf_name in self.ineligible:
+                _report_ineligible_rf(
+                    self.ctx,
+                    "Fresh Input RF To Uniform",
+                    rf_name,
+                    self.ineligible[rf_name],
+                    self._method,
+                )
+                continue
 
             # Don't simplify if the RF call is inside a loop
             if _rf_call_in_loop(remaining, rf_name):
@@ -1523,11 +2280,13 @@ class _FreshInputRFTransformer(BlockTransformer):
             # SOUNDNESS GATE: the <-uniq exclusion set must provably exclude
             # every input the RF has been (or will be) queried on, in the
             # k-th projection where the fresh variable sits.  Without this,
-            # an exclusion set that does not track the RF's full domain (e.g.
-            # an own-outputs-only set that ignores an adversary Hash oracle)
-            # would yield an unsound RF(v) -> uniform replacement.
+            # an exclusion set that does not hold every point the RF is
+            # queried on (e.g. an own-outputs-only set, or RF.domain, next to
+            # an adversary Hash oracle) would yield an unsound
+            # RF(v) -> uniform replacement.
             set_name = _get_unique_set_name(stmt.unique_set)
             proj_index = _index_of_var_in_arg(rf_call.args[0], var_name)
+            proof_namespace = self.ctx.proof_namespace if self.ctx is not None else {}
             if proj_index is False or self.game is None:
                 _adequate = False
             else:
@@ -1537,30 +2296,32 @@ class _FreshInputRFTransformer(BlockTransformer):
                     set_name,
                     proj_index,  # type: ignore[arg-type]
                     self.field_names,
+                    proof_namespace,
+                    stmt,
                 )
             if not _adequate:
-                if self.ctx is not None:
-                    self.ctx.near_misses.append(
-                        NearMiss(
-                            transform_name="Fresh Input RF To Uniform",
-                            reason=(
-                                f"RF '{rf_name}' input is sampled <-uniq"
-                                f"[{set_name}], but '{set_name}' is not "
-                                f"provably a superset of '{rf_name}'.domain "
-                                "(its relevant projection): some RF call site "
-                                "does not add its argument to the exclusion "
-                                "set, so RF(input) may not be fresh"
-                            ),
-                            location=stmt.origin,
-                            suggestion=(
-                                f"sample with <-uniq[{rf_name}.domain], or "
-                                "ensure every RF call site inserts its input's "
-                                "matching component into the exclusion set"
-                            ),
-                            variable=rf_name,
-                            method=None,
+                explained = None
+                unrecorded = None
+                if self.game is not None and proj_index is not False:
+                    if set_name != f"{rf_name}.domain":
+                        explained = _explained_unrecorded_query(
+                            self.game,
+                            rf_name,
+                            set_name,
+                            proj_index,  # type: ignore[arg-type]
+                            proof_namespace,
+                            stmt,
                         )
-                    )
+                    if explained is None:
+                        unrecorded = _first_unrecorded_query(
+                            self.game,
+                            rf_name,
+                            set_name,
+                            proj_index,  # type: ignore[arg-type]
+                            proof_namespace,
+                            stmt,
+                        )
+                self._record_near_miss(stmt, rf_name, set_name, explained, unrecorded)
                 continue
 
             range_type = copy.deepcopy(self.rf_types[rf_name].range_type)
@@ -1577,10 +2338,12 @@ class _FreshInputRFTransformer(BlockTransformer):
                 copy.deepcopy(range_type),  # type: ignore[arg-type]
             )
 
-            # Drop the original v sample (now dead) and prepend the
-            # fresh-result sample.
+            # Keep the v draw: `v <-uniq[S] T` also inserts v into S, and
+            # S may be read elsewhere (|S|, `x in S`, later draws).  Dead-code
+            # elimination drops the draw once that insertion is unobservable.
+            # The fresh-result sample follows it.
             new_stmts = (
-                list(block.statements[:sample_idx])
+                list(block.statements[: sample_idx + 1])
                 + [sample_stmt]
                 + list(new_remaining.statements)
             )
@@ -1596,55 +2359,55 @@ class FreshInputRFToUniform(TransformPass):
     concatenations containing the variable.
 
     The replacement is exactly sound (no guessing loss) only when the
-    ``<-uniq[S]`` exclusion set provably covers the RF's queried domain at the
-    variable's position; this is checked by :func:`_exclusion_adequate`
-    (regimes A/B).  When it cannot be established the pass declines and records
-    a near-miss rather than firing unsoundly.
+    ``<-uniq[S]`` draw keeps the variable away from every other point the RF
+    is queried on, at the variable's position; this is checked by
+    :func:`_exclusion_adequate` (regimes A/B).  When it cannot be established
+    the pass declines and records a near-miss rather than firing unsoundly.
     """
 
     name = "Fresh Input RF To Uniform"
 
-    @staticmethod
-    def _sampled_function_fields(game: frog_ast.Game) -> set[str]:
-        """Return names of Function fields that are sampled in Initialize."""
-        sampled: set[str] = set()
-        for method in game.methods:
-            if method.signature.name != "Initialize":
-                continue
-            for stmt in method.block.statements:
-                if (
-                    isinstance(stmt, frog_ast.Sample)
-                    and isinstance(stmt.var, frog_ast.Variable)
-                    and isinstance(stmt.sampled_from, frog_ast.FunctionType)
-                ):
-                    sampled.add(stmt.var.name)
-        return sampled
-
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         # Collect RF types from sampled game fields and sampled proof-level
         # Functions.  Only Functions that are explicitly sampled (via <-)
-        # are random functions; unsampled ones are known deterministic.
+        # are random functions; unsampled ones are known deterministic.  Each
+        # must also pass the shared eligibility rule (written only by its
+        # sample -- a sampled let: function nowhere in the game -- and never
+        # escaping into another name).
         rf_types: dict[str, frog_ast.FunctionType] = {}
-        sampled_fields = self._sampled_function_fields(game)
+        ineligible: dict[str, _RFIneligibility] = {}
+        sampled_fields = _classify_sampled_function_fields(game)
         for rf_field in game.fields:
             if (
                 isinstance(rf_field.type, frog_ast.FunctionType)
                 and rf_field.name in sampled_fields
             ):
-                rf_types[rf_field.name] = rf_field.type
+                problem = sampled_fields[rf_field.name]
+                if problem is None:
+                    rf_types[rf_field.name] = rf_field.type
+                else:
+                    ineligible[rf_field.name] = problem
         for entry in ctx.proof_let_types.type_map:
             if (
                 isinstance(entry.type, frog_ast.FunctionType)
                 and entry.name in ctx.sampled_let_names
             ):
-                rf_types[entry.name] = entry.type
+                problem = _rf_ineligibility(game, entry.name, None)
+                if problem is None:
+                    rf_types[entry.name] = entry.type
+                else:
+                    ineligible[entry.name] = problem
 
-        if not rf_types:
+        if not rf_types and not ineligible:
             return game
 
         field_names = {f.name for f in game.fields}
         return _FreshInputRFTransformer(
-            rf_types, ctx, game=game, field_names=field_names
+            rf_types,
+            ctx,
+            game=game,
+            field_names=field_names,
+            ineligible=ineligible,
         ).transform(game)
 
 
@@ -1778,12 +2541,19 @@ def _find_challenge_guard(
 
 def _build_local_assignments(
     block: frog_ast.Block,
+    coercing: frozenset[str] = frozenset(),
 ) -> dict[str, frog_ast.Expression]:
-    """Build a map of ``{var_name: rhs}`` for simple local assignments."""
+    """Build a map of ``{var_name: rhs}`` for simple local assignments.
+
+    A name in *coercing* is left out: a store converts an Int into its
+    ModInt type, so it holds the RHS reduced modulo the modulus (F-356).
+    """
     result: dict[str, frog_ast.Expression] = {}
     for stmt in block.statements:
-        if isinstance(stmt, frog_ast.Assignment) and isinstance(
-            stmt.var, frog_ast.Variable
+        if (
+            isinstance(stmt, frog_ast.Assignment)
+            and isinstance(stmt.var, frog_ast.Variable)
+            and stmt.var.name not in coercing
         ):
             result[stmt.var.name] = stmt.value
     return result
@@ -2069,29 +2839,177 @@ def _rf_args_structurally_differ(
     return _check_exprs(init_arg, oracle_arg)
 
 
-def _sampled_function_fields_in_init(
-    game: frog_ast.Game,
-) -> set[str]:
-    """Return names of ``Function`` fields that are genuinely SAMPLED.
+# ---------------------------------------------------------------------------
+# Random-function eligibility (shared by the RF rewrite passes)
+# ---------------------------------------------------------------------------
+#
+# A rewrite such as ``H(v) -> z <- R`` reasons about every query ``H`` ever
+# answers, by finding the calls ``H(...)`` in the game.  That is sound only
+# when the name ``H`` denotes ONE function, sampled uniformly, throughout the
+# game, and every query to it is a call written ``H(...)``:
+#
+#   (a) ``H`` is written exactly once: by its ``H <- Function<...>`` sample
+#       (in Initialize for a field; a sampled ``let:`` function is sampled
+#       outside the game, so it is written nowhere in it).  Any other write --
+#       an assignment ``H = F`` in an oracle, a second assignment or sample in
+#       Initialize, an element write, a loop binder, declaration or method
+#       parameter rebinding the name -- can leave ``H`` holding a function the
+#       adversary knows or queries under another name.
+#   (b) ``H``'s value never escapes into another name: apart from direct calls
+#       ``H(...)`` and metadata reads ``H.domain``, any occurrence (a copy
+#       ``K = H``, an argument ``f(H)``, ``return H``, a tuple, map or field
+#       holding it) lets the adversary or the game query ``H`` through a name
+#       the call-site analysis does not follow.
 
-    A function field is a *sampled random function* (re-samplable / ROM) only
-    when it is bound via ``H <- Function<...>`` in ``Initialize``.  A field
-    bound by an ordinary assignment ``H = F;`` (a known/standard-model
-    function) is NOT a random function, so the RF-to-uniform rewrite is invalid
-    for it (verdict vector (a)).
+
+@dataclass(frozen=True)
+class _RFIneligibility:
+    """Why a sampled ``Function`` name is not a random function the RF
+    rewrites may reason about (see the eligibility rule above)."""
+
+    # "written": a write other than its one sample; "escapes": the value is
+    # used other than by a direct call or ``.domain``.
+    kind: str
+    method: str | None = None
+    origin: frog_ast.SourceOrigin | None = None
+
+    def reason(self, rf_name: str) -> str:
+        """A near-miss reason naming *rf_name*."""
+        if self.kind == "written":
+            where = f"'{self.method}'" if self.method is not None else "the game"
+            return (
+                f"Random function '{rf_name}' not simplified: {where} writes or "
+                f"rebinds '{rf_name}' besides its one '{rf_name} <- Function<...>' "
+                "sample, so after that write it need not be the sampled random "
+                "function the rewrite assumes"
+            )
+        return (
+            f"Random function '{rf_name}' not simplified: its function value "
+            "escapes (copied, aliased, returned, or passed as an argument), so "
+            "a query through another name is invisible to the call-site "
+            "analysis and an unguarded evaluation may survive"
+        )
+
+    def suggestion(self, rf_name: str) -> str:
+        """A near-miss suggestion naming *rf_name*."""
+        if self.kind == "written":
+            return (
+                f"Sample '{rf_name}' once in Initialize and never assign it "
+                "again; model a re-keyed or adversary-chosen function with a "
+                "separate field"
+            )
+        return (
+            "Avoid copying or passing the random function value; call it "
+            "directly at each use site"
+        )
+
+
+def _writes_or_rebinds_name(node: frog_ast.ASTNode, name: str) -> bool:
+    """True if *node* itself writes *name* (any l-value with base *name*) or
+    binds a new variable called *name* (loop binder, bare declaration)."""
+    if isinstance(node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)):
+        return lvalue_base_name(node.var) == name
+    if isinstance(node, frog_ast.NumericFor):
+        return node.name == name
+    if isinstance(node, frog_ast.GenericFor):
+        return node.var_name == name
+    if isinstance(node, frog_ast.VariableDeclaration):
+        return node.name == name
+    return False
+
+
+def _rf_ineligibility(
+    game: frog_ast.Game,
+    rf_name: str,
+    sample: frog_ast.Statement | None,
+) -> _RFIneligibility | None:
+    """Why *rf_name* fails the random-function eligibility rule above, or
+    ``None`` if it passes.
+
+    *sample* is the statement that samples *rf_name* in the game (its one
+    permitted write), or ``None`` for a function sampled outside the game.
     """
-    sampled: set[str] = set()
+    for method in game.methods:
+        if any(param.name == rf_name for param in method.signature.parameters):
+            return _RFIneligibility("written", method.signature.name, None)
+        write = SearchVisitor(
+            lambda n: n is not sample and _writes_or_rebinds_name(n, rf_name)
+        ).visit(method.block)
+        if write is not None:
+            return _RFIneligibility("written", method.signature.name, write.origin)
+    if _rf_value_escapes(game, rf_name):
+        return _RFIneligibility("escapes")
+    return None
+
+
+def _classify_sampled_function_fields(
+    game: frog_ast.Game,
+) -> dict[str, _RFIneligibility | None]:
+    """Map each name sampled as a ``Function`` in Initialize to why it fails
+    the random-function eligibility rule, or to ``None`` when it passes.
+
+    A function field is a *sampled random function* (ROM) only when it is
+    bound via ``H <- Function<...>`` in ``Initialize``.  A field bound by an
+    ordinary assignment ``H = F;`` (a known/standard-model function) is NOT a
+    random function, so the RF-to-uniform rewrite is invalid for it (verdict
+    vector (a)); such a field is absent from the map.
+
+    The sample must also hold wherever the field is read (F-349): it is a
+    top-level statement, no earlier Initialize statement may return (the
+    field would keep its initial value) or read the field (it would see the
+    initial value), and it is untyped (a typed sample declares a local).
+    """
+    sampled: dict[str, _RFIneligibility | None] = {}
     for method in game.methods:
         if method.signature.name != "Initialize":
             continue
-        for stmt in method.block.statements:
+        stmts = method.block.statements
+        for idx, stmt in enumerate(stmts):
             if (
                 isinstance(stmt, frog_ast.Sample)
+                and stmt.the_type is None
                 and isinstance(stmt.var, frog_ast.Variable)
                 and isinstance(stmt.sampled_from, frog_ast.FunctionType)
+                and not may_return_before(stmts, idx)
+                and not any(_references_name(s, stmt.var.name) for s in stmts[:idx])
             ):
-                sampled.add(stmt.var.name)
+                sampled[stmt.var.name] = _rf_ineligibility(game, stmt.var.name, stmt)
     return sampled
+
+
+def _report_ineligible_rf(
+    ctx: PipelineContext | None,
+    transform_name: str,
+    rf_name: str,
+    problem: _RFIneligibility,
+    method: str | None,
+) -> None:
+    """Record a near miss for a sampled function the pass would otherwise
+    have treated as a random function, declining a rewrite in *method*."""
+    if ctx is None:
+        return
+    ctx.near_misses.append(
+        NearMiss(
+            transform_name=transform_name,
+            reason=problem.reason(rf_name),
+            location=problem.origin,
+            suggestion=problem.suggestion(rf_name),
+            # Canonical diffs rename fields, so a variable filter would hide
+            # this near miss; the method is where the rewrite was declined,
+            # not where the function is written.
+            variable=None,
+            method=method,
+        )
+    )
+
+
+def _references_name(node: frog_ast.ASTNode, name: str) -> bool:
+    return (
+        SearchVisitor(
+            lambda n: isinstance(n, frog_ast.Variable) and n.name == name
+        ).visit(node)
+        is not None
+    )
 
 
 def _count_rf_calls_in_block(block: frog_ast.Block, rf_name: str) -> int:
@@ -2105,18 +3023,108 @@ def _count_rf_calls_in_block(block: frog_ast.Block, rf_name: str) -> int:
     return len(_collect_rf_call_sites(block, rf_name))
 
 
-def _rf_aliased_in_game(game: frog_ast.Game, rf_name: str) -> bool:
-    """True if the function field *rf_name* is copied into a local alias.
+def _rf_arg_rewritten(
+    statements: Sequence[frog_ast.Statement],
+    call_idx: int,
+    field_names: set[str],
+) -> str | None:
+    """Name a variable the Initialize RF argument depends on that Initialize
+    may write after reading it, or return ``None``.
 
-    A local alias ``G = H;`` (where ``H`` is the RF) makes any subsequent
-    ``G(...)`` an RF query that the call-site scan -- which matches only by the
-    name ``rf_name`` -- cannot see (verdict vector (c)).  More generally, any
-    occurrence of ``Variable(rf_name)`` outside a direct call / property-access /
-    its own initialization lets the function value escape.  Reuses the existing
-    escape predicate so the soundness condition matches
-    :class:`UniqueRFSimplification`.
+    The oracle guards compare against the resolved argument, so every name it
+    reads must keep its value to the end of Initialize.  A local resolves
+    through its last top-level assignment, so no later statement may write it.
     """
-    return _rf_value_escapes(game, rf_name)
+    call = statements[call_idx]
+    assert isinstance(call, frog_ast.Assignment)
+    assert isinstance(call.value, frog_ast.FuncCall)
+    pending: list[tuple[int, frog_ast.Expression]] = [(call_idx, call.value.args[0])]
+    visited: set[str] = set()
+    while pending:
+        idx, expr = pending.pop()
+        reads = referenced_variable_names(expr)
+        for name in sorted(reads):
+            if reassigns_or_rebinds({name}, frog_ast.Block(list(statements[idx:]))):
+                return name
+        for name in sorted(reads - field_names - visited):
+            visited.add(name)
+            defs = [
+                i
+                for i, stmt in enumerate(statements)
+                if isinstance(stmt, frog_ast.Assignment)
+                and isinstance(stmt.var, frog_ast.Variable)
+                and stmt.var.name == name
+            ]
+            if not defs:
+                continue
+            later = frog_ast.Block(list(statements[defs[-1] + 1 :]))
+            if reassigns_or_rebinds({name}, later):
+                return name
+            definition = statements[defs[-1]]
+            assert isinstance(definition, frog_ast.Assignment)
+            pending.append((defs[-1], definition.value))
+    return None
+
+
+def _single_valued_in_method(name: str, method: frog_ast.Method) -> bool:
+    """True if *name* holds one value wherever *method* reads it.
+
+    That is the case when nothing in the method writes or rebinds *name*, or
+    when its only write is its own top-level typed declaration (``T x = e;``,
+    ``T x <- S;``), which runs once and before any read.  A method parameter
+    must not be written at all: it is read before any write.
+    """
+    statements = method.block.statements
+    decls = [
+        i
+        for i, stmt in enumerate(statements)
+        if isinstance(
+            stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        )
+        and stmt.the_type is not None
+        and isinstance(stmt.var, frog_ast.Variable)
+        and stmt.var.name == name
+    ]
+    if len(decls) > 1:
+        return False
+    if decls and any(p.name == name for p in method.signature.parameters):
+        return False
+    rest = [stmt for i, stmt in enumerate(statements) if i not in decls]
+    return not reassigns_or_rebinds({name}, frog_ast.Block(rest))
+
+
+def _oracle_names_not_single_valued(
+    method: frog_ast.Method,
+    guard_cond: frog_ast.Expression,
+    call_arg: frog_ast.Expression,
+    aliases: dict[str, frog_ast.Expression],
+    stop_names: set[str],
+) -> str | None:
+    """Name a variable that the exclusion guard or the oracle RF argument
+    reads and that may hold different values within *method*, or return
+    ``None``.
+
+    The pass compares the guard and the call argument after resolving local
+    aliases, which is only meaningful if every name involved denotes the same
+    value at the alias definitions, the guard and the call.  The names checked
+    are those of the guard condition, those of the call argument, and those
+    of every alias definition the resolver may expand, transitively.
+    """
+    names = referenced_variable_names(guard_cond)
+    expanded: set[str] = set()
+    pending = list(referenced_variable_names(call_arg))
+    while pending:
+        name = pending.pop()
+        if name in expanded:
+            continue
+        expanded.add(name)
+        names.add(name)
+        if name not in stop_names and name in aliases:
+            pending.extend(referenced_variable_names(aliases[name]))
+    for name in sorted(names):
+        if not _single_valued_in_method(name, method):
+            return name
+    return None
 
 
 class ChallengeExclusionRFToUniformTransformer:
@@ -2139,10 +3147,13 @@ class ChallengeExclusionRFToUniformTransformer:
             proof_namespace = {}
         field_names = [f.name for f in game.fields]
         field_types: dict[str, frog_ast.Type] = {f.name: f.type for f in game.fields}
+        coercing = coercing_store_names_for(game, ctx)
         # Vector (a): only genuinely SAMPLED random functions are eligible.  A
         # field bound by ``H = F;`` (a known function) denotes a fixed value the
         # adversary can recompute, so H(cf) is not an independent uniform draw.
-        sampled_fields = _sampled_function_fields_in_init(game)
+        # A sampled field must also pass the shared eligibility rule (written
+        # only by its sample, never escaping); that is checked per field below.
+        sampled_fields = _classify_sampled_function_fields(game)
         rf_fields: dict[str, frog_ast.FunctionType] = {}
         for f in game.fields:
             if isinstance(f.type, frog_ast.FunctionType):
@@ -2202,29 +3213,21 @@ class ChallengeExclusionRFToUniformTransformer:
             if len(init_calls) != 1:
                 continue
 
-            # Vector (c): if the RF value is copied into a local alias (or
-            # otherwise escapes), an aliased call ``G(cf)`` re-queries the init
-            # point but is invisible to the by-name call-site scan.  Decline.
-            if _rf_aliased_in_game(game, rf_name):
-                if ctx is not None:
-                    ctx.near_misses.append(
-                        NearMiss(
-                            transform_name="Challenge Exclusion RF To Uniform",
-                            reason=(
-                                f"Random function '{rf_name}' is copied, aliased, "
-                                "or passed as an argument; an RF query through the "
-                                "alias is invisible to the call-site scan and may "
-                                "re-query the challenge input"
-                            ),
-                            location=None,
-                            suggestion=(
-                                "Call the random function directly at every use "
-                                "site; do not bind it to another variable"
-                            ),
-                            variable=rf_name,
-                            method=None,
-                        )
-                    )
+            # Vector (c) and the shared eligibility rule: if the RF value is
+            # copied into an alias (or otherwise escapes), an aliased call
+            # ``G(cf)`` re-queries the init point but is invisible to the
+            # by-name call-site scan; if the field is written besides its
+            # sample (``H = K;`` before the call), H(cf) is not a random
+            # function's output.  Decline.
+            problem = sampled_fields[rf_name]
+            if problem is not None:
+                _report_ineligible_rf(
+                    ctx,
+                    "Challenge Exclusion RF To Uniform",
+                    rf_name,
+                    problem,
+                    "Initialize",
+                )
                 continue
 
             # Vector (d): the single standalone ``field = H(arg)`` must be the
@@ -2261,7 +3264,7 @@ class ChallengeExclusionRFToUniformTransformer:
             # Resolve local variable aliases in the Init RF arg so that
             # intermediate cast variables (e.g. bct2 = ct2Star) are traced
             # back to their field references.
-            init_aliases = _build_local_assignments(init_method.block)
+            init_aliases = _build_local_assignments(init_method.block, coercing)
             field_name_set = set(field_names)
             resolved_init_arg = _resolve_var_aliases(
                 init_arg, init_aliases, field_name_set
@@ -2297,6 +3300,34 @@ class ChallengeExclusionRFToUniformTransformer:
                             ),
                             variable=rf_name,
                             method=None,
+                        )
+                    )
+                continue
+
+            # The same holds inside Initialize: after `p = H(U); U = v;` the
+            # guard `param == U` excludes v, not the point H was queried on.
+            rewritten = _rf_arg_rewritten(
+                init_method.block.statements, init_idx, field_name_set
+            )
+            if rewritten is not None:
+                if ctx is not None:
+                    ctx.near_misses.append(
+                        NearMiss(
+                            transform_name="Challenge Exclusion RF To Uniform",
+                            reason=(
+                                f"Initialize may write '{rewritten}' after the "
+                                f"argument of its call to '{rf_name}' reads it, "
+                                "so the exclusion guard need not exclude the "
+                                f"point '{rf_name}' was queried on"
+                            ),
+                            location=init_stmt.origin,
+                            suggestion=(
+                                "Do not reassign the challenge value, or anything "
+                                "it is computed from, after the random-function "
+                                "call"
+                            ),
+                            variable=rf_name,
+                            method="Initialize",
                         )
                     )
                 continue
@@ -2407,11 +3438,53 @@ class ChallengeExclusionRFToUniformTransformer:
                 # Stop at field names AND guard variables so that guard-
                 # constrained variables (like ct2) are preserved as leaves
                 # for _check_leaf_pair to recognize.
-                oracle_aliases = _build_local_assignments(oracle_method.block)
+                oracle_aliases = _build_local_assignments(oracle_method.block, coercing)
                 oracle_stop = field_name_set | guard_lhs_vars
 
                 for call in all_post_calls:
                     if len(call.args) != 1:
+                        all_oracle_ok = False
+                        break
+
+                    # The guard must compare the value the call queries.  In
+                    # `q = pm; pm = v; if (pm == cf) {...} return H(q);` the
+                    # guard excludes v, but q resolves to `pm` as if it held
+                    # the guarded value.  So every name the guard or the
+                    # resolved argument reads must hold one value throughout
+                    # the method.
+                    unstable = _oracle_names_not_single_valued(
+                        oracle_method,
+                        guard_stmt.conditions[0],
+                        call.args[0],
+                        oracle_aliases,
+                        oracle_stop,
+                    )
+                    if unstable is not None:
+                        if ctx is not None:
+                            ctx.near_misses.append(
+                                NearMiss(
+                                    transform_name=(
+                                        "Challenge Exclusion RF To Uniform"
+                                    ),
+                                    reason=(
+                                        f"'{oracle_method.signature.name}' may "
+                                        f"write '{unstable}', which its "
+                                        "exclusion guard or its call to "
+                                        f"'{rf_name}' reads, so the guard need "
+                                        "not compare the value the call "
+                                        "queries"
+                                    ),
+                                    location=call.origin,
+                                    suggestion=(
+                                        "Assign each variable the guard and "
+                                        "the random-function argument read "
+                                        "exactly once, at its declaration, and "
+                                        "do not reassign method parameters"
+                                    ),
+                                    variable=rf_name,
+                                    method=oracle_method.signature.name,
+                                )
+                            )
                         all_oracle_ok = False
                         break
 
@@ -3596,7 +4669,8 @@ class LocalFunctionFieldToLet(TransformPass):
       callee of a ``FuncCall``.
     - P-4. The proof's ``let:`` namespace contains a sampled name ``H``
       with type ``Function<K', V'>`` equal to ``(K, V)``.
-    - P-5. ``H`` does not appear syntactically anywhere in the game body.
+    - P-5. ``H`` does not appear syntactically anywhere in the game: not
+      in a method, a method or game parameter, or a field initializer.
 
     Soundness: a uniform random function is observably characterized by
     its outputs on queried inputs; under P-5, no prior observation of
@@ -3749,6 +4823,31 @@ class LocalFunctionFieldToLet(TransformPass):
                     )
                     return None
                 found_idx = idx
+        # F-349: the field is the random function only after its sample, and
+        # only if no earlier return skips it.  Field initializers run before
+        # Initialize, so a read there is before the sample too.
+        if found_idx is not None and (
+            may_return_before(init.block.statements, found_idx)
+            or any(
+                _references_name(s, f_name) for s in init.block.statements[:found_idx]
+            )
+            or any(
+                fld.value is not None and _references_name(fld.value, f_name)
+                for fld in game.fields
+            )
+        ):
+            self._emit_near_miss(
+                ctx,
+                (
+                    f"Field '{f_name}' may be read before its sample: a field "
+                    "initializer or Initialize reads it, or Initialize may "
+                    "return before sampling it"
+                ),
+                init.block.statements[found_idx].origin,
+                f_name,
+                "Initialize",
+            )
+            return None
         return found_idx
 
     def _has_other_assignments(
@@ -3961,6 +5060,22 @@ class LocalFunctionFieldToLet(TransformPass):
                     method.block.origin,
                     f_name,
                     method.signature.name,
+                )
+                return True
+        # P-5c: nor in a field initializer, which queries H as well.
+        for fld in game.fields:
+            if fld.value is not None and _references_name(fld.value, h_name):
+                self._emit_near_miss(
+                    ctx,
+                    (
+                        f"Candidate let binding '{h_name}' is referenced in "
+                        f"the initializer of field '{fld.name}'; "
+                        "LocalFunctionFieldToLet requires H to be unused in "
+                        "the game"
+                    ),
+                    fld.origin,
+                    f_name,
+                    None,
                 )
                 return True
         return False

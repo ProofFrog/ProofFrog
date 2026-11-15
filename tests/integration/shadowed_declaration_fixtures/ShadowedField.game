@@ -1,0 +1,27 @@
+import 'Source.primitive';
+
+// Left reads the field before shadowing it. Right reads the uninitialized
+// local. The bare declaration must not float above the field read.
+Game Left(Source S) {
+    Int __a5__;
+    Void Initialize() { __a5__ = 7; }
+    Int O() {
+        Int out = __a5__;
+        Int __a5__;
+        __a5__ = S.Draw();
+        return __a5__ + out;
+    }
+}
+
+Game Right(Source S) {
+    Int __a5__;
+    Void Initialize() { __a5__ = 7; }
+    Int O() {
+        Int __a5__;
+        Int out = __a5__;
+        __a5__ = S.Draw();
+        return __a5__ + out;
+    }
+}
+
+export as ShadowedField;

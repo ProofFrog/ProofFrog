@@ -1,0 +1,15 @@
+// G.generator == G.identity is false in any nontrivial group, so O()
+// returns false in Left and true in Right.
+Game Left(Group G) {
+    Bool O() {
+        return G.generator == G.identity;
+    }
+}
+
+Game Right(Group G) {
+    Bool O() {
+        return true;
+    }
+}
+
+export as GroupEquality;

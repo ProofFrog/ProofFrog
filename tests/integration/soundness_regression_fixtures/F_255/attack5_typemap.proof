@@ -1,0 +1,18 @@
+// AUDIT ARTIFACT (ConcatEqualityDecompose, attack 5 proof-level probe).
+// Left == Right is TRUE; see attack5_typemap.game header for the
+// expected outcomes under the corrupted vs defused readings.
+
+import './attack5_typemap.game';
+
+proof:
+
+let:
+
+assume:
+
+theorem:
+    TypeMapCollision();
+
+games:
+    TypeMapCollision().Left against TypeMapCollision().Adversary;
+    TypeMapCollision().Right against TypeMapCollision().Adversary;

@@ -1,0 +1,23 @@
+// Target: the method inliner (InlineTransformer), parameter substitution.
+// Hypothesis: the inliner substitutes a plain-variable argument for the
+// callee's parameter, so the callee's assignment `x = 0^n;` to its own
+// parameter becomes an assignment to the caller's variable y.
+// Left returns the adversary's y (Reset's write is to Zero's parameter);
+// Right returns 0^n. Sound engine: Proof Failed! (advantage 1 - 2^-n).
+// Unsound engine: Proof Succeeded!
+import 'Writer.primitive';
+
+Game Left(Writer T, Int n) {
+    BitString<n> O(BitString<n> y) {
+        BitString<n> z = T.Reset(y);
+        return y;
+    }
+}
+
+Game Right(Writer T, Int n) {
+    BitString<n> O(BitString<n> y) {
+        return 0^n;
+    }
+}
+
+export as ParamWrite;

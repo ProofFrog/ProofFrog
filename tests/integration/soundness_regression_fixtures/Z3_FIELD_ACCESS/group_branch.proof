@@ -1,0 +1,26 @@
+// Remove unreachable blocks of code read G.generator == G.identity as
+// G == G and deleted the final return on both sides. Step 1 is a true
+// equivalence (the operands swap); step 2 must fail.
+import 'GroupBranch.game';
+
+Game Swapped(Group G) {
+    Int O() {
+        if (G.identity == G.generator) {
+            return 1;
+        }
+        return 2;
+    }
+}
+
+proof:
+
+let:
+    Group G;
+
+theorem:
+    GroupBranch(G);
+
+games:
+    GroupBranch(G).Left against GroupBranch(G).Adversary;
+    Swapped(G) against GroupBranch(G).Adversary;
+    GroupBranch(G).Right against GroupBranch(G).Adversary;

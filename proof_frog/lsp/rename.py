@@ -79,6 +79,9 @@ def prepare_rename(state: DocumentState, position: lsp.Position) -> lsp.Range | 
         "Array",
         "Initialize",
         "Finalize",
+        "event",
+        "of",
+        "at",
     }
     if word in keywords:
         return None

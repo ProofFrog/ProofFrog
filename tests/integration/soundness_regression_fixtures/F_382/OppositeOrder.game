@@ -1,0 +1,43 @@
+// Positive control for DupOrder.game: the same Left (A0 adds z to r and
+// then to d, A1 to d and then to r), against the game it really merges to:
+// one field that both oracles update. Remove Duplicate Fields deletes only
+// the second write of each oracle's pair, so each oracle keeps one update
+// and the merge is still made.
+// Sound engine: Proof Succeeded!
+Game Left(Int q) {
+    ModInt<q> d;
+    ModInt<q> r;
+    Void Initialize() {
+        d <- ModInt<q>;
+        r = d;
+    }
+    Void A0(ModInt<q> z) {
+        r = r + z;
+        d = d + z;
+    }
+    Void A1(ModInt<q> z) {
+        d = d + z;
+        r = r + z;
+    }
+    ModInt<q> Get() {
+        return d;
+    }
+}
+
+Game Right(Int q) {
+    ModInt<q> d;
+    Void Initialize() {
+        d <- ModInt<q>;
+    }
+    Void A0(ModInt<q> z) {
+        d = d + z;
+    }
+    Void A1(ModInt<q> z) {
+        d = d + z;
+    }
+    ModInt<q> Get() {
+        return d;
+    }
+}
+
+export as OppositeOrder;

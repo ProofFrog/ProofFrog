@@ -1,0 +1,14 @@
+// Exponents of type ModInt<G.order> and Int.
+Game Left(Group G) {
+    GroupElem<G> Power(ModInt<G.order> a, Int b) {
+        return (G.generator ^ a) ^ b;
+    }
+}
+
+Game Right(Group G) {
+    GroupElem<G> Power(ModInt<G.order> a, Int b) {
+        return (G.generator ^ a) ^ b;
+    }
+}
+
+export as OrderExponents;

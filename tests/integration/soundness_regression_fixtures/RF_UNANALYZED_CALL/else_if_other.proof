@@ -1,0 +1,16 @@
+import 'P.primitive';
+import 'ElseIfOther.game';
+
+proof:
+
+let:
+    P S;
+
+assume:
+
+theorem:
+    ElseIfOther(S);
+
+games:
+    ElseIfOther(S).Left against ElseIfOther(S).Adversary;
+    ElseIfOther(S).Right against ElseIfOther(S).Adversary;

@@ -1,0 +1,17 @@
+// Proof for SampleWrite.game (target, hypothesis and expected outcome in its header).
+import 'Writer2.primitive';
+import 'Writer2Impl.scheme';
+import 'SampleWrite.game';
+
+proof:
+
+let:
+    Int n;
+    Writer2 T = Writer2Impl(n);
+
+theorem:
+    SampleWrite(T, n);
+
+games:
+    SampleWrite(T, n).Left against SampleWrite(T, n).Adversary;
+    SampleWrite(T, n).Right against SampleWrite(T, n).Adversary;

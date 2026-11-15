@@ -1,0 +1,44 @@
+// Target: Inline Single-Use Variables.
+// Hypothesis: the pass checks that no free variable of `ctr + 1` is written
+// between `Int v = ctr + 1;` and the statement holding the use of v, but not
+// inside that statement, so it inlines `ctr + 1` past the write `ctr = 100;`
+// earlier in the same branch. Right is that output.
+// Distinguisher: Initialize(); Probe(true). Left returns 1 (v was bound
+// before the branch), Right returns 101. Advantage 1.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+import 'dummy.primitive';
+
+Game Left(Dummy D) {
+    Int ctr;
+
+    Void Initialize() {
+        ctr = 0;
+    }
+
+    Int Probe(Bool b) {
+        Int v = ctr + 1;
+        if (b) {
+            ctr = 100;
+            return v;
+        }
+        return 0;
+    }
+}
+
+Game Right(Dummy D) {
+    Int ctr;
+
+    Void Initialize() {
+        ctr = 0;
+    }
+
+    Int Probe(Bool b) {
+        if (b) {
+            ctr = 100;
+            return ctr + 1;
+        }
+        return 0;
+    }
+}
+
+export as Attack2aProp;

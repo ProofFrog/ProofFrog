@@ -1,0 +1,14 @@
+// Claims the two games of NestedLoop.game interchangeable; they are not (see its header). Sound engine: Proof Failed!
+import 'NestedLoop.game';
+
+proof:
+
+let:
+    Group G;
+
+theorem:
+    NestedLoop(G);
+
+games:
+    NestedLoop(G).Left against NestedLoop(G).Adversary;
+    NestedLoop(G).Right against NestedLoop(G).Adversary;

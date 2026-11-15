@@ -4304,6 +4304,7 @@ class RefactorGroupElemFieldExpTransformer:
                     )
                 continue
             matched_any = False
+            diagnosed = False
             for f2_name, (f2_idx, f2_exp, f2_group) in gen_field_assigns.items():
                 if f2_name == f1_name:
                     continue
@@ -4341,14 +4342,45 @@ class RefactorGroupElemFieldExpTransformer:
                 # DIFFERENT values -- rewriting `Field1 = Field2 ^ other` then
                 # conflates two independent draws (attack2 re-samples `x`
                 # between `A = g^(x*x)` and `B = g^x`). `_defined_before` only
-                # checks defined-before, not unchanged-since.
+                # checks defined-before, not unchanged-since. F-386: a write
+                # nested in an `if` or a loop between them counts too, so each
+                # statement is searched (`reassigns_or_rebinds`), not just its
+                # own node.
                 lo, hi = sorted((f1_idx, f2_idx))
                 factor_free = referenced_variable_names(f2_exp)
-                if any(
-                    _stmt_mutates_var(init_stmts[k], name)
-                    for k in range(lo + 1, hi)
-                    for name in factor_free
-                ):
+                writer = next(
+                    (
+                        k
+                        for k in range(lo + 1, hi)
+                        if reassigns_or_rebinds(factor_free, init_stmts[k])
+                    ),
+                    None,
+                )
+                if writer is not None:
+                    diagnosed = True
+                    self.ctx.near_misses.append(
+                        NearMiss(
+                            transform_name=("Refactor GroupElem Field Exponent"),
+                            reason=(
+                                f"Fields {f1_name!r} and {f2_name!r} share "
+                                f"the exponent factor {f2_exp}, but a "
+                                "statement between their assignments can "
+                                f"write {', '.join(sorted(factor_free))} "
+                                "(possibly inside a branch or loop), so the "
+                                "factor may differ at the two assignments "
+                                f"and {f1_name!r} cannot be rewritten as "
+                                f"{f2_name!r} ^ {other}."
+                            ),
+                            location=init_stmts[writer].origin,
+                            suggestion=(
+                                "Assign both fields on the same side of the "
+                                "statement that changes the factor, or give "
+                                "the new value a variable of its own."
+                            ),
+                            variable=f1_name,
+                            method="Initialize",
+                        )
+                    )
                     continue
                 matched_any = True
                 # Soundness: at f1's def, f2 must already hold its value.
@@ -4396,9 +4428,12 @@ class RefactorGroupElemFieldExpTransformer:
             # No peer ``Field2 = g ^ a`` exists with ``a`` structurally
             # equal to either operand of ``f1_exp = a * b``.  Only
             # diagnose when there is another candidate field at all —
-            # otherwise the transform is structurally inapplicable.
-            if not matched_any and any(
-                other_name != f1_name for other_name in gen_field_assigns
+            # otherwise the transform is structurally inapplicable — and
+            # when no peer was already diagnosed above.
+            if (
+                not matched_any
+                and not diagnosed
+                and any(other_name != f1_name for other_name in gen_field_assigns)
             ):
                 self.ctx.near_misses.append(
                     NearMiss(

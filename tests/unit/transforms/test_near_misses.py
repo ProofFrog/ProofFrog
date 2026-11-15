@@ -2291,6 +2291,43 @@ def test_rgfe_no_near_miss_when_only_one_candidate_field() -> None:
     assert not [nm for nm in ctx.near_misses if nm.transform_name == _RGFE_NAME]
 
 
+def test_rgfe_near_miss_shared_factor_written_in_branch() -> None:
+    """F-386: ``a`` is redrawn inside an ``if`` between ``field1 = g ^ (a *
+    b)`` and ``field2 = g ^ a``, so the shared factor may differ at the two
+    assignments. The decline names the write, not a missing peer."""
+    game = frog_parser.parse_game("""
+        Game G(Group GG) {
+            GroupElem<GG> field1;
+            GroupElem<GG> field2;
+            Bool c;
+
+            Void Initialize() {
+                c <- Bool;
+                ModInt<GG.order> a <- ModInt<GG.order>;
+                ModInt<GG.order> b <- ModInt<GG.order>;
+                field1 = GG.generator ^ (a * b);
+                if (c) {
+                    a <- ModInt<GG.order>;
+                }
+                field2 = GG.generator ^ a;
+            }
+        }
+        """)
+    before = str(game)
+    ctx = _rgfe_ctx()
+    after = RefactorGroupElemFieldExp().apply(game, ctx)
+    assert str(after) == before
+    misses = [nm for nm in ctx.near_misses if nm.transform_name == _RGFE_NAME]
+    assert any(
+        nm.variable == "field1"
+        and nm.method == "Initialize"
+        and "field2" in nm.reason
+        and "write a" in nm.reason
+        for nm in misses
+    )
+    assert not any("no peer" in nm.reason for nm in misses)
+
+
 _GCS_NAME = "Guard Condition Simplification"
 
 

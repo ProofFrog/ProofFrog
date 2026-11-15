@@ -1,0 +1,50 @@
+// Target: Refactor GroupElem Field Exponent, as Nested.game, with the redraw
+// of the shared exponent x in a loop body between A = g^(x*x) and B = g^x.
+// The loop always runs, so Left's B = g^x' is independent of A = g^(x^2),
+// while Right has A = B^(log B). In a group with easy discrete logarithms,
+// test A == B^(log B): advantage close to 1.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+Game Left(Group G) {
+    GroupElem<G> A;
+    GroupElem<G> B;
+    Bool c;
+
+    Void Initialize() {
+        c <- Bool;
+        ModInt<G.order> x <- ModInt<G.order>;
+        A = G.generator ^ (x * x);
+        for (Int i = 0 to 1) {
+            x <- ModInt<G.order>;
+        }
+        B = G.generator ^ x;
+    }
+
+    GroupElem<G> GetA() {
+        return A;
+    }
+    GroupElem<G> GetB() {
+        return B;
+    }
+}
+
+Game Right(Group G) {
+    GroupElem<G> A;
+    GroupElem<G> B;
+    Bool c;
+
+    Void Initialize() {
+        c <- Bool;
+        ModInt<G.order> x <- ModInt<G.order>;
+        B = G.generator ^ x;
+        A = B ^ x;
+    }
+
+    GroupElem<G> GetA() {
+        return A;
+    }
+    GroupElem<G> GetB() {
+        return B;
+    }
+}
+
+export as NestedLoop;

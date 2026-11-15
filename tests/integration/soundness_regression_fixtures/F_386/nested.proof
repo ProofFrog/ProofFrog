@@ -1,0 +1,14 @@
+// Claims the two games of Nested.game interchangeable; they are not (see its header). Sound engine: Proof Failed!
+import 'Nested.game';
+
+proof:
+
+let:
+    Group G;
+
+theorem:
+    Nested(G);
+
+games:
+    Nested(G).Left against Nested(G).Adversary;
+    Nested(G).Right against Nested(G).Adversary;

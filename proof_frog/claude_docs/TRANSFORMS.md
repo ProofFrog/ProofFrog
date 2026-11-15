@@ -81,7 +81,7 @@ The field-level RF rewrites (UniqueRFSimplification, FreshInputRFToUniform, Chal
 | HoistDeterministicCallToInitialize | Hoists a deterministic call out of oracles into Initialize and caches it in a new field. Sees through top-level single-assignment stable oracle locals (e.g. `g = NG.Generator(); NG.Exp(g, x)`), hoisting the alias-expanded call so both sides of a hop cache the same calls regardless of which already held one in a field. |
 | SplitOpaqueTupleField | Splits a `ProductType` field whose RHS is an opaque call and whose only reads are constant-indexed projections, into one fresh field per used component. |
 | HoistGroupExpToInitialize | Hoists `base ^ k` group exponentiations out of oracles into `Initialize` and caches the result in a pinned field; requires a prime-order / nonzero-exponent context. |
-| RefactorGroupElemFieldExp | Rewrites `base ^ (a * b)` as `Field2 ^ b` when a pre-existing pinned field `Field2 = base ^ a` exists. |
+| RefactorGroupElemFieldExp | Rewrites `base ^ (a * b)` as `Field2 ^ b` when a pre-existing pinned field `Field2 = base ^ a` exists and no statement between the two field assignments in `Initialize` can write a variable `a` reads, including inside a branch or loop. |
 | InlineSingleUseField | Inlines field assignments when the field is used exactly once in the same method (skips pinned fields). |
 | InlineSingleUseField (cross-method) | Extends field inlining across methods when expression is pure with stable field free vars. |
 | CollapseAssignment | Collapses a declaration followed by reassignment into one statement. |

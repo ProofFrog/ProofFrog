@@ -6,6 +6,8 @@ The pass rewrites `Field1 = g^(a*b)` to `Field2 ^ b` when a peer
   - F-221: the shared factor must have the SAME value at both field
     positions. If a free variable of the factor is reassigned between them,
     the two occurrences are independent draws (stale exponent).
+  - F-386: the same, when the write between them is nested in an `if` or a
+    loop (the check looked at each statement's own node only).
   - F-224: if Initialize can return early, moving Field2 changes which traces
     define it (turning a guarded/undefined read into a defined one).
   - F-225: moving Field2's assignment up past an intervening READ of Field2
@@ -158,6 +160,190 @@ def test_f222_same_group_generators_still_fire() -> None:
             Void Initialize() {
                 B = G.generator ^ x;
                 A = G.generator ^ (x * y);
+            }
+        }
+        """
+    )
+
+
+def test_f386_redraw_in_branch_move_declines() -> None:
+    """F-386: A before B, x redrawn inside an `if` between them. When the
+    branch runs, B uses the new x, so moving B up and writing A = B^x would
+    conflate two draws."""
+    assert not _fires(
+        """
+        Game BranchMove(Group G) {
+            GroupElem<G> A;
+            GroupElem<G> B;
+            Bool c;
+            Void Initialize() {
+                c <- Bool;
+                ModInt<G.order> x <- ModInt<G.order>;
+                A = G.generator ^ (x * x);
+                if (c) {
+                    x <- ModInt<G.order>;
+                }
+                B = G.generator ^ x;
+            }
+        }
+        """
+    )
+
+
+def test_f386_write_in_branch_no_move_declines() -> None:
+    """F-386: B before A, x written inside an `if` between them (no move
+    needed, so only the stability check stands in the way)."""
+    assert not _fires(
+        """
+        Game BranchStale(Group G) {
+            GroupElem<G> B;
+            GroupElem<G> A;
+            Bool c;
+            Void Initialize() {
+                c <- Bool;
+                Int x = 1;
+                B = G.generator ^ x;
+                if (c) {
+                    x = 3;
+                }
+                A = G.generator ^ (x * 2);
+            }
+        }
+        """
+    )
+
+
+def test_f386_write_in_else_branch_declines() -> None:
+    """F-386: the write sits in an `else` branch."""
+    assert not _fires(
+        """
+        Game ElseStale(Group G) {
+            GroupElem<G> B;
+            GroupElem<G> A;
+            Bool c;
+            Void Initialize() {
+                c <- Bool;
+                Int x = 1;
+                B = G.generator ^ x;
+                if (c) {
+                    c = false;
+                } else {
+                    x = 3;
+                }
+                A = G.generator ^ (x * 2);
+            }
+        }
+        """
+    )
+
+
+def test_f386_write_in_loop_declines() -> None:
+    """F-386: the write sits in a loop body between the two fields."""
+    assert not _fires(
+        """
+        Game LoopStale(Group G) {
+            GroupElem<G> B;
+            GroupElem<G> A;
+            Void Initialize() {
+                Int x = 1;
+                B = G.generator ^ x;
+                for (Int i = 0 to 2) {
+                    x = x + i;
+                }
+                A = G.generator ^ (x * 2);
+            }
+        }
+        """
+    )
+
+
+def test_f386_element_write_in_branch_declines() -> None:
+    """F-386: the factor reads a map entry that an element write inside a
+    branch changes."""
+    assert not _fires(
+        """
+        Game ElementStale(Group G) {
+            GroupElem<G> B;
+            GroupElem<G> A;
+            Map<Int, Int> M;
+            Bool c;
+            Void Initialize() {
+                c <- Bool;
+                M[0] = 1;
+                B = G.generator ^ M[0];
+                if (c) {
+                    M[0] = 3;
+                }
+                A = G.generator ^ (M[0] * 2);
+            }
+        }
+        """
+    )
+
+
+def test_f386_uniq_insertion_in_branch_declines() -> None:
+    """F-386: the factor reads |S|, and a `<-uniq[S]` draw inside a branch
+    inserts into S."""
+    assert not _fires(
+        """
+        Game UniqStale(Group G) {
+            GroupElem<G> B;
+            GroupElem<G> A;
+            Set<BitString<4>> S;
+            Bool c;
+            Void Initialize() {
+                c <- Bool;
+                B = G.generator ^ |S|;
+                if (c) {
+                    BitString<4> y <-uniq[S] BitString<4>;
+                }
+                A = G.generator ^ (|S| * 2);
+            }
+        }
+        """
+    )
+
+
+def test_f386_branch_writing_other_variable_still_fires() -> None:
+    """Positive control: the branch between the fields writes only c, not
+    the shared factor x, so A = g^(x*x) equals B^x and the pass fires."""
+    assert _fires(
+        """
+        Game BranchOther(Group G) {
+            GroupElem<G> A;
+            GroupElem<G> B;
+            Bool c;
+            Void Initialize() {
+                c <- Bool;
+                ModInt<G.order> x <- ModInt<G.order>;
+                A = G.generator ^ (x * x);
+                if (c) {
+                    c = false;
+                }
+                B = G.generator ^ x;
+            }
+        }
+        """
+    )
+
+
+def test_f386_write_after_both_fields_still_fires() -> None:
+    """Positive control: x is written inside a branch only after both
+    fields are assigned, so both read the same x and the pass fires."""
+    assert _fires(
+        """
+        Game WriteAfter(Group G) {
+            GroupElem<G> B;
+            GroupElem<G> A;
+            Bool c;
+            Void Initialize() {
+                c <- Bool;
+                Int x = 1;
+                B = G.generator ^ x;
+                A = G.generator ^ (x * 2);
+                if (c) {
+                    x = 3;
+                }
             }
         }
         """

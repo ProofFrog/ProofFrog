@@ -1,0 +1,56 @@
+// Target: Refactor GroupElem Field Exponent (the F-221 stability check in
+// inlining.RefactorGroupElemFieldExpTransformer). The check that the shared
+// exponent x is not written between A = g^(x*x) and B = g^x looked at each
+// statement's own node only, so a redraw of x nested in an `if` between them
+// was missed, and the pass rewrote A as B^x (Right), although B uses the new
+// x when c holds.
+// Distinguisher: with probability 1/2 (c true) Left's B = g^x' is
+// independent of A = g^(x^2); Right always has A = B^(log B). In a group
+// where discrete logarithms are easy (the theorem quantifies over every
+// group, for example ModInt<q> under +), test A == B^(log B): Right always
+// passes, Left fails about half the time. Advantage about 1/2.
+// Sound engine: Proof Failed! Unsound engine: Proof Succeeded!
+Game Left(Group G) {
+    GroupElem<G> A;
+    GroupElem<G> B;
+    Bool c;
+
+    Void Initialize() {
+        c <- Bool;
+        ModInt<G.order> x <- ModInt<G.order>;
+        A = G.generator ^ (x * x);
+        if (c) {
+            x <- ModInt<G.order>;
+        }
+        B = G.generator ^ x;
+    }
+
+    GroupElem<G> GetA() {
+        return A;
+    }
+    GroupElem<G> GetB() {
+        return B;
+    }
+}
+
+Game Right(Group G) {
+    GroupElem<G> A;
+    GroupElem<G> B;
+    Bool c;
+
+    Void Initialize() {
+        c <- Bool;
+        ModInt<G.order> x <- ModInt<G.order>;
+        B = G.generator ^ x;
+        A = B ^ x;
+    }
+
+    GroupElem<G> GetA() {
+        return A;
+    }
+    GroupElem<G> GetB() {
+        return B;
+    }
+}
+
+export as Nested;

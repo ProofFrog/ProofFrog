@@ -1,8 +1,10 @@
-"""Names a pass creates are fresh (F-369, F-370 part (b)).
+"""Names a pass creates are fresh (F-369, F-370 part (b), F-396).
 
 Split Product Sample (``v@i``), Generator Power Field To Exponent (``P@exp``),
-Offset Fusion (``P@fused``, ``P@exp``, ``D@next<k>``) and Field Invariant
-Elimination (``a@entry``) add new fields or locals to a game. Such a name
+Offset Fusion (``P@fused``, ``P@exp``, ``D@next<k>``), Field Invariant
+Elimination (``a@entry``), and Expand Tuple and Split Bare Tuple Declarations
+(``v@i`` for the components of a product field or local) add new fields or
+locals to a game. Such a name
 must not already be bound or mentioned in the game: a new local named like
 an existing field captures the field's reads, and an existing local named
 like the new one captures the rewritten reads. The parser cannot produce
@@ -22,6 +24,11 @@ from proof_frog.transforms.state_relations import (
     GeneratorPowerFieldToExponent,
     _fuse,
     _initialize,
+)
+from proof_frog.transforms.tuples import (
+    ExpandTuple,
+    ExpandTupleTransformer,
+    SplitBareTupleDeclarations,
 )
 from proof_frog.visitors import NameTypeMap, SearchVisitor
 
@@ -355,3 +362,215 @@ def test_fie_entry_local_is_not_named_like_a_local() -> None:
 def test_fie_keeps_the_usual_entry_name_without_a_clash() -> None:
     result = FieldInvariantElimination().apply(_game(_FIE_SOURCE, {}), _ctx())
     assert "pk@entry" in _declared(_method(result, "Upd").block)
+
+
+# --- Expand Tuple and Split Bare Tuple Declarations (F-396) -----------------
+
+
+def test_f396_expand_field_does_not_capture_a_local_named_like_a_component() -> None:
+    # Q declares a local v@0 (the name Split Product Sample gives component 0
+    # of a local product draw v) and reads component 0 of the product field
+    # v. The field's component 0 must not be named v@0, or Q's v[0] becomes
+    # a read of the local and Q returns [1^8, 1^8] instead of [0^8, 1^8].
+    game = _game(
+        f"""
+        Game T() {{
+            {_PAIR} v;
+            Void Initialize() {{
+                v = [0^8, 1^8];
+            }}
+            {_PAIR} Q() {{
+                BitString<8> vAT0 = 1^8;
+                return [v[0], vAT0];
+            }}
+        }}
+        """,
+        {"vAT0": "v@0"},
+    )
+    result = ExpandTuple().apply(game, _ctx())
+    component, second = [f.name for f in result.fields]
+    assert component != "v@0" and second == "v@1"
+    initialize = _method(result, "Initialize")
+    assert [str(s) for s in initialize.block.statements] == [
+        f"{component} = 0^8;",
+        "v@1 = 1^8;",
+    ]
+    q = _method(result, "Q")
+    assert _declared(q.block) == ["v@0"]
+    assert str(_return_value(q)) == f"[{component}, v@0]"
+
+
+def test_f396_expand_local_does_not_redeclare_a_local_named_like_a_component() -> None:
+    # A local w@0 already in Q: the split of the local product w must not
+    # declare w@0 again, or the return reads w[0] where it read the local.
+    game = _game(
+        f"""
+        Game T() {{
+            {_PAIR} Q() {{
+                BitString<8> wAT0 = 1^8;
+                {_PAIR} w = [0^8, 0^8];
+                return [w[0], wAT0];
+            }}
+        }}
+        """,
+        {"wAT0": "w@0"},
+    )
+    result = ExpandTuple().apply(game, _ctx())
+    q = _method(result, "Q")
+    declared = _declared(q.block)
+    assert declared.count("w@0") == 1
+    component = declared[1]
+    assert component != "w@0" and declared[2] == "w@1"
+    assert str(_return_value(q)) == f"[{component}, w@0]"
+
+
+def test_f396_split_bare_declaration_does_not_capture_a_field_named_like_a_component() -> (
+    None
+):
+    # A field b@0 (Expand Tuple's name for component 0 of a product field b)
+    # next to a bare local [T, T] b; in Q. The local's components must not
+    # be named b@0, or the read of the field becomes a read of the local.
+    game = _game(
+        f"""
+        Game T() {{
+            BitString<8> bAT0;
+            Void Initialize() {{
+                bAT0 = 1^8;
+            }}
+            {_PAIR} Q() {{
+                {_PAIR} b;
+                b = [0^8, 0^8];
+                return [b[0], bAT0];
+            }}
+        }}
+        """,
+        {"bAT0": "b@0"},
+    )
+    result = SplitBareTupleDeclarations().apply(game, _ctx())
+    assert [f.name for f in result.fields] == ["b@0"]
+    q = _method(result, "Q")
+    declared = _declared(q.block)
+    assert len(declared) == 2 and "b@0" not in declared
+    component = declared[0]
+    assert str(q.block.statements[2]) == f"{component} = 0^8;"
+    assert str(_return_value(q)) == f"[{component}, b@0]"
+
+
+def test_f396_expand_keeps_the_usual_names_without_a_clash() -> None:
+    game = _game(
+        f"""
+        Game T() {{
+            {_PAIR} v;
+            Void Initialize() {{
+                v = [0^8, 1^8];
+            }}
+            {_PAIR} Q() {{
+                {_PAIR} w = [1^8, 0^8];
+                {_PAIR} b;
+                b = [v[1], w[0]];
+                return [v[0], b[1]];
+            }}
+        }}
+        """,
+        {},
+    )
+    result = ExpandTuple().apply(game, _ctx())
+    assert [f.name for f in result.fields] == ["v@0", "v@1"]
+    q = _method(result, "Q")
+    assert _declared(q.block) == ["w@0", "w@1", "b@0", "b@1"]
+    assert str(_return_value(q)) == "[v@0, b@1]"
+
+
+def test_f396_read_before_a_local_declaration_keeps_the_outer_variable() -> None:
+    # The field v is not split (R reads it at a non-constant index). Q reads
+    # v[0] before declaring a local product v, which is split. That first
+    # read is the field's and must stay v[0]: rewritten to the local's
+    # component, it would read a variable not declared yet.
+    game = _game(
+        f"""
+        Game T() {{
+            {_PAIR} v;
+            Void Initialize() {{
+                v = [0^8, 0^8];
+            }}
+            BitString<8> R(Int i) {{
+                return v[i];
+            }}
+            {_PAIR} Q() {{
+                BitString<8> a = v[0];
+                {_PAIR} v = [1^8, 1^8];
+                return [a, v[0]];
+            }}
+        }}
+        """,
+        {},
+    )
+    result = ExpandTuple().apply(game, _ctx())
+    assert [f.name for f in result.fields] == ["v"]
+    q = _method(result, "Q")
+    assert [str(s) for s in q.block.statements] == [
+        "BitString<8> a = v[0];",
+        "BitString<8> v@0 = 1^8;",
+        "BitString<8> v@1 = 1^8;",
+        "return [a, v@0];",
+    ]
+
+
+def test_f396_bare_local_named_like_a_split_field_gets_its_own_components() -> None:
+    # Q reads the split field v, then declares a bare local v, which is split
+    # too. The two get components with different names, and each read
+    # resolves to the variable in scope where it stands: the first to the
+    # field's component, the return to the local's.
+    game = _game(
+        f"""
+        Game T() {{
+            {_PAIR} v;
+            Void Initialize() {{
+                v = [0^8, 0^8];
+            }}
+            {_PAIR} Q() {{
+                BitString<8> a = v[0];
+                {_PAIR} v;
+                v = [1^8, 1^8];
+                return [a, v[0]];
+            }}
+        }}
+        """,
+        {},
+    )
+    result = ExpandTuple().apply(game, _ctx())
+    assert [f.name for f in result.fields] == ["v@0", "v@1"]
+    q = _method(result, "Q")
+    statements = [str(s) for s in q.block.statements]
+    assert statements[0] == "BitString<8> a = v@0;"
+    local0, local1 = _declared(q.block)[1:]
+    assert {local0, local1}.isdisjoint({"v@0", "v@1"})
+    assert statements[3:] == [
+        f"{local0} = 1^8;",
+        f"{local1} = 1^8;",
+        f"return [a, {local0}];",
+    ]
+
+
+def test_f396_method_on_its_own_avoids_its_parameter_names() -> None:
+    # Transformed without its game, a method's own names are the ones a
+    # component may not take: here a parameter v@0.
+    method = frog_parser.parse_method(f"""
+        BitString<8> Q(BitString<8> vAT0) {{
+            {_PAIR} v = [0^8, 1^8];
+            return v[0] + vAT0;
+        }}
+        """)
+    method.signature.parameters[0].name = "v@0"
+
+    def visit(node: frog_ast.ASTNode) -> bool:
+        if isinstance(node, frog_ast.Variable) and node.name == "vAT0":
+            node.name = "v@0"
+        return False
+
+    SearchVisitor(visit).visit(method)
+    result = ExpandTupleTransformer().transform(method)
+    assert isinstance(result, frog_ast.Method)
+    component, second = _declared(result.block)
+    assert component != "v@0" and second == "v@1"
+    assert str(_return_value(result)) == f"{component} + v@0"

@@ -25,12 +25,16 @@ from ..visitors import (
     AllConstantFieldAccesses,
     GetTypeMapVisitor,
     lvalue_base_name,
+    referenced_variable_names,
 )
 from ._base import (
     TransformPass,
     PipelineContext,
     has_nondeterministic_call,
     NearMiss,
+    bound_names,
+    fresh_name,
+    game_names,
 )
 
 # ---------------------------------------------------------------------------
@@ -114,6 +118,15 @@ class ExpandTupleTransformer(Transformer):
     reads the variable in its own right-hand side (checked via
     ``AllConstantFieldAccesses`` and
     ``_has_self_referencing_whole_assignment``).
+
+    Component ``i`` of ``v`` is named ``v@i``, or another fresh name
+    (``_base.fresh_name``) when the game already binds or mentions ``v@i``
+    (for example a local ``v@i`` that Split Product Sample made from a local
+    product draw): reusing the name would let the existing binding capture
+    the rewritten ``v[i]``, or the new component capture the existing name's
+    reads (F-396). Statements are rewritten in order, and ``v[i]`` resolves
+    to the innermost expanded ``v`` in scope, so a read before a local's
+    declaration still reads the outer variable of that name.
     """
 
     def __init__(
@@ -132,9 +145,28 @@ class ExpandTupleTransformer(Transformer):
         # ``Expand Tuples`` pass) so their canonical routes are unchanged.
         self.bare_locals_only = bare_locals_only
         self.pass_name = pass_name
-        self.to_transform: list[str] = []
-        self.lengths: list[int] = []
+        # Each expanded variable in scope, innermost last: its name and the
+        # names of its components. A local's entry is dropped at the end of
+        # the block that declares it.
+        self._expanded: list[tuple[str, list[str]]] = []
+        # Names a new component may not take: every name of the game (set by
+        # transform_game, with the field components added), and in
+        # ``_taken`` also the components minted so far in this method.
+        self._game_taken: set[str] | None = None
+        self._taken: set[str] = set()
         self._current_method: frog_ast.Method | None = None
+
+    def _components(self, name: str) -> list[str] | None:
+        """The component names of the innermost expanded *name* in scope,
+        or None when *name* is not an expanded variable here."""
+        for expanded_name, components in reversed(self._expanded):
+            if expanded_name == name:
+                return components
+        return None
+
+    def _mint(self, name: str, count: int) -> list[str]:
+        """Fresh names for the *count* components of *name* (F-396)."""
+        return [fresh_name(f"{name}@{index}", self._taken) for index in range(count)]
 
     def _near_miss(
         self,
@@ -164,6 +196,13 @@ class ExpandTupleTransformer(Transformer):
         # Capture the enclosing method so the F-324 scope guard can tell whether
         # a block-local tuple declaration escapes the block being expanded.
         self._current_method = method
+        # Local components are fresh against every name of the game (or, for
+        # a method transformed on its own, of the method) and against the
+        # components already minted in this method.
+        if self._game_taken is not None:
+            self._taken = set(self._game_taken)
+        else:
+            self._taken = bound_names(method) | referenced_variable_names(method)
         result = self._transform_children(method)
         assert isinstance(result, frog_ast.Method)
         return result
@@ -286,7 +325,9 @@ class ExpandTupleTransformer(Transformer):
         return True
 
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
+        self._taken = game_names(game)
         if self.bare_locals_only:
+            self._game_taken = set(self._taken)
             return frog_ast.Game(
                 (
                     game.name,
@@ -300,6 +341,7 @@ class ExpandTupleTransformer(Transformer):
             if self._is_transformable_tuple(field.type, field.name, game):
                 assert isinstance(field.type, frog_ast.ProductType)
                 unfolded_types = field.type.types
+                components = self._mint(field.name, len(unfolded_types))
                 for index, the_type in enumerate(unfolded_types):
                     expression = None
                     if field.value:
@@ -307,12 +349,12 @@ class ExpandTupleTransformer(Transformer):
                         assert field_values is not None
                         expression = field_values[index]
                     new_fields.append(
-                        frog_ast.Field(the_type, f"{field.name}@{index}", expression)
+                        frog_ast.Field(the_type, components[index], expression)
                     )
-                self.to_transform.append(field.name)
-                self.lengths.append(len(unfolded_types))
+                self._expanded.append((field.name, components))
             else:
                 new_fields.append(field)
+        self._game_taken = set(self._taken)
         return frog_ast.Game(
             (
                 game.name,
@@ -323,134 +365,133 @@ class ExpandTupleTransformer(Transformer):
         )
 
     def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
+        # The statements are rewritten in order: a local's components are in
+        # scope from its declaration to the end of this block, so a statement
+        # before the declaration still reads an outer variable of that name.
         new_statements: list[frog_ast.Statement] = []
-        expanded_tuple_count = 0
+        outer_depth = len(self._expanded)
         for stmt_idx, statement in enumerate(block.statements):
-            # Assigning to the tuple means assigning each individual value
-            if (
-                isinstance(statement, frog_ast.Assignment)
-                and isinstance(statement.var, frog_ast.Variable)
-                and statement.var.name in self.to_transform
-            ):
-                stmt_values = frog_ast.tuple_literal_values(statement.value)
-                assert stmt_values is not None
-                for index, tuple_value in enumerate(stmt_values):
-                    new_statements.append(
-                        frog_ast.Assignment(
-                            None,
-                            frog_ast.Variable(f"{statement.var}@{index}"),
-                            tuple_value,
-                        )
-                    )
-            # Asssigning to a tuple element means assigning to that one element
-            elif (
-                isinstance(statement, (frog_ast.Assignment, frog_ast.Sample))
-                and isinstance(statement.var, frog_ast.ArrayAccess)
-                and isinstance(statement.var.the_array, frog_ast.Variable)
-                and statement.var.the_array.name in self.to_transform
-            ):
-                assert isinstance(statement.var.index, frog_ast.Integer)
-                new_statement = copy.deepcopy(statement)
-                new_statement.var = frog_ast.Variable(
-                    f"{statement.var.the_array.name}@{statement.var.index.num}",
-                )
-                new_statements.append(new_statement)
-            elif (
-                not self.bare_locals_only
-                and isinstance(statement, frog_ast.Assignment)
-                and statement.the_type is not None
-                and isinstance(statement.var, frog_ast.Variable)
-                and self._is_transformable_tuple(
-                    statement.the_type, statement.var.name, block
-                )
-                # Refuse to fire on a local-decl whose variable is not
-                # referenced in subsequent statements of THIS block: the
-                # use site is in an enclosing scope (e.g. this block is
-                # the body of an if-branch), and expanding here would
-                # split the decl into v@k components without rewriting
-                # the outer-scope ``v[k]`` access, leaving it dangling.
-                # The decl's own LHS does not count as a reference.
-                and self._has_reference(
-                    statement.var.name,
-                    frog_ast.Block(list(block.statements[stmt_idx + 1 :])),
-                )
-                # F-324: also decline when the local escapes this block (an
-                # outer-scope ``v[k]`` would be left dangling by the split).
-                and not self._local_escapes_block(block, statement.var.name)
-            ):
-                assert isinstance(statement.the_type, frog_ast.ProductType)
-                unfolded_types = statement.the_type.types
-                stmt_values = frog_ast.tuple_literal_values(statement.value)
-                assert stmt_values is not None
-                for index, the_type in enumerate(unfolded_types):
-                    new_statements.append(
-                        frog_ast.Assignment(
-                            the_type,
-                            frog_ast.Variable(f"{statement.var.name}@{index}"),
-                            stmt_values[index],
-                        )
-                    )
-                self.to_transform.append(statement.var.name)
-                self.lengths.append(len(unfolded_types))
-                expanded_tuple_count += 1
-            # A bare product-typed declaration ``[T0, T1] v;`` (issue #255)
-            # is split into per-component declarations; the later
-            # whole-variable / element assignments and accesses are then
-            # handled by the branches above and by transform_array_access.
-            elif isinstance(
-                statement, frog_ast.VariableDeclaration
-            ) and self._can_expand_bare_declaration(statement, block, stmt_idx):
-                assert isinstance(statement.type, frog_ast.ProductType)
-                unfolded_decl_types = statement.type.types
-                for index, the_type in enumerate(unfolded_decl_types):
-                    new_statements.append(
-                        frog_ast.VariableDeclaration(
-                            the_type, f"{statement.name}@{index}"
-                        )
-                    )
-                self.to_transform.append(statement.name)
-                self.lengths.append(len(unfolded_decl_types))
-                expanded_tuple_count += 1
-            else:
-                new_statements.append(statement)
-        new_block = frog_ast.Block(
-            [self.transform(statement) for statement in new_statements]
+            replacement, declared = self._expand_statement(block, stmt_idx, statement)
+            # A declaration's values are read in the scope before it.
+            new_statements.extend(self.transform(new) for new in replacement)
+            if declared is not None:
+                self._expanded.append(declared)
+        del self._expanded[outer_depth:]
+        return frog_ast.Block(new_statements)
+
+    def _expand_statement(
+        self, block: frog_ast.Block, stmt_idx: int, statement: frog_ast.Statement
+    ) -> tuple[list[frog_ast.Statement], tuple[str, list[str]] | None]:
+        """The statements that replace *statement* (before their children
+        are rewritten), and the local it declares as expanded, if any."""
+        # Assigning to the tuple means assigning each individual value
+        whole_target = (
+            self._components(statement.var.name)
+            if isinstance(statement, frog_ast.Assignment)
+            and isinstance(statement.var, frog_ast.Variable)
+            else None
         )
-        self.to_transform = (
-            self.to_transform[:-expanded_tuple_count]
-            if expanded_tuple_count > 0
-            else self.to_transform
+        if whole_target is not None:
+            assert isinstance(statement, frog_ast.Assignment)
+            stmt_values = frog_ast.tuple_literal_values(statement.value)
+            assert stmt_values is not None and len(stmt_values) == len(whole_target)
+            return [
+                frog_ast.Assignment(None, frog_ast.Variable(component), tuple_value)
+                for component, tuple_value in zip(whole_target, stmt_values)
+            ], None
+        # Asssigning to a tuple element means assigning to that one element
+        element_target = (
+            self._component_of(statement.var)
+            if isinstance(statement, (frog_ast.Assignment, frog_ast.Sample))
+            and isinstance(statement.var, frog_ast.ArrayAccess)
+            else None
         )
-        self.lengths = (
-            self.lengths[:-expanded_tuple_count]
-            if expanded_tuple_count > 0
-            else self.lengths
-        )
-        return new_block
+        if element_target is not None:
+            new_statement = copy.deepcopy(statement)
+            assert isinstance(new_statement, (frog_ast.Assignment, frog_ast.Sample))
+            new_statement.var = frog_ast.Variable(element_target)
+            return [new_statement], None
+        if (
+            not self.bare_locals_only
+            and isinstance(statement, frog_ast.Assignment)
+            and statement.the_type is not None
+            and isinstance(statement.var, frog_ast.Variable)
+            and self._is_transformable_tuple(
+                statement.the_type, statement.var.name, block
+            )
+            # Refuse to fire on a local-decl whose variable is not
+            # referenced in subsequent statements of THIS block: the
+            # use site is in an enclosing scope (e.g. this block is
+            # the body of an if-branch), and expanding here would
+            # split the decl into v@k components without rewriting
+            # the outer-scope ``v[k]`` access, leaving it dangling.
+            # The decl's own LHS does not count as a reference.
+            and self._has_reference(
+                statement.var.name,
+                frog_ast.Block(list(block.statements[stmt_idx + 1 :])),
+            )
+            # F-324: also decline when the local escapes this block (an
+            # outer-scope ``v[k]`` would be left dangling by the split).
+            and not self._local_escapes_block(block, statement.var.name)
+        ):
+            assert isinstance(statement.the_type, frog_ast.ProductType)
+            unfolded_types = statement.the_type.types
+            stmt_values = frog_ast.tuple_literal_values(statement.value)
+            assert stmt_values is not None
+            components = self._mint(statement.var.name, len(unfolded_types))
+            return [
+                frog_ast.Assignment(
+                    the_type,
+                    frog_ast.Variable(components[index]),
+                    stmt_values[index],
+                )
+                for index, the_type in enumerate(unfolded_types)
+            ], (statement.var.name, components)
+        # A bare product-typed declaration ``[T0, T1] v;`` (issue #255)
+        # is split into per-component declarations; the later
+        # whole-variable / element assignments and accesses are then
+        # handled by the branches above and by transform_array_access.
+        if isinstance(
+            statement, frog_ast.VariableDeclaration
+        ) and self._can_expand_bare_declaration(statement, block, stmt_idx):
+            assert isinstance(statement.type, frog_ast.ProductType)
+            unfolded_decl_types = statement.type.types
+            components = self._mint(statement.name, len(unfolded_decl_types))
+            return [
+                frog_ast.VariableDeclaration(the_type, components[index])
+                for index, the_type in enumerate(unfolded_decl_types)
+            ], (statement.name, components)
+        return [statement], None
+
+    def _component_of(self, array_access: frog_ast.ArrayAccess) -> str | None:
+        """The component variable ``v[i]`` stands for, when ``v`` is an
+        expanded variable in scope and ``i`` one of its constant indices."""
+        if not isinstance(array_access.the_array, frog_ast.Variable):
+            return None
+        components = self._components(array_access.the_array.name)
+        if components is None:
+            return None
+        assert isinstance(array_access.index, frog_ast.Integer)
+        if not 0 <= array_access.index.num < len(components):
+            return None
+        return components[array_access.index.num]
 
     def transform_array_access(
         self, array_access: frog_ast.ArrayAccess
     ) -> frog_ast.Expression:
-        if (
-            not isinstance(array_access.the_array, frog_ast.Variable)
-            or array_access.the_array.name not in self.to_transform
-        ):
+        component = self._component_of(array_access)
+        if component is None:
             return frog_ast.ArrayAccess(
                 self.transform(array_access.the_array),
                 self.transform(array_access.index),
             )
-        assert isinstance(array_access.index, frog_ast.Integer)
-        return frog_ast.Variable(
-            f"{array_access.the_array.name}@{array_access.index.num}"
-        )
+        return frog_ast.Variable(component)
 
     def transform_variable(self, var: frog_ast.Variable) -> frog_ast.Expression:
-        if var.name not in self.to_transform:
+        components = self._components(var.name)
+        if components is None:
             return var
-        length = self.lengths[self.to_transform.index(var.name)]
-        return frog_ast.Tuple(
-            [frog_ast.Variable(f"{var.name}@{index}") for index in range(length)]
-        )
+        return frog_ast.Tuple([frog_ast.Variable(name) for name in components])
 
 
 class FoldTupleIndexTransformer(Transformer):

@@ -1,0 +1,23 @@
+// Test returns the counter and H(5), then increments the counter. Left
+// returns the counter after the increment, Right the one before.
+// Distinguisher: the first Test() returns [1, _] on Left, [0, _] on Right.
+Game Left() {
+    Int c;
+    Function<Int, BitString<8>> H;
+    Void Initialize() { c = 0; H <- Function<Int, BitString<8>>; }
+    [Int, BitString<8>] Test() {
+        c = c + 1;
+        return [c, H(5)];
+    }
+}
+Game Right() {
+    Int c;
+    Function<Int, BitString<8>> H;
+    Void Initialize() { c = 0; H <- Function<Int, BitString<8>>; }
+    [Int, BitString<8>] Test() {
+        Int r = c;
+        c = c + 1;
+        return [r, H(5)];
+    }
+}
+export as TF;

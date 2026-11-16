@@ -588,6 +588,25 @@ def test_placement_rule_rejects_initialize_in_right_operand(
     assert msg is not None and "always evaluated" in msg
 
 
+def test_placement_rule_rejects_initialize_in_else_if_condition(
+    tmp_path: Path,
+) -> None:
+    # F-372 (second review): an `else if` condition is evaluated only when
+    # the earlier conditions are false, and the composition inlines
+    # challenger.Initialize without making that explicit; the rule refuses
+    # the call in any `if`, an `else if` condition included.
+    src = _placement_proof(tmp_path, "challenger.Eq(c)")
+    src.write_text(
+        src.read_text().replace(
+            "Void Initialize() { challenger.Initialize();  }",
+            "Void Initialize() { Bool z <- Bool; "
+            "if (z) { } else if (challenger.Initialize()) { } }",
+        )
+    )
+    msg = upto.check_challenger_init_placement(_reduction(src))
+    assert msg is not None and "top-level" in msg
+
+
 def test_placement_rule_accepts_initialize_in_left_operand(tmp_path: Path) -> None:
     src = _placement_proof(tmp_path, "challenger.Eq(c)")
     src.write_text(

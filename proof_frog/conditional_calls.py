@@ -30,6 +30,16 @@ its statement evaluates no call before it that the inliner inlines in this
 pass: the inliner takes that earlier call first, so the effects keep their
 order. (A ``challenger`` call counts only once the reduction is composed;
 see :func:`_inliner_takes_first`.)
+
+The temporary form moves ``L`` and ``R`` in front of the statement, ahead of
+the parts of the statement written before the position. Each such part that
+touches state ``L`` or ``R`` touches is bound to a variable in front of them
+first (:mod:`evaluation_order`, F-397's rule): while a reduction is resolved
+alone, a ``challenger`` call written before the position runs before a
+``challenger`` call in ``L`` (F-372's second review). While a reduction is
+resolved alone, the methods of the challenger it will be composed with are
+known (*challenger*), so a challenger call with an effect in a conditional
+position is rewritten then, and footprints see the challenger's state.
 """
 
 from __future__ import annotations
@@ -38,9 +48,20 @@ import copy
 from typing import Optional
 
 from . import dependencies, frog_ast, visitors
-
-MethodKey = tuple[str, str]
-MethodLookup = dict[MethodKey, frog_ast.Method]
+from .evaluation_order import (
+    EvaluationOrder,
+    FootprintOracle,
+    MethodKey,
+    MethodLookup,
+    Scope,
+    challenger_lookup,
+    declared_names,
+    game_taken_names,
+    map_nested_blocks,
+    method_call_key,
+    split_else_if,
+    written_names,
+)
 
 
 class UntypedConditionalCallError(Exception):
@@ -50,21 +71,9 @@ class UntypedConditionalCallError(Exception):
     could be wrong, so the game is not resolved."""
 
 
-def _method_call(node: frog_ast.ASTNode) -> Optional[MethodKey]:
-    """``(object, method)`` when *node* is a call ``object.method(...)``."""
-    if not isinstance(node, frog_ast.FuncCall):
-        return None
-    func = node.func
-    if isinstance(func, frog_ast.FieldAccess) and isinstance(
-        func.the_object, frog_ast.Variable
-    ):
-        return (func.the_object.name, func.name)
-    return None
-
-
 def _callee_key(node: frog_ast.ASTNode, lookup: MethodLookup) -> Optional[MethodKey]:
-    """The lookup key of *node* when it is a call the inliner inlines."""
-    key = _method_call(node)
+    """The key of *node* when it is a call of a method in *lookup*."""
+    key = method_call_key(node)
     return key if key in lookup else None
 
 
@@ -83,68 +92,6 @@ def _inliner_takes_first(node: frog_ast.ASTNode, lookup: MethodLookup) -> bool:
     return _callee_key(node, lookup) is not None
 
 
-# The attribute holding the name each binder statement declares.
-_BINDER_NAME = {
-    frog_ast.VariableDeclaration: "name",
-    frog_ast.NumericFor: "name",
-    frog_ast.GenericFor: "var_name",
-}
-
-
-def _declared_names(method: frog_ast.Method) -> set[str]:
-    """The method's parameters and every name it declares (typed writes,
-    bare declarations, loop binders): the callee's own variables. A written
-    parameter is the callee's own copy, since the inliner binds it."""
-    names = {param.name for param in method.signature.parameters}
-
-    def collect(node: frog_ast.ASTNode) -> bool:
-        binder = _BINDER_NAME.get(type(node))
-        if binder is not None:
-            names.add(getattr(node, binder))
-        elif isinstance(node, frog_ast.DestructuringBinding):
-            names.update(node.names)
-        elif isinstance(
-            node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
-        ):
-            if node.the_type is not None and isinstance(node.var, frog_ast.Variable):
-                names.add(node.var.name)
-        return False
-
-    visitors.SearchVisitor(collect).visit(method.block)
-    return names
-
-
-def _written_names(block: frog_ast.Block) -> set[str]:
-    """Every name a statement of *block* writes: the base of each l-value
-    (an element or tuple write included) and the exclusion set of each
-    ``<-uniq`` draw, which the draw inserts into."""
-    names: set[str] = set()
-
-    def add_target(target: frog_ast.ASTNode) -> None:
-        if isinstance(target, frog_ast.Tuple):
-            for value in target.values:
-                add_target(value)
-            return
-        base = visitors.lvalue_base_name(target)
-        # An l-value with no variable base is unknown: count it as a write
-        # to a name no callee declares.
-        names.add(base if base is not None else "")
-
-    def collect(node: frog_ast.ASTNode) -> bool:
-        if isinstance(
-            node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
-        ):
-            add_target(node.var)
-        if isinstance(node, frog_ast.UniqueSample) and node.surface_form == "uniq":
-            names.update(visitors.referenced_variable_names(node.unique_set))
-        if isinstance(node, frog_ast.DestructuringBinding):
-            names.update(node.names)
-        return False
-
-    visitors.SearchVisitor(collect).visit(block)
-    return names
-
-
 class _EffectOracle:
     """Decides, once per callee, whether inlining it has an effect."""
 
@@ -153,9 +100,14 @@ class _EffectOracle:
         game: frog_ast.Game,
         lookup: MethodLookup,
         proof_namespace: frog_ast.Namespace,
+        challenger: Optional[frog_ast.Game] = None,
     ) -> None:
         self.game = game
-        self.lookup = lookup
+        # The callees whose bodies are known: the inliner's, plus the
+        # challenger's while a reduction is resolved alone.
+        self.methods = challenger_lookup(challenger)
+        self.methods.update(lookup)
+        self.challenger = challenger
         self.proof_namespace = proof_namespace
         self.cache: dict[MethodKey, bool] = {}
 
@@ -165,14 +117,20 @@ class _EffectOracle:
         ``challenger@<name>`` in the composed game). A ``Set`` alias field
         (``Set Key = BitString<n>;``) names a type."""
         fields: list[frog_ast.Field] = []
-        if owner == "challenger":
+        prefix = ""
+        if owner == "challenger" and self.challenger is not None:
+            # Not composed yet: the challenger's methods already read its
+            # fields as `challenger@<name>`, its field list does not.
+            fields = self.challenger.fields
+            prefix = "challenger@"
+        elif owner == "challenger":
             fields = self.game.fields
         else:
             instance = self.proof_namespace.get(owner)
             if isinstance(instance, (frog_ast.Scheme, frog_ast.Primitive)):
                 fields = instance.fields
         return {
-            field.name
+            prefix + field.name
             for field in fields
             if not (
                 isinstance(field.type, frog_ast.SetType)
@@ -186,12 +144,12 @@ class _EffectOracle:
         # A call cycle cannot be inlined anyway; while one is explored, a
         # callee met again counts as having an effect (the safe answer).
         self.cache[key] = True
-        method = self.lookup[key]
-        declared = _declared_names(method)
+        method = self.methods[key]
+        declared = declared_names(method)
         value_names = declared | self._module_fields(key[0])
         effect = (
             dependencies.may_not_complete(method.block, value_names)
-            or bool(_written_names(method.block) - declared)
+            or bool(written_names(method.block) - declared)
             or self.makes_effectful_call(method.block)
         )
         self.cache[key] = effect
@@ -202,7 +160,7 @@ class _EffectOracle:
         effect."""
 
         def effectful(inner: frog_ast.ASTNode) -> bool:
-            key = _callee_key(inner, self.lookup)
+            key = _callee_key(inner, self.methods)
             return key is not None and self.has_effect(key)
 
         return visitors.SearchVisitor(effectful).visit(node) is not None
@@ -215,45 +173,16 @@ class _SiteFinder:
     def __init__(
         self,
         oracle: _EffectOracle,
-        type_map: visitors.NameTypeMap,
-        proof_namespace: frog_ast.Namespace,
+        inlinable: MethodLookup,
+        order: EvaluationOrder,
+        scope: Scope,
     ) -> None:
         self.oracle = oracle
-        self.type_map = type_map
-        self.proof_namespace = proof_namespace
+        self.inlinable = inlinable
+        self.order = order
+        self.scope = scope
         self.seen_call = False
         self.deferred = False
-
-    def _bool_operand(self, expr: frog_ast.Expression) -> Optional[bool]:
-        """True if *expr* is a ``Bool``, False if it is a bit string, None if
-        its type is unknown."""
-        if (
-            isinstance(expr, frog_ast.BinaryOperation)
-            and expr.operator == frog_ast.BinaryOperators.OR
-        ):
-            return self._bool_or(expr)
-        the_type: Optional[frog_ast.ASTNode] = visitors.expression_type(
-            expr, self.type_map, self.proof_namespace
-        )
-        key = _callee_key(expr, self.oracle.lookup)
-        if the_type is None and key is not None:
-            the_type = self.oracle.lookup[key].signature.return_type
-        if isinstance(the_type, frog_ast.BoolType):
-            return True
-        if isinstance(the_type, frog_ast.BitStringType):
-            return False
-        return None
-
-    def _bool_or(self, expr: frog_ast.BinaryOperation) -> Optional[bool]:
-        """Whether an ``||`` is the Boolean one (both operands have one
-        type, so either operand decides)."""
-        left = self._bool_operand(expr.left_expression)
-        right = self._bool_operand(expr.right_expression)
-        if left is True or right is True:
-            return True
-        if left is False or right is False:
-            return False
-        return None
 
     def _is_site(self, node: frog_ast.ASTNode) -> bool:
         if not (
@@ -265,7 +194,7 @@ class _SiteFinder:
             return False
         if node.operator == frog_ast.BinaryOperators.AND:
             return True
-        is_bool = self._bool_or(node)
+        is_bool = self.order.bool_or(node, self.scope)
         if is_bool is None:
             raise UntypedConditionalCallError(
                 f"cannot tell whether '{node}' is a Boolean '||' (whose right "
@@ -297,7 +226,7 @@ class _SiteFinder:
                     found = self.find(item)
                     if found is not None or self.deferred:
                         return found
-        if _inliner_takes_first(node, self.oracle.lookup):
+        if _inliner_takes_first(node, self.inlinable):
             self.seen_call = True
         return None
 
@@ -326,45 +255,47 @@ class _Rewriter:
         lookup: MethodLookup,
         proof_namespace: frog_ast.Namespace,
         proof_let_types: Optional[visitors.NameTypeMap],
+        challenger: Optional[frog_ast.Game],
     ) -> None:
         self.game = game
         self.lookup = lookup
         self.proof_namespace = proof_namespace
         self.proof_let_types = proof_let_types
-        self.oracle = _EffectOracle(game, lookup, proof_namespace)
-        self.taken = dependencies.game_value_names(
-            game
-        ) | visitors.referenced_variable_names(game)
-        self.type_map = visitors.NameTypeMap()
+        self.oracle = _EffectOracle(game, lookup, proof_namespace, challenger)
+        self.taken = game_taken_names(game)
+        self.order = EvaluationOrder(
+            FootprintOracle(self.oracle.methods), proof_namespace, self.taken
+        )
+        self.scope: Optional[Scope] = None
 
-    def _fresh(self, site: frog_ast.BinaryOperation) -> str:
-        """A name for the temporary, after the first call in the site's
-        right operand that has an effect (``P.Pick@cond0``)."""
+    def _effectful_callee(self, site: frog_ast.BinaryOperation) -> str:
+        """The first call in the site's right operand that has an effect, as
+        ``object.method``: the base of the names the rewrite makes."""
         keys: list[MethodKey] = []
 
         def effectful(node: frog_ast.ASTNode) -> bool:
-            key = _callee_key(node, self.lookup)
+            key = _callee_key(node, self.oracle.methods)
             if key is not None and self.oracle.has_effect(key):
                 keys.append(key)
                 return True
             return False
 
         visitors.SearchVisitor(effectful).visit(site.right_expression)
-        base = f"{keys[0][0]}.{keys[0][1]}@cond"
-        index = 0
-        while f"{base}{index}" in self.taken:
-            index += 1
-        name = f"{base}{index}"
-        self.taken.add(name)
+        return f"{keys[0][0]}.{keys[0][1]}"
+
+    def _fresh(self, callee: str) -> str:
+        """A name for the temporary (``P.Pick@cond@0``). The two ``@`` keep it
+        apart from the names the inliner gives a callee's locals
+        (``P.Pick@cond0`` for a local ``cond``)."""
+        name = self.order.fresh(f"{callee}@cond@")
         # The rewritten statement reads the temporary where the site was, so
         # a site found in it later can still tell a Boolean `||` by it.
-        self.type_map.set(name, frog_ast.BoolType())
+        assert self.scope is not None
+        self.scope.declare(name, frog_ast.BoolType())
         return name
 
     def rewrite_method(self, method: frog_ast.Method) -> frog_ast.Method:
-        self.type_map = visitors.build_method_type_map(
-            self.game, method, self.proof_let_types
-        )
+        self.scope = Scope(self.game, method, self.proof_let_types)
         new_block = self._rewrite_block(method.block)
         if new_block is method.block:
             return method
@@ -373,12 +304,17 @@ class _Rewriter:
         return new_method
 
     def _rewrite_block(self, block: frog_ast.Block) -> frog_ast.Block:
+        assert self.scope is not None
+        self.scope.push()
         new_statements: list[frog_ast.Statement] = []
         changed = False
         for statement in block.statements:
             rewritten = self._rewrite_all(statement)
             new_statements.extend(rewritten)
+            for new_statement in rewritten:
+                self.scope.declare_statement(new_statement)
             changed = changed or len(rewritten) != 1 or rewritten[0] is not statement
+        self.scope.pop()
         if not changed:
             return block
         return frog_ast.Block(new_statements)
@@ -393,42 +329,34 @@ class _Rewriter:
         outer one is a guarded ``return``, or a site in the first condition
         of an ``if`` whose ``else if`` was just split off. Each rewrite
         removes one ``&&`` / ``||`` or one ``else if``, so this ends."""
+        assert self.scope is not None
         inner = self._rewrite_nested(statement)
         replacement = self._rewrite_statement(inner)
         if replacement is None:
             return [inner]
         result: list[frog_ast.Statement] = []
         for new_statement in replacement:
-            result.extend(self._rewrite_all(new_statement))
+            rewritten = self._rewrite_all(new_statement)
+            result.extend(rewritten)
+            for declared in rewritten:
+                self.scope.declare_statement(declared)
         return result
 
     def _rewrite_nested(self, statement: frog_ast.Statement) -> frog_ast.Statement:
         """*statement* with the blocks nested in it rewritten."""
-        if isinstance(statement, frog_ast.IfStatement):
-            blocks = [self._rewrite_block(block) for block in statement.blocks]
-            if all(old is new for old, new in zip(statement.blocks, blocks)):
-                return statement
-            return frog_ast.IfStatement(list(statement.conditions), blocks)
-        if isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
-            loop_block = self._rewrite_block(statement.block)
-            if loop_block is statement.block:
-                return statement
-            loop = copy.copy(statement)
-            loop.block = loop_block
-            return loop
-        if isinstance(statement, frog_ast.Block):
-            return self._rewrite_block(statement)
-        return statement
+        assert self.scope is not None
+        return map_nested_blocks(statement, self._rewrite_block, self.scope)
 
     def _rewrite_statement(
         self, statement: frog_ast.Statement
     ) -> Optional[list[frog_ast.Statement]]:
         """The statements replacing *statement*, or None to keep it."""
+        assert self.scope is not None
         if isinstance(statement, frog_ast.IfStatement):
             for index in range(1, len(statement.conditions)):
                 if self.oracle.makes_effectful_call(statement.conditions[index]):
-                    return [_split_else_if(statement, index)]
-        finder = _SiteFinder(self.oracle, self.type_map, self.proof_namespace)
+                    return [split_else_if(statement, index)]
+        finder = _SiteFinder(self.oracle, self.lookup, self.order, self.scope)
         site: Optional[frog_ast.BinaryOperation] = None
         for part in _own_expressions(statement):
             site = finder.find(part)
@@ -464,11 +392,18 @@ class _Rewriter:
                 ),
                 frog_ast.ReturnStatement(site.right_expression),
             ]
-        temp = self._fresh(site)
+        # `L` and `R` move in front of the statement: first bind the parts
+        # written before the site that touch what they touch (F-397's rule).
+        callee = self._effectful_callee(site)
+        parts, _ = self.order.locate(statement, site, self.scope)
+        pieces = self.order.conflicting(parts, self.order.oracle.of(site), self.scope)
+        bound = self.order.bind(statement, pieces, self.scope, f"{callee}@prior@")
+        statement = bound[-1]
+        temp = self._fresh(callee)
         guard: frog_ast.Expression = frog_ast.Variable(temp)
         if not is_and:
             guard = frog_ast.UnaryOperation(frog_ast.UnaryOperators.NOT, guard)
-        return [
+        return bound[:-1] + [
             frog_ast.Assignment(
                 frog_ast.BoolType(), frog_ast.Variable(temp), site.left_expression
             ),
@@ -507,29 +442,19 @@ class _ReplaceFirst(visitors.Transformer):
         return None
 
 
-def _split_else_if(statement: frog_ast.IfStatement, index: int) -> frog_ast.IfStatement:
-    """``if (C0) {B0} ... else if (Ci) {Bi} ...`` with the chain from ``Ci``
-    on moved into an ``else`` block, so ``Ci`` is evaluated (and its calls
-    run) only when ``C0`` to ``C(i-1)`` are false, as before."""
-    nested = frog_ast.IfStatement(
-        list(statement.conditions[index:]), list(statement.blocks[index:])
-    )
-    return frog_ast.IfStatement(
-        list(statement.conditions[:index]),
-        list(statement.blocks[:index]) + [frog_ast.Block([nested])],
-    )
-
-
 def make_conditional_calls_explicit(
     game: frog_ast.Game,
     lookup: MethodLookup,
     proof_namespace: frog_ast.Namespace,
     proof_let_types: Optional[visitors.NameTypeMap] = None,
+    challenger: Optional[frog_ast.Game] = None,
 ) -> frog_ast.Game:
     """*game* with every conditionally evaluated call that has an effect
     given explicit control flow (module docstring); *game* itself when there
-    is none. *lookup* is the inliner's method lookup."""
-    rewriter = _Rewriter(game, lookup, proof_namespace, proof_let_types)
+    is none. *lookup* is the inliner's method lookup; *challenger* is the
+    challenger a reduction resolved alone will be composed with, whose
+    methods are known but not inlined."""
+    rewriter = _Rewriter(game, lookup, proof_namespace, proof_let_types, challenger)
     methods = [rewriter.rewrite_method(method) for method in game.methods]
     if all(old is new for old, new in zip(game.methods, methods)):
         return game

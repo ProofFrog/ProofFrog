@@ -1,0 +1,22 @@
+// F-397: positive control. Both sides of ROT are the reduction as written
+// (the count before the increment, + 0), so every hop is true.
+// Sound engine: Proof Succeeded!
+import 'Cnt.game';
+import 'ROT.game';
+
+Reduction R() compose Cnt() against ROT().Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    Int Test() { return challenger.Read() + challenger.Inc(); }
+}
+
+proof:
+let:
+assume:
+    Cnt();
+theorem:
+    ROT();
+games:
+    ROT().Left against ROT().Adversary;
+    Cnt().Left compose R() against ROT().Adversary;
+    Cnt().Right compose R() against ROT().Adversary;
+    ROT().Right against ROT().Adversary;

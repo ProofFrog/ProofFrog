@@ -1,0 +1,28 @@
+// F-372 (second review): reorder.proof with the theorem's Left written in
+// the order the reduction runs its calls (TRI.game), so hop 1 is one the
+// engine can show. The rewrite of the && must not move Zero in front of the
+// earlier Inc while the reduction is resolved alone.
+// Sound engine: fails at hop 3 only (hop 3 is false).
+// Unsound engine: fails at hop 1 only; hop 3 (false) accepted.
+import 'Picker.primitive';
+import 'PickImpl.scheme';
+import 'Ctr.game';
+import 'TRI.game';
+Reduction R(Picker P) compose Ctr() against TRI(P).Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    Bool Test(Set<BitString<1>> S) {
+        return challenger.Second(challenger.Inc(), challenger.Zero() && P.Pick(S));
+    }
+}
+proof:
+let:
+    PickImpl P = PickImpl();
+assume:
+    Ctr();
+theorem:
+    TRI(P);
+games:
+    TRI(P).Left against TRI(P).Adversary;
+    Ctr().Left compose R(P) against TRI(P).Adversary;
+    Ctr().Right compose R(P) against TRI(P).Adversary;
+    TRI(P).Right against TRI(P).Adversary;

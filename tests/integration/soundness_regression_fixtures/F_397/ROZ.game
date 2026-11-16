@@ -1,0 +1,16 @@
+// Left: the reduction of read_then_inc_plus_zero.proof as written: the count
+// before the increment, plus Inc's 0. (Equal to RO.game's Left; the engine
+// does not fold this + 0.)
+// Right: the count after the increment.
+// Distinguisher: one Test call returns 0 on Left and 1 on Right.
+Game Left() {
+    Int c;
+    Void Initialize() { c = 0; }
+    Int Test() { Int r = c; c = c + 1; return r + 0; }
+}
+Game Right() {
+    Int c;
+    Void Initialize() { c = 0; }
+    Int Test() { c = c + 1; return c; }
+}
+export as ROZ;

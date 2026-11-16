@@ -1,0 +1,24 @@
+import 'Picker.primitive';
+// Left: the reduction as written (Inc runs before Zero, so Zero is false and Pick never runs).
+// Right: Zero read before Inc, Pick guarded by it.
+Game Left(Picker P) {
+    Int c;
+    Void Initialize() { c = 0; }
+    Bool Test(Set<BitString<1>> S) {
+        c = c + 1;
+        return false;
+    }
+}
+Game Right(Picker P) {
+    Int c;
+    Void Initialize() { c = 0; }
+    Bool Test(Set<BitString<1>> S) {
+        Bool t = c == 0;
+        if (t) {
+            t = P.Pick(S);
+        }
+        c = c + 1;
+        return t;
+    }
+}
+export as TR;

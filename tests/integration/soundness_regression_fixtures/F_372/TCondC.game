@@ -1,0 +1,21 @@
+import 'Picker.primitive';
+// Left evaluates b && P.Pick(S) inside a larger expression.
+// Right: Left with the && made explicit and Pick inlined; Pick returns
+// false, so the temporary ends false whenever b holds.
+Game Left(Picker P) {
+    Bool Test(Bool b, Set<BitString<1>> S) {
+        Bool r = !(b && P.Pick(S));
+        return r;
+    }
+}
+Game Right(Picker P) {
+    Bool Test(Bool b, Set<BitString<1>> S) {
+        Bool t = b;
+        if (t) {
+            BitString<1> x <- BitString<1> \ S;
+            t = false;
+        }
+        return !t;
+    }
+}
+export as TCondC;

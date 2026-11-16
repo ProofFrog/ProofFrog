@@ -1,0 +1,16 @@
+// Target: the conditional-call rewrite, positive control for
+// cond_name.proof: TCondC's Right is Left with the `&&` made explicit and
+// PickCond inlined, so the hop is true.
+// Sound engine: Proof Succeeded!
+import 'Picker.primitive';
+import 'PickCond.scheme';
+import 'TCondC.game';
+proof:
+let:
+    PickCond P = PickCond();
+assume:
+theorem:
+    TCondC(P);
+games:
+    TCondC(P).Left against TCondC(P).Adversary;
+    TCondC(P).Right against TCondC(P).Adversary;

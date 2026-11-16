@@ -19,6 +19,7 @@ from . import frog_ast
 from . import visitors
 from . import dependencies
 from . import conditional_calls
+from . import evaluation_order
 from . import diagnostics
 from . import advantage
 from . import upto
@@ -2240,6 +2241,7 @@ class ProofEngine:
         reduction: Optional[frog_ast.ParameterizedGame] = None,
         *,
         composed_later: bool = False,
+        composed_with: Optional[frog_ast.Game] = None,
     ) -> frog_ast.Game:
         """Resolve a proof step's game to an inlined AST.
 
@@ -2252,7 +2254,11 @@ class ProofEngine:
         *composed_later* is set when the game is a reduction resolved before
         it is composed: its field initializers that make a call stay where
         they are until the composed game moves them into Initialize, where
-        the challenger's Initialize is known (F-391).
+        the challenger's Initialize is known (F-391). *composed_with* is then
+        the challenger it will be composed with (instantiated, its fields
+        renamed): its methods are known while the reduction is resolved, so
+        the parts of a statement keep their order around its challenger calls
+        (F-372, F-397), but they are inlined only once composed.
         """
         root, args = self._step_game_definition(challenger)
         game = instantiate(
@@ -2266,7 +2272,10 @@ class ProofEngine:
 
         lookup = dict(self.method_lookup)
         if reduction:
-            reduction_ast = self.resolve_step_game(reduction, composed_later=True)
+            game = self._renamed_challenger(game)
+            reduction_ast = self.resolve_step_game(
+                reduction, composed_later=True, composed_with=game
+            )
             assert isinstance(reduction_ast, frog_ast.Reduction)
             # The reduction's field initializers run before its Initialize,
             # so a challenger call there would precede challenger.Initialize
@@ -2276,40 +2285,6 @@ class ProofEngine:
             )
             if message is not None:
                 raise UnsupportedFieldInitializerError(message)
-            # Ensure independent methods list before mutation
-            game = copy.copy(game)
-            game.methods = list(game.methods)
-            # Capture-aware (F-337): a name-keyed substitution would also rewrite
-            # a same-named TYPE (``Variable`` is both Expression and Type), so a
-            # challenger field ``KA`` typed by a ``let:``-bound set ``KA`` would
-            # have its type prefixed too.
-            field_prefix = {
-                field.name: get_challenger_field_name(field.name)
-                for field in game.fields
-            }
-            for index, method in enumerate(game.methods):
-                game.methods[index] = visitors.rename_value_references(
-                    method, field_prefix
-                )
-            # A field the instantiation kept (written, F-045; converting,
-            # F-356; or initialized by a method call, F-384) may have an
-            # initializer naming another challenger field, one no method
-            # writes, and a length in a field's type may name one: they follow
-            # the rename, or they would name nothing, or a reduction field of
-            # the same name (F-384). A ``Set`` field's initializer is a type,
-            # renamed only in its lengths.
-            game.fields = [
-                frog_ast.Field(
-                    visitors.rename_value_references(field.type, field_prefix, True),
-                    field.name,
-                    visitors.rename_value_references(
-                        field.value,
-                        field_prefix,
-                        isinstance(field.type, frog_ast.SetType),
-                    ),
-                )
-                for field in game.fields
-            ]
             lookup.update(get_challenger_method_lookup(game))
             game = self.apply_reduction(game, reduction_ast)
 
@@ -2324,11 +2299,73 @@ class ProofEngine:
             # effect gets explicit control flow first, since the inliner puts
             # a callee's statements in front of the statement holding the
             # call (F-372).
-            return conditional_calls.make_conditional_calls_explicit(
-                current, lookup, namespace, let_types
+            current = conditional_calls.make_conditional_calls_explicit(
+                current, lookup, namespace, let_types, composed_with
+            )
+            # The inliner puts a callee's statements in front of the
+            # statement holding the call: a part of that statement evaluated
+            # before the call that touches what the callee touches is bound
+            # to a variable first (F-397).
+            return evaluation_order.order_calls_for_inlining(
+                current, lookup, namespace, let_types, composed_with
             )
 
         return inline_calls(game, lookup, prepare=prepare)
+
+    def _renamed_challenger(self, game: frog_ast.Game) -> frog_ast.Game:
+        """*game*, an instantiated challenger, with its fields read as
+        ``challenger@<name>`` in its methods and in its fields' initializers
+        and type lengths, as the game composed with a reduction names them
+        (:meth:`apply_reduction` renames the fields themselves)."""
+        # Ensure independent methods list before mutation
+        game = copy.copy(game)
+        game.methods = list(game.methods)
+        # Capture-aware (F-337): a name-keyed substitution would also rewrite
+        # a same-named TYPE (``Variable`` is both Expression and Type), so a
+        # challenger field ``KA`` typed by a ``let:``-bound set ``KA`` would
+        # have its type prefixed too.
+        field_prefix = {
+            field.name: get_challenger_field_name(field.name) for field in game.fields
+        }
+        for index, method in enumerate(game.methods):
+            game.methods[index] = visitors.rename_value_references(method, field_prefix)
+        # A field the instantiation kept (written, F-045; converting,
+        # F-356; or initialized by a method call, F-384) may have an
+        # initializer naming another challenger field, one no method
+        # writes, and a length in a field's type may name one: they follow
+        # the rename, or they would name nothing, or a reduction field of
+        # the same name (F-384). A ``Set`` field's initializer is a type,
+        # renamed only in its lengths.
+        game.fields = [
+            frog_ast.Field(
+                visitors.rename_value_references(field.type, field_prefix, True),
+                field.name,
+                visitors.rename_value_references(
+                    field.value,
+                    field_prefix,
+                    isinstance(field.type, frog_ast.SetType),
+                ),
+            )
+            for field in game.fields
+        ]
+        return game
+
+    def resolve_reduction(
+        self,
+        challenger: frog_ast.ParameterizedGame | frog_ast.ConcreteGame,
+        reduction: frog_ast.ParameterizedGame,
+    ) -> frog_ast.Game:
+        """The reduction of a step resolved alone, as :meth:`resolve_step_game`
+        resolves it before composing it with *challenger*: its scheme calls
+        inlined, its challenger calls kept (the step-detail display shows it)."""
+        root, args = self._step_game_definition(challenger)
+        game = instantiate(
+            root, args, self.proof_namespace, True, self._argument_types(args)
+        )
+        game = self._renamed_challenger(visitors.snapshot_starting_values(game))
+        return self.resolve_step_game(
+            reduction, composed_later=True, composed_with=game
+        )
 
     def _argument_types(
         self, args: list[frog_ast.Expression]

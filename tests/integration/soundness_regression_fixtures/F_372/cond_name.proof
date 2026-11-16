@@ -1,0 +1,22 @@
+// Target: the conditional-call rewrite (proof_frog/conditional_calls.py),
+// its temporary for a `&&` evaluated inside a larger expression.
+// Hypothesis: the temporary was named
+// `<object>.<method>@cond<k>`, the same shape the inliner gives a callee's
+// local `cond` at statement index k. PickCond's local `cond`, inlined in
+// the guard at index 0, is then declared there under the temporary's name,
+// shadowing it, so the temporary keeps `b` and Left becomes Right.
+// Sound engine: Proof Failed! (Left returns true when b holds and the draw
+// completes; Right returns false).
+// Unsound engine: Proof Succeeded!
+import 'Picker.primitive';
+import 'PickCond.scheme';
+import 'TCond.game';
+proof:
+let:
+    PickCond P = PickCond();
+assume:
+theorem:
+    TCond(P);
+games:
+    TCond(P).Left against TCond(P).Adversary;
+    TCond(P).Right against TCond(P).Adversary;

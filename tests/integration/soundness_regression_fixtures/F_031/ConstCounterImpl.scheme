@@ -1,0 +1,10 @@
+// F-031 positive control: the same scheme with its field never written, so
+// the field is a constant and is read as its initializer q.
+import 'Counter.primitive';
+
+Scheme ConstCounterImpl(Int q) extends Counter {
+    Int c = q;
+    Int Next() {
+        return c + 1;
+    }
+}

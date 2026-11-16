@@ -1,0 +1,21 @@
+// F-031: a scheme method counts up a scheme field that a game reads after
+// the call (see ReadLen.game). Distinguisher: one call to Q; advantage 1.
+// Sound engine: a type error, since Grow2 writes its own field.
+import 'Len2.primitive';
+import 'Grow2.scheme';
+import 'ReadLen.game';
+
+proof:
+
+let:
+    Int lambda;
+    Len2 E = Grow2(lambda);
+
+assume:
+
+theorem:
+    ReadLen(E);
+
+games:
+    ReadLen(E).Left against ReadLen(E).Adversary;
+    ReadLen(E).Right against ReadLen(E).Adversary;

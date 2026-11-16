@@ -1,0 +1,8 @@
+// F-031: a primitive whose Step changes hidden state, with Reset and
+// WasUsed so the change is visible to the adversary.
+Primitive MutP(Int n) {
+    Int n = n;
+    Void Reset();
+    BitString<n> Step();
+    Bool WasUsed();
+}

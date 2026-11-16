@@ -1,0 +1,36 @@
+// F-031: Real's Oracle computes (a || P.Step())[0 : P.n], which is a, but
+// Step sets the flag used; Random's Oracle returns a without calling Step.
+// Distinguisher: one Oracle call, then Used: Real gives true, Random false.
+// The inlined scheme's writes to its field were dropped as dead, so the hop
+// was accepted.
+import 'MutP.primitive';
+
+Game Real(MutP P) {
+    Void Initialize() {
+        P.Reset();
+    }
+
+    BitString<P.n> Oracle(BitString<P.n> a) {
+        return (a || P.Step())[0 : P.n];
+    }
+
+    Bool Used() {
+        return P.WasUsed();
+    }
+}
+
+Game Random(MutP P) {
+    Void Initialize() {
+        P.Reset();
+    }
+
+    BitString<P.n> Oracle(BitString<P.n> a) {
+        return a;
+    }
+
+    Bool Used() {
+        return P.WasUsed();
+    }
+}
+
+export as Attack4Prop;

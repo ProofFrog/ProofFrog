@@ -1,0 +1,20 @@
+// F-031: after one Grow, Left returns E.len (lambda + 1 with Grow2) and
+// Right returns E.lambda (lambda). The engine read E.len as its
+// initializer lambda, so the hop was accepted.
+import 'Len2.primitive';
+
+Game Left(Len2 E) {
+    Int Q() {
+        E.Grow();
+        return E.len;
+    }
+}
+
+Game Right(Len2 E) {
+    Int Q() {
+        E.Grow();
+        return E.lambda;
+    }
+}
+
+export as ReadLen;

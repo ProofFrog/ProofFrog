@@ -1,0 +1,16 @@
+// F-031: Grow counts the scheme field len up. A scheme field may not be
+// written in a method body, so the type checker refuses this scheme.
+import 'Len2.primitive';
+
+Scheme Grow2(Int lambda) extends Len2 {
+    Int lambda = lambda;
+    Int len = lambda;
+
+    Void Grow() {
+        len = len + 1;
+    }
+
+    BitString<lambda> Next() {
+        return 0^lambda;
+    }
+}

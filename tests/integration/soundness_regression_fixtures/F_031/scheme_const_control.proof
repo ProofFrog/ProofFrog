@@ -1,0 +1,18 @@
+// F-031 positive control: a constant scheme field next to a game field of
+// the same name (see ConstCapture.game). Sound engine: Proof Succeeded!
+import 'Counter.primitive';
+import 'ConstCounterImpl.scheme';
+import 'ConstCapture.game';
+
+proof:
+
+let:
+    Int q;
+    Counter S = ConstCounterImpl(q);
+
+theorem:
+    ConstCapture(S, q);
+
+games:
+    ConstCapture(S, q).Left against ConstCapture(S, q).Adversary;
+    ConstCapture(S, q).Right against ConstCapture(S, q).Adversary;

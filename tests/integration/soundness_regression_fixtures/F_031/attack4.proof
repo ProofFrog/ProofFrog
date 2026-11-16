@@ -1,0 +1,19 @@
+// F-031: a scheme flag set by Step, read through WasUsed, claimed not
+// observable (see Attack4Prop.game). Sound engine: a type error, since
+// MutScheme writes its own field.
+import 'MutP.primitive';
+import 'MutScheme.scheme';
+import 'Attack4Prop.game';
+
+proof:
+
+let:
+    Int n;
+    MutScheme M = MutScheme(n);
+
+theorem:
+    Attack4Prop(M);
+
+games:
+    Attack4Prop(M).Real against Attack4Prop(M).Adversary;
+    Attack4Prop(M).Random against Attack4Prop(M).Adversary;

@@ -3,11 +3,11 @@
 A length, modulus or size in a type, and the length of ``0^n`` / ``1^n``, may
 name only parameters, proof ``let:`` entries and variables never written
 after their declaration, so that a type means the same thing throughout an
-execution."""
+execution. A scheme's method may not write a field of the scheme."""
 
 import pytest
 
-from proof_frog import frog_parser, structural_rules
+from proof_frog import frog_ast, frog_parser, structural_rules
 
 
 def _messages(source: str) -> list[str]:
@@ -18,6 +18,11 @@ def _messages(source: str) -> list[str]:
 def _rejected(source: str, fragment: str) -> None:
     messages = _messages(source)
     assert any(fragment in m for m in messages), messages
+
+
+def _scheme_messages(source: str) -> list[str]:
+    scheme = frog_parser.parse_string(source, frog_ast.FileType.SCHEME)
+    return [v.message for v in structural_rules.check_structural_rules(scheme)]
 
 
 class TestWrittenSizes:
@@ -242,3 +247,99 @@ class TestWrittenGroups:
     )
     def test_never_written_groups_are_allowed(self, source: str) -> None:
         assert not _messages(source)
+
+
+class TestSchemeFieldWrites:
+    """F-031 (ruling of 2026-06-28): a scheme's fields are fixed once it is
+    instantiated, so a scheme's method may not write one; mutable state is
+    game state. The engine reads a scheme field as its initializer and
+    inlines the scheme's methods into games, where a written field would be
+    a bare name of the calling game (dropped as dead, or captured by a game
+    field of the same name)."""
+
+    def test_scheme_field_assigned(self) -> None:
+        messages = _scheme_messages("""
+            Scheme CounterImpl(Int q) extends Counter {
+                Int c = q;
+                Int Next() {
+                    c = c + 1;
+                    return c;
+                }
+            }""")
+        assert messages == [
+            "Method Next writes the scheme field 'c': a scheme field may not be"
+            " written in a method body; keep mutable state in a game"
+        ]
+
+    @pytest.mark.parametrize(
+        "body, field",
+        [
+            # A draw into the field.
+            ("k <- BitString<n>;", "k"),
+            # An element write.
+            ("M[k] = k;", "M"),
+            # A draw into an element.
+            ("M[k] <- BitString<n>;", "M"),
+            # '<-uniq[S]' inserts the draw into S.
+            ("BitString<n> r <-uniq[S] BitString<n>;", "S"),
+            # A write inside a branch and a loop.
+            ("if (true) { for (Int i = 0 to n) { u = !u; } }", "u"),
+        ],
+    )
+    def test_every_write_form_is_refused(self, body: str, field: str) -> None:
+        messages = _scheme_messages(f"""
+            Scheme S(Int n) extends P {{
+                BitString<n> k;
+                Map<BitString<n>, BitString<n>> M;
+                Set<BitString<n>> S;
+                Bool u;
+                Void Step() {{
+                    {body}
+                }}
+            }}""")
+        assert any(
+            f"Method Step writes the scheme field '{field}'" in m for m in messages
+        ), messages
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            # A field read but never written.
+            """
+            Scheme ConstCounterImpl(Int q) extends Counter {
+                Int c = q;
+                Int Next() { return c + 1; }
+            }""",
+            # A local of the field's name is another variable.
+            """
+            Scheme S(Int q) extends Counter {
+                Int c = q;
+                Int Next() {
+                    Int c = 0;
+                    c = c + 1;
+                    return c;
+                }
+            }""",
+            # So is a method parameter of the field's name.
+            """
+            Scheme S(Int q) extends Counter {
+                Int c = q;
+                Int Next(Int c) {
+                    c = c + 1;
+                    return c;
+                }
+            }""",
+        ],
+    )
+    def test_writes_to_other_variables_are_allowed(self, source: str) -> None:
+        assert not _scheme_messages(source)
+
+    def test_game_field_writes_are_allowed(self) -> None:
+        assert not _messages("""
+            Game G(Int q) {
+                Int c = q;
+                Int Next() {
+                    c = c + 1;
+                    return c;
+                }
+            }""")

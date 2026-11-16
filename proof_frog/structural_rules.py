@@ -8,6 +8,12 @@ type checker:
   (``__a<N>__``, used by alpha renaming) may not be written by a user.
 - A local declaration (typed assignment or draw, bare declaration, ``for``
   binder) may not reuse the name of a parameter of its method.
+- A scheme's method may not write a field of the scheme (an assignment, a
+  draw, an element write, or a ``<-uniq[S]`` draw that inserts into ``S``).
+  A scheme's fields are fixed once it is instantiated: mutable state is game
+  state.  The engine reads such a field as its initializer and inlines the
+  scheme's methods into games, where a written field would be a bare name
+  of the game.
 - A length, modulus or size in a type (``BitString<n>``, ``ModInt<q>``,
   ``Array<T, n>``), the group of ``GroupElem<G>``, and the length of a
   literal ``0^n`` / ``1^n`` may not name a variable that is assigned or drawn
@@ -152,6 +158,7 @@ class _ComponentChecker:
         self.violations: list[Violation] = []
         self.method_params: dict[str, _Binding] = {}
         self.method_name = ""
+        self.is_scheme = False
 
     def _lookup(self, name: str) -> Optional[_Binding]:
         for scope in reversed(self.scopes):
@@ -165,17 +172,27 @@ class _ComponentChecker:
             if binding is not None:
                 self.size_uses.append((use_node, name, binding))
 
-    def _write(self, target: frog_ast.ASTNode) -> None:
+    def _write(self, target: frog_ast.ASTNode, statement: frog_ast.Statement) -> None:
         if isinstance(target, frog_ast.Tuple):
             for value in target.values:
-                self._write(value)
+                self._write(value, statement)
             return
         name = _written_base(target)
         if name is None:
             return
         binding = self._lookup(name)
-        if binding is not None:
-            self.written.add(id(binding))
+        if binding is None:
+            return
+        self.written.add(id(binding))
+        if self.is_scheme and binding.kind == "field":
+            self.violations.append(
+                Violation(
+                    statement,
+                    f"Method {self.method_name} writes the scheme field '{name}':"
+                    " a scheme field may not be written in a method body;"
+                    " keep mutable state in a game",
+                )
+            )
 
     def _declare(self, node: frog_ast.ASTNode, name: str) -> None:
         if name in self.method_params:
@@ -194,6 +211,7 @@ class _ComponentChecker:
         methods: list[frog_ast.Method | frog_ast.MethodSignature] = getattr(
             component, "methods", []
         )
+        self.is_scheme = isinstance(component, frog_ast.Scheme)
         self.scopes = [{}]
         for param in parameters:
             self._record_sizes(param.type)
@@ -290,14 +308,14 @@ class _ComponentChecker:
                 self._record_sizes(statement.unique_set)
                 if statement.surface_form == "uniq":
                     # '<-uniq[S]' inserts the draw into S.
-                    self._write(statement.unique_set)
+                    self._write(statement.unique_set, statement)
             if statement.the_type is not None and isinstance(
                 statement.var, frog_ast.Variable
             ):
                 self._declare(statement, statement.var.name)
             else:
                 self._record_sizes(statement.var)
-                self._write(statement.var)
+                self._write(statement.var, statement)
         else:
             self._record_sizes(statement)
 

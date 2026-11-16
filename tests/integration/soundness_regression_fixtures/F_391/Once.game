@@ -1,0 +1,20 @@
+// Left: the counter is bumped once, by Initialize. Right: the same.
+Game Left(Int n) {
+    Int c = 0;
+    Void Initialize() {
+        c = c + 1;
+    }
+    Int Get() {
+        return c;
+    }
+}
+Game Right(Int n) {
+    Int c = 0;
+    Void Initialize() {
+        c = c + 1;
+    }
+    Int Get() {
+        return c;
+    }
+}
+export as Once;

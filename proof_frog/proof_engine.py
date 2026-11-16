@@ -22,11 +22,14 @@ from . import dependencies
 from . import diagnostics
 from . import advantage
 from . import upto
+from . import structural_rules
 from . import hop_cache as hop_cache_module
 from .transforms._base import (
     NearMiss,
     PipelineContext,
     deduplicate_near_misses,
+    fresh_name,
+    game_names,
     has_nondeterministic_call,
     run_pipeline,
     run_pipeline_until,
@@ -2218,6 +2221,8 @@ class ProofEngine:
         self,
         challenger: frog_ast.ParameterizedGame | frog_ast.ConcreteGame,
         reduction: Optional[frog_ast.ParameterizedGame] = None,
+        *,
+        composed_later: bool = False,
     ) -> frog_ast.Game:
         """Resolve a proof step's game to an inlined AST.
 
@@ -2226,6 +2231,11 @@ class ProofEngine:
         prover, the diagnostic CLI/web helpers, and the LaTeX exporter so they
         all use one resolution path. Names are *not* canonicalized (use
         ``canonicalize_game`` for that).
+
+        *composed_later* is set when the game is a reduction resolved before
+        it is composed: its field initializers that make a call stay where
+        they are until the composed game moves them into Initialize, where
+        the challenger's Initialize is known (F-391).
         """
         root, args = self._step_game_definition(challenger)
         game = instantiate(
@@ -2239,8 +2249,16 @@ class ProofEngine:
 
         lookup = dict(self.method_lookup)
         if reduction:
-            reduction_ast = self.resolve_step_game(reduction)
+            reduction_ast = self.resolve_step_game(reduction, composed_later=True)
             assert isinstance(reduction_ast, frog_ast.Reduction)
+            # The reduction's field initializers run before its Initialize,
+            # so a challenger call there would precede challenger.Initialize
+            # (the type checker refuses it too).
+            message = upto.challenger_call_in_field_initializer(
+                reduction_ast, game.has_method("Initialize")
+            )
+            if message is not None:
+                raise UnsupportedFieldInitializerError(message)
             # Ensure independent methods list before mutation
             game = copy.copy(game)
             game.methods = list(game.methods)
@@ -2278,6 +2296,8 @@ class ProofEngine:
             lookup.update(get_challenger_method_lookup(game))
             game = self.apply_reduction(game, reduction_ast)
 
+        if not composed_later:
+            game = run_call_initializers_in_initialize(game, lookup)
         for _iteration in range(_MAX_FIXED_POINT_ITERATIONS):
             new_game = visitors.InlineTransformer(lookup).transform(game)
             if game != new_game:
@@ -3119,6 +3139,116 @@ def get_challenger_method_lookup(challenger: frog_ast.Game) -> MethodLookup:
 
 def get_challenger_field_name(name: str) -> str:
     return f"challenger@{name}"
+
+
+class UnsupportedFieldInitializerError(Exception):
+    """A field initializer the engine cannot run in Initialize (F-391)."""
+
+
+def _makes_inlinable_call(node: frog_ast.ASTNode, lookup: MethodLookup) -> bool:
+    return (
+        visitors.SearchVisitor[frog_ast.ASTNode](
+            lambda n: isinstance(n, frog_ast.FuncCall)
+            and isinstance(n.func, frog_ast.FieldAccess)
+            and isinstance(n.func.the_object, frog_ast.Variable)
+            and (n.func.the_object.name, n.func.name) in lookup
+        ).visit(node)
+        is not None
+    )
+
+
+def run_call_initializers_in_initialize(
+    game: frog_ast.Game, lookup: MethodLookup
+) -> frog_ast.Game:
+    """*game* with each field initializer that makes a call the inliner
+    inlines (a key of *lookup*) run as an assignment at the start of
+    ``Initialize`` instead (F-391).
+
+    The initializers run once, in declaration order, before ``Initialize``
+    (ruling Q8), and a method call in one is made once. An initializer has
+    no block for the inliner to put the callee's body in, so the field is
+    declared without it, holding its type's default, and assigned first
+    thing in ``Initialize``: the same value, provided nothing reads the
+    field in between. Only a later initializer can, so one that reads a
+    moved field moves too, after it; the moved assignments keep the fields'
+    order. A game without ``Initialize`` gets ``Void Initialize()``, which
+    runs before any oracle, as the initializers do. An ``Initialize``
+    parameter named like a moved field, or like a name a moved initializer
+    reads, is renamed first so that it does not capture the reference. A
+    moved field named by a length, modulus, size or group in a type would
+    give the type a different meaning before ``Initialize``: refused.
+    """
+    moved: list[frog_ast.Field] = []
+    moved_names: set[str] = set()
+    for field in game.fields:
+        if field.value is None:
+            continue
+        if _makes_inlinable_call(field.value, lookup) or (
+            visitors.referenced_variable_names(field.value) & moved_names
+        ):
+            moved.append(field)
+            moved_names.add(field.name)
+    if not moved:
+        return game
+    in_types = sorted(moved_names & structural_rules.size_names(game))
+    if in_types:
+        raise UnsupportedFieldInitializerError(
+            f"field '{in_types[0]}' is initialized by a method call and named"
+            " in a type; move the call into Initialize"
+        )
+    used = set(moved_names)
+    assignments: list[frog_ast.Statement] = []
+    for field in moved:
+        assert field.value is not None
+        used |= visitors.referenced_variable_names(field.value)
+        assignments.append(
+            frog_ast.Assignment(
+                None, frog_ast.Variable(field.name), copy.deepcopy(field.value)
+            )
+        )
+    new_game = copy.copy(game)
+    new_game.fields = [
+        (
+            frog_ast.Field(field.type, field.name, None)
+            if field.name in moved_names
+            else field
+        )
+        for field in game.fields
+    ]
+    new_game.methods = list(game.methods)
+    if not game.has_method("Initialize"):
+        new_game.methods.insert(
+            0,
+            frog_ast.Method(
+                frog_ast.MethodSignature("Initialize", frog_ast.Void(), []),
+                frog_ast.Block(assignments),
+            ),
+        )
+        return new_game
+    index = next(
+        i for i, m in enumerate(game.methods) if m.signature.name == "Initialize"
+    )
+    initialize = game.methods[index]
+    taken = game_names(game)
+    rename = {
+        param.name: fresh_name(param.name, taken)
+        for param in initialize.signature.parameters
+        if param.name in used
+    }
+    signature = copy.copy(initialize.signature)
+    signature.parameters = [
+        (
+            frog_ast.Parameter(param.type, rename[param.name])
+            if param.name in rename
+            else param
+        )
+        for param in initialize.signature.parameters
+    ]
+    block = visitors.rename_value_references(initialize.block, rename)
+    new_game.methods[index] = frog_ast.Method(
+        signature, frog_ast.Block(assignments) + block
+    )
+    return new_game
 
 
 def _get_file_type_for_import(file_name: str) -> frog_ast.FileType:

@@ -1,0 +1,26 @@
+// Left stores k * k, Right k + k: they differ unless k is 0 or 2.
+Game Left(Int k) {
+    Int n;
+    Void Initialize() {
+        n = 0;
+    }
+    Void Put() {
+        n = k * k;
+    }
+    Int Get() {
+        return n;
+    }
+}
+Game Right(Int k) {
+    Int n;
+    Void Initialize() {
+        n = 0;
+    }
+    Void Put() {
+        n = k + k;
+    }
+    Int Get() {
+        return n;
+    }
+}
+export as SqWrong;

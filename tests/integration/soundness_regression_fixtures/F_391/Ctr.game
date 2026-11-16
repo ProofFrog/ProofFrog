@@ -1,0 +1,22 @@
+// Challenger: a counter the adversary can bump and read.
+Game Real(Int n) {
+    Int c = 0;
+    Int Bump() {
+        c = c + 1;
+        return c;
+    }
+    Int Get() {
+        return c;
+    }
+}
+Game Ideal(Int n) {
+    Int c = 0;
+    Int Bump() {
+        c = c + 1;
+        return c;
+    }
+    Int Get() {
+        return c;
+    }
+}
+export as Ctr;

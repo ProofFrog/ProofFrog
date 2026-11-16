@@ -11,6 +11,7 @@ from . import structural_rules
 from . import suggestions as _suggestions
 from . import upto
 from . import visitors
+from .transforms.symbolic import sympy_to_expression
 
 
 class FailedTypeCheck(Exception):
@@ -1239,7 +1240,7 @@ def check_proof_well_formed(
 
     for helper in proof.helpers:
         import_namespace[helper.name] = helper
-    _check_reduction_placement(proof, file_name)
+    _check_reduction_placement(proof, import_namespace, file_name)
     _check_upto_hops(proof, import_namespace, file_name)
     if isinstance(proof.theorem, frog_ast.EventTheorem):
         _check_event_chain(proof, proof.theorem, file_name)
@@ -1364,10 +1365,19 @@ def _check_upto_hops(
             )
 
 
-def _check_reduction_placement(proof: frog_ast.ProofFile, file_name: str) -> None:
+def _check_reduction_placement(
+    proof: frog_ast.ProofFile,
+    import_namespace: dict[str, frog_ast.Root | frog_ast.Game],
+    file_name: str,
+) -> None:
     for helper in proof.helpers:
         if isinstance(helper, frog_ast.Reduction):
-            message = upto.check_challenger_init_placement(helper)
+            # Both games of a pair have the same methods (checked earlier).
+            challenger = import_namespace.get(helper.to_use.name)
+            has_initialize = isinstance(challenger, frog_ast.GameFile) and any(
+                game.has_method("Initialize") for game in challenger.games
+            )
+            message = upto.check_challenger_init_placement(helper, has_initialize)
             if message is not None:
                 print_error(helper, message, file_name)
 
@@ -2249,9 +2259,12 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 "Slice bounds must be integer constants or simple arithmetic expressions",
             )
             return
-        total_length = frog_parser.parse_expression(
-            str(end_type_sympy - start_type_sympy)
-        )
+        # SymPy's str writes k * k as k**2, not FrogLang (F-392).
+        total_length = sympy_to_expression(end_type_sympy - start_type_sympy, True)
+        if total_length is None:
+            total_length = frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.SUBTRACT, the_slice.end, the_slice.start
+            )
         self.ast_type_map.set(the_slice, frog_ast.BitStringType(total_length))
 
     def leave_step_assumption(self, assumption: frog_ast.StepAssumption) -> None:
@@ -2588,11 +2601,20 @@ class CheckTypeVisitor(VariableTypeVisitor):
                             "Could not convert first length or second length to sympy expression",
                         )
                         return
-                    total_length = first_length + second_length
+                    # SymPy's str writes k * k as k**2, not FrogLang (F-392).
+                    total_length = sympy_to_expression(
+                        first_length + second_length, True
+                    )
                     self.ast_type_map.set(
                         bin_op,
                         frog_ast.BitStringType(
-                            frog_parser.parse_expression(str(total_length))
+                            total_length
+                            if total_length is not None
+                            else frog_ast.BinaryOperation(
+                                frog_ast.BinaryOperators.ADD,
+                                left_type.parameterization,
+                                right_type.parameterization,
+                            )
                         ),
                     )
                 else:
@@ -3374,6 +3396,13 @@ def _ast_to_sympy(  # pylint: disable=too-many-return-statements
             return left * right
         if node.operator == frog_ast.BinaryOperators.DIVIDE:
             return Rational(left, right)
+        if (
+            node.operator == frog_ast.BinaryOperators.EXPONENTIATE
+            and isinstance(right, (int, Integer))
+            and right >= 0
+        ):
+            # ``k ^ 2``, as a folded ``k * k`` is written (F-392).
+            return left**right
         return None
     if isinstance(node, frog_ast.UnaryOperation):
         if node.operator == frog_ast.UnaryOperators.MINUS:

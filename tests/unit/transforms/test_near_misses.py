@@ -5633,3 +5633,90 @@ def test_local_fn_near_miss_let_held_by_primitive() -> None:
     assert len(misses) == 1
     assert misses[0].variable == "F"
     assert "passes each to a primitive (entry 'L')" in misses[0].reason
+
+
+# ---------------------------------------------------------------------------
+# F-392: Symbolic Computation leaves a power without FrogLang text unfolded
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "2 ^ (0 - 1)",
+        "n ^ (0 - 1)",
+        "n ^ n",
+    ],
+)
+def test_symbolic_near_miss_on_power_without_froglang_text(expression: str) -> None:
+    misses = _symbolic_misses(expression)
+    assert len(misses) == 1, misses
+    assert misses[0].method == "Test"
+    assert "not folded" in misses[0].reason
+    assert "exponents known to be >= 0" in misses[0].reason
+    assert misses[0].suggestion is not None
+    assert "exponent that is a literal >= 0" in misses[0].suggestion
+
+
+@pytest.mark.parametrize("expression", ["n * n", "n * n * n + 1", "2 ^ 3"])
+def test_symbolic_no_near_miss_on_printable_power(expression: str) -> None:
+    assert not _symbolic_misses(expression)
+
+
+# ---------------------------------------------------------------------------
+# F-393: Remove Unreachable gives a condition that is not a Z3 Boolean no
+# path fact (a proof let: Bool, which the game's type map does not type)
+# ---------------------------------------------------------------------------
+
+
+def _ru_misses(ctx: PipelineContext) -> list[NearMiss]:
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Remove unreachable blocks of code"
+        and "gives no path fact" in nm.reason
+    ]
+
+
+def test_remove_unreachable_near_miss_on_untyped_bool_condition() -> None:
+    from proof_frog.transforms.control_flow import RemoveUnreachable
+
+    # fl is a proof let: Bool the game does not declare. Used to raise
+    # Z3Exception "Value cannot be converted into a Z3 Boolean value".
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int Get() {
+                if (fl) {
+                    return 1;
+                }
+                return 0;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    assert RemoveUnreachable().apply(game, ctx) == game
+    misses = _ru_misses(ctx)
+    assert misses
+    assert misses[0].variable == "fl"
+    assert "Condition 'fl' gives no path fact" in misses[0].reason
+
+
+def test_remove_unreachable_no_near_miss_on_declared_bool_condition() -> None:
+    from proof_frog.transforms.control_flow import RemoveUnreachable
+
+    game = frog_parser.parse_game("""
+        Game G(Bool fl) {
+            Int Get() {
+                if (fl) {
+                    return 1;
+                }
+                if (true) {
+                    return 2;
+                }
+                return 0;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    RemoveUnreachable().apply(game, ctx)
+    assert not _ru_misses(ctx)

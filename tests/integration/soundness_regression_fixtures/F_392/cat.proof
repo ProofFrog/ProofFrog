@@ -1,0 +1,12 @@
+// True: two uniform strings concatenated are one uniform string. Used to
+// crash type checking (k**2 parsed back as FrogLang).
+import 'Cat.game';
+proof:
+let:
+    Int kl;
+    Int nl;
+theorem:
+    Cat(kl, nl);
+games:
+    Cat(kl, nl).Left against Cat(kl, nl).Adversary;
+    Cat(kl, nl).Right against Cat(kl, nl).Adversary;

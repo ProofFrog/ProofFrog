@@ -1,0 +1,12 @@
+// GroupWrite's games write their group parameter A, named by GroupElem<A>:
+// a type error.
+import 'GroupWrite.game';
+proof:
+let:
+    Group G;
+    Group H;
+theorem:
+    GroupWrite(G, H);
+games:
+    GroupWrite(G, H).Left against GroupWrite(G, H).Adversary;
+    GroupWrite(G, H).Right against GroupWrite(G, H).Adversary;

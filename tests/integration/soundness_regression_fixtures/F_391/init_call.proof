@@ -1,0 +1,26 @@
+// The last hop is false: R's field initializer bumps the counter once, so
+// Get returns 1, against Probe's Right returning 0. Used to crash prove
+// ("pop from empty list"). Sound engine: Proof Failed!
+import 'Ctr.game';
+import 'Probe.game';
+
+// R bumps the challenger once, in a field initializer; Get then reads 1.
+Reduction R(Int n) compose Ctr(n) against Probe(n).Adversary {
+    Int y = challenger.Bump();
+    Int Get() {
+        return challenger.Get();
+    }
+}
+
+proof:
+let:
+    Int n;
+assume:
+    Ctr(n);
+theorem:
+    Probe(n);
+games:
+    Probe(n).Left against Probe(n).Adversary;
+    Ctr(n).Real compose R(n) against Probe(n).Adversary;
+    Ctr(n).Ideal compose R(n) against Probe(n).Adversary;
+    Probe(n).Right against Probe(n).Adversary;

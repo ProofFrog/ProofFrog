@@ -1,0 +1,28 @@
+// Challenger with an Initialize: the counter starts at 5.
+Game Real(Int n) {
+    Int c;
+    Void Initialize() {
+        c = 5;
+    }
+    Int Bump() {
+        c = c + 1;
+        return c;
+    }
+    Int Get() {
+        return c;
+    }
+}
+Game Ideal(Int n) {
+    Int c;
+    Void Initialize() {
+        c = 5;
+    }
+    Int Bump() {
+        c = c + 1;
+        return c;
+    }
+    Int Get() {
+        return c;
+    }
+}
+export as CtrI;

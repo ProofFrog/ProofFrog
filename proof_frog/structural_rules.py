@@ -9,10 +9,11 @@ type checker:
 - A local declaration (typed assignment or draw, bare declaration, ``for``
   binder) may not reuse the name of a parameter of its method.
 - A length, modulus or size in a type (``BitString<n>``, ``ModInt<q>``,
-  ``Array<T, n>``) and the length of a literal ``0^n`` / ``1^n`` may not name
-  a variable that is assigned or drawn anywhere: only parameters, proof
-  ``let:`` entries and variables never written after their declaration.  So a
-  type means the same thing throughout an execution.
+  ``Array<T, n>``), the group of ``GroupElem<G>``, and the length of a
+  literal ``0^n`` / ``1^n`` may not name a variable that is assigned or drawn
+  anywhere: only parameters, proof ``let:`` entries and variables never
+  written after their declaration.  So a type means the same thing
+  throughout an execution.
 
 ``check_structural_rules`` returns the violations in source order; the caller
 reports them.
@@ -65,9 +66,10 @@ class _NameNodeVisitor(visitors.Visitor[list[tuple[frog_ast.ASTNode, str]]]):
 
 
 class _SizeNameVisitor(visitors.Visitor[list[tuple[frog_ast.ASTNode, str]]]):
-    """Every variable named by a length, modulus or size inside a node: the
-    parameter of ``BitString<..>``, ``ModInt<..>``, ``Array<T, ..>`` and the
-    length of ``0^..`` / ``1^..``, with the node of that type or literal."""
+    """Every variable named by a length, modulus, size or group inside a node:
+    the parameter of ``BitString<..>``, ``ModInt<..>``, ``Array<T, ..>``,
+    ``GroupElem<..>`` and the length of ``0^..`` / ``1^..``, with the node of
+    that type or literal."""
 
     def __init__(self) -> None:
         self.found: list[tuple[frog_ast.ASTNode, str]] = []
@@ -89,6 +91,11 @@ class _SizeNameVisitor(visitors.Visitor[list[tuple[frog_ast.ASTNode, str]]]):
 
     def visit_array_type(self, node: frog_ast.ArrayType) -> None:
         self._add(node, node.count)
+
+    def visit_group_elem_type(self, node: frog_ast.GroupElemType) -> None:
+        # A group element is read in the group its type names (the passes
+        # rebuild ``G.generator`` from the type), so the group is fixed too.
+        self._add(node, node.group)
 
     def visit_bit_string_literal(self, node: frog_ast.BitStringLiteral) -> None:
         self._add(node, node.length)
@@ -117,6 +124,12 @@ def _sizes_in(node: Optional[frog_ast.ASTNode]) -> list[tuple[frog_ast.ASTNode, 
     if node is None:
         return []
     return _SizeNameVisitor().visit(node)
+
+
+def size_names(node: frog_ast.ASTNode) -> set[str]:
+    """The variables a length, modulus, size or group anywhere in *node*
+    names (the names the rule below requires to be never written)."""
+    return {name for _, name in _sizes_in(node)}
 
 
 def _written_base(target: frog_ast.ASTNode) -> Optional[str]:
@@ -196,13 +209,17 @@ class _ComponentChecker:
                 self._check_method(method)
         for use_node, name, binding in self.size_uses:
             if id(binding) in self.written:
+                what = (
+                    "group" if isinstance(use_node, frog_ast.GroupElemType) else "size"
+                )
                 self.violations.append(
                     Violation(
                         use_node,
-                        f"The size in {use_node} names {binding.kind} '{name}',"
-                        " which is assigned or sampled: a length, modulus or"
-                        " size in a type may name only parameters, let entries"
-                        " and variables never written after their declaration",
+                        f"The {what} in {use_node} names {binding.kind} '{name}',"
+                        " which is assigned or sampled: a length, modulus, size"
+                        " or group in a type may name only parameters, let"
+                        " entries and variables never written after their"
+                        " declaration",
                     )
                 )
         return self.violations

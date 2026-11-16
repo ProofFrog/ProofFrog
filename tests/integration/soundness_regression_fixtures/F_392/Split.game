@@ -1,0 +1,15 @@
+// c[0 : k * k] of a uniform c: the type checker and Split Uniform Samples
+// compute the slice length with SymPy, which wrote k * k as k**2.
+Game Left(Int k, Int n) {
+    BitString<k * k> Get() {
+        BitString<k * k + n> c <- BitString<k * k + n>;
+        return c[0 : k * k];
+    }
+}
+Game Right(Int k, Int n) {
+    BitString<k * k> Get() {
+        BitString<k * k> a <- BitString<k * k>;
+        return a;
+    }
+}
+export as Split;

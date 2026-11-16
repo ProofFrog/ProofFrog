@@ -1,0 +1,16 @@
+// Left and Right are the same game: a field initializer draws the key once,
+// and Get returns it. Used to crash prove ("pop from empty list").
+import 'Src.primitive';
+Game Left(Src S) {
+    BitString<S.lambda> k = S.Draw();
+    BitString<S.lambda> Get() {
+        return k;
+    }
+}
+Game Right(Src S) {
+    BitString<S.lambda> k = S.Draw();
+    BitString<S.lambda> Get() {
+        return k;
+    }
+}
+export as KeyOnce;

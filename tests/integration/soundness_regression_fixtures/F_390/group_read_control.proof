@@ -1,0 +1,11 @@
+// Positive control: the group parameter is read, never written.
+import 'GroupRead.game';
+proof:
+let:
+    Group G;
+    Group H;
+theorem:
+    GroupRead(G, H);
+games:
+    GroupRead(G, H).Left against GroupRead(G, H).Adversary;
+    GroupRead(G, H).Right against GroupRead(G, H).Adversary;

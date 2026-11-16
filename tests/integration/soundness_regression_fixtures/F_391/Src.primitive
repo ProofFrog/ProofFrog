@@ -1,0 +1,4 @@
+Primitive Src(Int lambda) {
+    Int lambda = lambda;
+    BitString<lambda> Draw();
+}

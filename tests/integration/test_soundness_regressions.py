@@ -445,6 +445,44 @@ CASES = [
      "let: values H(0b0), H(0b1) handed to a scheme revealed H's queries"),
     ("F-389", "sr_control.proof", "accept", "FreshInputRFToUniform",
      "positive control: the scheme holds plain let: values, not H's"),
+    ("F-390", "group_write.proof", "type_error", "structural rules",
+     "a game wrote the group parameter its GroupElem<A> field's type names"),
+    ("F-390", "group_swap.proof", "type_error", "structural rules",
+     "the same, with the element recomputed after the write on one side"),
+    ("F-390", "group_read_control.proof", "accept", "structural rules",
+     "positive control: a group parameter read, never written"),
+    ("F-391", "key_once.proof", "accept", "method inliner",
+     "a field initializer calling a scheme method crashed prove"),
+    ("F-391", "init_call.proof", "reject", "method inliner",
+     "a reduction field initializer calling the challenger crashed prove"),
+    ("F-391", "counter_once.proof", "accept", "method inliner",
+     "positive control: that call is made once, before Initialize"),
+    ("F-391", "counter_none.proof", "reject", "method inliner",
+     "the same call against a counter never bumped"),
+    ("F-391", "challenger_field_draw.proof", "reject", "method inliner",
+     "a challenger field drawn by a scheme call under a reduction's Initialize"),
+    ("F-391", "before_init.proof", "type_error", "challenger placement",
+     "a reduction field initializer called the challenger before its Initialize"),
+    ("F-391", "init_in_field.proof", "type_error", "challenger placement",
+     "a reduction field initializer called challenger.Initialize"),
+    ("F-392", "sq.proof", "accept", "SymbolicComputation",
+     "k * k folded to SymPy's k**2, parsed back as FrogLang, crashed prove"),
+    ("F-392", "sq_wrong.proof", "reject", "SymbolicComputation",
+     "k * k against k + k crashed prove the same way"),
+    ("F-392", "cat.proof", "accept", "type checker, MergeUniformSamples",
+     "the length k * k + n of a concatenation was printed as k**2 + n"),
+    ("F-392", "cat_wrong.proof", "reject", "type checker, MergeUniformSamples",
+     "the same concatenation against one padded with zeros"),
+    ("F-392", "split.proof", "accept", "type checker, SplitUniformSamples",
+     "the length of the slice c[0 : k * k] was printed as k**2"),
+    ("F-392", "split_wrong.proof", "reject", "type checker, SplitUniformSamples",
+     "the same slice against a string of zeros"),
+    ("F-393", "bf.proof", "accept", "RemoveUnreachable",
+     "a let: Bool as an if condition crashed Remove Unreachable's Z3 call"),
+    ("F-393", "bf_wrong.proof", "reject", "RemoveUnreachable",
+     "a let: Bool branch against a constant crashed prove the same way"),
+    ("F-393", "bf_twice_control.proof", "accept", "RemoveUnreachable",
+     "positive control: a repeated test of the let: Bool is still dead"),
     ("F-395", "letdraw.proof", "type_error", "proof let: evaluation",
      "a let: entry R.Draw() was read as a fresh draw at every use"),
     ("F-395", "letcall_xor.proof", "type_error", "proof let: evaluation",
@@ -755,6 +793,22 @@ TYPE_ERROR = {
     ("F-389", "letcall_draw_via_value.proof"): (
         "error: let: entry 'x' = R.Draw() makes a non-deterministic call"
     ),
+    ("F-390", "group_write.proof"): (
+        "error: The group in GroupElem<A> names parameter 'A', which is"
+        " assigned or sampled"
+    ),
+    ("F-390", "group_swap.proof"): (
+        "error: The group in GroupElem<A> names parameter 'A', which is"
+        " assigned or sampled"
+    ),
+    ("F-391", "before_init.proof"): (
+        "error: the initializer of R.y calls the challenger before"
+        " challenger.Initialize"
+    ),
+    ("F-391", "init_in_field.proof"): (
+        "error: the initializer of R.y calls challenger.Initialize; it may only"
+        " be called from Initialize"
+    ),
     ("F-395", "letdraw.proof"): (
         "error: let: entry 'c' = R.Draw() makes a non-deterministic call"
     ),
@@ -779,6 +833,12 @@ FAILED_STEP = {
     ),
     ("F-384", "reduction_written_copy.proof"): (
         "Step 2 failed: Ping().Real compose R7() -> Ping().Real compose R9()"
+    ),
+    ("F-391", "counter_none.proof"): (
+        "Step 3 failed: Ctr(n).Ideal compose R(n) -> OnceOrNone(n).Right"
+    ),
+    ("F-391", "challenger_field_draw.proof"): (
+        "Step 3 failed: KI(S).Real compose R(S) -> Twice(S).Right"
     ),
     ("Z3-FIELD-ACCESS", "group_equality.proof"): (
         "Step 2 failed: Swapped(G) -> GroupEquality(G).Right"

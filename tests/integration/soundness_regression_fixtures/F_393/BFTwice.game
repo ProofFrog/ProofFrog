@@ -1,0 +1,21 @@
+// The second test of f is dead: the first already returned when f holds.
+Game Left(Bool f) {
+    Int Get() {
+        if (f) {
+            return 1;
+        }
+        if (f) {
+            return 2;
+        }
+        return 0;
+    }
+}
+Game Right(Bool f) {
+    Int Get() {
+        if (f) {
+            return 1;
+        }
+        return 0;
+    }
+}
+export as BFTwice;

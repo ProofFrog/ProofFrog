@@ -1,0 +1,14 @@
+import 'Src.primitive';
+Game Left(Src S) {
+    BitString<S.lambda> Get() {
+        BitString<S.lambda> r <- BitString<S.lambda>;
+        return r;
+    }
+}
+Game Right(Src S) {
+    BitString<S.lambda> Get() {
+        BitString<S.lambda> r <- BitString<S.lambda>;
+        return r;
+    }
+}
+export as Twice;

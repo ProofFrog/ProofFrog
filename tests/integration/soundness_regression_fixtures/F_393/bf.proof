@@ -1,0 +1,11 @@
+// Two equal games branching on a let: Bool. Used to crash prove in Remove
+// Unreachable. Sound engine: Proof Succeeded!
+import 'BF.game';
+proof:
+let:
+    Bool fl;
+theorem:
+    BF(fl);
+games:
+    BF(fl).Left against BF(fl).Adversary;
+    BF(fl).Right against BF(fl).Adversary;

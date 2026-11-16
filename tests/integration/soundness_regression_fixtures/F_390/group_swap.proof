@@ -1,0 +1,12 @@
+// GroupSwap's games write their group parameter A, named by GroupElem<A>:
+// a type error.
+import 'GroupSwap.game';
+proof:
+let:
+    Group G;
+    Group H;
+theorem:
+    GroupSwap(G, H);
+games:
+    GroupSwap(G, H).Left against GroupSwap(G, H).Adversary;
+    GroupSwap(G, H).Right against GroupSwap(G, H).Adversary;

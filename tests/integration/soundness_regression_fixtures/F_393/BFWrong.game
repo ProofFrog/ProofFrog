@@ -1,0 +1,15 @@
+// Left returns 1 when f holds, Right always 0.
+Game Left(Bool f) {
+    Int Get() {
+        if (f) {
+            return 1;
+        }
+        return 0;
+    }
+}
+Game Right(Bool f) {
+    Int Get() {
+        return 0;
+    }
+}
+export as BFWrong;

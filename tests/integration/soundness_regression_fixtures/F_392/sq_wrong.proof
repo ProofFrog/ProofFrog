@@ -1,0 +1,11 @@
+// k * k against k + k: not equal in general. Used to crash prove. Sound
+// engine: Proof Failed!
+import 'SqWrong.game';
+proof:
+let:
+    Int kl;
+theorem:
+    SqWrong(kl);
+games:
+    SqWrong(kl).Left against SqWrong(kl).Adversary;
+    SqWrong(kl).Right against SqWrong(kl).Adversary;

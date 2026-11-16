@@ -1,0 +1,14 @@
+// The two equal games of KeyOnce.game, whose field initializer calls a
+// scheme method. Sound engine: Proof Succeeded! (it used to crash).
+import 'Src.primitive';
+import 'RandSrc.scheme';
+import 'KeyOnce.game';
+proof:
+let:
+    Int lambda;
+    RandSrc S = RandSrc(lambda);
+theorem:
+    KeyOnce(S);
+games:
+    KeyOnce(S).Left against KeyOnce(S).Adversary;
+    KeyOnce(S).Right against KeyOnce(S).Adversary;

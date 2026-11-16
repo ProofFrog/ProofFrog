@@ -16,7 +16,7 @@ from typing import (
     Dict,
 )
 import z3
-from sympy import Symbol, Rational
+from sympy import Integer, Symbol, Rational
 
 from . import frog_ast
 
@@ -460,6 +460,14 @@ class FrogToSympyVisitor(Visitor[Optional[Symbol | int]]):
             self.stack.append(item1 * item2)
         elif binary_operation.operator == frog_ast.BinaryOperators.DIVIDE:
             self.stack.append(Rational(item2, item1))
+        elif (
+            binary_operation.operator == frog_ast.BinaryOperators.EXPONENTIATE
+            and isinstance(item1, (int, Integer))
+            and item1 >= 0
+        ):
+            # ``k ^ 2``, as Symbolic Computation writes ``k * k`` (F-392); a
+            # power is read only with an exponent that is an integer >= 0.
+            self.stack.append(item2**item1)
         else:
             self.failed = True
 
@@ -1188,6 +1196,13 @@ class InlineTransformer(Transformer):
         ):
             return block
         return result
+
+    def transform_field(self, field: frog_ast.Field) -> frog_ast.Field:
+        # A field initializer has no block to put a callee's body in.
+        # ``ProofEngine.resolve_step_game`` first moves an initializer that
+        # makes an inlinable call into Initialize (F-391); an initializer
+        # left here is that of a reduction resolved before it is composed.
+        return field
 
     def transform_func_call(self, exp: frog_ast.FuncCall) -> frog_ast.FuncCall:
         is_inlinable_call = (

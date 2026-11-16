@@ -1,0 +1,12 @@
+// True: a prefix of a uniform string is uniform. Used to crash type
+// checking (k**2 parsed back as FrogLang).
+import 'Split.game';
+proof:
+let:
+    Int kl;
+    Int nl;
+theorem:
+    Split(kl, nl);
+games:
+    Split(kl, nl).Left against Split(kl, nl).Adversary;
+    Split(kl, nl).Right against Split(kl, nl).Adversary;

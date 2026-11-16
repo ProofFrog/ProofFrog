@@ -1,0 +1,8 @@
+import 'Src.primitive';
+Scheme RandSrc(Int lambda) extends Src {
+    Int lambda = lambda;
+    BitString<lambda> Draw() {
+        BitString<lambda> r <- BitString<lambda>;
+        return r;
+    }
+}

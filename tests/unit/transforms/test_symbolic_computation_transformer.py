@@ -1,8 +1,14 @@
 import pytest
-from sympy import symbols
+from sympy import Rational, symbols, sympify
 from proof_frog import frog_ast, frog_parser
 from proof_frog.proof_engine import ProofEngine
-from proof_frog.transforms.symbolic import SymbolicComputationTransformer
+from proof_frog.semantic_analysis import get_sympy_expression
+from proof_frog.transforms.symbolic import (
+    SymbolicComputationTransformer,
+    froglang_text,
+    sympy_to_expression,
+)
+from proof_frog.visitors import FrogToSympyVisitor
 
 
 @pytest.mark.parametrize(
@@ -235,3 +241,94 @@ def test_engine_accepts_equal_divisions_by_zero() -> None:
 def test_engine_rejects_unequal_division_by_zero(left: str, right: str) -> None:
     """Refused, not crashed: the pass and the Z3 layer leave ``c / 0`` alone."""
     assert not _equivalent(f"Game L() {{ {left} }}", f"Game R() {{ {right} }}")
+
+
+# F-392: a folded value was printed with SymPy's ``str`` and parsed back as
+# FrogLang, so a power (``k * k`` folds to ``k**2``) crashed the proof with a
+# parse error. Powers are now printed with FrogLang's ``^``, and a value with
+# no FrogLang Int text of the same meaning is left unfolded.
+
+
+@pytest.mark.parametrize(
+    "expression, expected",
+    [
+        ("lambda * lambda", "lambda ^ 2"),
+        ("lambda * lambda * 2", "2 * lambda ^ 2"),
+        ("lambda * (lambda * lambda)", "lambda ^ 3"),
+        ("0 - lambda * lambda", "-(lambda ^ 2)"),
+        ("(lambda + 1) * (lambda + 1)", "(lambda + 1) ^ 2"),
+        ("lambda ^ 2", "lambda ^ 2"),
+        ("2 ^ 3", "8"),
+        ("2 ^ (lambda - lambda)", "1"),
+    ],
+)
+def test_powers_fold_to_froglang(expression: str, expected: str) -> None:
+    transformed = SymbolicComputationTransformer(_LAMBDA).transform(_return(expression))
+    assert transformed == _return(expected)
+
+
+@pytest.mark.parametrize(
+    "expression, expected",
+    [
+        # Python's 2 ** -1 is the float 0.5, SymPy's lambda ** -1 the
+        # fraction 1/lambda, printed as an Int division.
+        ("2 ^ (0 - 1)", "2 ^ -1"),
+        ("lambda ^ (0 - 1)", "lambda ^ -1"),
+        # An exponent not known to be >= 0: SymPy would combine powers
+        # (lambda ^ a * lambda == lambda ^ (a + 1)), which Int need not obey.
+        ("lambda ^ lambda", "lambda ^ lambda"),
+        ("(lambda - lambda) ^ lambda", "0 ^ lambda"),
+    ],
+)
+def test_powers_without_froglang_text_not_folded(
+    expression: str, expected: str
+) -> None:
+    transformed = SymbolicComputationTransformer(_LAMBDA).transform(_return(expression))
+    assert transformed == _return(expected)
+
+
+def test_froglang_text() -> None:
+    k = symbols("k")
+    assert froglang_text(5) == "5"
+    assert froglang_text(-5) == "-5"
+    assert froglang_text(2 * k + 1) == "2*k + 1"
+    assert froglang_text(k**2) == "(k ^ 2)"
+    assert froglang_text(-(k**2)) == "-(k ^ 2)"
+    assert froglang_text((k + 1) ** 2) == "((k + 1) ^ 2)"
+    assert froglang_text(k**-1) is None
+    assert froglang_text(k / 2) is None
+    assert froglang_text(Rational(1, 2)) is None
+    assert froglang_text(0.5) is None
+    assert froglang_text(True) is None
+    assert froglang_text(k**k) is None
+    # The length computations print a rational coefficient as before.
+    assert froglang_text(k / 2, fractions=True) == "k/2"
+    assert froglang_text(k**2 / 2, fractions=True) == "(k ^ 2)/2"
+    assert froglang_text(k**-1, fractions=True) is None
+
+
+def test_sympy_to_expression() -> None:
+    k, n = symbols("k n")
+    assert sympy_to_expression(k * k + n) == frog_parser.parse_expression("k ^ 2 + n")
+    assert sympy_to_expression(7) == frog_ast.Integer(7)
+    assert sympy_to_expression(k / 2) is None
+
+
+@pytest.mark.parametrize(
+    "expression, ok",
+    [("k ^ 2 + n", True), ("k ^ 0", True), ("k ^ n", False), ("k ^ -1", False)],
+)
+def test_sympy_readers_read_natural_powers(expression: str, ok: bool) -> None:
+    """The printer writes k * k as k ^ 2, so the readers of lengths read it
+    back (an exponent that is an integer >= 0 only)."""
+    k, n = symbols("k n")
+    node = frog_parser.parse_expression(expression)
+    expected = sympify(expression.replace("^", "**"), locals={"k": k, "n": n})
+    from_visitor = FrogToSympyVisitor({"k": k, "n": n}).visit(node)
+    from_reader = get_sympy_expression(node)
+    if ok:
+        assert from_visitor == expected
+        assert from_reader == expected
+    else:
+        assert from_visitor is None
+        assert from_reader is None

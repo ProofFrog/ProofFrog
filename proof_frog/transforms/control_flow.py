@@ -1557,6 +1557,35 @@ class RemoveUnreachableTransformer(BlockTransformer):
 
         formula_visitor = Z3FormulaVisitor(NameTypeMap())
 
+        def condition_formula(condition: frog_ast.Expression) -> z3.BoolRef | None:
+            """The condition as a Z3 Boolean, or None. A name the type map
+            does not type (a proof ``let:`` Bool) is an opaque constant, and
+            a formula over it that is not Boolean gives no path fact: Z3
+            would refuse ``Not`` of it (F-393)."""
+            formula = formula_visitor.visit(condition)
+            if isinstance(formula, bool):
+                # A Boolean literal (Z3 casts it where it is used).
+                return z3.BoolVal(formula)
+            if formula is None or isinstance(formula, z3.BoolRef):
+                return formula
+            if self.ctx is not None:
+                self.ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Remove unreachable blocks of code",
+                        reason=(
+                            f"Condition '{condition}' gives no path fact: it "
+                            "does not translate to a Z3 Boolean (it names a "
+                            "value whose type the game does not declare, such "
+                            "as a proof let: entry)"
+                        ),
+                        location=None,
+                        suggestion=None,
+                        variable=str(condition),
+                        method=None,
+                    )
+                )
+            return None
+
         # Inherit path constraints from enclosing block (if any)
         path_constraints: list[z3.AstRef] = self._block_path.pop(id(block), [])
 
@@ -1650,7 +1679,7 @@ class RemoveUnreachableTransformer(BlockTransformer):
                 formula_visitor.set_variable_version_map(variable_version_map)
                 all_conditions_dead = True
                 for condition in statement.conditions:
-                    cond_formula = formula_visitor.visit(condition)
+                    cond_formula = condition_formula(condition)
                     if cond_formula is None:
                         all_conditions_dead = False
                         break
@@ -1692,7 +1721,7 @@ class RemoveUnreachableTransformer(BlockTransformer):
             formula_before_stmt = formula_so_far
             condition_formulae: list[z3.AstRef] = []
             for condition_index, condition in enumerate(statement.conditions):
-                individual_formula = formula_visitor.visit(condition)
+                individual_formula = condition_formula(condition)
                 if individual_formula is None:
                     break
                 if contains_unconditional_return(statement.blocks[condition_index]):
@@ -1756,15 +1785,11 @@ class RemoveUnreachableTransformer(BlockTransformer):
                         inner_path.append(z3.Not(formula_before_stmt))
                     # Add preceding if-conditions as negated (we didn't take those branches)
                     for prev_idx in range(cond_idx):
-                        prev_formula = formula_visitor.visit(
-                            statement.conditions[prev_idx]
-                        )
-                        if prev_formula is not None and not isinstance(
-                            prev_formula, str
-                        ):
+                        prev_formula = condition_formula(statement.conditions[prev_idx])
+                        if prev_formula is not None:
                             inner_path.append(z3.Not(prev_formula))
-                    cond_formula = formula_visitor.visit(cond)
-                    if cond_formula is not None and not isinstance(cond_formula, str):
+                    cond_formula = condition_formula(cond)
+                    if cond_formula is not None:
                         inner_path.append(cond_formula)
                     self._block_path[id(statement.blocks[cond_idx])] = inner_path
                     self._block_versions[id(statement.blocks[cond_idx])] = dict(

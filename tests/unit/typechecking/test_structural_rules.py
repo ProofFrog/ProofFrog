@@ -152,3 +152,93 @@ class TestWrittenSizes:
     )
     def test_never_written_names_are_allowed(self, source: str) -> None:
         assert not _messages(source)
+
+
+class TestWrittenGroups:
+    """F-390: the group a ``GroupElem<..>`` type names is fixed too. The
+    engine reads a group element in the group its type names (Generator
+    Power Field To Exponent and Offset Fusion rebuild ``A.generator`` from
+    the field's type at each read), so a write to that group would change
+    what an element already stored means."""
+
+    def test_written_group_parameter(self) -> None:
+        _rejected(
+            """
+            Game G(Group A, Group B) {
+                GroupElem<A> P;
+                Void Initialize() { P = A.generator; }
+                Void Swap() { A = B; }
+                GroupElem<A> GetP() { return P; }
+            }""",
+            "The group in GroupElem<A> names parameter 'A', which is assigned"
+            " or sampled",
+        )
+
+    def test_written_group_local(self) -> None:
+        _rejected(
+            """
+            Game G(Group A, Group B) {
+                Bool Test() {
+                    Group C = A;
+                    GroupElem<C> x = C.generator;
+                    C = B;
+                    return x == x;
+                }
+            }""",
+            "The group in GroupElem<C> names local 'C'",
+        )
+
+    def test_written_group_in_a_signature(self) -> None:
+        _rejected(
+            """
+            Game G(Group A, Group B) {
+                Void Swap() { A = B; }
+                GroupElem<A> Gen() { return A.generator; }
+            }""",
+            "The group in GroupElem<A> names parameter 'A'",
+        )
+
+    def test_group_of_a_member_access_is_checked_through_its_object(self) -> None:
+        # ``E.G`` reads ``E``: a write to ``E`` changes the group too.
+        _rejected(
+            """
+            Game G(Group A, Group B) {
+                Group E = A;
+                Void Swap() { E = B; }
+                GroupElem<E> Gen() { return E.generator; }
+            }""",
+            "names field 'E'",
+        )
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            # A group parameter read, never written.
+            """
+            Game G(Group A) {
+                GroupElem<A> P;
+                Void Initialize() { P = A.generator; }
+                GroupElem<A> GetP() { return P; }
+            }""",
+            # A written group no GroupElem type names: only its values read it.
+            """
+            Game G(Group A, Group B) {
+                Group C = A;
+                Void Swap() { C = B; }
+                Bool Same() { return C.order == A.order; }
+            }""",
+            # A local of the same name in another block is another variable.
+            """
+            Game G(Group A, Group B) {
+                GroupElem<A> Gen() {
+                    if (true) {
+                        Group A = B;
+                        A = B;
+                    }
+                    return A.generator;
+                }
+            }""",
+        ],
+    )
+    def test_never_written_groups_are_allowed(self, source: str) -> None:
+        assert not _messages(source)

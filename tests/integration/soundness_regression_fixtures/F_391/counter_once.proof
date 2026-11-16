@@ -1,0 +1,26 @@
+// Positive control: R's field initializer bumps the counter once, before
+// Initialize; Once's games bump it once in Initialize. Every hop holds.
+import 'Ctr.game';
+import 'Once.game';
+
+// R bumps the challenger's counter once, in a field initializer, which runs
+// before Initialize; Get reads the counter.
+Reduction R(Int n) compose Ctr(n) against Once(n).Adversary {
+    Int y = challenger.Bump();
+    Int Get() {
+        return challenger.Get();
+    }
+}
+
+proof:
+let:
+    Int n;
+assume:
+    Ctr(n);
+theorem:
+    Once(n);
+games:
+    Once(n).Left against Once(n).Adversary;
+    Ctr(n).Real compose R(n) against Once(n).Adversary;
+    Ctr(n).Ideal compose R(n) against Once(n).Adversary;
+    Once(n).Right against Once(n).Adversary;

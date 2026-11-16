@@ -1,0 +1,13 @@
+Game Left(Int k, Int n) {
+    BitString<k * k> Get() {
+        BitString<k * k + n> c <- BitString<k * k + n>;
+        return c[0 : k * k];
+    }
+}
+Game Right(Int k, Int n) {
+    BitString<k * k> Get() {
+        BitString<k * k> a = 0^(k * k);
+        return a;
+    }
+}
+export as SplitWrong;

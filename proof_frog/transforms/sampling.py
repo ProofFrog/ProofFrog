@@ -15,7 +15,6 @@ from sympy import Symbol, simplify as sympy_simplify
 
 from .. import dependencies
 from .. import frog_ast
-from .. import frog_parser
 from ..visitors import (
     Transformer,
     BlockTransformer,
@@ -28,6 +27,7 @@ from ..visitors import (
     reassigns_or_rebinds,
     lvalue_base_name,
 )
+from .symbolic import sympy_to_expression
 from ._base import (
     TransformPass,
     PipelineContext,
@@ -167,17 +167,20 @@ class SimplifySpliceTransformer(BlockTransformer):
                 continue
 
             # Step 2, create slices that map to these vars
-            partial_sum = 0
-            slices = []
+            bounds: list[Symbol | int] = [0]
             for length in lengths:
-                slices.append(
-                    frog_ast.Slice(
-                        frog_ast.Variable(statement.var.name),
-                        frog_parser.parse_expression(str(partial_sum)),
-                        frog_parser.parse_expression(str(partial_sum + length)),
-                    )
+                bounds.append(bounds[-1] + length)
+            bound_exprs = [sympy_to_expression(bound, True) for bound in bounds]
+            if any(bound is None for bound in bound_exprs):
+                continue
+            slices = [
+                frog_ast.Slice(
+                    frog_ast.Variable(statement.var.name),
+                    cast(frog_ast.Expression, start),
+                    cast(frog_ast.Expression, end),
                 )
-                partial_sum += length
+                for start, end in zip(bound_exprs, bound_exprs[1:])
+            ]
 
             # Step 3, replace, so long as none of the variables are changed
 
@@ -725,7 +728,9 @@ class MergeUniformSamplesTransformer(BlockTransformer):
 
             # Compute combined length
             combined_length = sum(lengths[1:], lengths[0])
-            combined_length_expr = frog_parser.parse_expression(str(combined_length))
+            combined_length_expr = sympy_to_expression(combined_length, True)
+            if combined_length_expr is None:
+                continue
             combined_type = frog_ast.BitStringType(combined_length_expr)
             # Build new block
             new_var = frog_ast.Variable(leaf_vars[0].name)
@@ -734,9 +739,7 @@ class MergeUniformSamplesTransformer(BlockTransformer):
                 new_var,
                 cast(
                     frog_ast.Expression,
-                    frog_ast.BitStringType(
-                        frog_parser.parse_expression(str(combined_length))
-                    ),
+                    frog_ast.BitStringType(copy.deepcopy(combined_length_expr)),
                 ),
             )
 
@@ -1424,9 +1427,15 @@ class SplitUniformSampleTransformer(BlockTransformer):
             # the split keeps firing.
             avoid_names = _collect_block_names(block) | {var_name}
 
+            part_len_exprs = [
+                sympy_to_expression(end - start, True) for start, end in unique_bounds
+            ]
+            if any(part is None for part in part_len_exprs):
+                continue
+
             for i, (start, end) in enumerate(unique_bounds):
-                part_len = end - start
-                part_len_expr = frog_parser.parse_expression(str(part_len))
+                part_len_expr = part_len_exprs[i]
+                assert part_len_expr is not None
                 part_type = frog_ast.BitStringType(part_len_expr)
                 new_var_name = _fresh_split_name(var_name, i, avoid_names)
                 avoid_names.add(new_var_name)
@@ -1436,9 +1445,7 @@ class SplitUniformSampleTransformer(BlockTransformer):
                     new_var,
                     cast(
                         frog_ast.Expression,
-                        frog_ast.BitStringType(
-                            frog_parser.parse_expression(str(part_len))
-                        ),
+                        frog_ast.BitStringType(copy.deepcopy(part_len_expr)),
                     ),
                 )
                 new_samples.append(new_sample)

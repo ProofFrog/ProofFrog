@@ -845,14 +845,23 @@ def is_challenger_init_call(node: object) -> bool:
     )
 
 
-def check_challenger_init_placement(reduction: frog_ast.Reduction) -> Optional[str]:
+def check_challenger_init_placement(
+    reduction: frog_ast.Reduction, challenger_has_initialize: bool = False
+) -> Optional[str]:
     """``challenger.Initialize`` runs at most once, before any other challenger call.
 
     Only the reduction's own ``Initialize`` may call it, as (part of) a
     top-level statement -- not inside a loop or branch, where it could run
     several times or not at all -- and no challenger call may be evaluated
     before it, in an earlier statement or in the same one.
+
+    The reduction's field initializers run before its ``Initialize``, so one
+    may not call ``challenger.Initialize``, nor, when the challenger has an
+    ``Initialize`` (*challenger_has_initialize*), any other challenger method.
     """
+    message = challenger_call_in_field_initializer(reduction, challenger_has_initialize)
+    if message is not None:
+        return message
     for method in reduction.methods:
         calls = [n for n in _walk(method.block) if is_challenger_init_call(n)]
         if method.signature.name != "Initialize" and calls:
@@ -891,6 +900,32 @@ def check_challenger_init_placement(reduction: frog_ast.Reduction) -> Optional[s
                     " challenger.Initialize"
                 )
             break
+    return None
+
+
+def challenger_call_in_field_initializer(
+    reduction: frog_ast.Reduction, challenger_has_initialize: bool
+) -> Optional[str]:
+    """Why a field initializer of *reduction* may not call the challenger, or
+    None. The initializers run before ``Initialize`` (reference, section
+    6.2), so such a call would come before ``challenger.Initialize``: never
+    allowed for ``challenger.Initialize`` itself, and for any other method
+    only when the challenger has no ``Initialize``."""
+    for field in reduction.fields:
+        if field.value is None:
+            continue
+        nodes = _walk(field.value)
+        if any(is_challenger_init_call(n) for n in nodes):
+            return (
+                f"the initializer of {reduction.name}.{field.name} calls"
+                " challenger.Initialize; it may only be called from Initialize"
+            )
+        if challenger_has_initialize and any(_is_challenger_call(n) for n in nodes):
+            return (
+                f"the initializer of {reduction.name}.{field.name} calls the"
+                " challenger before challenger.Initialize: field initializers"
+                " run before Initialize"
+            )
     return None
 
 

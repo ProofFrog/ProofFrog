@@ -1,0 +1,11 @@
+// Positive control: a second test of the let: Bool after the first returned
+// is dead. Used to crash prove.
+import 'BFTwice.game';
+proof:
+let:
+    Bool fl;
+theorem:
+    BFTwice(fl);
+games:
+    BFTwice(fl).Left against BFTwice(fl).Adversary;
+    BFTwice(fl).Right against BFTwice(fl).Adversary;

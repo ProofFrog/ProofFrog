@@ -1,0 +1,11 @@
+// Two equal games storing k * k for a let: Int k. Used to crash prove: the
+// folded k**2 was parsed back as FrogLang. Sound engine: Proof Succeeded!
+import 'Sq.game';
+proof:
+let:
+    Int kl;
+theorem:
+    Sq(kl);
+games:
+    Sq(kl).Left against Sq(kl).Adversary;
+    Sq(kl).Right against Sq(kl).Adversary;

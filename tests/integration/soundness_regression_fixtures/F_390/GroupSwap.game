@@ -1,0 +1,30 @@
+// Left: P keeps the element it was given (the old group's generator) after
+// Swap changes the game's group parameter A. Right: P is recomputed in the
+// new group.
+Game Left(Group A, Group B) {
+    GroupElem<A> P;
+    Void Initialize() {
+        P = A.generator;
+    }
+    Void Swap() {
+        A = B;
+        P = P;
+    }
+    GroupElem<A> GetP() {
+        return P;
+    }
+}
+Game Right(Group A, Group B) {
+    GroupElem<A> P;
+    Void Initialize() {
+        P = A.generator;
+    }
+    Void Swap() {
+        A = B;
+        P = A.generator;
+    }
+    GroupElem<A> GetP() {
+        return P;
+    }
+}
+export as GroupSwap;

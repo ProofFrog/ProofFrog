@@ -1,0 +1,26 @@
+// R's field initializer calls the challenger, which has an Initialize: field
+// initializers run before Initialize, so the call would come before
+// challenger.Initialize. A type error.
+import 'CtrI.game';
+import 'Probe.game';
+
+// R bumps the challenger in a field initializer, before challenger.Initialize.
+Reduction R(Int n) compose CtrI(n) against Probe(n).Adversary {
+    Int y = challenger.Bump();
+    Int Get() {
+        return challenger.Get();
+    }
+}
+
+proof:
+let:
+    Int n;
+assume:
+    CtrI(n);
+theorem:
+    Probe(n);
+games:
+    Probe(n).Left against Probe(n).Adversary;
+    CtrI(n).Real compose R(n) against Probe(n).Adversary;
+    CtrI(n).Ideal compose R(n) against Probe(n).Adversary;
+    Probe(n).Right against Probe(n).Adversary;

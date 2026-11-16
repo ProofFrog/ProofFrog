@@ -1,0 +1,11 @@
+Game Left(Int n) {
+    Int Get() {
+        return 1;
+    }
+}
+Game Right(Int n) {
+    Int Get() {
+        return 0;
+    }
+}
+export as Probe;

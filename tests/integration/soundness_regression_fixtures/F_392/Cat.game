@@ -1,0 +1,16 @@
+// a || b has length k * k + n: the type checker and Merge Uniform Samples
+// add the lengths with SymPy, which wrote k * k as k**2.
+Game Left(Int k, Int n) {
+    BitString<k * k + n> Get() {
+        BitString<k * k> a <- BitString<k * k>;
+        BitString<n> b <- BitString<n>;
+        return a || b;
+    }
+}
+Game Right(Int k, Int n) {
+    BitString<k * k + n> Get() {
+        BitString<k * k + n> c <- BitString<k * k + n>;
+        return c;
+    }
+}
+export as Cat;

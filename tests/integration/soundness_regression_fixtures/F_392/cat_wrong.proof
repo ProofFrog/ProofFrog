@@ -1,0 +1,11 @@
+// False: Right's last n bits are zero. Used to crash type checking.
+import 'CatWrong.game';
+proof:
+let:
+    Int kl;
+    Int nl;
+theorem:
+    CatWrong(kl, nl);
+games:
+    CatWrong(kl, nl).Left against CatWrong(kl, nl).Adversary;
+    CatWrong(kl, nl).Right against CatWrong(kl, nl).Adversary;

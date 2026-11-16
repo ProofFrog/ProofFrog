@@ -1,0 +1,33 @@
+// A challenger's field initializer draws a key by a scheme call; R has its
+// own Initialize. Real reveals the same key at every call, Twice's Right a
+// fresh one each time, so the last hop is false and hop 1 true.
+import 'Src.primitive';
+import 'RandSrc.scheme';
+import 'KI.game';
+import 'Twice.game';
+
+Reduction R(Src S) compose KI(S) against Twice(S).Adversary {
+    BitString<S.lambda> x;
+    Void Initialize() {
+        BitString<S.lambda> t <- BitString<S.lambda>;
+        challenger.Initialize();
+        x = t;
+    }
+    BitString<S.lambda> Get() {
+        return challenger.Key();
+    }
+}
+
+proof:
+let:
+    Int lambda;
+    RandSrc S = RandSrc(lambda);
+assume:
+    KI(S);
+theorem:
+    Twice(S);
+games:
+    Twice(S).Left against Twice(S).Adversary;
+    KI(S).Ideal compose R(S) against Twice(S).Adversary;
+    KI(S).Real compose R(S) against Twice(S).Adversary;
+    Twice(S).Right against Twice(S).Adversary;

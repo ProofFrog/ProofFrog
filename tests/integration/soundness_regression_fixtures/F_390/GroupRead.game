@@ -1,0 +1,21 @@
+// Control for the written-group rule: A is read, never written, so the
+// element P stored in Initialize stays its generator.
+Game Left(Group A, Group B) {
+    GroupElem<A> P;
+    Void Initialize() {
+        P = A.generator;
+    }
+    GroupElem<A> GetP() {
+        return P;
+    }
+}
+Game Right(Group A, Group B) {
+    GroupElem<A> P;
+    Void Initialize() {
+        P = A.generator;
+    }
+    GroupElem<A> GetP() {
+        return A.generator;
+    }
+}
+export as GroupRead;

@@ -1,0 +1,28 @@
+// Left keeps the element P it was given after Swap writes the group A that
+// P's type names; Right reads A's generator anew. A written group in a
+// GroupElem type is refused: the type would change meaning mid-game.
+Game Left(Group A, Group B) {
+    GroupElem<A> P;
+    Void Initialize() {
+        P = A.generator;
+    }
+    Void Swap() {
+        A = B;
+    }
+    GroupElem<A> GetP() {
+        return P;
+    }
+}
+Game Right(Group A, Group B) {
+    GroupElem<A> P;
+    Void Initialize() {
+        P = A.generator;
+    }
+    Void Swap() {
+        A = B;
+    }
+    GroupElem<A> GetP() {
+        return A.generator;
+    }
+}
+export as GroupWrite;

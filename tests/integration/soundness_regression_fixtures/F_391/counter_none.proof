@@ -1,0 +1,27 @@
+// The last hop is false: R's field initializer bumps the counter once, while
+// OnceOrNone's Right never bumps it. Only that hop may fail; hop 1 holds
+// only if the call is made exactly once, before Initialize.
+import 'Ctr.game';
+import 'OnceOrNone.game';
+
+// R bumps the challenger's counter once, in a field initializer, which runs
+// before Initialize; Get reads the counter.
+Reduction R(Int n) compose Ctr(n) against OnceOrNone(n).Adversary {
+    Int y = challenger.Bump();
+    Int Get() {
+        return challenger.Get();
+    }
+}
+
+proof:
+let:
+    Int n;
+assume:
+    Ctr(n);
+theorem:
+    OnceOrNone(n);
+games:
+    OnceOrNone(n).Left against OnceOrNone(n).Adversary;
+    Ctr(n).Real compose R(n) against OnceOrNone(n).Adversary;
+    Ctr(n).Ideal compose R(n) against OnceOrNone(n).Adversary;
+    OnceOrNone(n).Right against OnceOrNone(n).Adversary;

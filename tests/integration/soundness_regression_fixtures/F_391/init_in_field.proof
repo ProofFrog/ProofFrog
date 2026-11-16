@@ -1,0 +1,23 @@
+// R calls challenger.Initialize in a field initializer: a type error.
+import 'CtrI.game';
+import 'Probe.game';
+
+Reduction R(Int n) compose CtrI(n) against Probe(n).Adversary {
+    Void y = challenger.Initialize();
+    Int Get() {
+        return challenger.Get();
+    }
+}
+
+proof:
+let:
+    Int n;
+assume:
+    CtrI(n);
+theorem:
+    Probe(n);
+games:
+    Probe(n).Left against Probe(n).Adversary;
+    CtrI(n).Real compose R(n) against Probe(n).Adversary;
+    CtrI(n).Ideal compose R(n) against Probe(n).Adversary;
+    Probe(n).Right against Probe(n).Adversary;

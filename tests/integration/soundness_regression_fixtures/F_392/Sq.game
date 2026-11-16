@@ -1,0 +1,25 @@
+Game Left(Int k) {
+    Int n;
+    Void Initialize() {
+        n = 0;
+    }
+    Void Put() {
+        n = k * k;
+    }
+    Int Get() {
+        return n;
+    }
+}
+Game Right(Int k) {
+    Int n;
+    Void Initialize() {
+        n = 0;
+    }
+    Void Put() {
+        n = k * k;
+    }
+    Int Get() {
+        return n;
+    }
+}
+export as Sq;

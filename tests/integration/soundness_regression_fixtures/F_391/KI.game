@@ -1,0 +1,24 @@
+import 'Src.primitive';
+// Challenger: a key drawn by a field initializer, revealed or replaced.
+Game Real(Src S) {
+    BitString<S.lambda> k = S.Draw();
+    Int c;
+    Void Initialize() {
+        c = 0;
+    }
+    BitString<S.lambda> Key() {
+        return k;
+    }
+}
+Game Ideal(Src S) {
+    BitString<S.lambda> k = S.Draw();
+    Int c;
+    Void Initialize() {
+        c = 0;
+    }
+    BitString<S.lambda> Key() {
+        BitString<S.lambda> r <- BitString<S.lambda>;
+        return r;
+    }
+}
+export as KI;

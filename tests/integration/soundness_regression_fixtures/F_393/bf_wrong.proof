@@ -1,0 +1,11 @@
+// Left returns 1 when the let: Bool holds, Right 0. Used to crash prove.
+// Sound engine: Proof Failed!
+import 'BFWrong.game';
+proof:
+let:
+    Bool fl;
+theorem:
+    BFWrong(fl);
+games:
+    BFWrong(fl).Left against BFWrong(fl).Adversary;
+    BFWrong(fl).Right against BFWrong(fl).Adversary;

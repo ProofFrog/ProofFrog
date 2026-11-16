@@ -1,0 +1,11 @@
+// False: Right returns zeros. Used to crash type checking.
+import 'SplitWrong.game';
+proof:
+let:
+    Int kl;
+    Int nl;
+theorem:
+    SplitWrong(kl, nl);
+games:
+    SplitWrong(kl, nl).Left against SplitWrong(kl, nl).Adversary;
+    SplitWrong(kl, nl).Right against SplitWrong(kl, nl).Adversary;

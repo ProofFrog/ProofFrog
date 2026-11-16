@@ -1,0 +1,32 @@
+import 'Picker.primitive';
+// Left: the reduction of reorder_inc_first.proof as written, with Pick's
+// body under its guard: Inc runs first, then Zero decides whether Pick runs.
+// (Equal to TR.game's Left, which the engine cannot show: it does not know
+// that the counter is nonzero after an increment.)
+// Right: Zero read before Inc, Pick guarded by it.
+Game Left(Picker P) {
+    Int c;
+    Void Initialize() { c = 0; }
+    Bool Test(Set<BitString<1>> S) {
+        c = c + 1;
+        Bool t = c == 0;
+        if (t) {
+            BitString<1> x <- BitString<1> \ S;
+            t = true;
+        }
+        return t;
+    }
+}
+Game Right(Picker P) {
+    Int c;
+    Void Initialize() { c = 0; }
+    Bool Test(Set<BitString<1>> S) {
+        Bool t = c == 0;
+        if (t) {
+            t = P.Pick(S);
+        }
+        c = c + 1;
+        return t;
+    }
+}
+export as TRI;

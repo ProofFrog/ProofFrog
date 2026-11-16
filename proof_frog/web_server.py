@@ -302,7 +302,9 @@ def _capture_inline(
             suppress2 = io.StringIO()
             with redirect_stdout(suppress2), redirect_stderr(suppress2):
                 # pylint: disable=protected-access
-                reduction_game = engine._get_game_ast(step.reduction)
+                reduction_game = engine.resolve_reduction(
+                    step.challenger, step.reduction
+                )
                 challenger_only = engine._get_game_ast(step.challenger)
                 # pylint: enable=protected-access
             reduction_str = str(reduction_game)

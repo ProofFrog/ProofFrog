@@ -1,0 +1,14 @@
+// Read returns the counter; Inc increments it and returns 0.
+Game Left() {
+    Int c;
+    Void Initialize() { c = 0; }
+    Int Read() { return c; }
+    Int Inc() { c = c + 1; return 0; }
+}
+Game Right() {
+    Int c;
+    Void Initialize() { c = 0; }
+    Int Read() { return c; }
+    Int Inc() { c = c + 1; return 0; }
+}
+export as Cnt;

@@ -113,9 +113,9 @@ def test_f372_and_inside_larger_expression_uses_a_temporary() -> None:
     game = _rewrite(_game("Bool r = !(b && S.Pick(U)); return r;"))
     block = game.methods[0].block
     assert [str(s).strip() for s in block.statements] == [
-        "Bool S.Pick@cond0 = b;",
-        "if (S.Pick@cond0) {\nS.Pick@cond0 = S.Pick(U);\n}",
-        "Bool r = !(S.Pick@cond0);",
+        "Bool S.Pick@cond@0 = b;",
+        "if (S.Pick@cond@0) {\nS.Pick@cond@0 = S.Pick(U);\n}",
+        "Bool r = !(S.Pick@cond@0);",
         "return r;",
     ]
 
@@ -124,17 +124,17 @@ def test_f372_or_inside_if_condition_negates_the_guard() -> None:
     game = _rewrite(_game("if (b || S.Pick(U)) { return a; } return false;"))
     block = game.methods[0].block
     assert [str(s).strip() for s in block.statements[:3]] == [
-        "Bool S.Pick@cond0 = b;",
-        "if (!(S.Pick@cond0)) {\nS.Pick@cond0 = S.Pick(U);\n}",
-        "if (S.Pick@cond0) {\nreturn a;\n}",
+        "Bool S.Pick@cond@0 = b;",
+        "if (!(S.Pick@cond@0)) {\nS.Pick@cond@0 = S.Pick(U);\n}",
+        "if (S.Pick@cond@0) {\nreturn a;\n}",
     ]
 
 
 def test_f372_call_argument_position() -> None:
     game = _rewrite(_game("return F.g(b && S.Pick(U));"))
     block = game.methods[0].block
-    assert str(block.statements[-1]).strip() == "return F.g(S.Pick@cond0);"
-    assert str(block.statements[0]).strip() == "Bool S.Pick@cond0 = b;"
+    assert str(block.statements[-1]).strip() == "return F.g(S.Pick@cond@0);"
+    assert str(block.statements[0]).strip() == "Bool S.Pick@cond@0 = b;"
 
 
 def test_f372_nested_positions_are_rewritten_outermost_first() -> None:
@@ -161,8 +161,8 @@ def test_f372_temporary_name_is_fresh() -> None:
         for s in game.methods[0].block.statements
         if isinstance(s, frog_ast.Assignment) and s.the_type is not None
     ]
-    assert names[:2] == ["S.Pick@cond0", "r"]
-    assert "S.Pick@cond1" in names
+    assert names[:2] == ["S.Pick@cond@0", "r"]
+    assert "S.Pick@cond@1" in names
 
 
 def test_f372_effect_through_a_nested_call() -> None:
@@ -226,22 +226,22 @@ def test_f372_a_shared_node_is_evaluated_where_it_occurs() -> None:
     rewritten = _rewrite(game)
     statements = [str(s).strip() for s in rewritten.methods[0].block.statements]
     assert statements == [
-        "Bool S.Pick@cond0 = b;",
-        "if (S.Pick@cond0) {\nS.Pick@cond0 = S.Pick(U);\n}",
-        "Bool S.Pick@cond1 = b;",
-        "if (S.Pick@cond1) {\nS.Pick@cond1 = S.Pick(U);\n}",
-        "return [S.Pick@cond0, S.Pick@cond1];",
+        "Bool S.Pick@cond@0 = b;",
+        "if (S.Pick@cond@0) {\nS.Pick@cond@0 = S.Pick(U);\n}",
+        "Bool S.Pick@cond@1 = b;",
+        "if (S.Pick@cond@1) {\nS.Pick@cond@1 = S.Pick(U);\n}",
+        "return [S.Pick@cond@0, S.Pick@cond@1];",
     ]
 
 
 def test_f372_nested_positions_with_a_temporary_in_one_call() -> None:
     once = _rewrite(_game("Bool r = a && (b || S.Pick(U)); return r;"))
     assert [str(s).strip() for s in once.methods[0].block.statements] == [
-        "Bool S.Pick@cond0 = a;",
-        "if (S.Pick@cond0) {\nBool S.Pick@cond1 = b;\n"
-        "if (!(S.Pick@cond1)) {\nS.Pick@cond1 = S.Pick(U);\n}\n\n"
-        "S.Pick@cond0 = S.Pick@cond1;\n}",
-        "Bool r = S.Pick@cond0;",
+        "Bool S.Pick@cond@0 = a;",
+        "if (S.Pick@cond@0) {\nBool S.Pick@cond@1 = b;\n"
+        "if (!(S.Pick@cond@1)) {\nS.Pick@cond@1 = S.Pick(U);\n}\n\n"
+        "S.Pick@cond@0 = S.Pick@cond@1;\n}",
+        "Bool r = S.Pick@cond@0;",
         "return r;",
     ]
     assert _rewrite(once) is once
@@ -259,14 +259,14 @@ def test_f372_if_condition_is_rewritten_after_its_else_if_is_split() -> None:
     )
     statements = once.methods[0].block.statements
     assert [str(s).strip() for s in statements[:2]] == [
-        "Bool S.Pick@cond0 = a;",
-        "if (S.Pick@cond0) {\nS.Pick@cond0 = S.Pick(U);\n}",
+        "Bool S.Pick@cond@0 = a;",
+        "if (S.Pick@cond@0) {\nS.Pick@cond@0 = S.Pick(U);\n}",
     ]
     rest = frog_parser.parse_game(
         "Game G() { Bool O(Bool t, Set<BitString<1>> U) { if (t) { return true; } "
         "else { if (S.Pick(U)) { return false; } } return false; } }"
     ).methods[0]
-    renamed = visitors.rename_value_references(rest, {"t": "S.Pick@cond0"})
+    renamed = visitors.rename_value_references(rest, {"t": "S.Pick@cond@0"})
     assert statements[2:] == renamed.block.statements, str(once)
 
 
@@ -280,7 +280,7 @@ def test_f372_challenger_call_defers_only_once_composed() -> None:
     }
     alone = make_conditional_calls_explicit(game, scheme_only, {})
     assert str(alone.methods[0].block.statements[-1]).strip() == (
-        "return F.h(challenger.Get(), S.Pick@cond0);"
+        "return F.h(challenger.Get(), S.Pick@cond@0);"
     )
     assert _rewrite(game) is game
 
@@ -336,14 +336,14 @@ def _resolve(
         ("return a && (b || S.Pick(U));", [("a", "not b")]),
         (
             "Bool r = a && (b || S.Pick(U)); return r;",
-            [("S.Pick@cond0", "!(S.Pick@cond1)")],
+            [("S.Pick@cond@0", "!(S.Pick@cond@1)")],
         ),
         (
             "if (a && S.Pick(U)) { return true; } else if (S.Pick(U)) "
             "{ return false; } return false;",
-            [("S.Pick@cond0",), ("not S.Pick@cond0",)],
+            [("S.Pick@cond@0",), ("not S.Pick@cond@0",)],
         ),
-        ("return [S.Free(U), b && S.Pick(U)];", [("S.Pick@cond0",)]),
+        ("return [S.Free(U), b && S.Pick(U)];", [("S.Pick@cond@0",)]),
     ],
     ids=["nested_return", "nested_temporary", "else_if_after_site", "deferred"],
 )
@@ -363,4 +363,6 @@ def test_f372_inlining_keeps_a_draw_guarded_before_composition() -> None:
     resolved = _resolve(
         _game("return F.h(challenger.Get(), b && S.Pick(U));"), scheme_only
     )
-    assert _draw_guards(resolved.methods[0].block) == [("S.Pick@cond0",)], str(resolved)
+    assert _draw_guards(resolved.methods[0].block) == [("S.Pick@cond@0",)], str(
+        resolved
+    )

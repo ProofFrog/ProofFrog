@@ -1,0 +1,13 @@
+// Left returns the count before the increment, Right the count after.
+// Distinguisher: one Test call returns 0 on Left and 1 on Right.
+Game Left() {
+    Int c;
+    Void Initialize() { c = 0; }
+    Int Test() { Int r = c; c = c + 1; return r; }
+}
+Game Right() {
+    Int c;
+    Void Initialize() { c = 0; }
+    Int Test() { c = c + 1; return c; }
+}
+export as RO;

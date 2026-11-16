@@ -1,0 +1,26 @@
+// Target: method inliner, positive control for read_then_inc.proof.
+// Hypothesis: with the two calls in separate statements the engine keeps
+// their order, so the composed game is RO().Left.
+// Sound engine: fails at hop 3 only.
+import 'Cnt.game';
+import 'RO.game';
+
+// Control: the same reduction with the two calls in separate statements.
+// It returns the count before the increment: composed with Cnt it is
+// RO().Left (hop 1 true, hop 3 false).
+Reduction R() compose Cnt() against RO().Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    Int Test() { Int r = challenger.Read(); Int z = challenger.Inc(); return r; }
+}
+
+proof:
+let:
+assume:
+    Cnt();
+theorem:
+    RO();
+games:
+    RO().Left against RO().Adversary;
+    Cnt().Left compose R() against RO().Adversary;
+    Cnt().Right compose R() against RO().Adversary;
+    RO().Right against RO().Adversary;

@@ -1,0 +1,16 @@
+// Inc increments the counter, Zero reads it, Second returns its second argument.
+Game Left() {
+    Int c;
+    Void Initialize() { c = 0; }
+    Bool Inc() { c = c + 1; return true; }
+    Bool Zero() { return c == 0; }
+    Bool Second(Bool g, Bool v) { return v; }
+}
+Game Right() {
+    Int c;
+    Void Initialize() { c = 0; }
+    Bool Inc() { c = c + 1; return true; }
+    Bool Zero() { return c == 0; }
+    Bool Second(Bool g, Bool v) { return v; }
+}
+export as Ctr;

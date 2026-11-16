@@ -1,0 +1,33 @@
+// Target: the conditional-call rewrite (proof_frog/conditional_calls.py),
+// applied while a reduction is resolved alone.
+// Hypothesis: the rewrite moves the whole left operand of a `&&` in front of
+// the statement, ahead of an earlier challenger call in the same statement,
+// so `Zero` (reads the counter) runs before `Inc` (increments it).
+// As written: Inc runs first, Zero is then false, Pick never runs, Test
+// returns false: Ctr compose R is TR().Left.
+// Sound engine: fails at hop 3. Hop 1 is true, but the engine cannot show
+// that the counter is nonzero after an increment (reorder_inc_first.proof
+// writes Left in the order the reduction runs).
+// Unsound engine: hop 3 (false) accepted.
+import 'Picker.primitive';
+import 'PickImpl.scheme';
+import 'Ctr.game';
+import 'TR.game';
+Reduction R(Picker P) compose Ctr() against TR(P).Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    Bool Test(Set<BitString<1>> S) {
+        return challenger.Second(challenger.Inc(), challenger.Zero() && P.Pick(S));
+    }
+}
+proof:
+let:
+    PickImpl P = PickImpl();
+assume:
+    Ctr();
+theorem:
+    TR(P);
+games:
+    TR(P).Left against TR(P).Adversary;
+    Ctr().Left compose R(P) against TR(P).Adversary;
+    Ctr().Right compose R(P) against TR(P).Adversary;
+    TR(P).Right against TR(P).Adversary;

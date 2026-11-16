@@ -1,0 +1,26 @@
+// F-397: read_then_inc.proof with the theorem's Left written as the
+// reduction computes it (ROZ.game: the count before the increment, + 0), so
+// hop 1 is one the engine can show. challenger.Read() is evaluated before
+// challenger.Inc(), so the composed game returns the count before the
+// increment.
+// Sound engine: fails at hop 3 only (hop 3 is false).
+// Unsound engine: fails at hop 1 only; hop 3 (false) accepted.
+import 'Cnt.game';
+import 'ROZ.game';
+
+Reduction R() compose Cnt() against ROZ().Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    Int Test() { return challenger.Read() + challenger.Inc(); }
+}
+
+proof:
+let:
+assume:
+    Cnt();
+theorem:
+    ROZ();
+games:
+    ROZ().Left against ROZ().Adversary;
+    Cnt().Left compose R() against ROZ().Adversary;
+    Cnt().Right compose R() against ROZ().Adversary;
+    ROZ().Right against ROZ().Adversary;

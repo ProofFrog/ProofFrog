@@ -1,0 +1,31 @@
+import 'Picker.primitive';
+// Both sides: the reduction of reorder_control.proof as written, with
+// Pick's body under its guard (Inc first, then Zero decides whether Pick
+// runs).
+Game Left(Picker P) {
+    Int c;
+    Void Initialize() { c = 0; }
+    Bool Test(Set<BitString<1>> S) {
+        c = c + 1;
+        Bool t = c == 0;
+        if (t) {
+            BitString<1> x <- BitString<1> \ S;
+            t = true;
+        }
+        return t;
+    }
+}
+Game Right(Picker P) {
+    Int c;
+    Void Initialize() { c = 0; }
+    Bool Test(Set<BitString<1>> S) {
+        c = c + 1;
+        Bool t = c == 0;
+        if (t) {
+            BitString<1> x <- BitString<1> \ S;
+            t = true;
+        }
+        return t;
+    }
+}
+export as TRC;

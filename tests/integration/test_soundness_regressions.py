@@ -327,6 +327,16 @@ CASES = [
      "a && after a challenger call ran on every trace; hop 3 is the false one"),
     ("F-372", "init_and.proof", "type_error", "method inliner",
      "challenger.Initialize in the right operand of && ran on every trace"),
+    ("F-372", "reorder.proof", "reject", "method inliner",
+     "a hoisted && operand's challenger call ran before an earlier one"),
+    ("F-372", "reorder_inc_first.proof", "reject", "method inliner",
+     "the same, with Left in the order the reduction runs; hop 3 is false"),
+    ("F-372", "reorder_control.proof", "accept", "method inliner",
+     "positive control: the earlier challenger call stays ahead of the &&"),
+    ("F-372", "cond_name.proof", "reject", "method inliner",
+     "a callee local named cond was declared under the && temporary's name"),
+    ("F-372", "cond_name_control.proof", "accept", "method inliner",
+     "positive control: the temporary and the callee's local stay apart"),
     ("F-373", "param_write.proof", "reject", "method inliner",
      "a callee's x = 0^n; on its parameter assigned the caller's variable"),
     ("F-373", "param_element_write.proof", "reject", "method inliner",
@@ -546,6 +556,14 @@ CASES = [
      "a draw nested in a let: value H(R.Draw()) + 0^m, read anew at every use"),
     ("F-395", "letfixed_control.proof", "accept", "proof let: evaluation",
      "positive control: a let: entry R.Fixed() calls a deterministic method"),
+    ("F-397", "read_then_inc.proof", "reject", "method inliner",
+     "a returned field read was evaluated after a later call's write to it"),
+    ("F-397", "read_then_inc_plus_zero.proof", "reject", "method inliner",
+     "the same, with Left as the reduction computes it; hop 3 is false"),
+    ("F-397", "read_then_inc_control.proof", "reject", "method inliner",
+     "control: the two calls in separate statements; hop 3 is false"),
+    ("F-397", "read_then_inc_true.proof", "accept", "method inliner",
+     "positive control: the count is read before the increment"),
     ("F-398", "letcap.proof", "reject", "StandardizeFieldNames",
      "a field was renamed to field1, a let: Int the game reads"),
     ("F-398", "letcap_control.proof", "accept", "StandardizeFieldNames",
@@ -1031,6 +1049,9 @@ FAILED_STEP = {
     ),
     # Without the snapshot on the reduction, step 2 verifies, and steps 1 and
     # 3 fail in its place (the games' own fields get the snapshot).
+    ("F-372", "reorder_inc_first.proof"): (
+        "Step 3 failed: Ctr().Right compose R(P) -> TRI(P).Right"
+    ),
     ("F-384", "reduction_copy_source.proof"): (
         "Step 2 failed: Ping().Real compose R7() -> Ping().Real compose R9()"
     ),
@@ -1042,6 +1063,12 @@ FAILED_STEP = {
     ),
     ("F-391", "challenger_field_draw.proof"): (
         "Step 3 failed: KI(S).Real compose R(S) -> Twice(S).Right"
+    ),
+    ("F-397", "read_then_inc_plus_zero.proof"): (
+        "Step 3 failed: Cnt().Right compose R() -> ROZ().Right"
+    ),
+    ("F-397", "read_then_inc_control.proof"): (
+        "Step 3 failed: Cnt().Right compose R() -> RO().Right"
     ),
     # The hop fails because a game could not be inlined, not on a difference.
     ("F-404", "many.proof"): (

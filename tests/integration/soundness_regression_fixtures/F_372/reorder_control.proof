@@ -1,0 +1,26 @@
+// F-372 (second review): positive control for reorder.proof. Both sides
+// of TRC are the reduction as written (Inc, then Zero, then Pick under its
+// guard), so every hop is true.
+// Sound engine: Proof Succeeded!
+import 'Picker.primitive';
+import 'PickImpl.scheme';
+import 'Ctr.game';
+import 'TRC.game';
+Reduction R(Picker P) compose Ctr() against TRC(P).Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    Bool Test(Set<BitString<1>> S) {
+        return challenger.Second(challenger.Inc(), challenger.Zero() && P.Pick(S));
+    }
+}
+proof:
+let:
+    PickImpl P = PickImpl();
+assume:
+    Ctr();
+theorem:
+    TRC(P);
+games:
+    TRC(P).Left against TRC(P).Adversary;
+    Ctr().Left compose R(P) against TRC(P).Adversary;
+    Ctr().Right compose R(P) against TRC(P).Adversary;
+    TRC(P).Right against TRC(P).Adversary;

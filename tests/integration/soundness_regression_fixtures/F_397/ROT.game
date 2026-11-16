@@ -1,0 +1,13 @@
+// Both sides: the reduction of read_then_inc_true.proof as written: the
+// count before the increment, plus Inc's 0.
+Game Left() {
+    Int c;
+    Void Initialize() { c = 0; }
+    Int Test() { Int r = c; c = c + 1; return r + 0; }
+}
+Game Right() {
+    Int c;
+    Void Initialize() { c = 0; }
+    Int Test() { Int r = c; c = c + 1; return r + 0; }
+}
+export as ROT;

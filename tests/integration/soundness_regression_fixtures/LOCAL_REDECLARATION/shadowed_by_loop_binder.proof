@@ -1,0 +1,17 @@
+// A for binder shadows a local of its enclosing block (see
+// ShadowedByLoopBinder.game). Sound engine: a type error.
+import 'ShadowedByLoopBinder.game';
+
+proof:
+
+let:
+    Int n;
+
+assume:
+
+theorem:
+    ShadowedByLoopBinder(n);
+
+games:
+    ShadowedByLoopBinder(n).Left against ShadowedByLoopBinder(n).Adversary;
+    ShadowedByLoopBinder(n).Right against ShadowedByLoopBinder(n).Adversary;

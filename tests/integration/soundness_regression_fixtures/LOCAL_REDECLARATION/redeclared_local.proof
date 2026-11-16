@@ -1,0 +1,17 @@
+// A local declared twice in one block (see RedeclaredLocal.game).
+// Sound engine: a type error.
+import 'RedeclaredLocal.game';
+
+proof:
+
+let:
+    Int n;
+
+assume:
+
+theorem:
+    RedeclaredLocal(n);
+
+games:
+    RedeclaredLocal(n).Left against RedeclaredLocal(n).Adversary;
+    RedeclaredLocal(n).Right against RedeclaredLocal(n).Adversary;

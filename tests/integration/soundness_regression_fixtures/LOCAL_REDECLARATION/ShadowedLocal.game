@@ -1,0 +1,25 @@
+// A local in an inner block named like a local of the enclosing block.
+// Under lexical scoping Left's inner x is another variable, so F always
+// returns 1; Right returns 2 when b holds, as if the inner declaration wrote
+// the outer x. An inner block may not shadow an enclosing local, so the
+// type checker refuses Left.
+Game Left(Int n) {
+    Int F(Bool b) {
+        Int x = 1;
+        if (b) {
+            Int x = 2;
+        }
+        return x;
+    }
+}
+
+Game Right(Int n) {
+    Int F(Bool b) {
+        if (b) {
+            return 2;
+        }
+        return 1;
+    }
+}
+
+export as ShadowedLocal;

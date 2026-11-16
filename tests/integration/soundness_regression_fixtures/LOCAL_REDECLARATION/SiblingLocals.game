@@ -1,0 +1,42 @@
+// Positive control: locals of the same name in sibling blocks (the two arms
+// of an if, two loops one after the other) are different variables and are
+// allowed. Right is Left with every local given a name of its own.
+Game Left(Int n) {
+    Int F(Bool b) {
+        Int s = 0;
+        for (Int i = 0 to n) {
+            s = s + i;
+        }
+        for (Int i = 0 to n) {
+            s = s * i;
+        }
+        if (b) {
+            Int x = s + 1;
+            return x;
+        } else {
+            Int x = s + 2;
+            return x;
+        }
+    }
+}
+
+Game Right(Int n) {
+    Int F(Bool b) {
+        Int s = 0;
+        for (Int i = 0 to n) {
+            s = s + i;
+        }
+        for (Int j = 0 to n) {
+            s = s * j;
+        }
+        if (b) {
+            Int x = s + 1;
+            return x;
+        } else {
+            Int y = s + 2;
+            return y;
+        }
+    }
+}
+
+export as SiblingLocals;

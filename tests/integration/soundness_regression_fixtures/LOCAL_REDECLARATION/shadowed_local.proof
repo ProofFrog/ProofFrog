@@ -1,0 +1,17 @@
+// An inner block shadows a local of its enclosing block (see
+// ShadowedLocal.game). Sound engine: a type error.
+import 'ShadowedLocal.game';
+
+proof:
+
+let:
+    Int n;
+
+assume:
+
+theorem:
+    ShadowedLocal(n);
+
+games:
+    ShadowedLocal(n).Left against ShadowedLocal(n).Adversary;
+    ShadowedLocal(n).Right against ShadowedLocal(n).Adversary;

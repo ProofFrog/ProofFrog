@@ -1,0 +1,17 @@
+// Positive control: locals of the same name in sibling blocks (see
+// SiblingLocals.game). Sound engine: Proof Succeeded!
+import 'SiblingLocals.game';
+
+proof:
+
+let:
+    Int n;
+
+assume:
+
+theorem:
+    SiblingLocals(n);
+
+games:
+    SiblingLocals(n).Left against SiblingLocals(n).Adversary;
+    SiblingLocals(n).Right against SiblingLocals(n).Adversary;

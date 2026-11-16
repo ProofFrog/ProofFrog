@@ -61,7 +61,7 @@ CASES = [
      "two draws were merged across a write to the local that is their length"),
     ("F-048", "merge_control.proof", "accept", "MergeUniformSamples",
      "positive control: draws whose length nothing writes are still merged"),
-    ("F-062", "a2_probe.proof", "reject", "MergeProductSamples",
+    ("F-062", "a2_probe.proof", "type_error", "MergeProductSamples",
      "single-use scan blind to binders across a duplicate re-declaration"),
     ("F-079", "attack5_element_count_blind.proof", "reject",
      "RemoveDuplicateFields",
@@ -70,7 +70,8 @@ CASES = [
      "positive control: the same games without the element write"),
     ("F-101", "AttackA4.proof", "type_error", "DeadGuardedAssignmentElimination",
      "a shadowed inner variable entailed a guard about the outer one"),
-    ("F-101", "attack_a4_local.proof", "reject", "DeadGuardedAssignmentElimination",
+    ("F-101", "attack_a4_local.proof", "type_error",
+     "DeadGuardedAssignmentElimination",
      "a shadowing inner local entailed a guard about the outer local"),
     ("F-130", "alphacap.proof", "reject", "SimplifyIf",
      "branch locals were renamed to __alpha_1__, a let: entry a branch reads"),
@@ -112,7 +113,7 @@ CASES = [
      "the same, with the dropped component the only difference between the games"),
     ("F-191", "written_q_control.proof", "accept", "SplitOpaqueTupleField",
      "positive control: a field starting from the split field's initial value"),
-    ("F-199", "A3.proof", "accept", "RedundantFieldCopy",
+    ("F-199", "A3.proof", "type_error", "RedundantFieldCopy",
      "a declaration after the copy made the reconstruction diverge"),
     ("F-202", "attack3.proof", "reject", "DeduplicateDeterministicCalls",
      "F.Eval(F.Gen()) twice was merged, sharing one draw of the nested Gen"),
@@ -140,7 +141,7 @@ CASES = [
      "a flat type map confused Bool || with concatenation (false rejection)"),
     ("F-269", "attack3_poison.proof", "accept", "ModIntSimplification",
      "a flat type map rewrote a group element x^0 to 1 and crashed"),
-    ("F-290", "attack3_reserved.proof", "reject", "UniformXorSimplification",
+    ("F-290", "attack3_reserved.proof", "type_error", "UniformXorSimplification",
      "a reserved-prefix shadow survived renaming and consumed a loop element"),
     ("F-300", "attack_3.proof", "reject", "RemoveDuplicateFields",
      "an element write was skipped, so two maps it drives apart were merged"),
@@ -687,6 +688,14 @@ CASES = [
      "a local shadowed a method parameter"),
     ("F-366", "distinct_names_control.proof", "accept", "type checker",
      "positive control: locals that do not reuse a parameter's name"),
+    ("LOCAL-REDECLARATION", "redeclared_local.proof", "type_error",
+     "type checker", "a local was declared twice in one block"),
+    ("LOCAL-REDECLARATION", "shadowed_local.proof", "type_error",
+     "type checker", "an inner block shadowed a local of its enclosing block"),
+    ("LOCAL-REDECLARATION", "shadowed_by_loop_binder.proof", "type_error",
+     "type checker", "a for binder shadowed a local of its enclosing block"),
+    ("LOCAL-REDECLARATION", "sibling_locals_control.proof", "accept",
+     "type checker", "positive control: locals of one name in sibling blocks"),
     ("EXPONENT-MODULUS", "other_modulus.proof", "type_error", "type checker",
      "a group exponent of type ModInt<q> was read modulo the group order"),
     ("EXPONENT-MODULUS", "other_group.proof", "type_error", "type checker",
@@ -820,6 +829,30 @@ TYPE_ERROR = {
     ("INT-DIVISION", "int_division.proof"): ("error: Cannot use operator / on Int"),
     ("F-101", "AttackA4.proof"): (
         "error: Local 'x' shadows the parameter 'x' of method O"
+    ),
+    # A local is declared once and does not shadow an enclosing local (the
+    # ruling of 2026-06-28), so these shapes no longer reach the passes.
+    ("F-101", "attack_a4_local.proof"): (
+        "error: Local 'x' shadows the local 'x' of an enclosing block of method O"
+    ),
+    ("F-062", "a2_probe.proof"): (
+        "error: Local 'a' is declared twice in one block of method O"
+    ),
+    ("F-199", "A3.proof"): (
+        "error: Local 'v' is declared twice in one block of method Initialize"
+    ),
+    ("F-290", "attack3_reserved.proof"): (
+        "error: Local '__u' shadows the local '__u' of an enclosing block of"
+        " method O"
+    ),
+    ("LOCAL-REDECLARATION", "redeclared_local.proof"): (
+        "error: Local 'k' is declared twice in one block of method Draw"
+    ),
+    ("LOCAL-REDECLARATION", "shadowed_local.proof"): (
+        "error: Local 'x' shadows the local 'x' of an enclosing block of method F"
+    ),
+    ("LOCAL-REDECLARATION", "shadowed_by_loop_binder.proof"): (
+        "error: Local 'i' shadows the local 'i' of an enclosing block of method F"
     ),
     ("F-361", "collateral_poison_powpow.proof"): (
         "error: Exponent of a GroupElem<H> must have type Int or"

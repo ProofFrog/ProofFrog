@@ -7,7 +7,12 @@ type checker:
 - An identifier of the form the engine mints for its own fresh names
   (``__a<N>__``, used by alpha renaming) may not be written by a user.
 - A local declaration (typed assignment or draw, bare declaration, ``for``
-  binder) may not reuse the name of a parameter of its method.
+  binder) may not reuse the name of a parameter of its method, nor the name
+  of a local still in scope: a local is declared once in its block, and an
+  inner block may not shadow a local of an enclosing one.  Locals of the
+  same name in sibling blocks, or in a block after an inner block that
+  declared it has ended, are different variables and are allowed.  A local
+  may still shadow a field or a game parameter.
 - A scheme's method may not write a field of the scheme (an assignment, a
   draw, an element write, or a ``<-uniq[S]`` draw that inserts into ``S``).
   A scheme's fields are fixed once it is instantiated: mutable state is game
@@ -195,12 +200,27 @@ class _ComponentChecker:
             )
 
     def _declare(self, node: frog_ast.ASTNode, name: str) -> None:
+        previous = self._lookup(name)
         if name in self.method_params:
             self.violations.append(
                 Violation(
                     node,
                     f"Local '{name}' shadows the parameter '{name}' of method"
                     f" {self.method_name}: a local may not reuse a parameter's name",
+                )
+            )
+        elif previous is not None and previous.kind == "local":
+            # Only a method's own scopes hold locals, so ``previous`` is a
+            # local of this method that is still in scope here.
+            if self.scopes[-1].get(name) is previous:
+                problem = "is declared twice in one block"
+            else:
+                problem = f"shadows the local '{name}' of an enclosing block"
+            self.violations.append(
+                Violation(
+                    node,
+                    f"Local '{name}' {problem} of method {self.method_name}: a"
+                    " local may not reuse the name of a local in scope",
                 )
             )
         self.scopes[-1][name] = _Binding(name, "local")

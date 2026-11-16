@@ -1,0 +1,20 @@
+// A local declared twice in one block. Left's second declaration of k is a
+// new draw, so Draw returns the sum of two independent draws (uniform);
+// Right returns 0^n, as if the second k were the first. A local is declared
+// once in its block, so the type checker refuses Left.
+Game Left(Int n) {
+    BitString<n> Draw() {
+        BitString<n> k <- BitString<n>;
+        BitString<n> c = k;
+        BitString<n> k <- BitString<n>;
+        return c + k;
+    }
+}
+
+Game Right(Int n) {
+    BitString<n> Draw() {
+        return 0^n;
+    }
+}
+
+export as RedeclaredLocal;

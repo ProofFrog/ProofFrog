@@ -6,6 +6,10 @@ so an argument that draws was drawn once per read of the parameter, and not
 at all when the callee never reads it. An argument with a call is now bound
 to a variable of the parameter's type; an argument without calls is still
 substituted.
+
+F-403: a callee whose body is empty is no exception. The inliner replaced
+such a call by nothing, dropping the bindings with it; the bindings now
+take the call's place.
 """
 
 from __future__ import annotations
@@ -33,6 +37,9 @@ Scheme S(Int n) extends P {
     BitString<n> Draw() {
         BitString<n> r <- BitString<n>;
         return r;
+    }
+
+    Void Take(BitString<n> x) {
     }
 }
 """
@@ -136,3 +143,39 @@ def test_f371_argument_without_call_is_substituted() -> None:
     text = str(game)
     assert "@" not in text
     assert "y + y == y + y" in text
+
+
+def test_f403_empty_body_keeps_argument_draw() -> None:
+    """A draw passed to a callee whose body is empty is still made, in the
+    call's place: after the statements before it, before those after it."""
+    game = _inline(
+        "Game T(Int n) { Bool O() {"
+        " Int a = 1; S.Take(S.Draw()); Int b = 2; return true; } }"
+    )
+    statements = game.get_method("O").block.statements
+    assert _samples(game.get_method("O")) == 1
+    assert str(statements[0]) == "Int a = 1;"
+    assert isinstance(statements[1], frog_ast.Sample)
+    binding = statements[2]
+    assert isinstance(binding, frog_ast.Assignment)
+    assert isinstance(binding.var, frog_ast.Variable)
+    assert binding.var.name.startswith("S.Take@x")
+    assert [str(s) for s in statements[3:]] == ["Int b = 2;", "return true;"]
+
+
+def test_f403_empty_body_keeps_challenger_call() -> None:
+    """A challenger call passed to a callee whose body is empty still changes
+    the challenger's state."""
+    game = _inline(
+        "Game T(Int n) { Bool O() { S.Take(challenger.Inc()); return true; } }"
+    )
+    assert "count = count + 1;" in str(game)
+
+
+def test_f403_empty_body_with_call_free_argument_is_dropped() -> None:
+    """A call-free argument to a callee whose body is empty leaves nothing."""
+    game = _inline(
+        "Game T(Int n) { Bool O(BitString<n> y) { S.Take(y + y); return true; } }"
+    )
+    statements = game.get_method("O").block.statements
+    assert [str(s) for s in statements] == ["return true;"]

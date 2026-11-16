@@ -1,0 +1,16 @@
+import 'Picker.primitive';
+import 'Taker.primitive';
+// Left passes the constant true to T.Take, whose body is empty: no
+// effect, so Left and Right are interchangeable.
+Game Left(Picker P, Taker T) {
+    Bool Test(Set<BitString<1>> S) {
+        T.Take(true);
+        return true;
+    }
+}
+Game Right(Picker P, Taker T) {
+    Bool Test(Set<BitString<1>> S) {
+        return true;
+    }
+}
+export as EDC;

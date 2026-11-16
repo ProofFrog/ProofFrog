@@ -1,0 +1,26 @@
+// F-403 (method inliner). Left passes P.Pick(S) to T.Take, whose body is
+// empty. Pick draws from BitString<1> \ S, which does not complete when S is
+// all of BitString<1>, which the adversary observes; Right always returns.
+// The inliner dropped the call statement together with the binding of the
+// argument that makes a call, so the draw disappeared. Sound engine:
+// Proof Failed!
+import 'Picker.primitive';
+import 'PickImpl.scheme';
+import 'Taker.primitive';
+import 'TakeNothing.scheme';
+import 'ED.game';
+
+proof:
+
+let:
+    PickImpl P = PickImpl();
+    TakeNothing T = TakeNothing();
+
+assume:
+
+theorem:
+    ED(P, T);
+
+games:
+    ED(P, T).Left against ED(P, T).Adversary;
+    ED(P, T).Right against ED(P, T).Adversary;

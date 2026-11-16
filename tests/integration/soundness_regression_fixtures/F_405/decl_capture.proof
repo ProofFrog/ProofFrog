@@ -1,0 +1,18 @@
+// Target: method inliner (visitors.InlineTransformer), the names an inlined
+// body's variables get (F-405).
+// Hypothesis: Keep's bare declaration Bool b; keeps its name (the
+// inliner renamed only typed locals), so the argument b reads it.
+// Sound engine: Proof Failed!. Unsound engine: Proof Succeeded! (advantage 1).
+// Distinguisher: Test(true) returns true on Left, false on Right.
+import 'Cl.primitive';
+import 'ClImpl.scheme';
+import 'GKeep.game';
+proof:
+let:
+    ClImpl P = ClImpl();
+assume:
+theorem:
+    GKeep(P);
+games:
+    GKeep(P).Left against GKeep(P).Adversary;
+    GKeep(P).Right against GKeep(P).Adversary;

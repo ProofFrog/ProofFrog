@@ -1,0 +1,17 @@
+// Target: method inliner (visitors.InlineTransformer), the names an inlined
+// body's variables get (F-405).
+// Control: a true equivalence; a sound engine prints Proof Succeeded!.
+// G's local b is declared in a branch; the argument is a, so nothing
+// can capture it, and G(a, c) is a.
+import 'Ch.primitive';
+import 'ChImpl.scheme';
+import 'GChCtl.game';
+proof:
+let:
+    ChImpl P = ChImpl();
+assume:
+theorem:
+    GChCtl(P);
+games:
+    GChCtl(P).Left against GChCtl(P).Adversary;
+    GChCtl(P).Right against GChCtl(P).Adversary;

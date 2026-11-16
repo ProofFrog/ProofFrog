@@ -1,0 +1,18 @@
+import 'Cl.primitive';
+// Left: (a + 1) + (b + 1) when d holds. Right: (b + 1) + (b + 1).
+Game Left(Cl P) {
+    Int Test(Int a, Int b, Bool d) {
+        return P.Bump(a, d) + P.Bump(b, d);
+    }
+}
+Game Right(Cl P) {
+    Int Test(Int a, Int b, Bool d) {
+        if (d) {
+            Int y = b;
+            y = y + 1;
+            return y + y;
+        }
+        return 0;
+    }
+}
+export as GBump;

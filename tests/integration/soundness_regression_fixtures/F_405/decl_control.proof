@@ -1,0 +1,16 @@
+// Target: method inliner (visitors.InlineTransformer), the names an inlined
+// body's variables get (F-405).
+// Control: a true equivalence; a sound engine prints Proof Succeeded!.
+// decl_capture's Left against its true value.
+import 'Cl.primitive';
+import 'ClImpl.scheme';
+import 'GKeepCtl.game';
+proof:
+let:
+    ClImpl P = ClImpl();
+assume:
+theorem:
+    GKeepCtl(P);
+games:
+    GKeepCtl(P).Left against GKeepCtl(P).Adversary;
+    GKeepCtl(P).Right against GKeepCtl(P).Adversary;

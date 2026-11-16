@@ -1,0 +1,16 @@
+import 'Cl.primitive';
+// Left: a + b when d holds. Right: b + b.
+Game Left(Cl P) {
+    Int Test(Int a, Int b, Bool d) {
+        return P.Guard(a, d) + P.Guard(b, d);
+    }
+}
+Game Right(Cl P) {
+    Int Test(Int a, Int b, Bool d) {
+        if (d) {
+            return b + b;
+        }
+        return 0;
+    }
+}
+export as GGuard;

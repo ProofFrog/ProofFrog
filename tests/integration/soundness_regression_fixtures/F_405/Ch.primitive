@@ -1,0 +1,3 @@
+Primitive Ch() {
+    Bool G(Bool v, Bool c);
+}

@@ -1,0 +1,18 @@
+// Target: method inliner (visitors.InlineTransformer), the names an inlined
+// body's variables get (F-405).
+// Hypothesis: Sum's for binder i keeps its name, so the argument i
+// substituted into the loop body reads the binder.
+// Sound engine: Proof Failed!. Unsound engine: Proof Succeeded! (advantage 1).
+// Distinguisher: Test(5, 2) returns 10 on Left, 1 on Right.
+import 'Cl.primitive';
+import 'ClImpl.scheme';
+import 'GSum.game';
+proof:
+let:
+    ClImpl P = ClImpl();
+assume:
+theorem:
+    GSum(P);
+games:
+    GSum(P).Left against GSum(P).Adversary;
+    GSum(P).Right against GSum(P).Adversary;

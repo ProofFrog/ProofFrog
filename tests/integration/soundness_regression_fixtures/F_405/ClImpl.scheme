@@ -1,0 +1,44 @@
+import 'Cl.primitive';
+Scheme ClImpl() extends Cl {
+    // Guard returns x when d holds, else 0; y is a top-level local.
+    Int Guard(Int x, Bool d) {
+        Int y = x;
+        if (d) {
+            return y;
+        }
+        return 0;
+    }
+
+    // Bump writes its parameter, so the inliner binds it to a variable.
+    Int Bump(Int x, Bool d) {
+        x = x + 1;
+        if (d) {
+            return x;
+        }
+        return 0;
+    }
+
+    // Reduce returns a ModInt, so the inliner binds each returned value.
+    ModInt<7> Reduce(Int x, Bool d) {
+        if (d) {
+            return x;
+        }
+        return 0;
+    }
+
+    // Sum adds v to 0, k times; i is a for binder.
+    Int Sum(Int v, Int k) {
+        Int s = 0;
+        for (Int i = 0 to k) {
+            s = s + v;
+        }
+        return s;
+    }
+
+    // Keep returns v; b is a bare declaration.
+    Bool Keep(Bool v) {
+        Bool b;
+        b = false;
+        return v;
+    }
+}

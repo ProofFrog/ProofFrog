@@ -1,0 +1,18 @@
+// Target: method inliner (visitors.InlineTransformer), the names an inlined
+// body's variables get (F-405).
+// Hypothesis: as index_clash, with the bindings of the returned ModInt
+// values: the second call's get the first call's names Reduce@return1_k.
+// Sound engine: Proof Failed!. Unsound engine: Proof Succeeded! (advantage 1).
+// Distinguisher: Test(1, 0, true) returns 1 on Left, 0 on Right.
+import 'Cl.primitive';
+import 'ClImpl.scheme';
+import 'GReduce.game';
+proof:
+let:
+    ClImpl P = ClImpl();
+assume:
+theorem:
+    GReduce(P);
+games:
+    GReduce(P).Left against GReduce(P).Adversary;
+    GReduce(P).Right against GReduce(P).Adversary;

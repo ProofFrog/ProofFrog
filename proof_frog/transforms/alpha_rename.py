@@ -95,7 +95,8 @@ class _AlphaRenamer:
     """Renames local binders to fresh ``__aN__`` names within one game.
 
     With *only_locals* set, a typed local is renamed only if its name is in
-    that set (others keep their name), and *fresh* supplies the new names;
+    that set (others keep their name), and *fresh* supplies the new names,
+    given the name of the binder being renamed;
     :func:`rename_colliding_binders` uses this for capture-avoiding
     instantiation.
     """
@@ -104,16 +105,17 @@ class _AlphaRenamer:
         self,
         outer_names: frozenset[str] = frozenset(),
         only_locals: frozenset[str] | None = None,
-        fresh: Callable[[], str] | None = None,
+        fresh: Callable[[str], str] | None = None,
     ) -> None:
         self._counter = 0
         self._outer_names: frozenset[str] = outer_names
         self._only_locals = only_locals
         self._fresh_fn = fresh
 
-    def _fresh(self) -> str:
+    def _fresh(self, name: str) -> str:
+        """A new name for the binder *name*."""
         if self._fresh_fn is not None:
-            return self._fresh_fn()
+            return self._fresh_fn(name)
         # A proof-let name can look fresh without appearing in the game text,
         # so the counter alone cannot keep a minted name clear of it.
         while True:
@@ -146,7 +148,7 @@ class _AlphaRenamer:
         param_map: dict[str, str] = {}
         for param in signature.parameters:
             if param.name in self._outer_names:
-                param_map[param.name] = self._fresh()
+                param_map[param.name] = self._fresh(param.name)
         if not param_map:
             return frog_ast.Method(signature, self._rename_block(method.block, []))
         new_signature = copy.copy(signature)
@@ -163,7 +165,7 @@ class _AlphaRenamer:
         name (F-339), else unchanged. A fresh-looking name that collides is
         renamed too; ``_fresh`` never mints an outer name, so this converges."""
         if name in self._outer_names:
-            return self._fresh()
+            return self._fresh(name)
         return name
 
     def _rename_block(
@@ -246,7 +248,7 @@ class _AlphaRenamer:
             # fixed-point convergence.
             local[name] = name
             return None
-        fresh = self._fresh()
+        fresh = self._fresh(name)
         local[name] = fresh
         return fresh
 
@@ -397,7 +399,9 @@ def rename_colliding_binders(
     references that resolve to each binder under position-sensitive scoping.
     Other binders and all references to outer names are left alone. Used to
     make instantiation capture-avoiding (F-341)."""
-    renamer = _AlphaRenamer(outer_names=names, only_locals=names, fresh=fresh)
+    renamer = _AlphaRenamer(
+        outer_names=names, only_locals=names, fresh=lambda _name: fresh()
+    )
     return renamer._rename_method(method)  # pylint: disable=protected-access
 
 
@@ -447,6 +451,18 @@ def rename_block_binders(
     *fresh* must return names *block* does not mention, so a new name never
     captures such a reference. Simplify Ifs compares two branches this way
     up to the names of their locals (F-130)."""
+    return rename_block_binders_by_name(block, lambda _name: fresh())
+
+
+def rename_block_binders_by_name(
+    block: frog_ast.Block, fresh: Callable[[str], str]
+) -> frog_ast.Block:
+    """:func:`rename_block_binders`, with each binder's new name
+    ``fresh(name)`` for the name the binder declares. Each binder, two
+    declarations of one name included, is given its own name.
+
+    The method inliner renames a callee's locals this way before it puts
+    the arguments in for the parameters (F-405)."""
     renamer = _AlphaRenamer(
         outer_names=frozenset(block_mentioned_names(block)), fresh=fresh
     )

@@ -1125,11 +1125,11 @@ def substitutable_argument(arg: frog_ast.Expression) -> bool:
 def _bind_returns(
     block: frog_ast.Block,
     return_type: frog_ast.Type,
-    name: str,
-    counter: list[int],
+    new_name: Callable[[], str],
 ) -> frog_ast.Block:
     """Rewrite every ``return e;`` in *block* (at any depth) into
-    ``T r = e; return r;`` with *return_type* ``T`` and a fresh ``r``.
+    ``T r = e; return r;`` with *return_type* ``T`` and ``r`` the next name
+    *new_name* gives, which must be fresh.
 
     The inliner replaces a call by the expression its callee returns; when
     the return type converts the returned value (an ``Int`` returned as a
@@ -1142,8 +1142,7 @@ def _bind_returns(
             isinstance(statement, frog_ast.ReturnStatement)
             and statement.expression is not None
         ):
-            temp = f"{name}{counter[0]}"
-            counter[0] += 1
+            temp = new_name()
             new_statements.append(
                 frog_ast.Assignment(
                     copy.deepcopy(return_type),
@@ -1157,26 +1156,80 @@ def _bind_returns(
                 frog_ast.IfStatement(
                     list(statement.conditions),
                     [
-                        _bind_returns(inner, return_type, name, counter)
+                        _bind_returns(inner, return_type, new_name)
                         for inner in statement.blocks
                     ],
                 )
             )
         elif isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
             loop = copy.copy(statement)
-            loop.block = _bind_returns(statement.block, return_type, name, counter)
+            loop.block = _bind_returns(statement.block, return_type, new_name)
             new_statements.append(loop)
         else:
             new_statements.append(statement)
     return frog_ast.Block(new_statements)
 
 
+def mentioned_names(node: frog_ast.ASTNode) -> set[str]:
+    """Every name *node* mentions: each variable it references (type
+    positions included) and each name it declares (parameters, fields,
+    typed locals, bare declarations, ``for`` binders)."""
+    names: set[str] = set()
+
+    def _collect(inner: frog_ast.ASTNode) -> bool:
+        if isinstance(inner, frog_ast.Variable):
+            names.add(inner.name)
+        elif isinstance(
+            inner,
+            (frog_ast.Parameter, frog_ast.Field, frog_ast.VariableDeclaration),
+        ):
+            names.add(inner.name)
+        elif isinstance(inner, frog_ast.NumericFor):
+            names.add(inner.name)
+        elif isinstance(inner, frog_ast.GenericFor):
+            names.add(inner.var_name)
+        elif isinstance(inner, frog_ast.DestructuringBinding):
+            names.update(inner.names)
+        return False
+
+    SearchVisitor(_collect).visit(node)
+    return names
+
+
 class InlineTransformer(Transformer):
+    """Inline one call to a method of *method_lookup* (the first one met)
+    into the node it transforms, and set ``finished``.
+
+    The callee's body goes into the caller's block before the statement
+    holding the call. Every variable the body brings in has a new name, the
+    callee's locals (any depth, ``for`` binders included) and the bindings
+    of parameters and returned values, made fresh against every name the
+    node being transformed and the callee mention: the callee's locals are
+    renamed before the arguments are put in for the parameters, so no local
+    captures a name an argument reads, and a body inlined inside a block
+    where an earlier inlined body's variables are in scope does not reuse
+    their names (F-405)."""
+
     def __init__(self, method_lookup: Dict[Tuple[str, str], frog_ast.Method]) -> None:
         self.blocks: list[frog_ast.Block] = []
         self.statement_index = 0
         self.method_lookup = method_lookup
         self.finished = False
+        self._root: Optional[frog_ast.ASTNode] = None
+        self._root_names: Optional[set[str]] = None
+
+    def transform(self, node: T) -> T:
+        if self._root is None:
+            # The node the transformer was called on: the caller whose names
+            # a new name must avoid.
+            self._root = node
+        return super().transform(node)
+
+    def _caller_names(self) -> set[str]:
+        if self._root_names is None:
+            assert self._root is not None
+            self._root_names = mentioned_names(self._root)
+        return self._root_names
 
     def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
         if self.finished:
@@ -1240,34 +1293,32 @@ class InlineTransformer(Transformer):
         assert isinstance(exp.func, frog_ast.FieldAccess)
         assert isinstance(exp.func.the_object, frog_ast.Variable)
 
+        # Lazy import to avoid a cycle with transforms/.
+        # pylint: disable=import-outside-toplevel,cyclic-import
+        from .transforms._base import fresh_name
+        from .transforms.alpha_rename import rename_block_binders_by_name
+
         called_method = copy.deepcopy(
             self.method_lookup[(exp.func.the_object.name, exp.func.name)]
         )
 
-        for var_statement in called_method.block.statements:
-            if (
-                isinstance(
-                    var_statement,
-                    (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample),
-                )
-                and var_statement.the_type is not None
-                and isinstance(var_statement.var, frog_ast.Variable)
-            ):
-                ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-                ast_map.set(
-                    var_statement.var,
-                    frog_ast.Variable(
-                        exp.func.the_object.name
-                        + "."
-                        + exp.func.name
-                        + "@"
-                        + var_statement.var.name
-                        + str(self.statement_index)
-                    ),
-                )
-                called_method = SubstitutionTransformer(ast_map).transform(
-                    called_method
-                )
+        # Every variable the callee's body brings into the caller gets a name
+        # that neither the caller nor the callee mentions (F-405). The name is
+        # `obj.method@<name><index of the call's statement>` unless that is
+        # taken: a call inside a block nested in an earlier inlined body can
+        # sit at the same index, with the earlier body's variables in scope.
+        taken = self._caller_names() | mentioned_names(called_method)
+        fresh_prefix = exp.func.the_object.name + "." + exp.func.name + "@"
+        fresh_suffix = str(self.statement_index)
+        # Each local the callee declares, at any depth (`for` binders and
+        # bare declarations included), is renamed by scope before the
+        # arguments are put in for the parameters, so that no local captures
+        # a name an argument reads: `if (c) { Bool b = false; return v; }`
+        # with `v := b` must not return the local `b`.
+        called_method.block = rename_block_binders_by_name(
+            called_method.block,
+            lambda local: fresh_name(fresh_prefix + local + fresh_suffix, taken),
+        )
         # A call evaluates each argument once, before the callee's body, and
         # stores it in the parameter. Substituting the argument expression for
         # the parameter is the same only when the argument calls nothing
@@ -1287,8 +1338,6 @@ class InlineTransformer(Transformer):
         # write to the caller's variable (`x = 0^n;` becoming `y = 0^n;`, or
         # `X[k] = v;` writing the caller's map).
         # The pipeline forwards a binding when it provably keeps its value.
-        fresh_prefix = exp.func.the_object.name + "." + exp.func.name + "@"
-        fresh_suffix = str(self.statement_index)
         bindings: list[frog_ast.Statement] = []
         arguments: frog_ast.Namespace = {}
         for param, arg in zip(called_method.signature.parameters, exp.args):
@@ -1297,7 +1346,7 @@ class InlineTransformer(Transformer):
                 or not substitutable_argument(arg)
                 or reassigns_or_rebinds({param.name}, called_method.block)
             ):
-                bound = fresh_prefix + param.name + fresh_suffix
+                bound = fresh_name(fresh_prefix + param.name + fresh_suffix, taken)
                 bindings.append(
                     frog_ast.Assignment(
                         copy.deepcopy(param.type),
@@ -1313,12 +1362,16 @@ class InlineTransformer(Transformer):
         )
         return_type = called_method.signature.return_type
         if type_contains_mod_int(return_type):
+            returns_bound = [0]
+
+            def return_name() -> str:
+                index = returns_bound[0]
+                returns_bound[0] += 1
+                return fresh_name(f"{fresh_prefix}return{fresh_suffix}_{index}", taken)
+
             transformed_method = copy.copy(transformed_method)
             transformed_method.block = _bind_returns(
-                transformed_method.block,
-                return_type,
-                fresh_prefix + "return" + fresh_suffix + "_",
-                [0],
+                transformed_method.block, return_type, return_name
             )
 
         block_to_transform = self.blocks.pop()

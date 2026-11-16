@@ -1,0 +1,18 @@
+// Target: method inliner (visitors.InlineTransformer), the names an inlined
+// body's variables get (F-405).
+// Hypothesis: as index_clash, with the binding of the written parameter
+// x: the second call's binding gets the first call's name Bump@x0.
+// Sound engine: Proof Failed!. Unsound engine: Proof Succeeded! (advantage 1).
+// Distinguisher: Test(1, 0, true) returns 3 on Left, 2 on Right.
+import 'Cl.primitive';
+import 'ClImpl.scheme';
+import 'GBump.game';
+proof:
+let:
+    ClImpl P = ClImpl();
+assume:
+theorem:
+    GBump(P);
+games:
+    GBump(P).Left against GBump(P).Adversary;
+    GBump(P).Right against GBump(P).Adversary;

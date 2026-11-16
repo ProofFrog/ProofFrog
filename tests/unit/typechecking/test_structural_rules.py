@@ -3,7 +3,8 @@
 A length, modulus or size in a type, and the length of ``0^n`` / ``1^n``, may
 name only parameters, proof ``let:`` entries and variables never written
 after their declaration, so that a type means the same thing throughout an
-execution. A scheme's method may not write a field of the scheme."""
+execution. A scheme's method may not write a field of the scheme. A local
+is declared once and does not shadow a local of an enclosing block."""
 
 import pytest
 
@@ -342,4 +343,98 @@ class TestSchemeFieldWrites:
                     c = c + 1;
                     return c;
                 }
+            }""")
+
+
+class TestLocalDeclaredOnce:
+    """The ruling of 2026-06-28: a local is declared once in its block, and an
+    inner block may not declare a local named like a local of an enclosing
+    block (a local reusing a method parameter's name is refused already).
+    Locals of one name in sibling blocks are different variables."""
+
+    @pytest.mark.parametrize(
+        "body, fragment",
+        [
+            # Two typed declarations in one block.
+            (
+                "Int x = 1; Int x = 2; return x;",
+                "Local 'x' is declared twice in one block of method F",
+            ),
+            # A bare declaration and then a typed one.
+            (
+                "Int x; Int x = 2; return x;",
+                "Local 'x' is declared twice in one block of method F",
+            ),
+            # A draw declaring a local declared before.
+            (
+                "Bool x = true; Bool x <- Bool; return 0;",
+                "Local 'x' is declared twice in one block of method F",
+            ),
+            # An if block shadowing an enclosing local.
+            (
+                "Int x = 1; if (true) { Int x = 2; } return x;",
+                "Local 'x' shadows the local 'x' of an enclosing block of method F",
+            ),
+            # An else block, nested two levels deep.
+            (
+                "Int x = 1; if (false) { } else { if (true) { Bool x; } }" " return x;",
+                "Local 'x' shadows the local 'x' of an enclosing block of method F",
+            ),
+            # A for binder shadowing an enclosing local.
+            (
+                "Int i = 1; for (Int i = 0 to 3) { } return i;",
+                "Local 'i' shadows the local 'i' of an enclosing block of method F",
+            ),
+            # A loop body shadowing its binder.
+            (
+                "for (Int i = 0 to 3) { Int i = 5; } return 0;",
+                "Local 'i' shadows the local 'i' of an enclosing block of method F",
+            ),
+            # A generic for binder shadowing an enclosing local.
+            (
+                "Set<Int> S; Int e = 0; for (Int e in S) { } return e;",
+                "Local 'e' shadows the local 'e' of an enclosing block of method F",
+            ),
+        ],
+    )
+    def test_redeclaration_and_shadowing_are_refused(
+        self, body: str, fragment: str
+    ) -> None:
+        _rejected(f"Game G() {{ Int F() {{ {body} }} }}", fragment)
+
+    def test_a_scheme_local_is_checked_too(self) -> None:
+        messages = _scheme_messages("""
+            Scheme S(Int q) extends P {
+                Int F() {
+                    Int x = 1;
+                    Int x = 2;
+                    return x;
+                }
+            }""")
+        assert any("Local 'x' is declared twice" in m for m in messages), messages
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # The two arms of an if.
+            "if (true) { Int x = 1; return x; } else { Int x = 2; return x; }",
+            # Two loops one after the other.
+            "for (Int i = 0 to 3) { } for (Int i = 0 to 3) { } return 0;",
+            # A declaration after the inner block that declared the name has
+            # ended: the inner local is no longer in scope.
+            "if (true) { Int x = 1; } Int x = 2; return x;",
+            # A local may still shadow a field or a game parameter.
+            "Int c = 1; Int n = 2; return c + n;",
+            # A plain assignment does not declare.
+            "Int x = 1; x = 2; if (true) { x = 3; } return x;",
+        ],
+    )
+    def test_distinct_variables_are_allowed(self, body: str) -> None:
+        assert not _messages(f"Game G(Int n) {{ Int c; Int F() {{ {body} }} }}")
+
+    def test_locals_of_different_methods_are_different(self) -> None:
+        assert not _messages("""
+            Game G() {
+                Int F() { Int x = 1; return x; }
+                Int H() { Int x = 2; return x; }
             }""")

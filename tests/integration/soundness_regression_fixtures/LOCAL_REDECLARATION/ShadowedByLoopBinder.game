@@ -1,0 +1,23 @@
+// A for binder named like a local of the enclosing block. Under lexical
+// scoping the binder is another variable, so Left's F returns 7 whatever
+// the loop does; Right returns 7 too. The claim is true, but an inner
+// binder may not shadow an enclosing local, so the type checker refuses
+// Left.
+Game Left(Int n) {
+    Int F() {
+        Int i = 7;
+        Int last = 0;
+        for (Int i = 0 to n) {
+            last = i;
+        }
+        return i;
+    }
+}
+
+Game Right(Int n) {
+    Int F() {
+        return 7;
+    }
+}
+
+export as ShadowedByLoopBinder;

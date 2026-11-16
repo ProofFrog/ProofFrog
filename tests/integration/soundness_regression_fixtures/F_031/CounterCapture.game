@@ -1,0 +1,24 @@
+// F-031: Left plays the scheme's counter, which starts at q, so its first
+// Next returns q + 1; the game's own field c is never used. Right plays the
+// game's counter, which starts at 0, so its first Next returns 1. They
+// differ when q is not 0. The written scheme field was left unsubstituted,
+// so the inlined Next read and wrote a bare c, which the game's field c
+// captured, and the hop was accepted.
+import 'Counter.primitive';
+
+Game Left(Counter S, Int q) {
+    Int c = 0;
+    Int Next() {
+        return S.Next();
+    }
+}
+
+Game Right(Counter S, Int q) {
+    Int c = 0;
+    Int Next() {
+        c = c + 1;
+        return c;
+    }
+}
+
+export as CounterCapture;

@@ -49,6 +49,14 @@ CASES = [
     ("F-002", "field_initializer_query_field_set.proof", "reject",
      "FreshInputRFToUniform",
      "the same field-initializer queries, with a field exclusion set"),
+    ("F-031", "attack4.proof", "type_error", "type checker",
+     "a scheme's writes to its own field were dropped as dead when inlined"),
+    ("F-031", "scheme_state_capture.proof", "type_error", "type checker",
+     "a written scheme field, left a bare name, was captured by a game field"),
+    ("F-031", "scheme_field_grow.proof", "type_error", "type checker",
+     "a written scheme field was read as its initializer after a write"),
+    ("F-031", "scheme_const_control.proof", "accept", "type checker",
+     "positive control: a scheme field no method writes is read as its value"),
     ("F-048", "J2.proof", "type_error", "MergeUniformSamples",
      "two draws were merged across a write to the local that is their length"),
     ("F-048", "merge_control.proof", "accept", "MergeUniformSamples",
@@ -722,6 +730,18 @@ CASES = [
 
 # (finding, proof file) -> the error a type_error case must fail with.
 TYPE_ERROR = {
+    ("F-031", "attack4.proof"): (
+        "error: Method Reset writes the scheme field 'used': a scheme field may"
+        " not be written in a method body"
+    ),
+    ("F-031", "scheme_state_capture.proof"): (
+        "error: Method Next writes the scheme field 'c': a scheme field may not"
+        " be written in a method body"
+    ),
+    ("F-031", "scheme_field_grow.proof"): (
+        "error: Method Grow writes the scheme field 'len': a scheme field may"
+        " not be written in a method body"
+    ),
     ("F-048", "J2.proof"): (
         "error: The size in BitString<n> names local 'n', which is assigned or"
         " sampled"
@@ -748,10 +768,10 @@ TYPE_ERROR = {
         "error: Cannot instantiate BumpCounter: one of its methods writes its "
         "parameter 'n'"
     ),
+    # The scheme's write to its own field is refused before instantiation.
     ("F-384", "scheme_reads_written.proof"): (
-        "error: Cannot instantiate StartCounter: the initializer of its field "
-        "'start', c, calls a method or reads a field one of the scheme's "
-        "methods writes"
+        "error: Method Next writes the scheme field 'c': a scheme field may not"
+        " be written in a method body"
     ),
     ("F-384", "scheme_method_call.proof"): (
         "error: Cannot instantiate KeyedSource: the initializer of its field "

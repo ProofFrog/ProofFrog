@@ -1,0 +1,8 @@
+// F-031: a primitive with a growing length and an output query.
+Primitive Len2(Int lambda) {
+    Int lambda = lambda;
+    Int len = lambda;
+
+    Void Grow();
+    BitString<lambda> Next();
+}

@@ -1,0 +1,19 @@
+// F-031: a scheme counter starting at q claimed interchangeable with a game
+// counter starting at 0 (see CounterCapture.game). Sound engine: a type
+// error, since CounterImpl writes its own field.
+import 'Counter.primitive';
+import 'CounterImpl.scheme';
+import 'CounterCapture.game';
+
+proof:
+
+let:
+    Int q;
+    Counter S = CounterImpl(q);
+
+theorem:
+    CounterCapture(S, q);
+
+games:
+    CounterCapture(S, q).Left against CounterCapture(S, q).Adversary;
+    CounterCapture(S, q).Right against CounterCapture(S, q).Adversary;

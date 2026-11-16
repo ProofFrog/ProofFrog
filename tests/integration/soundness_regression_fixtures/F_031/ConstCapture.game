@@ -1,0 +1,19 @@
+// F-031 positive control: with ConstCounterImpl, Left's Next returns q + 1
+// (the game's own field c is never used), and so does Right's.
+import 'Counter.primitive';
+
+Game Left(Counter S, Int q) {
+    Int c = 0;
+    Int Next() {
+        return S.Next();
+    }
+}
+
+Game Right(Counter S, Int q) {
+    Int c = 0;
+    Int Next() {
+        return q + 1;
+    }
+}
+
+export as ConstCapture;

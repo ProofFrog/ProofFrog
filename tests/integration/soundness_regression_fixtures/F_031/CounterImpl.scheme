@@ -1,0 +1,13 @@
+// F-031: a scheme whose method writes its own field. The counter c starts
+// at q and Next counts it up. A scheme field may not be written in a method
+// body (keep mutable state in a game), so the type checker refuses this
+// scheme.
+import 'Counter.primitive';
+
+Scheme CounterImpl(Int q) extends Counter {
+    Int c = q;
+    Int Next() {
+        c = c + 1;
+        return c;
+    }
+}

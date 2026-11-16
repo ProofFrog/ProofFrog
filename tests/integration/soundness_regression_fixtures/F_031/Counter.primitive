@@ -1,0 +1,4 @@
+// F-031: a primitive with one counter query.
+Primitive Counter(Int q) {
+    Int Next();
+}

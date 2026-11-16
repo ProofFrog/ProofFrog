@@ -1,0 +1,23 @@
+// F-031: Step sets the scheme field used, which WasUsed returns. A scheme
+// field may not be written in a method body, so the type checker refuses
+// this scheme.
+import 'MutP.primitive';
+
+Scheme MutScheme(Int n) extends MutP {
+    Int n = n;
+    Bool used;
+
+    Void Reset() {
+        used = false;
+    }
+
+    BitString<n> Step() {
+        used = true;
+        BitString<n> r <- BitString<n>;
+        return r;
+    }
+
+    Bool WasUsed() {
+        return used;
+    }
+}

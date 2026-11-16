@@ -1,0 +1,18 @@
+// F-394 positive control: Probe never writes a, so v = a || b still holds
+// at the comparison and v == x decomposes into slices of x compared with a
+// and b. The two games are interchangeable.
+Game Left(Int n) {
+    [Bool, BitString<n>] Probe(BitString<n> a, BitString<n> b, BitString<n + n> x) {
+        BitString<n + n> v = a || b;
+        return [v == x, b];
+    }
+}
+
+Game Right(Int n) {
+    [Bool, BitString<n>] Probe(BitString<n> a, BitString<n> b, BitString<n + n> x) {
+        BitString<n + n> w = a || b;
+        return [x == w, b];
+    }
+}
+
+export as ConcatParamWriteControl;

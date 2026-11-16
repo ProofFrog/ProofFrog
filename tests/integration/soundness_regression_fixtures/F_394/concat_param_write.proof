@@ -1,0 +1,16 @@
+// F-394: claims ConcatParamWrite(n).Left and ConcatParamWrite(n).Right are
+// interchangeable. They are not (see ConcatParamWrite.game). Sound engine:
+// Proof Failed!
+import 'ConcatParamWrite.game';
+
+proof:
+
+let:
+    Int n;
+
+theorem:
+    ConcatParamWrite(n);
+
+games:
+    ConcatParamWrite(n).Left against ConcatParamWrite(n).Adversary;
+    ConcatParamWrite(n).Right against ConcatParamWrite(n).Adversary;

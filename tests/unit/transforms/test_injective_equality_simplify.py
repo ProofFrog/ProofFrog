@@ -726,3 +726,153 @@ def test_member_read_field_image_of_initialize_local_not_resolved() -> None:
         "O",
     )
     assert "f == F.Enc(y)" in out, out
+
+
+# ---------------------------------------------------------------------------
+# F-394: a parameter the method writes is not a value that never changes
+# ---------------------------------------------------------------------------
+
+
+def _simplify_enc1(source: str, method: str = "Test") -> tuple[str, PipelineContext]:
+    game = frog_parser.parse_game(source)
+    ctx = _ctx(_ns(NS_INJ_ENC))
+    result = InjectiveEqualitySimplify().apply(game, ctx)
+    return str(result.get_method(method)), ctx
+
+
+def _written_parameter_misses(ctx: PipelineContext) -> list:
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Injective Equality Simplify"
+        and "which method" in nm.reason
+    ]
+
+
+def test_f394_binding_over_written_parameter_not_resolved() -> None:
+    """``v = T.Enc1(k); k = m;``: v encodes the old k, so ``v == T.Enc1(m)``
+    must not become ``k == m``, which reads the new k (always true)."""
+    out, ctx = _simplify_enc1("""
+        Game G(Int n) {
+            [Bool, BitString<n>] Test(BitString<n> k, BitString<n> m) {
+                BitString<n> v = T.Enc1(k);
+                k = m;
+                return [v == T.Enc1(m), k];
+            }
+        }
+        """)
+    assert "v == T.Enc1(m)" in out, out
+    assert "k == m" not in out, out
+    misses = _written_parameter_misses(ctx)
+    assert misses, ctx.near_misses
+    assert misses[0].variable == "v"
+    assert misses[0].method == "Test"
+    assert "parameter 'k'" in misses[0].reason
+
+
+def test_f394_parameter_written_in_a_branch_not_resolved() -> None:
+    """A write to k inside an ``if`` body runs on some calls only; the
+    binding is still not resolved."""
+    out, _ = _simplify_enc1("""
+        Game G(Int n) {
+            Bool Test(BitString<n> k, BitString<n> m, Bool c) {
+                BitString<n> v = T.Enc1(k);
+                if (c) {
+                    k = m;
+                }
+                return v == T.Enc1(k);
+            }
+        }
+        """)
+    assert "v == T.Enc1(k)" in out, out
+    assert "k == k" not in out, out
+
+
+def test_f394_parameter_redrawn_not_resolved() -> None:
+    """A draw into the parameter writes it too."""
+    out, _ = _simplify_enc1("""
+        Game G(Int n) {
+            Bool Test(BitString<n> k, BitString<n> m) {
+                BitString<n> v = T.Enc1(k);
+                k <- BitString<n>;
+                return v == T.Enc1(k);
+            }
+        }
+        """)
+    assert "v == T.Enc1(k)" in out, out
+
+
+def test_f394_map_parameter_element_write_not_resolved() -> None:
+    """An element write ``N[x] = y`` changes a Map parameter, so a binding
+    over N is not read again after it."""
+    out = _simplify(
+        """
+        Game G(Int n) {
+            Bool O(Map<BitString<n>, BitString<n>> N, BitString<n> x, BitString<n> y) {
+                BitString<n> v = F.inj(N);
+                N[x] = y;
+                return v == F.inj(N);
+            }
+        }
+        """,
+        "O",
+    )
+    assert "v == F.inj(N)" in out, out
+    assert "N == N" not in out, out
+
+
+def test_f394_parameter_redeclared_by_local_not_resolved() -> None:
+    """A typed local named like the parameter (which the type checker
+    refuses) rebinds it; neither binding is a value that never changes."""
+    out, _ = _simplify_enc1("""
+        Game G(Int n) {
+            Bool Test(BitString<n> k, BitString<n> m) {
+                BitString<n> v = T.Enc1(k);
+                BitString<n> k = m;
+                return v == T.Enc1(k);
+            }
+        }
+        """)
+    assert "v == T.Enc1(k)" in out, out
+    assert "k == k" not in out, out
+
+
+def test_f394_other_parameter_written_still_resolves() -> None:
+    """Control: the method writes m, but v reads only k, which it never
+    writes, so the binding is resolved and no near miss names it."""
+    out, ctx = _simplify_enc1("""
+        Game G(Int n) {
+            [Bool, BitString<n>] Test(BitString<n> k, BitString<n> m) {
+                BitString<n> v = T.Enc1(k);
+                m = k;
+                return [v == T.Enc1(m), m];
+            }
+        }
+        """)
+    assert "k == m" in out, out
+    assert not _written_parameter_misses(ctx), ctx.near_misses
+
+
+def test_f394_stable_value_names_excludes_written_parameters() -> None:
+    """``_stable_value_names`` keeps a parameter only if the method never
+    writes or rebinds it."""
+    from proof_frog.transforms.algebraic import _stable_value_names
+
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            BitString<n> f;
+            Bool Test(BitString<n> k, BitString<n> m, BitString<n> r,
+                      BitString<n> s, Bool c) {
+                if (c) {
+                    m = k;
+                }
+                r <- BitString<n>;
+                BitString<n> s = k;
+                BitString<n> t = k;
+                return t == m;
+            }
+        }
+        """)
+    stable = _stable_value_names(game.get_method("Test"), game)
+    assert {"k", "c", "f", "t"} <= stable, stable
+    assert not {"m", "r", "s"} & stable, stable

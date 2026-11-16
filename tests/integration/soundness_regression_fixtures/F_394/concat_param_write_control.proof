@@ -1,0 +1,16 @@
+// F-394 positive control: claims ConcatParamWriteControl(n).Left and
+// ConcatParamWriteControl(n).Right are interchangeable, which they are (see
+// ConcatParamWriteControl.game). Sound engine: Proof Succeeded!
+import 'ConcatParamWriteControl.game';
+
+proof:
+
+let:
+    Int n;
+
+theorem:
+    ConcatParamWriteControl(n);
+
+games:
+    ConcatParamWriteControl(n).Left against ConcatParamWriteControl(n).Adversary;
+    ConcatParamWriteControl(n).Right against ConcatParamWriteControl(n).Adversary;

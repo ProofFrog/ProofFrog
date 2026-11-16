@@ -5720,3 +5720,102 @@ def test_remove_unreachable_no_near_miss_on_declared_bool_condition() -> None:
     ctx = _make_ctx()
     RemoveUnreachable().apply(game, ctx)
     assert not _ru_misses(ctx)
+
+
+# ---------------------------------------------------------------------------
+# F-394: Injective Equality Simplify and Concat Equality Decompose do not
+# read a local again after the method writes a parameter its value reads
+# ---------------------------------------------------------------------------
+
+_F394_INJECTIVE_PRIMITIVE_SRC = """
+Primitive T(Int n) {
+    deterministic injective BitString<n> Enc1(BitString<n> x);
+}
+"""
+
+
+def _f394_misses(ctx: PipelineContext, transform_name: str) -> list[NearMiss]:
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == transform_name and "which method" in nm.reason
+    ]
+
+
+def test_injective_equality_near_miss_on_written_parameter() -> None:
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            [Bool, BitString<n>] Probe(BitString<n> k, BitString<n> m) {
+                BitString<n> v = T.Enc1(k);
+                k = m;
+                return [v == T.Enc1(m), k];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    ctx.proof_namespace["T"] = frog_parser.parse_primitive_file(
+        _F394_INJECTIVE_PRIMITIVE_SRC
+    )
+    InjectiveEqualitySimplify().apply(game, ctx)
+    misses = _f394_misses(ctx, "Injective Equality Simplify")
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert misses[0].method == "Probe"
+    assert "parameter 'k', which method 'Probe' writes" in misses[0].reason
+    assert misses[0].suggestion is not None
+    assert "new local" in misses[0].suggestion
+
+
+def test_injective_equality_no_near_miss_on_unwritten_parameter() -> None:
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            [Bool, BitString<n>] Probe(BitString<n> k, BitString<n> m) {
+                BitString<n> v = T.Enc1(k);
+                BitString<n> t = m;
+                return [v == T.Enc1(m), t];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    ctx.proof_namespace["T"] = frog_parser.parse_primitive_file(
+        _F394_INJECTIVE_PRIMITIVE_SRC
+    )
+    InjectiveEqualitySimplify().apply(game, ctx)
+    assert not _f394_misses(ctx, "Injective Equality Simplify")
+
+
+def test_concat_equality_near_miss_on_written_parameter() -> None:
+    from proof_frog.transforms.algebraic import ConcatEqualityDecompose
+
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            [Bool, BitString<n>] Probe(BitString<n> a, BitString<n> b, BitString<n + n> x) {
+                BitString<n + n> v = a || b;
+                a = b;
+                return [v == x, a];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    ConcatEqualityDecompose().apply(game, ctx)
+    misses = _f394_misses(ctx, "Concat Equality Decompose")
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert misses[0].method == "Probe"
+    assert "parameter 'a', which method 'Probe' writes" in misses[0].reason
+
+
+def test_concat_equality_no_near_miss_on_unwritten_parameter() -> None:
+    from proof_frog.transforms.algebraic import ConcatEqualityDecompose
+
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            [Bool, BitString<n>] Probe(BitString<n> a, BitString<n> b, BitString<n + n> x) {
+                BitString<n + n> v = a || b;
+                return [v == x, b];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    ConcatEqualityDecompose().apply(game, ctx)
+    assert not _f394_misses(ctx, "Concat Equality Decompose")

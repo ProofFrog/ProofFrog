@@ -1,0 +1,24 @@
+// F-394: Probe writes its own parameter a after binding v = a || b, so v
+// keeps the old a. Left returns [v == x, a]: for Probe(u, w, u || w) with
+// u != w its first component is true. Right compares x with b || b, the
+// concatenation after the write, which is false there. Concat Equality
+// Decompose counted every method parameter as a value that never changes,
+// read v as a || b at the comparison, where a is already b, and so
+// compared x slice by slice against the new a.
+Game Left(Int n) {
+    [Bool, BitString<n>] Probe(BitString<n> a, BitString<n> b, BitString<n + n> x) {
+        BitString<n + n> v = a || b;
+        a = b;
+        return [v == x, a];
+    }
+}
+
+Game Right(Int n) {
+    [Bool, BitString<n>] Probe(BitString<n> a, BitString<n> b, BitString<n + n> x) {
+        a = b;
+        BitString<n + n> w = a || b;
+        return [x == w, a];
+    }
+}
+
+export as ConcatParamWrite;

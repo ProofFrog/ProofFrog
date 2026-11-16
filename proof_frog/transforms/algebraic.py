@@ -12,7 +12,7 @@ from __future__ import annotations
 import copy
 import functools
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Optional, TypeVar
 
 from .. import frog_ast
 from ..visitors import (
@@ -2211,23 +2211,19 @@ class InjectiveEqualitySimplifyTransformer(Transformer):
         # Gap D: drop bindings whose call args reference free variables
         # that may differ between the binding site and the comparison
         # site. A free variable is "stable" iff its value is fixed across
-        # the method (params, fields unwritten in this method, write-once
-        # typed-locals -- nested-aware). See _stable_value_names.
-        stable_names = _stable_value_names(method, self.game)
-        state_names = _method_state_names(method, self.game)
-        for name in list(funccall_bindings.keys()):
-            call = funccall_bindings[name]
-            free = {
-                v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(call))
-            }
-            # A value read only through a member access (`M` in
-            # `F.Enc(|M.keys|)`) must be stable too: a write to `M` between
-            # the binding and the comparison changes what the substituted
-            # call computes.
-            if not free.issubset(stable_names) or _reads_unstable_member(
-                call, stable_names, state_names
-            ):
-                funccall_bindings.pop(name, None)
+        # the method (parameters the method never writes, fields unwritten
+        # in this method, write-once typed-locals -- nested-aware). A value
+        # read only through a member access (`M` in `F.Enc(|M.keys|)`) must
+        # be stable too: a write to `M` between the binding and the
+        # comparison changes what the substituted call computes. See
+        # _stable_value_names.
+        _drop_unstable_bindings(
+            funccall_bindings,
+            method,
+            self.game,
+            self.ctx,
+            "Injective Equality Simplify",
+        )
         old = self.local_funccall_bindings
         self.local_funccall_bindings = funccall_bindings
         try:
@@ -2739,29 +2735,114 @@ def _scan_top_level_single_writes(
     return bindings, reassigned
 
 
+def _written_parameter_names(method: frog_ast.Method) -> set[str]:
+    """The parameters of *method* that its body writes: an assignment, draw
+    or element write to one, a ``<-uniq`` insertion into one, or a rebinding
+    (:func:`reassigns_or_rebinds`). A parameter receives its argument by
+    value and is the method's own variable, so such a write changes what
+    later reads of it see (F-394, the class of F-373 and F-383)."""
+    return {
+        parameter.name
+        for parameter in method.signature.parameters
+        if reassigns_or_rebinds({parameter.name}, method.block)
+    }
+
+
 def _stable_value_names(method: frog_ast.Method, game: frog_ast.Game) -> set[str]:
     """Names whose VALUE is fixed across *method*'s execution.
 
-    A name is value-stable if it is a method parameter (immutable), a game
-    field never written in this method (``_count_field_assigns == 0``), or a
-    top-level write-once typed-init local (nested-aware via
-    :func:`_scan_top_level_single_writes`).
+    A name is value-stable if it is a method parameter the method never
+    writes (see :func:`_written_parameter_names`), a game field never written
+    in this method (``_count_field_assigns == 0``), or a top-level write-once
+    typed-init local (nested-aware via :func:`_scan_top_level_single_writes`)
+    that is not named like a parameter.
 
     Used to decide whether a local binding ``v = f(...free...)`` /
     ``v = a || b`` may be substituted at a later comparison site: the
     substitution re-evaluates the RHS there, so every free variable of the
     RHS must hold the same value it did at the binding site (audit F-252,
-    and the Gap-D stability set of InjectiveEqualitySimplify / F-247).
+    and the Gap-D stability set of InjectiveEqualitySimplify / F-247). A
+    parameter the method writes does not (F-394): after ``v = F.Enc(k);
+    k = m;`` the comparison ``v == F.Enc(m)`` would read the new ``k``.
     """
     param_names = {p.name for p in method.signature.parameters}
+    stable_param_names = param_names - _written_parameter_names(method)
     stable_field_names = {
         f.name for f in game.fields if _count_field_assigns(method.block, f.name) == 0
     }
     all_locals, all_reassigned = _scan_top_level_single_writes(
         method.block, value_predicate=lambda v: True
     )
-    single_write_locals = set(all_locals.keys()) - all_reassigned
-    return param_names | stable_field_names | single_write_locals
+    # A typed declaration named like a parameter re-declares it (the type
+    # checker refuses one); the name then has two bindings, so neither is
+    # known to keep its value.
+    single_write_locals = set(all_locals.keys()) - all_reassigned - param_names
+    return stable_param_names | stable_field_names | single_write_locals
+
+
+def _note_written_parameter(
+    ctx: PipelineContext,
+    transform_name: str,
+    binding: str,
+    parameter: str,
+    method_name: str,
+) -> None:
+    """Record that *transform_name* did not read local *binding* as its
+    value because that value reads *parameter*, which the method writes."""
+    ctx.near_misses.append(
+        NearMiss(
+            transform_name=transform_name,
+            reason=(
+                f"Local '{binding}' was not replaced by its value at a "
+                f"comparison: the value reads parameter '{parameter}', which "
+                f"method '{method_name}' writes, so the comparison could see "
+                f"a different value of '{parameter}'"
+            ),
+            location=None,
+            suggestion=(
+                f"Store the new value in a new local instead of writing "
+                f"parameter '{parameter}'"
+            ),
+            variable=binding,
+            method=method_name,
+        )
+    )
+
+
+_BoundValue = TypeVar("_BoundValue", bound=frog_ast.Expression)
+
+
+def _drop_unstable_bindings(
+    bindings: dict[str, _BoundValue],
+    method: frog_ast.Method,
+    game: frog_ast.Game,
+    ctx: PipelineContext,
+    transform_name: str,
+) -> None:
+    """Remove from *bindings* every local whose value reads a name that may
+    change during *method*: a free variable outside
+    :func:`_stable_value_names`, or a name of the method's state read only
+    through a member access (``M`` in ``F.Enc(|M.keys|)``) that is not
+    stable either. A binding dropped because it reads a parameter the method
+    writes gets a near miss."""
+    stable_names = _stable_value_names(method, game)
+    state_names = _method_state_names(method, game)
+    written_parameters = _written_parameter_names(method)
+    for name in list(bindings):
+        value = bindings[name]
+        free = {v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(value))}
+        if free.issubset(stable_names) and not _reads_unstable_member(
+            value, stable_names, state_names
+        ):
+            continue
+        del bindings[name]
+        read_parameters = sorted(
+            (free | _member_only_names(value)) & written_parameters
+        )
+        if read_parameters:
+            _note_written_parameter(
+                ctx, transform_name, name, read_parameters[0], method.signature.name
+            )
 
 
 def _member_only_names(expr: frog_ast.Expression) -> set[str]:
@@ -2929,24 +3010,19 @@ class ConcatEqualityDecomposeTransformer(MethodScopedTypeMapMixin):
         # F-252: a concat binding `v = a || b` is substituted textually at
         # the comparison site, re-evaluating its RHS there. Drop any binding
         # whose RHS free variables are not all value-stable (a later write to
-        # `a` -- even at top level, or nested -- would make the substituted
+        # `a` -- even at top level, or nested, and even when `a` is a
+        # parameter of the method (F-394) -- would make the substituted
         # `a || b` read the mutated value, diverging from the frozen `v`).
+        # Values read only through a member access (`M` in
+        # `F.Ev(|M.keys|) || u`) must be stable as well.
         if self._scope_game is not None:
-            stable_names = _stable_value_names(method, self._scope_game)
-            state_names = _method_state_names(method, self._scope_game)
-            for name in list(bindings.keys()):
-                free = {
-                    v.name
-                    for v in VariableCollectionVisitor().visit(
-                        copy.deepcopy(bindings[name])
-                    )
-                }
-                # Values read only through a member access (`M` in
-                # `F.Ev(|M.keys|) || u`) must be stable as well.
-                if not free.issubset(stable_names) or _reads_unstable_member(
-                    bindings[name], stable_names, state_names
-                ):
-                    bindings.pop(name, None)
+            _drop_unstable_bindings(
+                bindings,
+                method,
+                self._scope_game,
+                self.ctx,
+                "Concat Equality Decompose",
+            )
         old = self.local_concat_bindings
         self.local_concat_bindings = bindings
         # Scope the type map to THIS method (fields + this method's

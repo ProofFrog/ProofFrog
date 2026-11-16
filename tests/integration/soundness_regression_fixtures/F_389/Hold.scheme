@@ -1,0 +1,9 @@
+import 'Leaker.primitive';
+
+// A scheme handed two values; Leak returns them.
+Scheme Hold(Int m, BitString<m> a, BitString<m> b) extends Leaker {
+    Int outlen = m;
+    [BitString<m>, BitString<m>] Leak() {
+        return [a, b];
+    }
+}

@@ -1,0 +1,25 @@
+// let: values computed from the sampled function H, handed to a scheme.
+// c0 and c1 are H's values at 0b0 and 0b1, read as H(0b0) and H(0b1)
+// wherever they are used, so Peek reveals H at both points of its domain
+// and Fresh's H(v) on a <-uniq[S] draw (S empty) is one of them, not a
+// fresh sample. The two games are distinguishable; the engine must reject
+// the hop (it used to crash on c0's call of H).
+import 'Leaker.primitive';
+import 'Hold.scheme';
+import 'sr.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+    BitString<m> c0 = H(0b0);
+    BitString<m> c1 = H(0b1);
+    Hold W = Hold(m, c0, c1);
+
+theorem:
+    SR(m, H, W);
+
+games:
+    SR(m, H, W).Real against SR(m, H, W).Adversary;
+    SR(m, H, W).Random against SR(m, H, W).Adversary;

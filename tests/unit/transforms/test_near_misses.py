@@ -6029,3 +6029,105 @@ def test_standardize_parameters_no_near_miss_on_free_non_target_name() -> None:
     result = StandardizeParameters().apply(game, ctx)
     assert "Int Oracle(Int arg1)" in str(result)
     assert not _f326_misses(ctx, "Standardize Parameters")
+
+
+# ---------------------------------------------------------------------------
+# Simplify Ifs: branches compared up to their binders' names, by scope (F-130)
+# ---------------------------------------------------------------------------
+
+
+def _simplify_if_misses(game_src: str) -> tuple[frog_ast.Game, list[NearMiss]]:
+    from proof_frog.transforms.control_flow import SimplifyIf
+
+    game = frog_parser.parse_game(game_src)
+    ctx = _make_ctx()
+    result = SimplifyIf().apply(game, ctx)
+    return result, [nm for nm in ctx.near_misses if nm.transform_name == "Simplify Ifs"]
+
+
+def test_simplify_if_near_miss_on_read_outside_local_scope() -> None:
+    # F-130 A1: alike only if the reads of the fields x and z, before the
+    # same-named locals are declared, were taken for those locals.
+    game_src = """
+        Game G() {
+            Int x;
+            Int z;
+            Int Probe(Bool c) {
+                if (c) {
+                    Int out = x;
+                    Int x = 0;
+                    return out + x;
+                } else {
+                    Int out = z;
+                    Int z = 0;
+                    return out + z;
+                }
+            }
+        }
+        """
+    result, misses = _simplify_if_misses(game_src)
+    assert result == frog_parser.parse_game(game_src)
+    assert len(misses) == 1
+    assert misses[0].method == "Probe"
+    assert misses[0].variable == "x, z"
+    assert "outside the scope of a same-named local" in misses[0].reason
+
+
+def test_simplify_if_near_miss_on_local_used_as_type_name() -> None:
+    game_src = """
+        Game G(Set K, Set J) {
+            Int Probe(Bool c) {
+                if (c) {
+                    Int K = 0;
+                    K y <- K;
+                    return K;
+                } else {
+                    Int J = 0;
+                    J y <- J;
+                    return J;
+                }
+            }
+        }
+        """
+    result, misses = _simplify_if_misses(game_src)
+    assert result == frog_parser.parse_game(game_src)
+    assert len(misses) == 1
+    assert misses[0].variable == "J, K"
+    assert "also used as a type name" in misses[0].reason
+
+
+def test_simplify_if_no_near_miss_on_free_name_like_minted_name() -> None:
+    # The branches differ (y || __alpha_1__ against x || x): no near miss.
+    _, misses = _simplify_if_misses("""
+        Game G() {
+            BitString<16> s;
+            Void Probe(Bool b) {
+                if (b) {
+                    BitString<8> x <- BitString<8>;
+                    s = x || x;
+                } else {
+                    BitString<8> y <- BitString<8>;
+                    s = y || __alpha_1__;
+                }
+            }
+        }
+        """)
+    assert not misses
+
+
+def test_simplify_if_no_near_miss_when_branches_merge() -> None:
+    result, misses = _simplify_if_misses("""
+        Game G() {
+            Int Probe(Bool c) {
+                if (c) {
+                    Int a = 7;
+                    return a;
+                } else {
+                    Int b = 7;
+                    return b;
+                }
+            }
+        }
+        """)
+    assert "if (true)" in str(result)
+    assert not misses

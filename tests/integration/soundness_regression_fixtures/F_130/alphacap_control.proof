@@ -1,0 +1,15 @@
+// F-130 positive control (see AlphaCapControl.game). Expected: Proof
+// Succeeded!
+import 'AlphaCapControl.game';
+
+proof:
+
+let:
+    BitString<8> __alpha_1__;
+
+theorem:
+    AlphaCapControl(__alpha_1__);
+
+games:
+    AlphaCapControl(__alpha_1__).Left against AlphaCapControl(__alpha_1__).Adversary;
+    AlphaCapControl(__alpha_1__).Right against AlphaCapControl(__alpha_1__).Adversary;

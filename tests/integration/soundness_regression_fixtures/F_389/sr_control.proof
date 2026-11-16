@@ -1,0 +1,22 @@
+// Positive control for sr.proof: the scheme holds plain let: values that
+// do not come from H, so Peek reveals nothing about H and Fresh's H(v) on a
+// <-uniq[S] draw is a fresh sample. A true equivalence; it must verify.
+import 'Leaker.primitive';
+import 'Hold.scheme';
+import 'sr.game';
+
+proof:
+
+let:
+    Int m;
+    Function<BitString<1>, BitString<m>> H <- Function<BitString<1>, BitString<m>>;
+    BitString<m> c0;
+    BitString<m> c1;
+    Hold W = Hold(m, c0, c1);
+
+theorem:
+    SR(m, H, W);
+
+games:
+    SR(m, H, W).Real against SR(m, H, W).Adversary;
+    SR(m, H, W).Random against SR(m, H, W).Adversary;

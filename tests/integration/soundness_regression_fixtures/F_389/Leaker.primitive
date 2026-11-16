@@ -1,0 +1,4 @@
+Primitive Leaker(Int m) {
+    Int outlen = m;
+    [BitString<m>, BitString<m>] Leak();
+}

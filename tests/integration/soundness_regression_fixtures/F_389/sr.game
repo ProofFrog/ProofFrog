@@ -1,0 +1,29 @@
+import 'Leaker.primitive';
+
+// W holds c0 = H(0b0) and c1 = H(0b1) (see the proof's let:), so Peek
+// reveals H at both points of the 1-bit domain; Fresh's v <-uniq[S] can be
+// either point, so H(v) is one of the revealed values, not fresh.
+Game Real(Int m, Function<BitString<1>, BitString<m>> H, Leaker W) {
+    Set<BitString<1>> S;
+    [BitString<m>, BitString<m>] Peek() {
+        return W.Leak();
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[S] BitString<1>;
+        return H(v);
+    }
+}
+
+Game Random(Int m, Function<BitString<1>, BitString<m>> H, Leaker W) {
+    Set<BitString<1>> S;
+    [BitString<m>, BitString<m>] Peek() {
+        return W.Leak();
+    }
+    BitString<m> Fresh() {
+        BitString<1> v <-uniq[S] BitString<1>;
+        BitString<m> u <- BitString<m>;
+        return u;
+    }
+}
+
+export as SR;

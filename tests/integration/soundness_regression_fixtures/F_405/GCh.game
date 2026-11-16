@@ -1,0 +1,17 @@
+import 'Ch.primitive';
+// Left: G returns its first argument b. Right: returns false when c holds.
+// Distinguisher: Test(true, true) returns true on Left, false on Right.
+Game Left(Ch P) {
+    Bool Test(Bool b, Bool c) {
+        return P.G(b, c);
+    }
+}
+Game Right(Ch P) {
+    Bool Test(Bool b, Bool c) {
+        if (c) {
+            return false;
+        }
+        return b;
+    }
+}
+export as GCh;

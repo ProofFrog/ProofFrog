@@ -1,0 +1,13 @@
+import 'Ch.primitive';
+// G returns its first argument, here the caller's b.
+Game Left(Ch P) {
+    Bool Test(Bool b, Bool c) {
+        return P.G(b, c);
+    }
+}
+Game Right(Ch P) {
+    Bool Test(Bool b, Bool c) {
+        return b;
+    }
+}
+export as GChSame;

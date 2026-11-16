@@ -1,0 +1,11 @@
+import 'Ch.primitive';
+// G returns v. The local b is declared inside a branch.
+Scheme ChImpl() extends Ch {
+    Bool G(Bool v, Bool c) {
+        if (c) {
+            Bool b = false;
+            return v;
+        }
+        return v;
+    }
+}

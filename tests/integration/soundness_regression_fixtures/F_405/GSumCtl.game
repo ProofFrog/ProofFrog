@@ -1,0 +1,17 @@
+import 'Cl.primitive';
+// Both: add the caller's i, n times.
+Game Left(Cl P) {
+    Int Test(Int i, Int n) {
+        return P.Sum(i, n);
+    }
+}
+Game Right(Cl P) {
+    Int Test(Int i, Int n) {
+        Int s = 0;
+        for (Int j = 0 to n) {
+            s = s + i;
+        }
+        return s;
+    }
+}
+export as GSumCtl;

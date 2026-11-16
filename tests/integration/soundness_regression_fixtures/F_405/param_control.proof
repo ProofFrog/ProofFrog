@@ -1,0 +1,16 @@
+// Target: method inliner (visitors.InlineTransformer), the names an inlined
+// body's variables get (F-405).
+// Control: a true equivalence; a sound engine prints Proof Succeeded!.
+// param_clash's Left against its true value.
+import 'Cl.primitive';
+import 'ClImpl.scheme';
+import 'GBumpCtl.game';
+proof:
+let:
+    ClImpl P = ClImpl();
+assume:
+theorem:
+    GBumpCtl(P);
+games:
+    GBumpCtl(P).Left against GBumpCtl(P).Adversary;
+    GBumpCtl(P).Right against GBumpCtl(P).Adversary;

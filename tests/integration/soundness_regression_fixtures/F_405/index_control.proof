@@ -1,0 +1,16 @@
+// Target: method inliner (visitors.InlineTransformer), the names an inlined
+// body's variables get (F-405).
+// Control: a true equivalence; a sound engine prints Proof Succeeded!.
+// index_clash's Left against its true value.
+import 'Cl.primitive';
+import 'ClImpl.scheme';
+import 'GGuardCtl.game';
+proof:
+let:
+    ClImpl P = ClImpl();
+assume:
+theorem:
+    GGuardCtl(P);
+games:
+    GGuardCtl(P).Left against GGuardCtl(P).Adversary;
+    GGuardCtl(P).Right against GGuardCtl(P).Adversary;

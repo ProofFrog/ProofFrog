@@ -1,0 +1,19 @@
+// Target: method inliner (visitors.InlineTransformer), the names an inlined
+// body's variables get (F-405).
+// Hypothesis: the second call sits in a leaf of the first call's inlined
+// if, at the same statement index, so its local gets the first call's
+// name Guard@y0 and overwrites it: a + b reads as b + b.
+// Sound engine: Proof Failed!. Unsound engine: Proof Succeeded! (advantage 1).
+// Distinguisher: Test(1, 0, true) returns 1 on Left, 0 on Right.
+import 'Cl.primitive';
+import 'ClImpl.scheme';
+import 'GGuard.game';
+proof:
+let:
+    ClImpl P = ClImpl();
+assume:
+theorem:
+    GGuard(P);
+games:
+    GGuard(P).Left against GGuard(P).Adversary;
+    GGuard(P).Right against GGuard(P).Adversary;

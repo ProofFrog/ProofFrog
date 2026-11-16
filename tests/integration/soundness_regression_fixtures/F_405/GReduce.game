@@ -1,0 +1,15 @@
+import 'Cl.primitive';
+// Left: a + b mod 7 when d holds. Right: b + b mod 7.
+Game Left(Cl P) {
+    ModInt<7> Test(Int a, Int b, Bool d) {
+        Bool e = d;
+        return P.Reduce(a, e) + P.Reduce(b, e);
+    }
+}
+Game Right(Cl P) {
+    ModInt<7> Test(Int a, Int b, Bool d) {
+        Bool e = d;
+        return P.Reduce(b, e) + P.Reduce(b, e);
+    }
+}
+export as GReduce;

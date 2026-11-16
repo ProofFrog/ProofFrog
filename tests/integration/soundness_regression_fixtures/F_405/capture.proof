@@ -1,0 +1,15 @@
+// Pre-existing inliner capture probe: a callee local declared in a nested
+// block is not renamed, so a substituted argument naming the same variable
+// is captured.
+import 'Ch.primitive';
+import 'ChImpl.scheme';
+import 'GCh.game';
+proof:
+let:
+    ChImpl P = ChImpl();
+assume:
+theorem:
+    GCh(P);
+games:
+    GCh(P).Left against GCh(P).Adversary;
+    GCh(P).Right against GCh(P).Adversary;

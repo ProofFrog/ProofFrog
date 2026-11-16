@@ -1,0 +1,7 @@
+Primitive Cl() {
+    Int Guard(Int x, Bool d);
+    Int Bump(Int x, Bool d);
+    ModInt<7> Reduce(Int x, Bool d);
+    Int Sum(Int v, Int k);
+    Bool Keep(Bool v);
+}

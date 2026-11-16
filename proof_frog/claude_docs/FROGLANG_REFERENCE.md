@@ -530,7 +530,7 @@ The composition merges the `Initialize` methods:
 When inlining `obj.method(arg1, arg2)`:
 1. A fresh copy of the method body is created.
 2. Each formal parameter is substituted with the corresponding argument expression, except where that would change what the call computes: an argument that calls a method or function (which may draw, change a challenger's state, or not complete, and must run exactly once whether the callee reads the parameter twice or never, its body empty included), a parameter the callee writes (substitution would turn the callee's write into a write to the caller's variable) and a parameter whose type contains a `ModInt` (which reduces an `Int` argument) are bound instead, by a declaration `T obj.method@param<i> = arg;` of the parameter's type placed before the body.
-3. Locally declared variables are renamed to avoid name collisions (using a scheme like `method@varname`).
+3. Every variable the body declares, at any depth (typed locals, bare declarations `T x;` and `for` binders), is renamed by scope before the arguments are substituted, so that no local of the callee captures a name an argument reads. The new names (`obj.method@<name><i>`, and likewise those of the parameter and return bindings) are fresh: none is a name the caller or the callee already mentions, so a body inlined inside a block of an earlier inlined body does not reuse that body's names.
 4. The method call expression is replaced by the return expression (or the call statement is replaced by the method body for void methods).
 
 Inlining is applied repeatedly in a fixed-point loop until no more method calls can be expanded. This converges because the call graph is finite and acyclic (recursive method calls are not supported in FrogLang).

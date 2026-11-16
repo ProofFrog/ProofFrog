@@ -1,0 +1,13 @@
+import 'Cl.primitive';
+// Left: Keep(b) returns b. Right: false.
+Game Left(Cl P) {
+    Bool Test(Bool b) {
+        return P.Keep(b);
+    }
+}
+Game Right(Cl P) {
+    Bool Test(Bool b) {
+        return false;
+    }
+}
+export as GKeep;

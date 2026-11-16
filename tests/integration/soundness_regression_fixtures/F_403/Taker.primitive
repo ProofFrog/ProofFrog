@@ -1,0 +1,3 @@
+Primitive Taker() {
+    Void Take(Bool b);
+}

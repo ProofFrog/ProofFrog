@@ -529,7 +529,7 @@ The composition merges the `Initialize` methods:
 
 When inlining `obj.method(arg1, arg2)`:
 1. A fresh copy of the method body is created.
-2. Each formal parameter is substituted with the corresponding argument expression, except where that would change what the call computes: an argument that calls a method or function (which may draw, change a challenger's state, or not complete, and must run exactly once whether the callee reads the parameter twice or never), a parameter the callee writes (substitution would turn the callee's write into a write to the caller's variable) and a parameter whose type contains a `ModInt` (which reduces an `Int` argument) are bound instead, by a declaration `T obj.method@param<i> = arg;` of the parameter's type placed before the body.
+2. Each formal parameter is substituted with the corresponding argument expression, except where that would change what the call computes: an argument that calls a method or function (which may draw, change a challenger's state, or not complete, and must run exactly once whether the callee reads the parameter twice or never, its body empty included), a parameter the callee writes (substitution would turn the callee's write into a write to the caller's variable) and a parameter whose type contains a `ModInt` (which reduces an `Int` argument) are bound instead, by a declaration `T obj.method@param<i> = arg;` of the parameter's type placed before the body.
 3. Locally declared variables are renamed to avoid name collisions (using a scheme like `method@varname`).
 4. The method call expression is replaced by the return expression (or the call statement is replaced by the method body for void methods).
 

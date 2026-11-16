@@ -1331,8 +1331,13 @@ class InlineTransformer(Transformer):
 
         if not transformed_method.block.statements:
             # Empty method body (e.g. a Void Initialize with no statements):
-            # drop the call site entirely and continue with surrounding statements.
-            self.blocks.append(frog_ast.Block(statements_so_far + statements_after))
+            # the call does nothing once its arguments are evaluated, so the
+            # call site is replaced by the bindings alone. An argument that
+            # makes a call still runs once (F-403): its draw may not complete,
+            # or may change a challenger's state.
+            self.blocks.append(
+                frog_ast.Block(statements_so_far + bindings + statements_after)
+            )
             self.finished = True
             return exp
 

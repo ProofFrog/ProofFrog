@@ -1,0 +1,24 @@
+// F-403 positive control. Left passes the constant true to T.Take, whose
+// body is empty: an argument without a call has no effect, so the call is
+// dropped and Left and Right are interchangeable. Sound engine:
+// Proof Succeeded!
+import 'Picker.primitive';
+import 'PickImpl.scheme';
+import 'Taker.primitive';
+import 'TakeNothing.scheme';
+import 'EDC.game';
+
+proof:
+
+let:
+    PickImpl P = PickImpl();
+    TakeNothing T = TakeNothing();
+
+assume:
+
+theorem:
+    EDC(P, T);
+
+games:
+    EDC(P, T).Left against EDC(P, T).Adversary;
+    EDC(P, T).Right against EDC(P, T).Adversary;

@@ -1,0 +1,3 @@
+Primitive Picker() {
+    Bool Pick(Set<BitString<1>> S);
+}

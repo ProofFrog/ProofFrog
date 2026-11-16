@@ -1,0 +1,16 @@
+import 'Picker.primitive';
+import 'Taker.primitive';
+// Left passes P.Pick(S) to T.Take, so Pick's draw runs (and does not
+// complete when S is all of BitString<1>); Right makes no call.
+Game Left(Picker P, Taker T) {
+    Bool Test(Set<BitString<1>> S) {
+        T.Take(P.Pick(S));
+        return true;
+    }
+}
+Game Right(Picker P, Taker T) {
+    Bool Test(Set<BitString<1>> S) {
+        return true;
+    }
+}
+export as ED;

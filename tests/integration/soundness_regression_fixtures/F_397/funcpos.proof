@@ -1,0 +1,34 @@
+// F-397, found by the second review of S36 (2026-11-16): a call in the callee position.
+// Target: evaluation_order.first_inlinable_call / evaluated_children.
+// Hypothesis: evaluated_children of a call whose callee expression is not a
+// plain variable lists only the arguments, so a method call in the callee
+// position (challenger.IncGetH()(5)) is not found, although the inliner
+// (InlineTransformer.transform_func_call: `new_func = self.transform(
+// exp.func)`) takes it. No earlier part is bound: the returned
+// challenger@c of the inlined Read is read after IncGetH's increment.
+// CF is a true assumption (Read written two equivalent ways).
+// Sound engine: fails at hop 1 or hop 3.
+// Unsound engine: Proof Succeeded! for TF, whose sides are distinguishable.
+// Distinguisher: the first Test() returns [1, _] on TF.Left, [0, _] on
+// TF.Right.
+import 'CF.game';
+import 'TF.game';
+
+Reduction R() compose CF() against TF().Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    [Int, BitString<8>] Test() {
+        return [challenger.Read(), challenger.IncGetH()(5)];
+    }
+}
+
+proof:
+let:
+assume:
+    CF();
+theorem:
+    TF();
+games:
+    TF().Left against TF().Adversary;
+    CF().Left compose R() against TF().Adversary;
+    CF().Right compose R() against TF().Adversary;
+    TF().Right against TF().Adversary;

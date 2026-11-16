@@ -1,0 +1,34 @@
+// F-397, found by the second review of S36 (2026-11-16): a call in the callee position.
+// Same root cause as funcpos.proof, on the path taken while the reduction is
+// resolved alone (composed_with=challenger): EvaluationOrder.pieces recurses
+// into evaluated_children of the part challenger.IncGetH()(5), which lists
+// only its argument, so the part is never bound, and the inliner binds the
+// argument challenger.Read() of the scheme call P.F in front of the
+// statement, ahead of IncGetH. As written, Test returns [H(5), 1] on the
+// first call (Read after IncGetH); the composed game returns [H(5), 0].
+// This file only exhibits the composed game (step-detail 1); TF2 is not
+// meant to be provable.
+import 'Ider.primitive';
+import 'IdImpl.scheme';
+import 'CF.game';
+import 'TF2.game';
+
+Reduction R(Ider P) compose CF() against TF2().Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    [BitString<8>, Int] Test() {
+        return [challenger.IncGetH()(5), P.F(challenger.Read())];
+    }
+}
+
+proof:
+let:
+    IdImpl P = IdImpl();
+assume:
+    CF();
+theorem:
+    TF2();
+games:
+    TF2().Left against TF2().Adversary;
+    CF().Left compose R(P) against TF2().Adversary;
+    CF().Right compose R(P) against TF2().Adversary;
+    TF2().Right against TF2().Adversary;

@@ -361,7 +361,11 @@ def evaluated_children(node: frog_ast.ASTNode) -> list[frog_ast.ASTNode]:
         children = [*_lvalue_parts(node.var), node.unique_set]
     elif isinstance(node, frog_ast.FuncCall):
         children = list(node.args)
-        if isinstance(node.func, frog_ast.Variable):
+        # The callee expression runs before the arguments, as the inliner
+        # takes it: a `Function` value, or any expression yielding one (a
+        # call returning a function, `challenger.GetH()(x)`). Only a method
+        # name `obj.m` is not evaluated.
+        if method_call_key(node) is None:
             children.insert(0, node.func)
     elif isinstance(node, (frog_ast.Block, frog_ast.VariableDeclaration)):
         children = []

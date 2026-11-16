@@ -1,0 +1,26 @@
+// F-397, found by the second review of S36 (2026-11-16): a call in the callee position.
+// Positive control for funcpos.proof: the same reduction, with a theorem
+// whose two sides are the reduction as written (the count before the
+// increment). Every hop is true.
+// Sound engine: Proof Succeeded!
+import 'CF.game';
+import 'TFT.game';
+
+Reduction R() compose CF() against TFT().Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    [Int, BitString<8>] Test() {
+        return [challenger.Read(), challenger.IncGetH()(5)];
+    }
+}
+
+proof:
+let:
+assume:
+    CF();
+theorem:
+    TFT();
+games:
+    TFT().Left against TFT().Adversary;
+    CF().Left compose R() against TFT().Adversary;
+    CF().Right compose R() against TFT().Adversary;
+    TFT().Right against TFT().Adversary;

@@ -576,6 +576,12 @@ CASES = [
      "control: the earlier calls in statements of their own; hop 3 is false"),
     ("F-397", "bind_order_true.proof", "accept", "method inliner",
      "positive control: both sides are the reduction as written"),
+    ("F-397", "funcpos.proof", "reject", "method inliner",
+     "a call in the callee position ran before an earlier read it writes"),
+    ("F-397", "funcpos_phase1.proof", "reject", "method inliner",
+     "the same while the reduction is resolved alone; hop 3 is false"),
+    ("F-397", "funcpos_true.proof", "accept", "method inliner",
+     "positive control: both sides are the reduction as written"),
     ("F-398", "letcap.proof", "reject", "StandardizeFieldNames",
      "a field was renamed to field1, a let: Int the game reads"),
     ("F-398", "letcap_control.proof", "accept", "StandardizeFieldNames",
@@ -1087,6 +1093,12 @@ FAILED_STEP = {
     ),
     ("F-397", "bind_order_control.proof"): (
         "Step 3 failed: CD2().Right compose R(P) -> TB(P).Right"
+    ),
+    ("F-397", "funcpos.proof"): (
+        "Step 1 failed: TF().Left -> CF().Left compose R()"
+    ),
+    ("F-397", "funcpos_phase1.proof"): (
+        "Step 3 failed: CF().Right compose R(P) -> TF2().Right"
     ),
     ("F-372", "bind_order_cond.proof"): (
         "Step 3 failed: CDB().Right compose R(P) -> TC(P).Right"

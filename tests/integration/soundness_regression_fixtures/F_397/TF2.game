@@ -1,0 +1,22 @@
+// Left: the reduction of funcpos_phase1.proof as written (count after the
+// increment). Right: the count before it.
+Game Left() {
+    Int c;
+    Function<Int, BitString<8>> H;
+    Void Initialize() { c = 0; H <- Function<Int, BitString<8>>; }
+    [BitString<8>, Int] Test() {
+        c = c + 1;
+        return [H(5), c];
+    }
+}
+Game Right() {
+    Int c;
+    Function<Int, BitString<8>> H;
+    Void Initialize() { c = 0; H <- Function<Int, BitString<8>>; }
+    [BitString<8>, Int] Test() {
+        Int r = c;
+        c = c + 1;
+        return [H(5), r];
+    }
+}
+export as TF2;

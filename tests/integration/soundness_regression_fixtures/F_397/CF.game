@@ -1,0 +1,18 @@
+// The two sides behave identically. Left's Read returns the field c
+// directly; Right's copies it into a local first. IncGetH increments c and
+// returns the function field H.
+Game Left() {
+    Int c;
+    Function<Int, BitString<8>> H;
+    Void Initialize() { c = 0; H <- Function<Int, BitString<8>>; }
+    Int Read() { return c; }
+    Function<Int, BitString<8>> IncGetH() { c = c + 1; return H; }
+}
+Game Right() {
+    Int c;
+    Function<Int, BitString<8>> H;
+    Void Initialize() { c = 0; H <- Function<Int, BitString<8>>; }
+    Int Read() { Int r = c; return r; }
+    Function<Int, BitString<8>> IncGetH() { c = c + 1; return H; }
+}
+export as CF;

@@ -1,0 +1,25 @@
+// Both sides are the reduction of funcpos_true.proof as written: the counter
+// is read, then IncGetH increments it, so Test returns the count before the
+// increment. Right names H(5) before returning it.
+Game Left() {
+    Int c;
+    Function<Int, BitString<8>> H;
+    Void Initialize() { c = 0; H <- Function<Int, BitString<8>>; }
+    [Int, BitString<8>] Test() {
+        Int r = c;
+        c = c + 1;
+        return [r, H(5)];
+    }
+}
+Game Right() {
+    Int c;
+    Function<Int, BitString<8>> H;
+    Void Initialize() { c = 0; H <- Function<Int, BitString<8>>; }
+    [Int, BitString<8>] Test() {
+        Int r = c;
+        c = c + 1;
+        BitString<8> h = H(5);
+        return [r, h];
+    }
+}
+export as TFT;

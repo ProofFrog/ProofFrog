@@ -51,6 +51,7 @@ Game C() {
     Int c;
     Int d;
     Int e;
+    Function<Int, Int> F;
     Bool Inc() {
         c = c + 1;
         return true;
@@ -77,6 +78,10 @@ Game C() {
     }
     Int ReadE() {
         return e;
+    }
+    Function<Int, Int> BumpGetF() {
+        c = c + 1;
+        return F;
     }
 }
 """
@@ -342,6 +347,64 @@ def test_f372_part_conflicting_with_a_bound_part_is_bound_too() -> None:
         "Bool S.Pick@cond@0 = challenger.DZero();",
         "if (S.Pick@cond@0) {\nS.Pick@cond@0 = S.Pick(U);\n}",
         "return F.h(S.Pick@prior@0, S.Pick@prior@1, S.Pick@cond@0);",
+    ]
+
+
+def test_f397_call_in_the_callee_position_is_an_earlier_part() -> None:
+    # The second review of S36: the callee expression of a call runs before
+    # its arguments, and the inliner takes a call there first. The `c` read
+    # ahead of it is bound before BumpGetF's increment moves in front.
+    ordered = order_calls_for_inlining(
+        _game("return [c, challenger.BumpGetF()(5)];", "[Int, Int]"),
+        _composed_lookup(),
+        {},
+    )
+    assert _statements(ordered) == [
+        "Int challenger.BumpGetF@prior@0 = c;",
+        "return [challenger.BumpGetF@prior@0, challenger.BumpGetF()(5)];",
+    ]
+
+
+def test_f397_callee_position_call_is_bound_in_order() -> None:
+    # While the reduction is resolved alone, S.IdI's argument Read moves in
+    # front; BumpGetF() in the callee position writes the `c` Read reads, so
+    # it is bound, and with it the earlier Read() it would otherwise pass.
+    ordered = order_calls_for_inlining(
+        _game(
+            "return [challenger.Read(), challenger.BumpGetF()(5), "
+            "S.IdI(challenger.Read())];",
+            "[Int, Int, Int]",
+        ),
+        _scheme_lookup(),
+        {},
+        challenger=_challenger(),
+    )
+    assert _statements(ordered) == [
+        "Int S.IdI@prior@0 = challenger.Read();",
+        "Function<Int, Int> S.IdI@prior@1 = challenger.BumpGetF();",
+        "return [S.IdI@prior@0, S.IdI@prior@1(5), S.IdI(challenger.Read())];",
+    ]
+
+
+def test_f372_callee_position_call_stays_ahead_of_a_hoisted_operand() -> None:
+    # The guarded Inc moves in front of the statement; BumpGetF() in the
+    # callee position of an earlier part writes the same `c`, so it is bound
+    # ahead of it.
+    rewritten = make_conditional_calls_explicit(
+        _game(
+            "return [challenger.BumpGetF()(5) == 0, b && challenger.Inc()];",
+            "[Bool, Bool]",
+        ),
+        _scheme_lookup(),
+        {},
+        None,
+        _challenger(),
+    )
+    assert _statements(rewritten) == [
+        "Function<Int, Int> challenger.Inc@prior@0 = challenger.BumpGetF();",
+        "Bool challenger.Inc@cond@0 = b;",
+        "if (challenger.Inc@cond@0) {\nchallenger.Inc@cond@0 = challenger.Inc();\n}",
+        "return [challenger.Inc@prior@0(5) == 0, challenger.Inc@cond@0];",
     ]
 
 

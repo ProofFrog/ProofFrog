@@ -28,7 +28,7 @@ from ..visitors import (
     type_position_names,
     walk_children,
 )
-from ._base import TransformPass, PipelineContext
+from ._base import NearMiss, TransformPass, PipelineContext
 from ._ordering import node_sort_key
 from .alpha_rename import _RefRewriter
 
@@ -467,20 +467,223 @@ class _ParameterStandardizer:
 # The rename now goes through ``visitors.rename_value_references``, which skips
 # type positions, plus a decline guard on minting a name that is already an
 # in-scope type name.
+#
+# Inside a method the rename also respects binders (F-326): a method parameter
+# or a local binder named like a field hides the field, so a reference it
+# resolves is not a field reference and keeps its name, and a renamed field
+# reference that a binder of the target name would resolve declines the rename.
 
 
-def _apply_field_rename(game: frog_ast.Game, rename: dict[str, str]) -> frog_ast.Game:
-    """Apply a field-name rename map via the temp-then-final pattern.
+class _FieldRenameCapture(Exception):
+    """A field reference cannot be renamed without changing what it reads."""
 
-    Using a single substitution would corrupt the AST when two field
-    names swap (e.g. ``field9 → field10`` and ``field10 → field9``); the
-    temp pass disambiguates.
+    def __init__(self, method: str, name: str, reason: str) -> None:
+        super().__init__(reason)
+        self.method = method
+        self.name = name
+        self.reason = reason
+
+
+class _RecordingRename(dict[str, str]):
+    """A rename map that records the names it was asked to rename."""
+
+    def __init__(self, mapping: dict[str, str]) -> None:
+        super().__init__(mapping)
+        self.used: set[str] = set()
+
+    def __getitem__(self, key: str) -> str:
+        self.used.add(key)
+        return super().__getitem__(key)
+
+
+class _ScopedFieldRenamer:
+    """Rename field references in a method, respecting its binders.
+
+    Under lexical scoping (ruling Q1) a method parameter covers the whole
+    method, and a local binder (a typed assignment or draw, a bare
+    declaration, a ``for`` binder) covers the rest of its block from its own
+    statement on. A name such a binder covers is the binder, not the field,
+    so it keeps its name. A field reference renamed to a name a binder covers
+    at that point would be read as the binder: the renamer raises
+    ``_FieldRenameCapture`` and the caller keeps the game as it is.
+
+    A name in the signature that is both a parameter and a name of the
+    rename (old or new) raises too, since a length in a parameter's type is
+    not clearly inside or outside the parameters' scope.
+    """
+
+    def __init__(self, rename: dict[str, str]) -> None:
+        self.rename = rename
+        self.targets = set(rename.values())
+        self._method = ""
+
+    def method(self, method: frog_ast.Method) -> frog_ast.Method:
+        self._method = method.signature.name
+        parameters = {param.name for param in method.signature.parameters}
+        ambiguous = (
+            referenced_variable_names(method.signature)
+            & parameters
+            & (set(self.rename) | self.targets)
+        )
+        if ambiguous:
+            name = sorted(ambiguous)[0]
+            raise _FieldRenameCapture(
+                self._method,
+                name,
+                f"the signature of '{self._method}' names '{name}', which is "
+                "both one of its parameters and a field name the rename uses",
+            )
+        signature = cast(
+            frog_ast.MethodSignature, self._rewrite(method.signature, parameters)
+        )
+        block = self._block(method.block, parameters)
+        if signature is method.signature and block is method.block:
+            return method
+        new_method = copy.copy(method)
+        new_method.signature = signature
+        new_method.block = block
+        return new_method
+
+    def _rewrite(self, node: object, bound: set[str], in_type: bool = False) -> object:
+        """Rename the field references in *node*, where the names in *bound*
+        are binders in scope."""
+        rename = _RecordingRename(
+            {old: new for old, new in self.rename.items() if old not in bound}
+        )
+        new_node = rename_value_references(node, rename, in_type)
+        for old in sorted(rename.used):
+            if rename[old] in bound:
+                raise _FieldRenameCapture(
+                    self._method,
+                    rename[old],
+                    f"renaming field '{old}' to '{rename[old]}' would make "
+                    f"'{self._method}' read its own '{rename[old]}' (a parameter "
+                    "or local of that name is in scope there) instead of the "
+                    "field",
+                )
+        return new_node
+
+    def _block(self, block: frog_ast.Block, enclosing: set[str]) -> frog_ast.Block:
+        bound = set(enclosing)
+        statements = [self._statement(stmt, bound) for stmt in block.statements]
+        if all(new is old for new, old in zip(statements, block.statements)):
+            return block
+        new_block = copy.copy(block)
+        new_block.statements = statements
+        return new_block
+
+    def _children(
+        self,
+        stmt: frog_ast.Statement,
+        bound: set[str],
+        keep: tuple[str, ...] = (),
+    ) -> frog_ast.Statement:
+        """*stmt* with every child but those in *keep* renamed under
+        *bound*; a child that is a block opens a nested scope."""
+        changed = False
+        new_attrs: dict[str, object] = {}
+        for attr, child, child_in_type in walk_children(stmt, False, escape=True):
+            if attr in keep:
+                continue
+            if isinstance(child, frog_ast.Block):
+                new_child: object = self._block(child, bound)
+            elif isinstance(child, list) and any(
+                isinstance(item, frog_ast.Block) for item in child
+            ):
+                new_items = [
+                    (
+                        self._block(item, bound)
+                        if isinstance(item, frog_ast.Block)
+                        else self._rewrite(item, bound, child_in_type)
+                    )
+                    for item in child
+                ]
+                new_child = (
+                    child
+                    if all(new is old for new, old in zip(new_items, child))
+                    else new_items
+                )
+            else:
+                new_child = self._rewrite(child, bound, child_in_type)
+            new_attrs[attr] = new_child
+            changed = changed or new_child is not child
+        if not changed:
+            return stmt
+        new_stmt = copy.copy(stmt)
+        for attr, new_child in new_attrs.items():
+            setattr(new_stmt, attr, new_child)
+        return new_stmt
+
+    def _statement(
+        self, stmt: frog_ast.Statement, bound: set[str]
+    ) -> frog_ast.Statement:
+        """Rename *stmt* under *bound*, then add the names it binds to
+        *bound* (they cover the rest of the block)."""
+        if isinstance(
+            stmt, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            if stmt.the_type is not None and isinstance(stmt.var, frog_ast.Variable):
+                new_stmt = self._children(stmt, bound, keep=("var",))
+                bound.add(stmt.var.name)
+                return new_stmt
+            return self._children(stmt, bound)
+        if isinstance(stmt, frog_ast.VariableDeclaration):
+            new_stmt = self._children(stmt, bound)
+            bound.add(stmt.name)
+            return new_stmt
+        if isinstance(stmt, frog_ast.DestructuringBinding):
+            new_stmt = self._children(stmt, bound)
+            bound.update(stmt.names)
+            return new_stmt
+        if isinstance(stmt, frog_ast.NumericFor):
+            return self._loop(stmt, bound, stmt.name)
+        if isinstance(stmt, frog_ast.GenericFor):
+            return self._loop(stmt, bound, stmt.var_name)
+        if isinstance(stmt, frog_ast.Block):
+            return self._block(stmt, bound)
+        return self._children(stmt, bound)
+
+    def _loop(
+        self,
+        stmt: frog_ast.NumericFor | frog_ast.GenericFor,
+        bound: set[str],
+        binder: str,
+    ) -> frog_ast.Statement:
+        """A ``for`` loop: its header is outside its binder's scope, its
+        body inside."""
+        header = cast(
+            frog_ast.NumericFor | frog_ast.GenericFor,
+            self._children(stmt, bound, keep=("block",)),
+        )
+        block = self._block(stmt.block, bound | {binder})
+        if header is stmt and block is stmt.block:
+            return stmt
+        new_stmt = copy.copy(header)
+        new_stmt.block = block
+        return new_stmt
+
+
+def _apply_field_rename(
+    game: frog_ast.Game,
+    rename: dict[str, str],
+    ctx: PipelineContext | None = None,
+    pass_name: str = "Standardize Field Names",
+) -> frog_ast.Game:
+    """Rename the game's fields by *rename* (old name to new name).
+
+    The rename is simultaneous, so two fields may swap names
+    (``field9 → field10`` and ``field10 → field9``).
 
     The rewrite is TYPE-POSITION AWARE (see ``visitors.TYPE_SLOTS``): only occurrences
     that can denote the field's *value* are renamed.  Additionally, if a target
     name would collide with a type/set name that is in scope in this game, the
     rename is DECLINED outright -- standardization is only canonicalization, so
     declining costs power but can never conflate two distinct games.
+
+    In a method the rewrite is also SCOPE AWARE (``_ScopedFieldRenamer``): a
+    reference that a method parameter or local binder of the same name
+    covers is left alone, and if a renamed reference would be covered by a
+    binder of its new name, the rename is declined with a near miss (F-326).
     """
     if not rename:
         return game
@@ -488,25 +691,45 @@ def _apply_field_rename(game: frog_ast.Game, rename: dict[str, str]) -> frog_ast
     if protected & set(rename.values()):
         # Minting `fieldN` here would fuse the field with a same-named type.
         return game
-    temp_map: dict[str, str] = {
-        old: f"__field_temp_{i}__" for i, old in enumerate(rename)
-    }
-    rev_temp: dict[str, str] = {temp_map[old]: rename[old] for old in rename}
+    renamer = _ScopedFieldRenamer(rename)
+    try:
+        methods = [renamer.method(method) for method in game.methods]
+    except _FieldRenameCapture as capture:
+        if ctx is not None:
+            ctx.near_misses.append(
+                NearMiss(
+                    transform_name=pass_name,
+                    reason=f"Field renaming declined: {capture.reason}",
+                    location=None,
+                    suggestion=(
+                        f"Rename the parameter or local '{capture.name}' in "
+                        f"'{capture.method}' so it differs from the game's "
+                        "field names and from field<N>"
+                    ),
+                    variable=capture.name,
+                    method=capture.method,
+                )
+            )
+        return game
 
-    new_game = cast(frog_ast.Game, rename_value_references(game, temp_map))
-    new_game = copy.copy(new_game)
-    new_game.fields = [copy.copy(f) for f in new_game.fields]
-    for field in new_game.fields:
-        if field.name in temp_map:
-            field.name = temp_map[field.name]
-
-    new_game = cast(frog_ast.Game, rename_value_references(new_game, rev_temp))
-    new_game = copy.copy(new_game)
-    new_game.fields = [copy.copy(f) for f in new_game.fields]
-    for field in new_game.fields:
-        if field.name in rev_temp:
-            field.name = rev_temp[field.name]
-    new_game.fields.sort(key=lambda element: element.name)
+    # Outside the methods nothing binds a name, so every other reference to
+    # a field (in a field's type or initializer, a game parameter's type) is
+    # renamed by name.
+    new_game = copy.copy(game)
+    for attr, child, child_in_type in walk_children(game, False, escape=True):
+        if attr == "methods":
+            new_game.methods = methods
+        elif attr == "fields":
+            new_fields = []
+            for field in game.fields:
+                new_field = copy.copy(rename_value_references(field, rename))
+                new_field.name = rename.get(field.name, field.name)
+                new_fields.append(new_field)
+            new_game.fields = sorted(new_fields, key=lambda element: element.name)
+        else:
+            setattr(
+                new_game, attr, rename_value_references(child, rename, child_in_type)
+            )
     return new_game
 
 
@@ -573,13 +796,19 @@ def _phase3_lex_min_within_type(game: frog_ast.Game) -> frog_ast.Game:
     ``field9 = v1[1]; field10 = v4[1]`` in one game and the swap in
     the other).
     """
+    return _apply_field_rename(game, _phase3_rename_map(game))
+
+
+def _phase3_rename_map(game: frog_ast.Game) -> dict[str, str]:
+    """The field rename Phase 3 (:func:`_phase3_lex_min_within_type`) applies
+    to *game*."""
     init_method: frog_ast.Method | None = None
     for m in game.methods:
         if m.signature.name == "Initialize":
             init_method = m
             break
     if init_method is None:
-        return game
+        return {}
 
     field_names = {f.name for f in game.fields}
     field_rhs_key: dict[str, tuple] = {}  # type: ignore[type-arg]
@@ -638,10 +867,12 @@ def _phase3_lex_min_within_type(game: frog_ast.Game) -> frog_ast.Game:
             if sn != slots[k]:
                 rename[sn] = slots[k]
 
-    return _apply_field_rename(game, rename)
+    return rename
 
 
-def standardize_field_names(game: frog_ast.Game) -> frog_ast.Game:
+def standardize_field_names(
+    game: frog_ast.Game, ctx: PipelineContext | None = None
+) -> frog_ast.Game:
     """Normalize field names to canonical ordering.
 
     Three-phase pass:
@@ -659,7 +890,7 @@ def standardize_field_names(game: frog_ast.Game) -> frog_ast.Game:
        field assignment.
     """
     field_rename_map = _field_order_rename_map(game)
-    new_game = _apply_field_rename(game, field_rename_map)
+    new_game = _apply_field_rename(game, field_rename_map, ctx)
 
     # Phase 2: group by type, preserving relative order within each group.
     # This re-numbers fields so that two semantically equivalent games whose
@@ -681,7 +912,7 @@ def standardize_field_names(game: frog_ast.Game) -> frog_ast.Game:
         canonical = f"field{new_idx + 1}"
         if field.name != canonical:
             second_rename[field.name] = canonical
-    new_game = _apply_field_rename(new_game, second_rename)
+    new_game = _apply_field_rename(new_game, second_rename, ctx)
 
     # Phase 3 lex-min runs as a separate `FieldLexMinByRHS` pass after
     # the second `VariableStandardize`, where RHS sort keys see the
@@ -713,7 +944,7 @@ class StandardizeFieldNames(TransformPass):
     name = "Standardize Field Names"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return standardize_field_names(game)
+        return standardize_field_names(game, ctx)
 
 
 class FieldLexMinByRHS(TransformPass):
@@ -733,6 +964,9 @@ class FieldLexMinByRHS(TransformPass):
         for _ in range(8):  # bounded fixed-point; 8 iterations is ample
             new_game = _phase3_lex_min_within_type(game)
             if new_game is game:
+                # A declined rename (F-326) also leaves the game as it is:
+                # run it once more with ``ctx`` to record why.
+                _apply_field_rename(game, _phase3_rename_map(game), ctx, self.name)
                 return game
             # Compare via str() since AST objects may not implement __eq__.
             if str(new_game) == str(game):

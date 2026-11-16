@@ -1,0 +1,17 @@
+// F-326: claims ParamCapture(p).Real and ParamCapture(p).Fake are
+// interchangeable. They are not (see ParamCapture.game). Sound engine:
+// Proof Failed!
+import 'P.primitive';
+import 'ParamCapture.game';
+
+proof:
+
+let:
+    P p = P();
+
+theorem:
+    ParamCapture(p);
+
+games:
+    ParamCapture(p).Real against ParamCapture(p).Adversary;
+    ParamCapture(p).Fake against ParamCapture(p).Adversary;

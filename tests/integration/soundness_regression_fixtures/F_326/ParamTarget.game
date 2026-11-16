@@ -1,0 +1,55 @@
+// F-326, the other direction: Real's Oracle returns the field x, fixed in
+// Initialize; Fake's returns its argument. Distinguisher: Oracle(true) and
+// Oracle(false) give the same answer in Real, different ones in Fake. The
+// field arg1 makes Standardize Parameters keep the parameter name field1.
+// Standardize Field Names numbers x first, as field1: renamed by name
+// alone, Real's field read `return x;` became `return field1;`, which reads
+// the parameter, and the two Oracles matched. (Get keeps x a field in Fake
+// too, so both sides number it alike.)
+import 'P.primitive';
+
+Game Real(P p) {
+    Bool x;
+    Int arg1;
+
+    Void Initialize() {
+        x = p.Gen(1) == 0;
+        arg1 = p.Gen(2);
+    }
+
+    Bool Oracle(Bool field1) {
+        return x;
+    }
+
+    Bool Get() {
+        return x;
+    }
+
+    Int Peek() {
+        return arg1;
+    }
+}
+
+Game Fake(P p) {
+    Bool x;
+    Int arg1;
+
+    Void Initialize() {
+        x = p.Gen(1) == 0;
+        arg1 = p.Gen(2);
+    }
+
+    Bool Oracle(Bool field1) {
+        return field1;
+    }
+
+    Bool Get() {
+        return x;
+    }
+
+    Int Peek() {
+        return arg1;
+    }
+}
+
+export as ParamTarget;

@@ -1,0 +1,56 @@
+// F-326 positive control: both Oracles return their argument, and the games
+// differ only in which of x and y holds p.Gen(1), which neither Peek
+// (x + x + y + y) nor Oracle can see. They are interchangeable. Before the
+// fix the same capture turned each Oracle's parameter read into a read of a
+// different field on the two sides, and the hop failed.
+import 'P.primitive';
+
+Game Real(P p) {
+    Int x;
+    Int y;
+    Bool arg1;
+
+    Void Initialize() {
+        x = p.Gen(1);
+        y = p.Gen(0);
+        arg1 = p.Gen(2) == 0;
+    }
+
+    Int Peek() {
+        return x + x + y + y;
+    }
+
+    Bool Flag() {
+        return arg1;
+    }
+
+    Int Oracle(Int field1) {
+        return field1;
+    }
+}
+
+Game Fake(P p) {
+    Int x;
+    Int y;
+    Bool arg1;
+
+    Void Initialize() {
+        x = p.Gen(0);
+        y = p.Gen(1);
+        arg1 = p.Gen(2) == 0;
+    }
+
+    Int Peek() {
+        return x + x + y + y;
+    }
+
+    Bool Flag() {
+        return arg1;
+    }
+
+    Int Oracle(Int field1) {
+        return field1;
+    }
+}
+
+export as ParamControl;

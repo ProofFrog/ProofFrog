@@ -5819,3 +5819,82 @@ def test_concat_equality_no_near_miss_on_unwritten_parameter() -> None:
     ctx = _make_ctx()
     ConcatEqualityDecompose().apply(game, ctx)
     assert not _f394_misses(ctx, "Concat Equality Decompose")
+
+
+# ---------------------------------------------------------------------------
+# F-326: a field rename that a method's own binder would capture is declined
+# ---------------------------------------------------------------------------
+
+
+def _f326_misses(ctx: PipelineContext, transform_name: str) -> list[NearMiss]:
+    return [nm for nm in ctx.near_misses if nm.transform_name == transform_name]
+
+
+def test_standardize_field_names_near_miss_on_capturing_parameter() -> None:
+    from proof_frog.transforms.standardization import StandardizeFieldNames
+
+    game = frog_parser.parse_game("""
+        Game G() {
+            Bool x;
+            Bool Oracle(Bool field1) {
+                return x;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = StandardizeFieldNames().apply(game, ctx)
+    assert [f.name for f in result.fields] == ["x"]
+    misses = _f326_misses(ctx, "Standardize Field Names")
+    assert misses
+    assert misses[0].method == "Oracle"
+    assert misses[0].variable == "field1"
+    assert "would make 'Oracle' read its own 'field1'" in misses[0].reason
+
+
+def test_standardize_field_names_no_near_miss_on_shadowing_parameter() -> None:
+    """A parameter named like a field that is renamed away is not a
+    capture: its reads stay the parameter's, and no near miss is recorded."""
+    from proof_frog.transforms.standardization import StandardizeFieldNames
+
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int x;
+            Int Oracle(Int x) {
+                return x;
+            }
+            Int Peek() {
+                return x;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = StandardizeFieldNames().apply(game, ctx)
+    assert [f.name for f in result.fields] == ["field1"]
+    assert "return x;" in str(result.methods[0])
+    assert "return field1;" in str(result.methods[1])
+    assert not _f326_misses(ctx, "Standardize Field Names")
+
+
+def test_field_lex_min_near_miss_on_capturing_parameter() -> None:
+    from proof_frog.transforms.standardization import FieldLexMinByRHS
+
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int field1;
+            Int field2;
+            Void Initialize() {
+                field1 = 2;
+                field2 = 1;
+            }
+            Int Oracle(Int field2) {
+                return field1 + field2;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = FieldLexMinByRHS().apply(game, ctx)
+    assert result is game
+    misses = _f326_misses(ctx, "Field Lex-Min By RHS")
+    assert misses
+    assert misses[0].method == "Oracle"
+    assert misses[0].variable == "field2"

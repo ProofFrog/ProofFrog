@@ -1,0 +1,17 @@
+// F-326: claims ParamRenamed(p).Real and ParamRenamed(p).Fake are
+// interchangeable. They are not (see ParamRenamed.game). Sound engine:
+// Proof Failed!
+import 'P.primitive';
+import 'ParamRenamed.game';
+
+proof:
+
+let:
+    P p = P();
+
+theorem:
+    ParamRenamed(p);
+
+games:
+    ParamRenamed(p).Real against ParamRenamed(p).Adversary;
+    ParamRenamed(p).Fake against ParamRenamed(p).Adversary;

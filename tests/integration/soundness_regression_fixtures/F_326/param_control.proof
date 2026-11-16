@@ -1,0 +1,16 @@
+// F-326 positive control: ParamControl(p).Real and ParamControl(p).Fake are
+// interchangeable (see ParamControl.game). Expected: Proof Succeeded!
+import 'P.primitive';
+import 'ParamControl.game';
+
+proof:
+
+let:
+    P p = P();
+
+theorem:
+    ParamControl(p);
+
+games:
+    ParamControl(p).Real against ParamControl(p).Adversary;
+    ParamControl(p).Fake against ParamControl(p).Adversary;

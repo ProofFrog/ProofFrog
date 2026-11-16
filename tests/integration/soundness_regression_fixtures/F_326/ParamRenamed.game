@@ -1,0 +1,43 @@
+// F-326: the pair of ParamCapture.game without the field arg1. Standardize
+// Parameters renames the parameter field1 to arg1, so no field rename can
+// reach it. Real's Oracle returns its argument, Fake's the field holding
+// p.Gen(1): distinguishable, and rejected before the fix too.
+import 'P.primitive';
+
+Game Real(P p) {
+    Int x;
+    Int y;
+
+    Void Initialize() {
+        x = p.Gen(1);
+        y = p.Gen(0);
+    }
+
+    Int Peek() {
+        return x + x + y + y;
+    }
+
+    Int Oracle(Int field1) {
+        return field1;
+    }
+}
+
+Game Fake(P p) {
+    Int x;
+    Int y;
+
+    Void Initialize() {
+        x = p.Gen(0);
+        y = p.Gen(1);
+    }
+
+    Int Peek() {
+        return x + x + y + y;
+    }
+
+    Int Oracle(Int field1) {
+        return y;
+    }
+}
+
+export as ParamRenamed;

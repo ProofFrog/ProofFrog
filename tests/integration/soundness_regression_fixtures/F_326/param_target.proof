@@ -1,0 +1,17 @@
+// F-326: claims ParamTarget(p).Real and ParamTarget(p).Fake are
+// interchangeable. They are not (see ParamTarget.game). Sound engine:
+// Proof Failed!
+import 'P.primitive';
+import 'ParamTarget.game';
+
+proof:
+
+let:
+    P p = P();
+
+theorem:
+    ParamTarget(p);
+
+games:
+    ParamTarget(p).Real against ParamTarget(p).Adversary;
+    ParamTarget(p).Fake against ParamTarget(p).Adversary;

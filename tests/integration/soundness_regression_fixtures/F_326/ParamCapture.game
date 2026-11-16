@@ -1,0 +1,58 @@
+// F-326: Real's Oracle returns its argument; Fake's returns the field y,
+// which holds p.Gen(1). Distinguisher: Oracle(7) returns 7 in Real and
+// p.Gen(1) in Fake. The field arg1 makes Standardize Parameters keep the
+// parameter name field1 (its target arg1 is taken). Standardize Field Names
+// then renamed the fields to field1..field3 and, renaming by name alone,
+// also rewrote the parameter read `return field1;` into a field read, so
+// both Oracles returned the field holding p.Gen(1).
+import 'P.primitive';
+
+Game Real(P p) {
+    Int x;
+    Int y;
+    Bool arg1;
+
+    Void Initialize() {
+        x = p.Gen(1);
+        y = p.Gen(0);
+        arg1 = p.Gen(2) == 0;
+    }
+
+    Int Peek() {
+        return x + x + y + y;
+    }
+
+    Bool Flag() {
+        return arg1;
+    }
+
+    Int Oracle(Int field1) {
+        return field1;
+    }
+}
+
+Game Fake(P p) {
+    Int x;
+    Int y;
+    Bool arg1;
+
+    Void Initialize() {
+        x = p.Gen(0);
+        y = p.Gen(1);
+        arg1 = p.Gen(2) == 0;
+    }
+
+    Int Peek() {
+        return x + x + y + y;
+    }
+
+    Bool Flag() {
+        return arg1;
+    }
+
+    Int Oracle(Int field1) {
+        return y;
+    }
+}
+
+export as ParamCapture;

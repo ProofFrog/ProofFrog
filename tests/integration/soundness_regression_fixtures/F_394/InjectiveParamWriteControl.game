@@ -1,0 +1,20 @@
+// F-394 positive control: Probe never writes k, so v = F.Enc(k) still
+// encodes k at the comparison and v == F.Enc(m) is k == m (Enc is
+// injective). The two games are interchangeable.
+import 'DetInj.primitive';
+
+Game Left(DetInj F) {
+    [Bool, F.Block] Probe(F.Block k, F.Block m) {
+        F.Block v = F.Enc(k);
+        F.Block t = m;
+        return [v == F.Enc(m), t];
+    }
+}
+
+Game Right(DetInj F) {
+    [Bool, F.Block] Probe(F.Block k, F.Block m) {
+        return [k == m, m];
+    }
+}
+
+export as InjectiveParamWriteControl;

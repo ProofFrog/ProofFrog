@@ -1,0 +1,26 @@
+// F-394: Probe writes its own parameter k after binding v = F.Enc(k). A
+// parameter receives its argument by value and is the method's own
+// variable, so v keeps the encoding of the old k. Left's first component is
+// Enc(a) == Enc(b), false whenever a != b (Enc is injective); Right's is
+// always true. Distinguisher: Probe(a, b) with a != b. Injective Equality
+// Simplify counted every method parameter as a value that never changes,
+// read v as F.Enc(k) at the comparison, where k is already m, and so turned
+// v == F.Enc(m) into k == m.
+import 'DetInj.primitive';
+
+Game Left(DetInj F) {
+    [Bool, F.Block] Probe(F.Block k, F.Block m) {
+        F.Block v = F.Enc(k);
+        k = m;
+        return [v == F.Enc(m), k];
+    }
+}
+
+Game Right(DetInj F) {
+    [Bool, F.Block] Probe(F.Block k, F.Block m) {
+        k = m;
+        return [k == m, k];
+    }
+}
+
+export as InjectiveParamWrite;

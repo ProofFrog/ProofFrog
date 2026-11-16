@@ -489,3 +489,59 @@ def test_member_read_binding_decomposes_when_map_unwritten() -> None:
         """
     )
     assert "T.Ev(|M.keys|) == t" in str(game), str(game)
+
+
+# --------------------------------------------------------------------------
+# F-394: a parameter the method writes is not a value that never changes
+# --------------------------------------------------------------------------
+
+
+def _apply_with_ctx(source: str) -> tuple[frog_ast.Game, PipelineContext]:
+    game = frog_parser.parse_game(source)
+    ctx = _ctx()
+    return ConcatEqualityDecompose().apply(game, ctx), ctx
+
+
+def test_f394_binding_over_written_parameter_not_decomposed() -> None:
+    """``v = a || b; a = b;``: v holds the old a, so ``v == x`` must not be
+    decomposed against the new a. A near miss names v and a."""
+    game, ctx = _apply_with_ctx("""
+        Game G(Int n) {
+            [Bool, BitString<n>] O(BitString<n> a, BitString<n> b, BitString<n + n> x) {
+                BitString<n + n> v = a || b;
+                a = b;
+                return [v == x, a];
+            }
+        }
+        """)
+    assert "v == x" in str(game), str(game)
+    assert "x[0 : n] == a" not in str(game), str(game)
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Concat Equality Decompose"
+        and "parameter 'a'" in nm.reason
+    ]
+    assert misses, ctx.near_misses
+    assert misses[0].variable == "v"
+    assert misses[0].method == "O"
+
+
+def test_f394_other_parameter_written_still_decomposes() -> None:
+    """Control: the method writes c, which v does not read, so ``v == x``
+    still decomposes and no near miss names v."""
+    game, ctx = _apply_with_ctx("""
+        Game G(Int n) {
+            [Bool, BitString<n>] O(BitString<n> a, BitString<n> b, BitString<n + n> x,
+                                   BitString<n> c) {
+                BitString<n + n> v = a || b;
+                c = b;
+                return [v == x, c];
+            }
+        }
+        """)
+    assert "x[0 : n] == a" in str(game), str(game)
+    assert not any(
+        nm.transform_name == "Concat Equality Decompose" and nm.variable == "v"
+        for nm in ctx.near_misses
+    ), ctx.near_misses

@@ -1,0 +1,18 @@
+// F-394 positive control: claims InjectiveParamWriteControl(F).Left and
+// InjectiveParamWriteControl(F).Right are interchangeable, which they are (see
+// InjectiveParamWriteControl.game). Sound engine: Proof Succeeded!
+import 'DetInj.primitive';
+import 'InjectiveParamWriteControl.game';
+
+proof:
+
+let:
+    Int n;
+    DetInj F = DetInj(BitString<n>);
+
+theorem:
+    InjectiveParamWriteControl(F);
+
+games:
+    InjectiveParamWriteControl(F).Left against InjectiveParamWriteControl(F).Adversary;
+    InjectiveParamWriteControl(F).Right against InjectiveParamWriteControl(F).Adversary;

@@ -1,0 +1,18 @@
+// F-394: claims InjectiveParamWrite(F).Left and InjectiveParamWrite(F).Right are
+// interchangeable. They are not (see InjectiveParamWrite.game). Sound engine:
+// Proof Failed!
+import 'DetInj.primitive';
+import 'InjectiveParamWrite.game';
+
+proof:
+
+let:
+    Int n;
+    DetInj F = DetInj(BitString<n>);
+
+theorem:
+    InjectiveParamWrite(F);
+
+games:
+    InjectiveParamWrite(F).Left against InjectiveParamWrite(F).Adversary;
+    InjectiveParamWrite(F).Right against InjectiveParamWrite(F).Adversary;

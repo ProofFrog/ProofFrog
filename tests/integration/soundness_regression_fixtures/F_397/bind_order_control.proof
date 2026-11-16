@@ -1,0 +1,30 @@
+// F-397, found by the review of S36's retry (2026-11-16).
+// Control for bind_order.proof: the same reduction with IncC and CopyCtoD
+// in statements of their own, so nothing needs binding. The composed game
+// is TB(P).Left on both sides of CD2.
+// Sound engine: fails at hop 3 only (hop 3 is false).
+// Distinguisher: one Test() call returns 1 on TB(P).Left and 0 on TB(P).Right.
+import 'Ider.primitive';
+import 'IdImpl.scheme';
+import 'CD2.game';
+import 'TB.game';
+Reduction R(Ider P) compose CD2() against TB(P).Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    Int Test() {
+        Int a = challenger.IncC();
+        Int b = challenger.CopyCtoD();
+        return challenger.Third(a, b, P.F(challenger.ReadD()));
+    }
+}
+proof:
+let:
+    IdImpl P = IdImpl();
+assume:
+    CD2();
+theorem:
+    TB(P);
+games:
+    TB(P).Left against TB(P).Adversary;
+    CD2().Left compose R(P) against TB(P).Adversary;
+    CD2().Right compose R(P) against TB(P).Adversary;
+    TB(P).Right against TB(P).Adversary;

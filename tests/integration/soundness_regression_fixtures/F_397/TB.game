@@ -1,0 +1,25 @@
+import 'Ider.primitive';
+// Left: as written (IncC, CopyCtoD, ReadD): returns the count after the increment.
+// Right: CopyCtoD and ReadD before IncC: returns the count before it.
+Game Left(Ider P) {
+    Int c;
+    Int d;
+    Void Initialize() { c = 0; d = 0; }
+    Int Test() {
+        c = c + 1;
+        d = c;
+        return d;
+    }
+}
+Game Right(Ider P) {
+    Int c;
+    Int d;
+    Void Initialize() { c = 0; d = 0; }
+    Int Test() {
+        d = c;
+        Int v = d;
+        c = c + 1;
+        return v;
+    }
+}
+export as TB;

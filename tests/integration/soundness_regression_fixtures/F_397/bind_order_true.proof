@@ -1,0 +1,28 @@
+// F-397, found by the review of S36's retry (2026-11-16).
+// Positive control for bind_order.proof: the same reduction, with a theorem
+// whose two sides are the reduction as written (the count after the
+// increment). Every hop is true, including hop 3 on CD2().Right, where
+// only some of the earlier calls conflict with the moved ReadD.
+// Sound engine: Proof Succeeded!
+import 'Ider.primitive';
+import 'IdImpl.scheme';
+import 'CD2.game';
+import 'TBT.game';
+Reduction R(Ider P) compose CD2() against TBT(P).Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    Int Test() {
+        return challenger.Third(challenger.IncC(), challenger.CopyCtoD(), P.F(challenger.ReadD()));
+    }
+}
+proof:
+let:
+    IdImpl P = IdImpl();
+assume:
+    CD2();
+theorem:
+    TBT(P);
+games:
+    TBT(P).Left against TBT(P).Adversary;
+    CD2().Left compose R(P) against TBT(P).Adversary;
+    CD2().Right compose R(P) against TBT(P).Adversary;
+    TBT(P).Right against TBT(P).Adversary;

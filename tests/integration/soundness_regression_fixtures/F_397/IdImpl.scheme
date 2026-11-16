@@ -1,0 +1,7 @@
+import 'Ider.primitive';
+// F is the identity.
+Scheme IdImpl() extends Ider {
+    Int F(Int x) {
+        return x;
+    }
+}

@@ -109,6 +109,7 @@ This makes `Key` (or `E.Key` when accessed through an instance `E`) usable as a 
 
 **Logical** (on `Bool`):
 - `&&` (AND), `||` (OR), `!` (NOT)
+- `&&` and `||` short-circuit, left to right: `a && b` evaluates `b` only when `a` is true, and `a || b` only when `a` is false. A method call in the right operand is made only then, so its draws, writes and any draw that cannot complete happen only on those traces (the engine gives such a call explicit control flow before inlining it).
 
 Note: `||` is overloaded — it is logical OR on `Bool` and concatenation on `BitString`.
 
@@ -118,8 +119,10 @@ The following operators are commutative and associative:
 - `+` on `Int` and `ModInt<q>` (addition)
 - `+` on `BitString<n>` (XOR)
 - `*` on `Int`, `ModInt<q>`, and `GroupElem<G>` (multiplication / group operation)
-- `&&` on `Bool` (logical AND)
-- `||` on `Bool` (logical OR)
+- `&&` on `Bool` (logical AND), for operands that call no method with an effect
+- `||` on `Bool` (logical OR), for operands that call no method with an effect
+
+Swapping the operands of `&&` or `||` changes which one may go unevaluated, so it is exact only when neither calls a method whose body has an effect (a draw that may not complete, or a write to state outside the method).
 
 The following are NOT commutative:
 - `-` (subtraction), `/` (division), `^` (exponentiation)
@@ -197,7 +200,7 @@ if (condition) {
 }
 ```
 
-Standard deterministic branching. The condition is a `Bool` expression evaluated at runtime. `else if` and `else` clauses are optional.
+Standard deterministic branching. The condition is a `Bool` expression evaluated at runtime. `else if` and `else` clauses are optional. The conditions are evaluated in order, and an `else if` condition only when every earlier condition is false, so a method call in it is made only on those traces.
 
 ### 4.5 For Loops
 

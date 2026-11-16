@@ -1,0 +1,10 @@
+import 'Picker.primitive';
+
+// Pick draws from a type, a draw that always completes: a call whose body
+// has no effect, so evaluating it on every trace changes nothing.
+Scheme PickFree() extends Picker {
+    Bool Pick(Set<BitString<1>> S) {
+        BitString<1> x <- BitString<1>;
+        return true;
+    }
+}

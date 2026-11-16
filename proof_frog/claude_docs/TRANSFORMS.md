@@ -189,6 +189,7 @@ Modifications to the `InlineTransformer` that runs during proof composition.
 | Component | Description |
 |---|---|
 | InlinerEarlyReturnNormalization | Normalizes early returns in inlined methods so no bare `ReturnStatement` leaks into the caller. |
+| ConditionalCallsExplicit (`conditional_calls.py`) | Before each inlining step, a call in the right operand of a Boolean `&&` / `||` or in an `else if` condition, whose body has an effect (a draw that may not complete, a write to state outside the callee, or a call with one), gets explicit control flow: `return b && f(x);` becomes `if (b) { return f(x); } return false;`, another `b && f(x)` becomes `Bool t = b; if (t) { t = f(x); }` in front of its statement, and an `else if` with such a call moves into an `else` block. The inliner puts a callee's statements in front of the statement holding the call, which would run the call on traces where it is not evaluated. A call with no effect is left alone. |
 
 ## Per-Step Passes
 

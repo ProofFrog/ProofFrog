@@ -1,0 +1,13 @@
+import 'Picker.primitive';
+import 'PickImpl.scheme';
+import 'TT_or.game';
+
+proof:
+let:
+    PickImpl P = PickImpl();
+assume:
+theorem:
+    TT_or(P);
+games:
+    TT_or(P).Left against TT_or(P).Adversary;
+    TT_or(P).Right against TT_or(P).Adversary;

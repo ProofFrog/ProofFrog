@@ -1,0 +1,17 @@
+import 'Picker.primitive';
+import 'PickFree.scheme';
+import 'TT.game';
+
+// Positive control for attack_and.proof: the same two games, with a Pick
+// whose body has no effect (its draw is from a type and always completes).
+// Making the call only when b is true or on every trace gives the same
+// game, and the engine still proves it.
+proof:
+let:
+    PickFree P = PickFree();
+assume:
+theorem:
+    TT(P);
+games:
+    TT(P).Left against TT(P).Adversary;
+    TT(P).Right against TT(P).Adversary;

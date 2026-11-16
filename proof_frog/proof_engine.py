@@ -10,7 +10,7 @@ import sys
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from enum import Enum, IntEnum
 from collections import namedtuple
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TypeAlias, Tuple, Dict, Optional, TypeVar, Union
 import z3
 from colorama import Fore
@@ -18,6 +18,7 @@ from sympy import Symbol
 from . import frog_ast
 from . import visitors
 from . import dependencies
+from . import conditional_calls
 from . import diagnostics
 from . import advantage
 from . import upto
@@ -2314,7 +2315,20 @@ class ProofEngine:
 
         if not composed_later:
             game = run_call_initializers_in_initialize(game, lookup)
-        return inline_calls(game, lookup)
+        namespace = self.proof_namespace
+        let_types = self.proof_let_types
+
+        def prepare(current: frog_ast.Game) -> frog_ast.Game:
+            # A call evaluated only conditionally (the right operand of a
+            # Boolean `&&` or `||`, an `else if` condition) whose body has an
+            # effect gets explicit control flow first, since the inliner puts
+            # a callee's statements in front of the statement holding the
+            # call (F-372).
+            return conditional_calls.make_conditional_calls_explicit(
+                current, lookup, namespace, let_types
+            )
+
+        return inline_calls(game, lookup, prepare=prepare)
 
     def _argument_types(
         self, args: list[frog_ast.Expression]
@@ -3188,10 +3202,18 @@ def _makes_inlinable_call(node: frog_ast.ASTNode, lookup: MethodLookup) -> bool:
 
 
 def inline_calls(
-    game: frog_ast.Game, lookup: MethodLookup, max_rounds: int | None = None
+    game: frog_ast.Game,
+    lookup: MethodLookup,
+    max_rounds: int | None = None,
+    prepare: Callable[[frog_ast.Game], frog_ast.Game] | None = None,
 ) -> frog_ast.Game:
     """Inline the calls to *lookup*'s methods in *game*'s methods, one call
     per round, until none is left.
+
+    *prepare*, when given, rewrites the game before each round:
+    ``resolve_step_game`` passes the rewrites that keep the inliner's
+    hoisting sound (F-372). A round that changes nothing, *prepare* included,
+    ends the loop.
 
     Raises :class:`InliningLimitError` when calls are still left after
     *max_rounds* rounds (by default ``_MAX_FIXED_POINT_ITERATIONS``): the game
@@ -3199,12 +3221,18 @@ def inline_calls(
     (``InlineTransformer.transform_field``), so its calls do not count.
     """
     rounds = _MAX_FIXED_POINT_ITERATIONS if max_rounds is None else max_rounds
+
+    def one_round(current: frog_ast.Game) -> frog_ast.Game:
+        if prepare is not None:
+            current = prepare(current)
+        return visitors.InlineTransformer(lookup).transform(current)
+
     for _ in range(rounds):
-        new_game = visitors.InlineTransformer(lookup).transform(game)
+        new_game = one_round(game)
         if new_game == game:
             return game
         game = new_game
-    if visitors.InlineTransformer(lookup).transform(game) == game:
+    if one_round(game) == game:
         return game
     left = next(
         (

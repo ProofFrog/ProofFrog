@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from proof_frog import frog_ast, frog_parser
+from proof_frog import frog_ast, frog_parser, visitors
 from proof_frog.conditional_calls import (
     UntypedConditionalCallError,
     make_conditional_calls_explicit,
@@ -138,13 +138,14 @@ def test_f372_call_argument_position() -> None:
 
 
 def test_f372_nested_positions_are_rewritten_outermost_first() -> None:
+    # One call rewrites the inner position too: the inliner runs before the
+    # next call and would take S.Pick(U) out of `return b || S.Pick(U);`.
     once = _rewrite(_game("return a && (b || S.Pick(U));"))
-    _assert_body(once, "if (a) { return b || S.Pick(U); } return false;")
-    twice = _rewrite(once)
     _assert_body(
-        twice,
+        once,
         "if (a) { if (b) { return true; } return S.Pick(U); } return false;",
     )
+    assert _rewrite(once) is once
 
 
 def test_f372_temporary_name_is_fresh() -> None:
@@ -223,9 +224,143 @@ def test_f372_a_shared_node_is_evaluated_where_it_occurs() -> None:
     assert isinstance(statement, frog_ast.ReturnStatement)
     statement.expression = frog_ast.Tuple([site, site])
     rewritten = _rewrite(game)
-    last = rewritten.methods[0].block.statements[-1]
-    assert str(last).strip() == "return [S.Pick@cond0, b && S.Pick(U)];"
-    twice = _rewrite(rewritten)
-    assert str(twice.methods[0].block.statements[-1]).strip() == (
-        "return [S.Pick@cond0, S.Pick@cond1];"
+    statements = [str(s).strip() for s in rewritten.methods[0].block.statements]
+    assert statements == [
+        "Bool S.Pick@cond0 = b;",
+        "if (S.Pick@cond0) {\nS.Pick@cond0 = S.Pick(U);\n}",
+        "Bool S.Pick@cond1 = b;",
+        "if (S.Pick@cond1) {\nS.Pick@cond1 = S.Pick(U);\n}",
+        "return [S.Pick@cond0, S.Pick@cond1];",
+    ]
+
+
+def test_f372_nested_positions_with_a_temporary_in_one_call() -> None:
+    once = _rewrite(_game("Bool r = a && (b || S.Pick(U)); return r;"))
+    assert [str(s).strip() for s in once.methods[0].block.statements] == [
+        "Bool S.Pick@cond0 = a;",
+        "if (S.Pick@cond0) {\nBool S.Pick@cond1 = b;\n"
+        "if (!(S.Pick@cond1)) {\nS.Pick@cond1 = S.Pick(U);\n}\n\n"
+        "S.Pick@cond0 = S.Pick@cond1;\n}",
+        "Bool r = S.Pick@cond0;",
+        "return r;",
+    ]
+    assert _rewrite(once) is once
+
+
+def test_f372_if_condition_is_rewritten_after_its_else_if_is_split() -> None:
+    # Splitting off the else if leaves `a && S.Pick(U)` in the first
+    # condition; the same call rewrites it, before the inliner can take
+    # S.Pick(U) out of the condition.
+    once = _rewrite(
+        _game(
+            "if (a && S.Pick(U)) { return true; } else if (S.Pick(U)) "
+            "{ return false; } return false;"
+        )
     )
+    statements = once.methods[0].block.statements
+    assert [str(s).strip() for s in statements[:2]] == [
+        "Bool S.Pick@cond0 = a;",
+        "if (S.Pick@cond0) {\nS.Pick@cond0 = S.Pick(U);\n}",
+    ]
+    rest = frog_parser.parse_game(
+        "Game G() { Bool O(Bool t, Set<BitString<1>> U) { if (t) { return true; } "
+        "else { if (S.Pick(U)) { return false; } } return false; } }"
+    ).methods[0]
+    renamed = visitors.rename_value_references(rest, {"t": "S.Pick@cond0"})
+    assert statements[2:] == renamed.block.statements, str(once)
+
+
+def test_f372_challenger_call_defers_only_once_composed() -> None:
+    # While a reduction is resolved alone its challenger calls are not in the
+    # lookup: the inliner passes over them, so the && is rewritten at once.
+    # Once composed, the inliner takes challenger.Get() first.
+    game = _game("return F.h(challenger.Get(), b && S.Pick(U));")
+    scheme_only = {
+        key: method for key, method in _lookup().items() if key[0] != "challenger"
+    }
+    alone = make_conditional_calls_explicit(game, scheme_only, {})
+    assert str(alone.methods[0].block.statements[-1]).strip() == (
+        "return F.h(challenger.Get(), S.Pick@cond0);"
+    )
+    assert _rewrite(game) is game
+
+
+def _draw_guards(
+    block: frog_ast.Block, guards: tuple[str, ...] = ()
+) -> list[tuple[str, ...]]:
+    """The conditions under which each draw from `BitString<1> \\ U` (the
+    draw in S.Pick whose domain may be empty) runs: the conditions of the
+    `if` blocks around it, and the negated condition of each earlier `if`
+    whose every branch returns."""
+    found: list[tuple[str, ...]] = []
+    for statement in block.statements:
+        # `x <- T \ U;` parses as a draw from T excluding U.
+        if isinstance(statement, frog_ast.UniqueSample):
+            found.append(guards)
+        elif isinstance(statement, frog_ast.IfStatement):
+            earlier: tuple[str, ...] = ()
+            for index, inner in enumerate(statement.blocks):
+                own: tuple[str, ...] = ()
+                if index < len(statement.conditions):
+                    own = (str(statement.conditions[index]),)
+                found.extend(_draw_guards(inner, guards + earlier + own))
+                earlier += tuple(f"not {c}" for c in own)
+            returns = all(
+                inner.statements
+                and isinstance(inner.statements[-1], frog_ast.ReturnStatement)
+                for inner in statement.blocks
+            )
+            if returns and len(statement.blocks) == len(statement.conditions):
+                guards += earlier
+    return found
+
+
+def _resolve(
+    game: frog_ast.Game,
+    lookup: dict[tuple[str, str], frog_ast.Method] | None = None,
+) -> frog_ast.Game:
+    """Rewrite and inline to a fixed point, as `resolve_step_game` does."""
+    lookup = _lookup() if lookup is None else lookup
+    for _ in range(50):
+        new_game = make_conditional_calls_explicit(game, lookup, {})
+        new_game = visitors.InlineTransformer(lookup).transform(new_game)
+        if new_game == game:
+            return game
+        game = new_game
+    raise AssertionError("inlining did not converge")
+
+
+@pytest.mark.parametrize(
+    "body, guards",
+    [
+        ("return a && (b || S.Pick(U));", [("a", "not b")]),
+        (
+            "Bool r = a && (b || S.Pick(U)); return r;",
+            [("S.Pick@cond0", "!(S.Pick@cond1)")],
+        ),
+        (
+            "if (a && S.Pick(U)) { return true; } else if (S.Pick(U)) "
+            "{ return false; } return false;",
+            [("S.Pick@cond0",), ("not S.Pick@cond0",)],
+        ),
+        ("return [S.Free(U), b && S.Pick(U)];", [("S.Pick@cond0",)]),
+    ],
+    ids=["nested_return", "nested_temporary", "else_if_after_site", "deferred"],
+)
+def test_f372_inlining_keeps_every_draw_guarded(
+    body: str, guards: list[tuple[str, ...]]
+) -> None:
+    # The rewriter and the inliner alternate; a draw that may not complete
+    # must stay under the conditions that guard its call.
+    resolved = _resolve(_game(body))
+    assert _draw_guards(resolved.methods[0].block) == guards, str(resolved)
+
+
+def test_f372_inlining_keeps_a_draw_guarded_before_composition() -> None:
+    scheme_only = {
+        key: method for key, method in _lookup().items() if key[0] != "challenger"
+    }
+    resolved = _resolve(
+        _game("return F.h(challenger.Get(), b && S.Pick(U));"), scheme_only
+    )
+    assert _draw_guards(resolved.methods[0].block) == [("S.Pick@cond0",)], str(resolved)

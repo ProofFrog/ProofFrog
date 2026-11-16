@@ -1,0 +1,18 @@
+import 'Picker.primitive';
+// Distinguisher: Test(false, {0b0, 0b1}, {}). Left: a is false, so Pick(S)
+// is not evaluated; Pick(T) completes and Test returns false. Right runs
+// Pick(S), whose draw cannot complete.
+Game Left(Picker P) {
+    Bool Test(Bool a, Set<BitString<1>> S, Set<BitString<1>> T) {
+        if (a && P.Pick(S)) { return true; } else if (P.Pick(T)) { return false; }
+        return false;
+    }
+}
+Game Right(Picker P) {
+    Bool Test(Bool a, Set<BitString<1>> S, Set<BitString<1>> T) {
+        Bool t = P.Pick(S);
+        if (a && t) { return true; } else if (P.Pick(T)) { return false; }
+        return false;
+    }
+}
+export as TT_elseif_first;

@@ -1,0 +1,12 @@
+// A stateless oracle pair: Get returns true, Second returns its second argument.
+Game Left() {
+    Void Initialize() { }
+    Bool Get() { return true; }
+    Bool Second(Bool g, Bool v) { return v; }
+}
+Game Right() {
+    Void Initialize() { }
+    Bool Get() { return true; }
+    Bool Second(Bool g, Bool v) { return v; }
+}
+export as Echo;

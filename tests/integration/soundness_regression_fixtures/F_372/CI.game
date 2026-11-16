@@ -1,0 +1,13 @@
+// Initialize records 0 in M; Has reveals whether it did. Not calling
+// Initialize leaves M empty.
+Game Left() {
+    Map<Int, Int> M;
+    Bool Initialize() { M[0] = 1; return true; }
+    Bool Has() { return 0 in M; }
+}
+Game Right() {
+    Map<Int, Int> M;
+    Bool Initialize() { M[0] = 1; return true; }
+    Bool Has() { return 0 in M; }
+}
+export as CI;

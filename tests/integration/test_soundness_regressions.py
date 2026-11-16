@@ -315,6 +315,18 @@ CASES = [
      "b && P.Pick(S) is the guarded if (b) { return P.Pick(S); } return false;"),
     ("F-372", "control_no_effect.proof", "accept", "method inliner",
      "positive control: a call with no effect may still run on every trace"),
+    ("F-372", "nested.proof", "reject", "method inliner",
+     "the call in a && (b || f(x)) ran whenever a held, also when b did"),
+    ("F-372", "nested_guarded_control.proof", "accept", "method inliner",
+     "a && (b || P.Pick(S)) is its explicit short-circuit form"),
+    ("F-372", "elseif_first.proof", "reject", "method inliner",
+     "after an else if was split off, a call in the first condition's && ran"),
+    ("F-372", "elseif_first_control.proof", "accept", "method inliner",
+     "an if with a && site and an else if call is its explicit form"),
+    ("F-372", "deferred_challenger.proof", "reject", "method inliner",
+     "a && after a challenger call ran on every trace; hop 3 is the false one"),
+    ("F-372", "init_and.proof", "type_error", "method inliner",
+     "challenger.Initialize in the right operand of && ran on every trace"),
     ("F-373", "param_write.proof", "reject", "method inliner",
      "a callee's x = 0^n; on its parameter assigned the caller's variable"),
     ("F-373", "param_element_write.proof", "reject", "method inliner",
@@ -796,6 +808,10 @@ TYPE_ERROR = {
         "error: The size in BitString<n> names local 'n', which is assigned or"
         " sampled"
     ),
+    ("F-372", "init_and.proof"): (
+        "error: R.Initialize must call challenger.Initialize where it is"
+        " always evaluated, not in the right operand of && or ||"
+    ),
     ("F-356", "field_init_int_compare.proof"): (
         "error: Cannot compare different types ModInt<q> and Int"
     ),
@@ -1003,6 +1019,9 @@ TYPE_ERROR = {
 FAILED_STEP = {
     ("F-372", "challenger_and_guarded.proof"): (
         "Step 3 failed: Counter().Right compose R() -> TG().Right"
+    ),
+    ("F-372", "deferred_challenger.proof"): (
+        "Step 3 failed: Echo().Right compose R(P) -> TT_temp(P).Right"
     ),
     ("F-373", "challenger_write.proof"): (
         "Step 1 failed: Probe(n).Left -> Echo(n).Left compose R(n)"

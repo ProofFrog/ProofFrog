@@ -22,9 +22,14 @@ explicit control flow before the inliner reaches the call:
   (``if (!t)``) in front of the statement, which then reads ``t``.
 
 Only a position whose right operand makes such a call is rewritten, so every
-other call is inlined exactly as before. A position is rewritten only when
-its statement evaluates no inlinable or ``challenger`` call before it: the
-inliner takes that earlier call first, so the effects keep their order.
+other call is inlined exactly as before. The statements a rewrite produces
+are rewritten in turn before the inliner runs, so nested positions
+(``a && (b || f(x))``) and the first condition of an ``if`` whose
+``else if`` was split off are covered too. A position is rewritten only when
+its statement evaluates no call before it that the inliner inlines in this
+pass: the inliner takes that earlier call first, so the effects keep their
+order. (A ``challenger`` call counts only once the reduction is composed;
+see :func:`_inliner_takes_first`.)
 """
 
 from __future__ import annotations
@@ -63,12 +68,19 @@ def _callee_key(node: frog_ast.ASTNode, lookup: MethodLookup) -> Optional[Method
     return key if key in lookup else None
 
 
-def _orders_effects(node: frog_ast.ASTNode, lookup: MethodLookup) -> bool:
-    """True when *node* is a call whose place among the effects of a
-    statement matters: one the inliner inlines, or a ``challenger`` call
-    (inlined once the reduction is composed)."""
-    key = _method_call(node)
-    return key is not None and (key in lookup or key[0] == "challenger")
+def _inliner_takes_first(node: frog_ast.ASTNode, lookup: MethodLookup) -> bool:
+    """True when *node* is a call the inliner takes in this pass, before any
+    call that comes after it in its statement.
+
+    A ``challenger`` call qualifies only once the reduction is composed (its
+    methods are then in *lookup*). While a reduction is resolved alone, the
+    inliner passes over it and takes the reduction's own calls after it, so
+    waiting for it would leave a conditional call to be inlined
+    unconditionally. Rewriting the position then puts the call's body in
+    front of the challenger call, where the inliner already puts the body
+    of every unconditional call the reduction makes after one; the
+    challenger's variables are its own and cannot be the reduction's."""
+    return _callee_key(node, lookup) is not None
 
 
 # The attribute holding the name each binder statement declares.
@@ -285,7 +297,7 @@ class _SiteFinder:
                     found = self.find(item)
                     if found is not None or self.deferred:
                         return found
-        if _orders_effects(node, self.oracle.lookup):
+        if _inliner_takes_first(node, self.oracle.lookup):
             self.seen_call = True
         return None
 
@@ -344,6 +356,9 @@ class _Rewriter:
             index += 1
         name = f"{base}{index}"
         self.taken.add(name)
+        # The rewritten statement reads the temporary where the site was, so
+        # a site found in it later can still tell a Boolean `||` by it.
+        self.type_map.set(name, frog_ast.BoolType())
         return name
 
     def rewrite_method(self, method: frog_ast.Method) -> frog_ast.Method:
@@ -361,17 +376,31 @@ class _Rewriter:
         new_statements: list[frog_ast.Statement] = []
         changed = False
         for statement in block.statements:
-            inner = self._rewrite_nested(statement)
-            replacement = self._rewrite_statement(inner)
-            if replacement is None:
-                new_statements.append(inner)
-                changed = changed or inner is not statement
-            else:
-                new_statements.extend(replacement)
-                changed = True
+            rewritten = self._rewrite_all(statement)
+            new_statements.extend(rewritten)
+            changed = changed or len(rewritten) != 1 or rewritten[0] is not statement
         if not changed:
             return block
         return frog_ast.Block(new_statements)
+
+    def _rewrite_all(self, statement: frog_ast.Statement) -> list[frog_ast.Statement]:
+        """The statements replacing *statement*, with every site in them
+        rewritten, those a rewrite produces included.
+
+        The inliner runs between two calls of this rewriter and takes the
+        first call it finds, so a site left for the next call would be
+        inlined first: the inner position of ``a && (b || f(x))`` once the
+        outer one is a guarded ``return``, or a site in the first condition
+        of an ``if`` whose ``else if`` was just split off. Each rewrite
+        removes one ``&&`` / ``||`` or one ``else if``, so this ends."""
+        inner = self._rewrite_nested(statement)
+        replacement = self._rewrite_statement(inner)
+        if replacement is None:
+            return [inner]
+        result: list[frog_ast.Statement] = []
+        for new_statement in replacement:
+            result.extend(self._rewrite_all(new_statement))
+        return result
 
     def _rewrite_nested(self, statement: frog_ast.Statement) -> frog_ast.Statement:
         """*statement* with the blocks nested in it rewritten."""

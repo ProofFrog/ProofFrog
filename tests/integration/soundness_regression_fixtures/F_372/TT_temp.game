@@ -1,0 +1,20 @@
+import 'Picker.primitive';
+// Left is b && P.Pick(S) written with a temporary: Pick runs only when b
+// holds. Right runs Pick on every trace. Distinguisher: Test(false,
+// {0b0, 0b1}) returns false on Left and never returns on Right.
+Game Left(Picker P) {
+    Bool Test(Bool b, Set<BitString<1>> S) {
+        Bool t = b;
+        if (t) {
+            t = P.Pick(S);
+        }
+        return t;
+    }
+}
+Game Right(Picker P) {
+    Bool Test(Bool b, Set<BitString<1>> S) {
+        Bool t = P.Pick(S);
+        return b && t;
+    }
+}
+export as TT_temp;

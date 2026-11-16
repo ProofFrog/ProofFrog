@@ -1,0 +1,27 @@
+// F-398 positive control: ArgCapControl(p, c).Real, the intermediate game
+// Renamed(p, c) and ArgCapControl(p, c).Fake differ only in the name of
+// Oracle's parameter (m, u, m), so each hop verifies only if Standardize
+// Parameters still renames both parameters to arg1. The let: Int c the
+// Oracles read is not a minted name. Expected: Proof Succeeded!
+import 'P.primitive';
+import 'ArgCapControl.game';
+
+Game Renamed(P p, Int c) {
+    Int Oracle(Int u) {
+        return u + c;
+    }
+}
+
+proof:
+
+let:
+    P p = P();
+    Int c;
+
+theorem:
+    ArgCapControl(p, c);
+
+games:
+    ArgCapControl(p, c).Real against ArgCapControl(p, c).Adversary;
+    Renamed(p, c) against ArgCapControl(p, c).Adversary;
+    ArgCapControl(p, c).Fake against ArgCapControl(p, c).Adversary;

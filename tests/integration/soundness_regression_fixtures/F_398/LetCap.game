@@ -1,0 +1,42 @@
+// F-398: Real's Oracle returns the game parameter field1, which the proof
+// passes its let: Int field1; Fake's Oracle returns the field x, which holds
+// p.Gen(1). Distinguisher: Oracle() returns the fixed let: value in Real and
+// p.Gen(1) in Fake. After instantiation field1 is a name the game reads but
+// does not bind. Standardize Field Names renamed the field x to field1
+// without checking such names, so Real's `return field1;` (the let: value)
+// and Fake's renamed `return x;` printed alike and the hop was accepted.
+import 'P.primitive';
+
+Game Real(P p, Int field1) {
+    Int x;
+
+    Void Initialize() {
+        x = p.Gen(1);
+    }
+
+    Int Oracle() {
+        return field1;
+    }
+
+    Int Peek() {
+        return x;
+    }
+}
+
+Game Fake(P p, Int field1) {
+    Int x;
+
+    Void Initialize() {
+        x = p.Gen(1);
+    }
+
+    Int Oracle() {
+        return x;
+    }
+
+    Int Peek() {
+        return x;
+    }
+}
+
+export as LetCap;

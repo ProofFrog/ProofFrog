@@ -1,0 +1,22 @@
+// F-398: Real's Oracle(m) returns its argument m; Fake's Oracle(m) returns
+// the game parameter arg1, which the proof passes its let: Int arg1.
+// Distinguisher: two calls with different arguments return both in Real and
+// the same fixed value in Fake. After instantiation arg1 is a name Fake's
+// Oracle reads but does not bind. Standardize Parameters renamed each
+// Oracle's parameter m to arg1, checking only body binders and fields, so
+// both Oracles printed `return arg1;` and the hop was accepted.
+import 'P.primitive';
+
+Game Real(P p, Int arg1) {
+    Int Oracle(Int m) {
+        return m;
+    }
+}
+
+Game Fake(P p, Int arg1) {
+    Int Oracle(Int m) {
+        return arg1;
+    }
+}
+
+export as ArgCap;

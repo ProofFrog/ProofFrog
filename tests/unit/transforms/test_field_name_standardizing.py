@@ -360,3 +360,114 @@ def test_f326_swap_still_renames_every_reference() -> None:
     assert "b = a;" in text
     assert "Int v = a + 1;" in text
     assert "return v + b;" in text
+
+
+# ---------------------------------------------------------------------------
+# F-398: a minted fieldN must not be a name the game reads but does not bind
+# ---------------------------------------------------------------------------
+
+
+def test_f398_declines_when_a_method_reads_a_free_name_of_the_target() -> None:
+    """After instantiation a proof let: Int `field1` the game reads is a free
+    name. Renaming the field `x` to `field1` would make `return field1;` read
+    the field, so the rename is declined."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int x;
+            Void Initialize() { x = 1; }
+            Int Oracle() { return field1; }
+            Int Peek() { return x; }
+        }
+        """)
+    result = standardize_field_names(game, _ctx())
+    assert [f.name for f in result.fields] == ["x"]
+    assert "return field1;" in str(result.methods[1])
+    assert "return x;" in str(result.methods[2])
+
+
+def test_f398_declines_when_a_game_parameter_has_the_target_name() -> None:
+    """A game parameter `field1` binds that name for the whole game: a field
+    renamed to it would capture the parameter's reads."""
+    game = frog_parser.parse_game("""
+        Game G(Int field1) {
+            Int x;
+            Int Oracle() { return field1; }
+            Int Peek() { return x; }
+        }
+        """)
+    result = _apply_field_rename(game, {"x": "field1"}, _ctx())
+    assert result is game
+
+
+def test_f398_declines_when_a_field_initializer_reads_the_target_name() -> None:
+    """A free name read outside the methods (here a field's initializer) is
+    taken as well."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int x;
+            Int y = field1;
+            Int Peek() { return x + y; }
+        }
+        """)
+    result = _apply_field_rename(game, {"x": "field1", "y": "field2"}, _ctx())
+    assert result is game
+
+
+def test_f398_declines_when_a_kept_field_has_the_target_name() -> None:
+    """A rename that gives a field the name of a field it keeps would fuse
+    the two fields."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int x;
+            Int field1;
+            Int Peek() { return x + field1; }
+        }
+        """)
+    result = _apply_field_rename(game, {"x": "field1"}, _ctx())
+    assert result is game
+
+
+def test_f398_free_name_out_of_scope_of_a_binder_still_declines() -> None:
+    """A free `field1` is taken even if another method binds a parameter of
+    that name: the read in Oracle is still free."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int x;
+            Int Oracle() { return field1; }
+            Int Echo(Int field1) { return field1; }
+            Int Peek() { return x; }
+        }
+        """)
+    result = _apply_field_rename(game, {"x": "field1"}, _ctx())
+    assert result is game
+
+
+def test_f398_name_a_binder_covers_is_not_free() -> None:
+    """A method parameter `field1` covers its reads, so they are not free:
+    with no renamed reference in its scope, the rename goes ahead."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int x;
+            Int Echo(Int field1) { return field1; }
+            Int Peek() { return x; }
+        }
+        """)
+    result = _apply_field_rename(game, {"x": "field1"}, _ctx())
+    assert [f.name for f in result.fields] == ["field1"]
+    assert "return field1;" in str(result.methods[0])
+    assert "return field1;" in str(result.methods[1])
+
+
+def test_f398_free_name_that_is_not_a_target_does_not_decline() -> None:
+    """Only minted names matter: a free `field3` in a game with two fields
+    does not clash with field1 or field2."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int x;
+            Int y;
+            Int Peek() { return x + y + field3; }
+        }
+        """)
+    result = standardize_field_names(game, _ctx())
+    assert [f.name for f in result.fields] == ["field1", "field2"]
+    assert "return field1 + field2 + field3;" in str(result.methods[0])

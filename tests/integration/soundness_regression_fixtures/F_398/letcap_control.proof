@@ -1,0 +1,18 @@
+// F-398 positive control: LetCapControl(p, c).Real and
+// LetCapControl(p, c).Fake are interchangeable (see LetCapControl.game).
+// Expected: Proof Succeeded!
+import 'P.primitive';
+import 'LetCapControl.game';
+
+proof:
+
+let:
+    P p = P();
+    Int c;
+
+theorem:
+    LetCapControl(p, c);
+
+games:
+    LetCapControl(p, c).Real against LetCapControl(p, c).Adversary;
+    LetCapControl(p, c).Fake against LetCapControl(p, c).Adversary;

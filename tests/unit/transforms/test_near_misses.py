@@ -5898,3 +5898,134 @@ def test_field_lex_min_near_miss_on_capturing_parameter() -> None:
     assert misses
     assert misses[0].method == "Oracle"
     assert misses[0].variable == "field2"
+
+
+# ---------------------------------------------------------------------------
+# F-398: a canonical name the game reads but does not bind is taken
+# ---------------------------------------------------------------------------
+
+
+def test_standardize_field_names_near_miss_on_free_target_name() -> None:
+    from proof_frog.transforms.standardization import StandardizeFieldNames
+
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int x;
+            Int Oracle() {
+                return field1;
+            }
+            Int Peek() {
+                return x;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = StandardizeFieldNames().apply(game, ctx)
+    assert [f.name for f in result.fields] == ["x"]
+    misses = _f326_misses(ctx, "Standardize Field Names")
+    assert misses
+    assert misses[0].method == "Oracle"
+    assert misses[0].variable == "field1"
+    assert "'Oracle' reads 'field1', which is not one of the game's fields" in (
+        misses[0].reason
+    )
+    assert misses[0].suggestion is not None
+    assert "not of the form field<N>" in misses[0].suggestion
+
+
+def test_standardize_field_names_near_miss_on_free_name_outside_methods() -> None:
+    from proof_frog.transforms.standardization import StandardizeFieldNames
+
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int x;
+            Int y = field2;
+            Int Peek() {
+                return x + y;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    StandardizeFieldNames().apply(game, ctx)
+    misses = _f326_misses(ctx, "Standardize Field Names")
+    assert misses
+    assert misses[0].method is None
+    assert misses[0].variable == "field2"
+    assert "a game parameter's or field's declaration reads 'field2'" in (
+        misses[0].reason
+    )
+
+
+def test_standardize_field_names_no_near_miss_on_free_non_target_name() -> None:
+    from proof_frog.transforms.standardization import StandardizeFieldNames
+
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int x;
+            Int Oracle() {
+                return c;
+            }
+            Int Peek() {
+                return x;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = StandardizeFieldNames().apply(game, ctx)
+    assert [f.name for f in result.fields] == ["field1"]
+    assert not _f326_misses(ctx, "Standardize Field Names")
+
+
+def test_standardize_parameters_near_miss_on_free_target_name() -> None:
+    from proof_frog.transforms.standardization import StandardizeParameters
+
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int Oracle(Int m) {
+                return arg1;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = StandardizeParameters().apply(game, ctx)
+    assert "Int Oracle(Int m)" in str(result)
+    misses = _f326_misses(ctx, "Standardize Parameters")
+    assert len(misses) == 1
+    assert misses[0].method == "Oracle"
+    assert misses[0].variable == "arg1"
+    assert "a name the method reads but does not bind" in misses[0].reason
+
+
+def test_standardize_parameters_near_miss_on_binder_target_name() -> None:
+    from proof_frog.transforms.standardization import StandardizeParameters
+
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int arg1;
+            Int Oracle(Int m) {
+                return m + arg1;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    StandardizeParameters().apply(game, ctx)
+    misses = _f326_misses(ctx, "Standardize Parameters")
+    assert len(misses) == 1
+    assert misses[0].variable == "arg1"
+    assert "a field or a name the method binds" in misses[0].reason
+
+
+def test_standardize_parameters_no_near_miss_on_free_non_target_name() -> None:
+    from proof_frog.transforms.standardization import StandardizeParameters
+
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int Oracle(Int m) {
+                return m + c;
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = StandardizeParameters().apply(game, ctx)
+    assert "Int Oracle(Int arg1)" in str(result)
+    assert not _f326_misses(ctx, "Standardize Parameters")

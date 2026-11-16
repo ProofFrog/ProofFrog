@@ -1188,6 +1188,18 @@ def check_proof_well_formed(
                 )
         # Always visit to register the type in the checker's scope
         type_check_visitor.visit(let)
+    # A let: value is a constant (ruling Q13), read as its expression at
+    # every use, so a value that makes a non-deterministic call is
+    # ill-formed: each use would make the call again (F-389, F-395).
+    for let in proof_engine.nondeterministic_let_values(
+        proof.lets, proof.sampled_let_names, import_namespace
+    ):
+        assert let.value is not None
+        print_error(
+            let,
+            str(proof_engine.UnsupportedLetEntryError(let.name, let.value)),
+            file_name,
+        )
     for assumption in proof.assumptions:
         type_check_visitor.visit(frog_ast.notion_game(assumption))
     for lemma in proof.lemmas:

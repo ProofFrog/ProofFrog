@@ -1,0 +1,20 @@
+// The let: entry c calls the non-deterministic method R.Draw(), so it holds
+// one draw. Read as R.Draw() at every use, Left's [c, c] would become
+// Right's two independent draws, and the distinguishable pair would verify.
+// A let: value is a constant, so such an entry is ill-formed.
+import 'Drawer.primitive';
+import 'letdraw.game';
+
+proof:
+
+let:
+    Int n;
+    Drawer R;
+    BitString<n> c = R.Draw();
+
+theorem:
+    LetDraw(n, R, c);
+
+games:
+    LetDraw(n, R, c).Left against LetDraw(n, R, c).Adversary;
+    LetDraw(n, R, c).Right against LetDraw(n, R, c).Adversary;

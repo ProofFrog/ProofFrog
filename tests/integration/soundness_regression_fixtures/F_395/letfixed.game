@@ -1,0 +1,17 @@
+import 'Drawer.primitive';
+
+// c is the deterministic Fixed()'s value: reading it twice is calling
+// Fixed twice.
+Game Left(Int n, Drawer R, BitString<n> c) {
+    [BitString<n>, BitString<n>] Get() {
+        return [c, c];
+    }
+}
+
+Game Right(Int n, Drawer R, BitString<n> c) {
+    [BitString<n>, BitString<n>] Get() {
+        return [R.Fixed(), R.Fixed()];
+    }
+}
+
+export as LetFixed;

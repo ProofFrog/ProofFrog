@@ -521,7 +521,7 @@ For example, `Security(G).Real compose R(G, T)` produces a game where:
 3. The combined state includes both `R`'s fields and `Security(G).Real`'s fields.
 
 The composition merges the `Initialize` methods:
-- If both the reduction and the composed game have `Initialize`, the reduction's `Initialize` may explicitly call `challenger.Initialize()` to invoke the composed game's initialization.
+- If both the reduction and the composed game have `Initialize`, the reduction's `Initialize` may explicitly call `challenger.Initialize()` to invoke the composed game's initialization. The call must be made exactly where it always runs: once, in a top-level statement of the reduction's `Initialize` (not inside a loop or branch, nor in the right operand of `&&` or `||`), before any other challenger call. The type checker refuses any other placement.
 - The resulting game's initialization runs both, establishing the combined initial state.
 - The fields are initialized first, the challenger's and then the reduction's. A reduction field initializer may call the challenger only when the challenger has no `Initialize`, and may never call `challenger.Initialize` (section 6.2).
 

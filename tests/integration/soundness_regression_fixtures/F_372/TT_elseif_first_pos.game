@@ -1,0 +1,27 @@
+import 'Picker.primitive';
+// An if whose first condition is a && P.Pick(S) and whose else if calls
+// P.Pick(T), against its explicit short-circuit form: the same game, so
+// the proof must verify.
+Game Left(Picker P) {
+    Bool Test(Bool a, Set<BitString<1>> S, Set<BitString<1>> T) {
+        if (a && P.Pick(S)) { return true; } else if (P.Pick(T)) { return false; }
+        return false;
+    }
+}
+Game Right(Picker P) {
+    Bool Test(Bool a, Set<BitString<1>> S, Set<BitString<1>> T) {
+        Bool t = a;
+        if (t) {
+            t = P.Pick(S);
+        }
+        if (t) {
+            return true;
+        } else {
+            if (P.Pick(T)) {
+                return false;
+            }
+        }
+        return false;
+    }
+}
+export as TT_elseif_first_pos;

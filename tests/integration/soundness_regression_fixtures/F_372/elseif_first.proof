@@ -1,0 +1,16 @@
+import 'Picker.primitive';
+import 'PickImpl.scheme';
+import 'TT_elseif_first.game';
+
+// An if whose first condition is a && P.Pick(S) and whose else if calls
+// P.Pick(T). The engine used to split off the else if and leave the first
+// condition to the inliner, which ran P.Pick(S) also when a was false.
+proof:
+let:
+    PickImpl P = PickImpl();
+assume:
+theorem:
+    TT_elseif_first(P);
+games:
+    TT_elseif_first(P).Left against TT_elseif_first(P).Adversary;
+    TT_elseif_first(P).Right against TT_elseif_first(P).Adversary;

@@ -1,0 +1,16 @@
+import 'Picker.primitive';
+import 'PickImpl.scheme';
+import 'TT_nested.game';
+
+// A call nested two conditional positions deep: a && (b || P.Pick(S)). The
+// engine used to give only the outer && explicit control flow before
+// inlining, so Pick ran whenever a held, also when b already decided ||.
+proof:
+let:
+    PickImpl P = PickImpl();
+assume:
+theorem:
+    TT_nested(P);
+games:
+    TT_nested(P).Left against TT_nested(P).Adversary;
+    TT_nested(P).Right against TT_nested(P).Adversary;

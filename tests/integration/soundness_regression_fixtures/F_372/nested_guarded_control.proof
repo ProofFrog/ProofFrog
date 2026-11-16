@@ -1,0 +1,15 @@
+import 'Picker.primitive';
+import 'PickImpl.scheme';
+import 'TT_nested_pos.game';
+
+// Positive control for nested.proof: a && (b || P.Pick(S)) is the same game
+// as its explicit short-circuit form, and the engine proves it.
+proof:
+let:
+    PickImpl P = PickImpl();
+assume:
+theorem:
+    TT_nested_pos(P);
+games:
+    TT_nested_pos(P).Left against TT_nested_pos(P).Adversary;
+    TT_nested_pos(P).Right against TT_nested_pos(P).Adversary;

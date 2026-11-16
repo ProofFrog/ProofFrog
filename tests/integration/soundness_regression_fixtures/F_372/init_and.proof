@@ -1,0 +1,27 @@
+import 'CI.game';
+import 'TI.game';
+
+// The reduction calls challenger.Initialize only when its coin b is true,
+// so composed with CI it is TI().Left (hop 1 true, hop 3 false). The engine
+// used to inline the challenger's Initialize on every trace, accepting
+// hop 3. Such a call may run not at all, like one inside a branch, so the
+// type checker now refuses it.
+Reduction R() compose CI() against TI().Adversary {
+    Void Initialize() {
+        Bool b <- Bool;
+        Bool r = b && challenger.Initialize();
+    }
+    Bool Has() { return challenger.Has(); }
+}
+
+proof:
+let:
+assume:
+    CI();
+theorem:
+    TI();
+games:
+    TI().Left against TI().Adversary;
+    CI().Left compose R() against TI().Adversary;
+    CI().Right compose R() against TI().Adversary;
+    TI().Right against TI().Adversary;

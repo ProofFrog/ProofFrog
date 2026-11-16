@@ -852,8 +852,9 @@ def check_challenger_init_placement(
 
     Only the reduction's own ``Initialize`` may call it, as (part of) a
     top-level statement -- not inside a loop or branch, where it could run
-    several times or not at all -- and no challenger call may be evaluated
-    before it, in an earlier statement or in the same one.
+    several times or not at all, nor in the right operand of ``&&`` or
+    ``||`` -- and no challenger call may be evaluated before it, in an
+    earlier statement or in the same one.
 
     The reduction's field initializers run before its ``Initialize``, so one
     may not call ``challenger.Initialize``, nor, when the challenger has an
@@ -899,6 +900,12 @@ def check_challenger_init_placement(
                     f"{reduction.name}.Initialize calls the challenger before"
                     " challenger.Initialize"
                 )
+            if _in_right_operand_of_and_or(nodes):
+                return (
+                    f"{reduction.name}.Initialize must call challenger.Initialize"
+                    " where it is always evaluated, not in the right operand of"
+                    " && or ||"
+                )
             break
     return None
 
@@ -927,6 +934,24 @@ def challenger_call_in_field_initializer(
                 " run before Initialize"
             )
     return None
+
+
+def _in_right_operand_of_and_or(nodes: list[object]) -> bool:
+    """Whether a ``challenger.Initialize`` call among *nodes* sits in the
+    right operand of a ``&&`` or ``||``. A Boolean ``&&`` / ``||`` evaluates
+    that operand only when the left one does not decide the result, so the
+    call could run not at all, like one inside a branch, while the composed
+    game would run the challenger's ``Initialize`` on every trace (F-372).
+    A concatenation ``||`` evaluates both operands, but without types the
+    two cannot be told apart here, so it is refused too."""
+    return any(
+        isinstance(node, frog_ast.BinaryOperation)
+        and node.operator in (frog_ast.BinaryOperators.AND, frog_ast.BinaryOperators.OR)
+        and any(
+            is_challenger_init_call(inner) for inner in _walk(node.right_expression)
+        )
+        for node in nodes
+    )
 
 
 def _is_challenger_call(node: object) -> bool:

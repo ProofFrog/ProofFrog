@@ -1,0 +1,19 @@
+import 'Picker.primitive';
+// Distinguisher: Test(true, true, {0b0, 0b1}). Left returns true (b is
+// true, so P.Pick(S) is not evaluated); Right runs Pick, whose draw cannot
+// complete.
+Game Left(Picker P) {
+    Bool Test(Bool a, Bool b, Set<BitString<1>> S) {
+        return a && (b || P.Pick(S));
+    }
+}
+Game Right(Picker P) {
+    Bool Test(Bool a, Bool b, Set<BitString<1>> S) {
+        if (a) {
+            Bool t = P.Pick(S);
+            return b || t;
+        }
+        return false;
+    }
+}
+export as TT_nested;

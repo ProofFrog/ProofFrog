@@ -1,0 +1,15 @@
+import 'Picker.primitive';
+import 'PickImpl.scheme';
+import 'TT_elseif_first_pos.game';
+
+// Positive control for elseif_first.proof: the same if against its explicit
+// short-circuit form, which the engine proves equal.
+proof:
+let:
+    PickImpl P = PickImpl();
+assume:
+theorem:
+    TT_elseif_first_pos(P);
+games:
+    TT_elseif_first_pos(P).Left against TT_elseif_first_pos(P).Adversary;
+    TT_elseif_first_pos(P).Right against TT_elseif_first_pos(P).Adversary;

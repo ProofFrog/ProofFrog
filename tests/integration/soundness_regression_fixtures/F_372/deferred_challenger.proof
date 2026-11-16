@@ -1,0 +1,31 @@
+import 'Picker.primitive';
+import 'PickImpl.scheme';
+import 'Echo.game';
+import 'TT_temp.game';
+
+// The reduction evaluates challenger.Get() and then b && P.Pick(S), and
+// returns the latter: composed with Echo it is TT_temp(P).Left, so hop 1 is
+// true and hop 3 false. While the reduction was resolved alone, the engine
+// used to wait for the challenger call (which is inlined only once the
+// reduction is composed) before giving the && explicit control flow, and
+// meanwhile inlined P.Pick(S) on every trace: hop 3 verified and hop 1
+// failed.
+Reduction R(Picker P) compose Echo() against TT_temp(P).Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    Bool Test(Bool b, Set<BitString<1>> S) {
+        return challenger.Second(challenger.Get(), b && P.Pick(S));
+    }
+}
+
+proof:
+let:
+    PickImpl P = PickImpl();
+assume:
+    Echo();
+theorem:
+    TT_temp(P);
+games:
+    TT_temp(P).Left against TT_temp(P).Adversary;
+    Echo().Left compose R(P) against TT_temp(P).Adversary;
+    Echo().Right compose R(P) against TT_temp(P).Adversary;
+    TT_temp(P).Right against TT_temp(P).Adversary;

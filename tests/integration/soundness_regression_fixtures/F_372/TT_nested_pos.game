@@ -1,0 +1,20 @@
+import 'Picker.primitive';
+// a && (b || P.Pick(S)) against its explicit short-circuit form: the same
+// game, so the proof must verify.
+Game Left(Picker P) {
+    Bool Test(Bool a, Bool b, Set<BitString<1>> S) {
+        return a && (b || P.Pick(S));
+    }
+}
+Game Right(Picker P) {
+    Bool Test(Bool a, Bool b, Set<BitString<1>> S) {
+        if (a) {
+            if (b) {
+                return true;
+            }
+            return P.Pick(S);
+        }
+        return false;
+    }
+}
+export as TT_nested_pos;

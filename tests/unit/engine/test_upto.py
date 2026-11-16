@@ -570,6 +570,36 @@ def test_placement_rule_rejects_conditional_initialize(tmp_path: Path) -> None:
     assert msg is not None and "top-level" in msg
 
 
+@pytest.mark.parametrize("operator", ["&&", "||"])
+def test_placement_rule_rejects_initialize_in_right_operand(
+    tmp_path: Path, operator: str
+) -> None:
+    # F-372: the right operand of && or || may not be evaluated, so the call
+    # could run not at all, like one inside a branch.
+    src = _placement_proof(tmp_path, "challenger.Eq(c)")
+    src.write_text(
+        src.read_text().replace(
+            "Void Initialize() { challenger.Initialize();  }",
+            "Void Initialize() { Bool z <- Bool; "
+            f"Bool r = z {operator} challenger.Initialize(); }}",
+        )
+    )
+    msg = upto.check_challenger_init_placement(_reduction(src))
+    assert msg is not None and "always evaluated" in msg
+
+
+def test_placement_rule_accepts_initialize_in_left_operand(tmp_path: Path) -> None:
+    src = _placement_proof(tmp_path, "challenger.Eq(c)")
+    src.write_text(
+        src.read_text().replace(
+            "Void Initialize() { challenger.Initialize();  }",
+            "Void Initialize() { Bool z <- Bool; "
+            "Bool r = challenger.Initialize() && z; }",
+        )
+    )
+    assert upto.check_challenger_init_placement(_reduction(src)) is None
+
+
 def test_placement_rule_accepts_returned_initialize(tmp_path: Path) -> None:
     src = _placement_proof(tmp_path, "challenger.Eq(c)")
     src.write_text(

@@ -1,0 +1,5 @@
+// An opaque primitive whose Gen is not deterministic, so each call stays a
+// call and a field holding one is neither folded nor inlined.
+Primitive P() {
+    Int Gen(Int i);
+}

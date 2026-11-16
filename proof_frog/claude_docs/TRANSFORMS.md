@@ -175,7 +175,8 @@ The standardization pipeline runs once after the core pipeline converges.
 | Pass | Description |
 |---|---|
 | VariableStandardize | Renames explicit local binders (typed assignments and samples, bare declarations, loop binders) to v1, v2, ... per method, by a scope walk. Untyped writes follow their binder. Field, parameter, type and free names are reserved. |
-| StandardizeFieldNames | Normalizes field names to canonical ordering. Two-phase: rename by oracle first-read order, then regroup by type. |
+| StandardizeParameters | Renames each method's parameters to arg1, arg2, ... by position. Declines a method when a target name is a body binder, a field, or another name the method reads (such as a proof `let:` entry). |
+| StandardizeFieldNames | Normalizes field names to canonical ordering. Two-phase: rename by oracle first-read order, then regroup by type. Declines when a target name is a type name, a game parameter, a field it keeps, or a name the game reads where nothing binds it (such as a proof `let:` entry). |
 | NormalizeCommutativeChains | Re-sorts commutative chains after field/variable renaming. |
 | BubbleSortFieldAssignments | Sorts field assignments into canonical dependency order: swaps two adjacent whole-field writes, lower field name first, when the later one has no edge to the earlier in the dependency graph. It permutes the graph's own nodes, which compare by identity, so two equal statements keep their own edges. |
 | StabilizeIndependentStatements | Sorts independent statements by value expression for deterministic ordering. Uses the TopologicalSort dependency graph, so a draw whose domain may be empty is never moved across an `if` that returns. |

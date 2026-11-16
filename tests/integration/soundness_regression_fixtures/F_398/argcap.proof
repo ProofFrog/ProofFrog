@@ -1,0 +1,18 @@
+// F-398: claims ArgCap(p, arg1).Real and ArgCap(p, arg1).Fake are
+// interchangeable. They are not (see ArgCap.game). Sound engine:
+// Proof Failed!
+import 'P.primitive';
+import 'ArgCap.game';
+
+proof:
+
+let:
+    P p = P();
+    Int arg1;
+
+theorem:
+    ArgCap(p, arg1);
+
+games:
+    ArgCap(p, arg1).Real against ArgCap(p, arg1).Adversary;
+    ArgCap(p, arg1).Fake against ArgCap(p, arg1).Adversary;

@@ -1,0 +1,39 @@
+// F-398 positive control: the games read the let: Int c, which is not a
+// name the field rename mints, and differ only in their field's name (x in
+// Real, y in Fake). They are interchangeable, and the hop verifies only if
+// Standardize Field Names still renames both fields to field1.
+import 'P.primitive';
+
+Game Real(P p, Int c) {
+    Int x;
+
+    Void Initialize() {
+        x = p.Gen(1);
+    }
+
+    Int Oracle() {
+        return c;
+    }
+
+    Int Peek() {
+        return x;
+    }
+}
+
+Game Fake(P p, Int c) {
+    Int y;
+
+    Void Initialize() {
+        y = p.Gen(1);
+    }
+
+    Int Oracle() {
+        return c;
+    }
+
+    Int Peek() {
+        return y;
+    }
+}
+
+export as LetCapControl;

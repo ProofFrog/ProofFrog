@@ -1,0 +1,18 @@
+// F-398: claims LetCap(p, field1).Real and LetCap(p, field1).Fake are
+// interchangeable. They are not (see LetCap.game). Sound engine:
+// Proof Failed!
+import 'P.primitive';
+import 'LetCap.game';
+
+proof:
+
+let:
+    P p = P();
+    Int field1;
+
+theorem:
+    LetCap(p, field1);
+
+games:
+    LetCap(p, field1).Real against LetCap(p, field1).Adversary;
+    LetCap(p, field1).Fake against LetCap(p, field1).Adversary;

@@ -1,0 +1,19 @@
+// F-398 positive control: each Oracle adds its argument to the let: Int c,
+// which is not a name the parameter rename mints. Both sides are the same
+// game; argcap_control.proof hops through an intermediate game whose Oracle
+// names its parameter u instead of m.
+import 'P.primitive';
+
+Game Real(P p, Int c) {
+    Int Oracle(Int m) {
+        return m + c;
+    }
+}
+
+Game Fake(P p, Int c) {
+    Int Oracle(Int m) {
+        return m + c;
+    }
+}
+
+export as ArgCapControl;

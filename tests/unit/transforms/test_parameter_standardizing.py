@@ -186,3 +186,76 @@ def test_f307_declines_when_target_name_collides_with_field() -> None:
     out = str(result)
     assert "Int O(Int c)" in out, "collision with a field must decline the rename"
     assert "return c + arg1" in out, "the field read must not fuse with the parameter"
+
+
+def test_f398_declines_when_target_name_is_a_free_name_the_method_reads() -> None:
+    """F-398: a name the method reads but does not bind (after instantiation,
+    for example a proof let: Int passed to the game) is taken too. Renaming
+    `m` to `arg1` would make `return arg1;` (the free name) read the
+    parameter, so the pass declines and keeps `m`."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int O(Int m) { return arg1; }
+        }
+        """)
+    result = _ParameterStandardizer().rename_game(game)
+    out = str(result)
+    assert "Int O(Int m)" in out, "a free name arg1 must decline the rename"
+    assert "return arg1;" in out
+
+
+def test_f398_declines_when_target_name_is_a_game_parameter_the_method_reads() -> None:
+    """F-398, before instantiation: a game parameter `arg1` the method reads
+    is not bound by the method, so it is taken as well."""
+    game = frog_parser.parse_game("""
+        Game G(Int arg1) {
+            Int O(Int m) { return m + arg1; }
+        }
+        """)
+    out = str(_ParameterStandardizer().rename_game(game))
+    assert "Int O(Int m)" in out
+    assert "return m + arg1;" in out
+
+
+def test_f398_free_name_in_another_method_does_not_decline() -> None:
+    """A parameter covers its own method only: a free `arg1` read in another
+    method is not captured by renaming this method's parameter."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int O(Int m) { return m; }
+            Int P() { return arg1; }
+        }
+        """)
+    out = str(_ParameterStandardizer().rename_game(game))
+    assert "Int O(Int arg1)" in out
+    assert "return arg1;" in out
+
+
+def test_f398_free_name_that_is_not_a_target_does_not_decline() -> None:
+    """Only the targets arg1..argN matter: with one parameter, a free `arg2`
+    does not clash, and the parameter is still renamed."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int O(Int m) { return m + arg2; }
+        }
+        """)
+    out = str(_ParameterStandardizer().rename_game(game))
+    assert "Int O(Int arg1)" in out
+    assert "return arg1 + arg2;" in out
+
+
+def test_f398_declines_when_target_name_is_a_bare_declaration() -> None:
+    """A bare declaration `Int arg1;` masks the parameter from its statement
+    on, like a typed assignment: renaming `c` to `arg1` would make the later
+    read of `c` read the local, so the pass declines."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int O(Int c) {
+                Int arg1;
+                return c;
+            }
+        }
+        """)
+    out = str(_ParameterStandardizer().rename_game(game))
+    assert "Int O(Int c)" in out, "a bare declaration arg1 must decline the rename"
+    assert "return c;" in out

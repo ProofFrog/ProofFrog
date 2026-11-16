@@ -298,7 +298,13 @@ class _ParameterStandardizer:
     the shadowing binder, not the parameter, and are left untouched). Because
     normalization only removes a non-observable distinction, it can make two
     canonical forms match but never conflates genuinely different behaviour.
+
+    With a pipeline context, a method whose rename is declined because a
+    canonical name is taken records a near miss.
     """
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self._ctx = ctx
 
     def rename_game(self, game: frog_ast.Game) -> frog_ast.Game:
         field_names = {field.name for field in game.fields}
@@ -307,8 +313,10 @@ class _ParameterStandardizer:
 
     @staticmethod
     def _body_bound_names(block: frog_ast.Block) -> set[str]:
-        """Names bound WITHIN a method body: ``for`` binders and typed local
-        declarations. Parameters are excluded -- they are what this pass renames.
+        """Names bound WITHIN a method body: ``for`` binders, typed local
+        declarations and bare declarations (``T x;``, which mask a parameter
+        just as a typed assignment does). Parameters are excluded -- they are
+        what this pass renames.
         """
         names: set[str] = set()
 
@@ -317,6 +325,8 @@ class _ParameterStandardizer:
                 names.add(node.name)
             elif isinstance(node, frog_ast.GenericFor):
                 names.add(node.var_name)
+            elif isinstance(node, frog_ast.VariableDeclaration):
+                names.add(node.name)
             elif (
                 isinstance(
                     node,
@@ -346,9 +356,39 @@ class _ParameterStandardizer:
         # field store silently rebinds). Standardization is only
         # canonicalization, so on a collision decline the rename for this method
         # -- never conflate.
+        #
+        # F-398: likewise every name the method reads that it does not bind,
+        # such as a proof `let:` entry passed to the game: a parameter renamed
+        # to it would capture the read. Every name the method mentions other
+        # than its parameters is either a body binder, a field or such a name.
         targets = {f"arg{i + 1}" for i in range(len(params))}
-        collides_with = self._body_bound_names(method.block) | (field_names or set())
-        if targets & collides_with:
+        parameter_names = {param.name for param in params}
+        bound_or_fields = self._body_bound_names(method.block) | (field_names or set())
+        free = referenced_variable_names(method) - parameter_names - bound_or_fields
+        if targets & (bound_or_fields | free):
+            if self._ctx is not None:
+                name = sorted(targets & (bound_or_fields | free))[0]
+                what = (
+                    "a field or a name the method binds"
+                    if name in bound_or_fields
+                    else "a name the method reads but does not bind (for "
+                    "example a proof let: entry)"
+                )
+                self._ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Standardize Parameters",
+                        reason=(
+                            f"Parameter renaming declined in "
+                            f"'{method.signature.name}': the canonical name "
+                            f"'{name}' is {what}, so a parameter renamed to it "
+                            "would capture or be captured by it"
+                        ),
+                        location=None,
+                        suggestion=f"Rename '{name}' so it is not of the form arg<N>",
+                        variable=name,
+                        method=method.signature.name,
+                    )
+                )
             return method
         seed = {p.name: f"arg{i + 1}" for i, p in enumerate(params)}
         new_method = copy.deepcopy(method)
@@ -475,13 +515,49 @@ class _ParameterStandardizer:
 
 
 class _FieldRenameCapture(Exception):
-    """A field reference cannot be renamed without changing what it reads."""
+    """A field reference cannot be renamed without changing what it reads.
 
-    def __init__(self, method: str, name: str, reason: str) -> None:
+    *method* is ``None`` when the clash is outside the methods (a game
+    parameter, or a field's type or initializer). *free* marks a clash with a
+    name the game reads but does not bind (F-398), as opposed to a binder of
+    a method.
+    """
+
+    def __init__(
+        self, method: str | None, name: str, reason: str, free: bool = False
+    ) -> None:
         super().__init__(reason)
         self.method = method
         self.name = name
         self.reason = reason
+        self.free = free
+
+
+def _referenced_names(node: object) -> set[str]:
+    """The names of every ``Variable`` in *node*, which may be an AST node,
+    a list of them or a scalar."""
+    if isinstance(node, list):
+        names: set[str] = set()
+        for item in node:
+            names |= _referenced_names(item)
+        return names
+    if isinstance(node, frog_ast.ASTNode):
+        return referenced_variable_names(node)
+    return set()
+
+
+def _free_target_capture(
+    method: str | None, name: str, where: str
+) -> _FieldRenameCapture:
+    """The capture of a free name *name* by a field renamed to it (F-398)."""
+    return _FieldRenameCapture(
+        method,
+        name,
+        f"{where} reads '{name}', which is not one of the game's fields and "
+        f"which nothing in the game binds there (for example a proof let: "
+        f"entry); a field renamed to '{name}' would capture that read",
+        free=True,
+    )
 
 
 class _RecordingRename(dict[str, str]):
@@ -510,11 +586,17 @@ class _ScopedFieldRenamer:
     A name in the signature that is both a parameter and a name of the
     rename (old or new) raises too, since a length in a parameter's type is
     not clearly inside or outside the parameters' scope.
+
+    A target name read where no binder covers it and that is not a field
+    (*field_names*) is free there, for example a proof ``let:`` entry the
+    game reads. Once a field bears that name, the read would denote the
+    field, so the renamer raises for it too (F-398), wherever the read is.
     """
 
-    def __init__(self, rename: dict[str, str]) -> None:
+    def __init__(self, rename: dict[str, str], field_names: set[str]) -> None:
         self.rename = rename
         self.targets = set(rename.values())
+        self.field_names = field_names
         self._method = ""
 
     def method(self, method: frog_ast.Method) -> frog_ast.Method:
@@ -547,6 +629,13 @@ class _ScopedFieldRenamer:
     def _rewrite(self, node: object, bound: set[str], in_type: bool = False) -> object:
         """Rename the field references in *node*, where the names in *bound*
         are binders in scope."""
+        free_targets = (
+            (_referenced_names(node) & self.targets) - bound - self.field_names
+        )
+        if free_targets:
+            raise _free_target_capture(
+                self._method, sorted(free_targets)[0], f"'{self._method}'"
+            )
         rename = _RecordingRename(
             {old: new for old, new in self.rename.items() if old not in bound}
         )
@@ -663,6 +752,35 @@ class _ScopedFieldRenamer:
         return new_stmt
 
 
+def _check_targets_outside_methods(
+    game: frog_ast.Game, rename: dict[str, str], field_names: set[str]
+) -> None:
+    """Raise ``_FieldRenameCapture`` when a target name of *rename* is taken
+    outside the methods: a game parameter's name, the name of a field the
+    rename keeps, or a name a game parameter's type or a field's type or
+    initializer reads that is not a field (F-398)."""
+    parameter_names = {parameter.name for parameter in game.parameters}
+    declared = _referenced_names([*game.parameters, *game.fields])
+    for name in sorted(set(rename.values())):
+        if name in parameter_names:
+            reason = (
+                f"the game has a parameter '{name}'; a field renamed to "
+                f"'{name}' would capture its reads"
+            )
+        elif name in field_names and name not in rename:
+            reason = (
+                f"the game keeps a field '{name}'; renaming another field to "
+                f"'{name}' would fuse the two"
+            )
+        elif name in declared and name not in field_names:
+            raise _free_target_capture(
+                None, name, "a game parameter's or field's declaration"
+            )
+        else:
+            continue
+        raise _FieldRenameCapture(None, name, reason, free=True)
+
+
 def _apply_field_rename(
     game: frog_ast.Game,
     rename: dict[str, str],
@@ -684,6 +802,12 @@ def _apply_field_rename(
     reference that a method parameter or local binder of the same name
     covers is left alone, and if a renamed reference would be covered by a
     binder of its new name, the rename is declined with a near miss (F-326).
+
+    A target name must also be FREE in the game (F-398): no game parameter,
+    no field the rename keeps, and no name the game reads without binding it
+    (a proof ``let:`` entry passed to the game, say), anywhere in the game.
+    A field given such a name would capture it, so the rename is declined
+    with a near miss.
     """
     if not rename:
         return game
@@ -691,21 +815,31 @@ def _apply_field_rename(
     if protected & set(rename.values()):
         # Minting `fieldN` here would fuse the field with a same-named type.
         return game
-    renamer = _ScopedFieldRenamer(rename)
+    field_names = {field.name for field in game.fields}
+    renamer = _ScopedFieldRenamer(rename, field_names)
     try:
+        _check_targets_outside_methods(game, rename, field_names)
         methods = [renamer.method(method) for method in game.methods]
     except _FieldRenameCapture as capture:
         if ctx is not None:
+            if capture.free:
+                suggestion = (
+                    f"Rename '{capture.name}' (a proof let: entry, a game "
+                    "parameter or a field the game keeps) so it is not of the "
+                    "form field<N>"
+                )
+            else:
+                suggestion = (
+                    f"Rename the parameter or local '{capture.name}' in "
+                    f"'{capture.method}' so it differs from the game's field "
+                    "names and from field<N>"
+                )
             ctx.near_misses.append(
                 NearMiss(
                     transform_name=pass_name,
                     reason=f"Field renaming declined: {capture.reason}",
                     location=None,
-                    suggestion=(
-                        f"Rename the parameter or local '{capture.name}' in "
-                        f"'{capture.method}' so it differs from the game's "
-                        "field names and from field<N>"
-                    ),
+                    suggestion=suggestion,
                     variable=capture.name,
                     method=capture.method,
                 )
@@ -937,7 +1071,7 @@ class StandardizeParameters(TransformPass):
     name = "Standardize Parameters"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return _ParameterStandardizer().rename_game(game)
+        return _ParameterStandardizer(ctx).rename_game(game)
 
 
 class StandardizeFieldNames(TransformPass):

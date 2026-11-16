@@ -1,0 +1,22 @@
+// The same flaw as letdraw.proof, with the non-deterministic call nested in
+// a value whose top is not a call: c = H(R.Draw()) + 0^m holds H at one
+// draw. Read as its expression at every use, Left's [c, c] would become
+// Right's H at two independent draws. Such an entry is ill-formed.
+import 'Drawer.primitive';
+import 'letcall_draw.game';
+
+proof:
+
+let:
+    Int n;
+    Int m;
+    Drawer R;
+    Function<BitString<n>, BitString<m>> H <- Function<BitString<n>, BitString<m>>;
+    BitString<m> c = H(R.Draw()) + 0^m;
+
+theorem:
+    LetCallDraw(n, m, R, H, c);
+
+games:
+    LetCallDraw(n, m, R, H, c).Left against LetCallDraw(n, m, R, H, c).Adversary;
+    LetCallDraw(n, m, R, H, c).Right against LetCallDraw(n, m, R, H, c).Adversary;

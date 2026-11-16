@@ -11,6 +11,7 @@ import sys
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from enum import Enum, IntEnum
 from collections import namedtuple
+from collections.abc import Mapping
 from typing import TypeAlias, Tuple, Dict, Optional, TypeVar, Union
 import z3
 from colorama import Fore
@@ -99,21 +100,22 @@ class FailedProof(Exception):
 
 
 class UnsupportedLetEntryError(Exception):
-    """A ``let:`` entry calls a function on an argument that makes a
-    non-deterministic call (``BitString<n> c = H(R.Draw());``).
+    """A ``let:`` entry whose value makes a non-deterministic call
+    (``BitString<n> c = R.Draw();``, ``c = H(R.Draw()) + 0^m``).
 
-    The entry holds one value, but set-up reads a ``let:`` value as its
-    expression wherever the entry is used, and each use of
-    ``H(R.Draw())`` would make a draw of its own. ``prove`` reports it as a
-    failed proof (F-389)."""
+    A ``let:`` value is a constant (ruling Q13): it is read as its expression
+    wherever the entry is used. The entry holds one value, but each use of
+    ``R.Draw()`` would make a draw of its own, so such an entry is
+    ill-formed. The type checker refuses it, naming the entry, and ``prove``
+    reports it as a failed proof (F-389, F-395)."""
 
     def __init__(self, name: str, value: frog_ast.Expression) -> None:
         super().__init__(
-            f"let: entry '{name}' = {value} calls a function on an argument "
-            "that makes a non-deterministic call. The entry holds one value, "
-            "but the engine reads a let: value as its expression at every use, "
-            "where each use would make a call of its own, so such an entry is "
-            "not supported."
+            f"let: entry '{name}' = {value} makes a non-deterministic call. "
+            "A let: value is a constant, read as its expression wherever the "
+            "entry is used, so each use would make the call again; a let: "
+            "value may make only deterministic calls (a primitive method "
+            "declared deterministic, a Function)."
         )
         self.name = name
 
@@ -821,7 +823,10 @@ class ProofEngine:
                 # `c = H(0b0)` reads as H(0b0) at every use, which is exact
                 # because a Function is deterministic and its argument makes
                 # no call that is not; `c = H(R.Draw())` would read as a
-                # fresh draw at every use (F-389).
+                # fresh draw at every use (F-389). The type checker and
+                # `prove` refuse every let: value that makes a
+                # non-deterministic call (`nondeterministic_let_values`,
+                # F-395); set-up refuses this shape itself as well.
                 raise UnsupportedLetEntryError(let.name, let.value)
             else:
                 self.proof_namespace[let.name] = copy.deepcopy(let.value)
@@ -858,6 +863,14 @@ class ProofEngine:
     def prove(self, proof_file: frog_ast.ProofFile, proof_path: str = "") -> None:
         try:
             self.set_up_proof_context(proof_file)
+            # Ill-formed (ruling Q13), so the type checker refuses it too; a
+            # caller that skips the type checker must not see it verify.
+            refused = nondeterministic_let_values(
+                proof_file.lets, self.sampled_let_names, self.definition_namespace
+            )
+            if refused:
+                assert refused[0].value is not None
+                raise UnsupportedLetEntryError(refused[0].name, refused[0].value)
         except UnsupportedLetEntryError as e:
             print(Fore.RED + str(e) + Fore.RESET)
             print(
@@ -2816,6 +2829,56 @@ def _written_parameters(
             for method in renamed.methods
         )
     ]
+
+
+def nondeterministic_let_values(
+    lets: list[frog_ast.Field],
+    sampled: set[str],
+    definitions: Mapping[str, Optional[frog_ast.ASTNode]],
+) -> list[frog_ast.Field]:
+    """Each entry of *lets* whose value makes a non-deterministic call, in
+    order.
+
+    A ``let:`` value is a constant (ruling Q13): it is read as its expression
+    wherever the entry is used, so a value that makes a non-deterministic
+    call anywhere in it (``c = R.Draw()``, ``c = H(R.Draw()) + 0^m``) would
+    make the call again at each use, though the entry holds one value. Such
+    an entry is ill-formed (F-389, F-395). An entry that instantiates a
+    primitive or scheme of *definitions* is not a value, and neither is a
+    sampled entry or one without a value.
+
+    A call is judged as the passes judge it (:func:`has_nondeterministic_call`
+    with the ``let:`` types): a primitive method declared ``deterministic``
+    and a call of a ``let:`` ``Function`` are deterministic; any other call,
+    a scheme method included, is not. Each entry sees the entries before it,
+    as set-up builds them.
+    """
+    namespace: frog_ast.Namespace = {}
+    let_types = visitors.NameTypeMap()
+    refused: list[frog_ast.Field] = []
+    for let in lets:
+        let_types.set(let.name, let.type)
+        if let.name in sampled:
+            continue
+        if let.value is None:
+            # `Drawer R;`: R's methods are the primitive's.
+            if isinstance(let.type, frog_ast.Variable):
+                definition = definitions.get(let.type.name)
+                if isinstance(definition, (frog_ast.Primitive, frog_ast.Scheme)):
+                    namespace[let.name] = definition
+            continue
+        if (
+            isinstance(let.value, frog_ast.FuncCall)
+            and isinstance(let.value.func, frog_ast.Variable)
+            and let.value.func.name in definitions
+        ):
+            definition = definitions[let.value.func.name]
+            if isinstance(definition, (frog_ast.Primitive, frog_ast.Scheme)):
+                namespace[let.name] = definition
+            continue
+        if has_nondeterministic_call(let.value, namespace, let_types):
+            refused.append(let)
+    return refused
 
 
 def _functions_held_by_primitives(

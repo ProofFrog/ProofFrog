@@ -1,0 +1,17 @@
+import 'Drawer.primitive';
+
+// c is one value, drawn once in the proof's let: block, so Left returns
+// two equal components; Right draws twice.
+Game Left(Int n, Drawer R, BitString<n> c) {
+    [BitString<n>, BitString<n>] Get() {
+        return [c, c];
+    }
+}
+
+Game Right(Int n, Drawer R, BitString<n> c) {
+    [BitString<n>, BitString<n>] Get() {
+        return [R.Draw(), R.Draw()];
+    }
+}
+
+export as LetDraw;

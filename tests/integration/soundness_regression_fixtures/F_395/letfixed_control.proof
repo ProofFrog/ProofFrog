@@ -1,0 +1,19 @@
+// Control for letdraw.proof: the let: entry calls a method declared
+// deterministic, so reading c as R.Fixed() at every use is exact, and the
+// entry is a well-formed value.
+import 'Drawer.primitive';
+import 'letfixed.game';
+
+proof:
+
+let:
+    Int n;
+    Drawer R;
+    BitString<n> c = R.Fixed();
+
+theorem:
+    LetFixed(n, R, c);
+
+games:
+    LetFixed(n, R, c).Left against LetFixed(n, R, c).Adversary;
+    LetFixed(n, R, c).Right against LetFixed(n, R, c).Adversary;

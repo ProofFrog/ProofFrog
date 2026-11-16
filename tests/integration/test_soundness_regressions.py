@@ -434,16 +434,23 @@ CASES = [
      "the same values of H passed to the game directly"),
     ("F-389", "let_value_control.proof", "accept", "proof let: evaluation",
      "positive control: a let: entry H(0b0) is read as H's value at 0b0"),
-    ("F-389", "letcall_draw.proof", "reject", "proof let: evaluation",
+    ("F-389", "letcall_draw.proof", "type_error", "proof let: evaluation",
      "a let: entry H(R.Draw()) would read as a fresh draw at every use"),
-    ("F-389", "letcall_draw_via_value.proof", "reject", "proof let: evaluation",
-     "the same draw in a let: entry of its own, read through its name"),
+    ("F-389", "letcall_draw_via_value.proof", "type_error",
+     "proof let: evaluation",
+     "the same draw in a let: entry of its own, itself a fresh draw at each use"),
     ("F-389", "letcall_fixed_control.proof", "accept", "proof let: evaluation",
      "positive control: H(R.Fixed()), a deterministic argument, is a value"),
     ("F-389", "sr.proof", "reject", "FreshInputRFToUniform",
      "let: values H(0b0), H(0b1) handed to a scheme revealed H's queries"),
     ("F-389", "sr_control.proof", "accept", "FreshInputRFToUniform",
      "positive control: the scheme holds plain let: values, not H's"),
+    ("F-395", "letdraw.proof", "type_error", "proof let: evaluation",
+     "a let: entry R.Draw() was read as a fresh draw at every use"),
+    ("F-395", "letcall_xor.proof", "type_error", "proof let: evaluation",
+     "a draw nested in a let: value H(R.Draw()) + 0^m, read anew at every use"),
+    ("F-395", "letfixed_control.proof", "accept", "proof let: evaluation",
+     "positive control: a let: entry R.Fixed() calls a deterministic method"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),
@@ -741,6 +748,18 @@ TYPE_ERROR = {
     ("STATE-RELATIONS", "coerced_literal.proof"): (
         "error: Exponent of a GroupElem<G> must have type Int or"
         " ModInt<G.order>, got ModInt<q>"
+    ),
+    ("F-389", "letcall_draw.proof"): (
+        "error: let: entry 'c' = H(R.Draw()) makes a non-deterministic call"
+    ),
+    ("F-389", "letcall_draw_via_value.proof"): (
+        "error: let: entry 'x' = R.Draw() makes a non-deterministic call"
+    ),
+    ("F-395", "letdraw.proof"): (
+        "error: let: entry 'c' = R.Draw() makes a non-deterministic call"
+    ),
+    ("F-395", "letcall_xor.proof"): (
+        "error: let: entry 'c' = H(R.Draw()) + 0^m makes a non-deterministic call"
     ),
 }
 

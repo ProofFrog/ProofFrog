@@ -1,0 +1,37 @@
+// F-130 positive control: the two branches of Left are alike up to the
+// names of their locals (x and y), so Simplify Ifs still drops the
+// else-branch and Left becomes Right. The let: entry __alpha_1__ is passed
+// but never read.
+
+Game Left(BitString<8> __alpha_1__) {
+    BitString<16> s;
+
+    Void Oracle(Bool b) {
+        if (b) {
+            BitString<8> x <- BitString<8>;
+            s = x || x;
+        } else {
+            BitString<8> y <- BitString<8>;
+            s = y || y;
+        }
+    }
+
+    BitString<16> Peek() {
+        return s;
+    }
+}
+
+Game Right(BitString<8> __alpha_1__) {
+    BitString<16> s;
+
+    Void Oracle(Bool b) {
+        BitString<8> x <- BitString<8>;
+        s = x || x;
+    }
+
+    BitString<16> Peek() {
+        return s;
+    }
+}
+
+export as AlphaCapControl;

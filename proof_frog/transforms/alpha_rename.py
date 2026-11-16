@@ -62,7 +62,7 @@ import re
 from typing import Callable
 
 from .. import frog_ast
-from ..visitors import Transformer
+from ..visitors import SearchVisitor, Transformer, referenced_variable_names
 from ._base import TransformPass, PipelineContext
 
 # AlphaRename's own fresh-name pattern.  These -- and ONLY these -- are left
@@ -399,6 +399,60 @@ def rename_colliding_binders(
     make instantiation capture-avoiding (F-341)."""
     renamer = _AlphaRenamer(outer_names=names, only_locals=names, fresh=fresh)
     return renamer._rename_method(method)  # pylint: disable=protected-access
+
+
+def block_binder_names(block: frog_ast.Block) -> list[str]:
+    """The names *block* binds at any depth, each once, in the order a
+    traversal meets their binders: typed locals (``T x = e;``, ``T x <- S;``,
+    ``T x <-uniq[S] T;``), bare declarations ``T x;`` and ``for`` binders."""
+    names: dict[str, None] = {}
+
+    def _collect(node: frog_ast.ASTNode) -> bool:
+        if isinstance(node, frog_ast.VariableDeclaration):
+            names.setdefault(node.name)
+        elif isinstance(node, frog_ast.NumericFor):
+            names.setdefault(node.name)
+        elif isinstance(node, frog_ast.GenericFor):
+            names.setdefault(node.var_name)
+        elif (
+            isinstance(
+                node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            )
+            and node.the_type is not None
+            and isinstance(node.var, frog_ast.Variable)
+        ):
+            names.setdefault(node.var.name)
+        return False
+
+    SearchVisitor(_collect).visit(block)
+    return list(names)
+
+
+def block_mentioned_names(block: frog_ast.Block) -> set[str]:
+    """Every name *block* mentions: each variable it reads or writes (type
+    positions included) and each name it binds."""
+    return referenced_variable_names(block) | set(block_binder_names(block))
+
+
+def rename_block_binders(
+    block: frog_ast.Block, fresh: Callable[[], str]
+) -> frog_ast.Block:
+    """Rename every binder *block* declares, at any depth (typed locals, bare
+    declarations and ``for`` binders), to the names *fresh* returns, in the
+    order the binders occur, rewriting exactly the references that resolve to
+    each binder under position-sensitive scoping. A reference that resolves
+    to a name the block does not bind (a field, a parameter, a ``let:`` name,
+    or a read before a same-named local is declared) is left alone.
+
+    *fresh* must return names *block* does not mention, so a new name never
+    captures such a reference. Simplify Ifs compares two branches this way
+    up to the names of their locals (F-130)."""
+    renamer = _AlphaRenamer(
+        outer_names=frozenset(block_mentioned_names(block)), fresh=fresh
+    )
+    # Every binder's name is an "outer" name here, so each one, loop binders
+    # and ``__aN__`` names included, gets a name from *fresh*.
+    return renamer._rename_block(block, [])  # pylint: disable=protected-access
 
 
 class AlphaRename(TransformPass):

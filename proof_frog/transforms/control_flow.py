@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import functools
+import itertools
 from operator import eq, ge, gt, le, lt, ne
 from typing import Any, Callable, Sequence
 
@@ -32,6 +33,7 @@ from ..visitors import (
     referenced_variable_names,
     reassigns_or_rebinds,
     block_unconditionally_returns,
+    type_position_names,
     with_proof_let_types,
 )
 from ._base import (
@@ -44,6 +46,11 @@ from ._base import (
     _lookup_primitive_method,
 )
 from ._coercion import coercing_store_names_for, note_coercing_store
+from .alpha_rename import (
+    block_binder_names,
+    block_mentioned_names,
+    rename_block_binders,
+)
 from ._definedness import GameDefinedness, method_binder_counts
 
 # ---------------------------------------------------------------------------
@@ -731,38 +738,59 @@ class UniqExclusionBranchEliminationTransformer(BlockTransformer):
         return frog_ast.Block(new_stmts)
 
 
-def _normalize_block_locals(block: frog_ast.Block) -> frog_ast.Block:
-    """Rename locally-declared variables in *block* to v1, v2, ... by
-    declaration order.  Used for alpha-equivalent comparison of branches."""
-    rename_map: dict[str, str] = {}
-    counter = 0
+def _alpha_names(taken: set[str]) -> Callable[[], str]:
+    """A supply of the names ``__alpha_1__``, ``__alpha_2__``, ... that are
+    not in *taken*, in that order."""
+    counter = itertools.count(1)
 
-    # Collect local declarations (Sample and Assignment with the_type)
-    for stmt in block.statements:
-        if isinstance(stmt, (frog_ast.Sample, frog_ast.Assignment)):
-            if (
-                isinstance(stmt.var, frog_ast.Variable)
-                and stmt.the_type is not None
-                and stmt.var.name not in rename_map
-            ):
-                counter += 1
-                rename_map[stmt.var.name] = f"__alpha_{counter}__"
+    def fresh() -> str:
+        while True:
+            name = f"__alpha_{next(counter)}__"
+            if name not in taken:
+                return name
 
-    if not rename_map:
-        return block
-
-    normalized = copy.deepcopy(block)
-    for old_name, new_name in rename_map.items():
-        ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
-        ast_map.set(frog_ast.Variable(old_name), frog_ast.Variable(new_name))
-        normalized = SubstitutionTransformer(ast_map).transform(normalized)
-    return normalized
+    return fresh
 
 
-def _blocks_alpha_equivalent(a: frog_ast.Block, b: frog_ast.Block) -> bool:
-    """Check if two blocks are identical up to renaming of locally-declared
-    variables."""
-    return _normalize_block_locals(a) == _normalize_block_locals(b)
+def _normalize_block_locals(block: frog_ast.Block, taken: set[str]) -> frog_ast.Block:
+    """*block* with every name it binds renamed, in the order the binders
+    occur, to the first ``__alpha_<k>__`` names not in *taken*.
+
+    The renaming follows position-sensitive scope (``rename_block_binders``),
+    so a read of a field or outer name that precedes a same-named local's
+    declaration keeps its name (F-130, A1). *taken* must hold every name the
+    compared blocks mention, so a new name never fuses with a name a block
+    reads where nothing in it binds that name, such as a field or a proof
+    ``let:`` entry literally named ``__alpha_1__`` (F-130, A2)."""
+    return rename_block_binders(block, _alpha_names(taken))
+
+
+def _rename_binders_blindly(block: frog_ast.Block, taken: set[str]) -> frog_ast.Block:
+    """*block* with every variable named like one of its binders renamed,
+    whatever binding the occurrence resolves to; the comparison Simplify Ifs
+    made before F-130's fix. Used only to report a near miss."""
+    fresh = _alpha_names(taken)
+    ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
+    for name in block_binder_names(block):
+        ast_map.set(frog_ast.Variable(name), frog_ast.Variable(fresh()))
+    return SubstitutionTransformer(ast_map).transform(copy.deepcopy(block))
+
+
+def _unrenamable_binders(block: frog_ast.Block) -> set[str]:
+    """Names *block* binds that a renaming of its binders could not follow:
+    a binder also named in a type position of the block (the renaming would
+    rewrite the type name with it; the type checker reads such a name as the
+    local, so only an ill-typed game has one), and the names of a tuple
+    destructuring, which the parser desugars before the engine sees it."""
+    names = set(block_binder_names(block)) & type_position_names(block)
+
+    def _destructuring(node: frog_ast.ASTNode) -> bool:
+        if isinstance(node, frog_ast.DestructuringBinding):
+            names.update(node.names)
+        return False
+
+    SearchVisitor(_destructuring).visit(block)
+    return names
 
 
 class SimplifyIfTransformer(Transformer):
@@ -780,6 +808,63 @@ class SimplifyIfTransformer(Transformer):
         if (a || b) { return x; }
     """
 
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+        self._method: str | None = None
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        saved = self._method
+        self._method = method.signature.name
+        try:
+            return self._transform_children(method)
+        finally:
+            self._method = saved
+
+    def _note(self, reason: str, names: set[str]) -> None:
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Simplify Ifs",
+                reason=reason,
+                location=None,
+                suggestion=None,
+                variable=", ".join(sorted(names)) or None,
+                method=self._method,
+            )
+        )
+
+    def _alpha_equivalent(self, a: frog_ast.Block, b: frog_ast.Block) -> bool:
+        """Whether *a* and *b* are the same block up to the names of the
+        variables each one binds."""
+        taken = block_mentioned_names(a) | block_mentioned_names(b)
+        unrenamable = _unrenamable_binders(a) | _unrenamable_binders(b)
+        if unrenamable:
+            if _rename_binders_blindly(a, taken) == _rename_binders_blindly(b, taken):
+                self._note(
+                    "Branches look alike up to the names of their locals, but "
+                    "a local's name is also used as a type name (or bound by a "
+                    "tuple destructuring), so the branches are not compared",
+                    unrenamable,
+                )
+            return False
+        normal_a = _normalize_block_locals(a, taken)
+        normal_b = _normalize_block_locals(b, taken)
+        if normal_a == normal_b:
+            return True
+        if _rename_binders_blindly(a, taken) == _rename_binders_blindly(b, taken):
+            # Alike only if a read outside a local's scope is taken for it.
+            outside = (set(block_binder_names(a)) & block_mentioned_names(normal_a)) | (
+                set(block_binder_names(b)) & block_mentioned_names(normal_b)
+            )
+            self._note(
+                "Branches match only if a read of a name outside the scope of "
+                "a same-named local (before its declaration, or after the block "
+                "that declares it) is taken for that local; they are kept apart",
+                outside,
+            )
+        return False
+
     def transform_if_statement(
         self, if_statement: frog_ast.IfStatement
     ) -> frog_ast.IfStatement:
@@ -787,7 +872,7 @@ class SimplifyIfTransformer(Transformer):
         new_conditions = copy.deepcopy(if_statement.conditions)
         index = 0
         while index < len(new_blocks) - (1 if not if_statement.has_else_block() else 2):
-            if _blocks_alpha_equivalent(new_blocks[index], new_blocks[index + 1]):
+            if self._alpha_equivalent(new_blocks[index], new_blocks[index + 1]):
                 del new_blocks[index]
                 new_conditions[index] = frog_ast.BinaryOperation(
                     frog_ast.BinaryOperators.OR,
@@ -799,7 +884,7 @@ class SimplifyIfTransformer(Transformer):
                 index += 1
 
         if if_statement.has_else_block():
-            if _blocks_alpha_equivalent(new_blocks[-1], new_blocks[-2]):
+            if self._alpha_equivalent(new_blocks[-1], new_blocks[-2]):
                 del new_blocks[-1]
                 del new_conditions[-1]
 
@@ -3891,7 +3976,7 @@ class SimplifyIf(TransformPass):
     name = "Simplify Ifs"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return SimplifyIfTransformer().transform(game)
+        return SimplifyIfTransformer(ctx).transform(game)
 
 
 class FlagSetToAssignment(TransformPass):

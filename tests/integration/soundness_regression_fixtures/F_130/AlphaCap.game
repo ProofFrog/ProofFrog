@@ -1,0 +1,44 @@
+// F-130: Simplify Ifs compares two branches up to the names of their
+// locals by renaming each branch's locals to __alpha_<k>__. The new name
+// was not checked against the names the branches read, and a proof let:
+// entry named __alpha_1__ is legal and renamed by no pass. So the
+// then-branch `x <- ...; s = x || x;` and the else-branch
+// `y <- ...; s = y || __alpha_1__;` (the let: value) both became
+// `__alpha_1__ <- ...; s = __alpha_1__ || __alpha_1__;`, the else-branch was
+// dropped as a copy of the then-branch, and Left became Right.
+// Distinguisher: call Oracle(false), then Peek(); output 1 iff the two
+// halves of s are equal. Right: always 1. Left: 1 only when the draw equals
+// the let: value, probability 1/256. Advantage 255/256.
+
+Game Left(BitString<8> __alpha_1__) {
+    BitString<16> s;
+
+    Void Oracle(Bool b) {
+        if (b) {
+            BitString<8> x <- BitString<8>;
+            s = x || x;
+        } else {
+            BitString<8> y <- BitString<8>;
+            s = y || __alpha_1__;
+        }
+    }
+
+    BitString<16> Peek() {
+        return s;
+    }
+}
+
+Game Right(BitString<8> __alpha_1__) {
+    BitString<16> s;
+
+    Void Oracle(Bool b) {
+        BitString<8> x <- BitString<8>;
+        s = x || x;
+    }
+
+    BitString<16> Peek() {
+        return s;
+    }
+}
+
+export as AlphaCap;

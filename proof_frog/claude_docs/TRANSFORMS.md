@@ -132,7 +132,7 @@ The field-level RF rewrites (UniqueRFSimplification, FreshInputRFToUniform, Chal
 | UniqExclusionBranchElimination | Statically eliminates `x in S` branches when `x` was sampled via `<-uniq[S] T` and `S` has not been mutated since. |
 | ElseUnwrap | Unwraps else blocks when the if-branch unconditionally returns. |
 | SimplifyReturn | Inlines `Type v = expr; return v;` into `return expr;`. |
-| SimplifyIf | Merges adjacent if/else-if branches with identical (alpha-equivalent) bodies. |
+| SimplifyIf | Merges adjacent if/else-if branches with identical (alpha-equivalent) bodies. Two branches are compared after each one's binders (typed locals, bare declarations and `for` binders, at any depth) are renamed in order to `__alpha_<k>__` names neither branch mentions, following position-sensitive scope, so a read of a field, parameter or `let:` name, including one before a same-named local's declaration, keeps its name. A branch whose local is also used as a type name there is not compared (near-miss), and branches alike only if a read outside a local's scope were taken for that local record a near-miss. |
 | RemoveUnreachable | Removes statements after all execution paths have returned (Z3-assisted). |
 | FlagSetToAssignment | Folds `x = false; S; if (C) { x = true; }` into `x = false; S; x = C;` when S does not mention `x` (the flag-raise shape of identical-until-bad pairs). |
 | RemoveEmptyIf | Drops an `if` whose branches are all empty when its conditions make no call and index no map/array (else records a near-miss). |

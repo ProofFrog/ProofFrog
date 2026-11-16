@@ -1,0 +1,15 @@
+// F-130: claims AlphaCap(__alpha_1__).Left and .Right are interchangeable.
+// They are not (see AlphaCap.game). Sound engine: Proof Failed!
+import 'AlphaCap.game';
+
+proof:
+
+let:
+    BitString<8> __alpha_1__;
+
+theorem:
+    AlphaCap(__alpha_1__);
+
+games:
+    AlphaCap(__alpha_1__).Left against AlphaCap(__alpha_1__).Adversary;
+    AlphaCap(__alpha_1__).Right against AlphaCap(__alpha_1__).Adversary;

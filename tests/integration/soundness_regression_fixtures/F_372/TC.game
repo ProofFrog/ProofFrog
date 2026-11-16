@@ -1,0 +1,36 @@
+import 'Picker.primitive';
+// Left: as written: IncC, CopyCtoD (d = new c, nonzero), then DZero decides
+// whether Pick runs; Test returns false (d is never 0 here).
+// Right: CopyCtoD before IncC, so d is the old count (0 on the first call),
+// Pick runs and Test returns true.
+Game Left(Picker P) {
+    Int c;
+    Int d;
+    Void Initialize() { c = 0; d = 0; }
+    Bool Test(Set<BitString<1>> S) {
+        c = c + 1;
+        d = c;
+        Bool t = d == 0;
+        if (t) {
+            BitString<1> x <- BitString<1> \ S;
+            t = true;
+        }
+        return t;
+    }
+}
+Game Right(Picker P) {
+    Int c;
+    Int d;
+    Void Initialize() { c = 0; d = 0; }
+    Bool Test(Set<BitString<1>> S) {
+        d = c;
+        Bool t = d == 0;
+        if (t) {
+            BitString<1> x <- BitString<1> \ S;
+            t = true;
+        }
+        c = c + 1;
+        return t;
+    }
+}
+export as TC;

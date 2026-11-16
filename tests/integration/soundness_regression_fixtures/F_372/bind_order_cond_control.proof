@@ -1,0 +1,28 @@
+// F-372, found by the review of S36's retry (2026-11-16).
+// Control for bind_order_cond.proof: IncC and CopyCtoD in statements of
+// their own. The composed game is TC(P).Left on both sides of CDB.
+// Sound engine: fails at hop 3 only (hop 3 is false).
+import 'Picker.primitive';
+import 'PickImpl.scheme';
+import 'CDB.game';
+import 'TC.game';
+Reduction R(Picker P) compose CDB() against TC(P).Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    Bool Test(Set<BitString<1>> S) {
+        Int a = challenger.IncC();
+        Int b = challenger.CopyCtoD();
+        return challenger.ThirdB(a, b, challenger.DZero() && P.Pick(S));
+    }
+}
+proof:
+let:
+    PickImpl P = PickImpl();
+assume:
+    CDB();
+theorem:
+    TC(P);
+games:
+    TC(P).Left against TC(P).Adversary;
+    CDB().Left compose R(P) against TC(P).Adversary;
+    CDB().Right compose R(P) against TC(P).Adversary;
+    TC(P).Right against TC(P).Adversary;

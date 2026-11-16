@@ -1,0 +1,37 @@
+// F-397, found by the review of S36's retry (2026-11-16).
+// Target: evaluation_order.EvaluationOrder.bind (via order_calls_for_inlining),
+// while a reduction is resolved alone (composed_with=challenger).
+// Hypothesis: bind hoists only the earlier parts whose footprint conflicts
+// with the moved call, so a bound part (CopyCtoD) jumps ahead of an earlier
+// unbound part (IncC) that it conflicts with: IncC writes c, CopyCtoD reads
+// c. Whether IncC is bound depends on whether the moved call's footprint
+// reads c; CD2().Left's ReadD makes a dead read of c, Right's does not.
+// The two sides of CD2 behave identically (the assumption is true).
+// As written, Test runs IncC, then CopyCtoD (d = new c), then ReadD, and
+// returns the count after the increment: 1 on the first call. That is
+// TB(P).Left on both sides of CD2.
+// Sound engine: fails at hop 3 (TB(P).Right returns the count before it).
+// Unsound engine: Proof Succeeded! on the false theorem TB(P).
+// Distinguisher: one Test() call returns 1 on TB(P).Left and 0 on TB(P).Right.
+import 'Ider.primitive';
+import 'IdImpl.scheme';
+import 'CD2.game';
+import 'TB.game';
+Reduction R(Ider P) compose CD2() against TB(P).Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    Int Test() {
+        return challenger.Third(challenger.IncC(), challenger.CopyCtoD(), P.F(challenger.ReadD()));
+    }
+}
+proof:
+let:
+    IdImpl P = IdImpl();
+assume:
+    CD2();
+theorem:
+    TB(P);
+games:
+    TB(P).Left against TB(P).Adversary;
+    CD2().Left compose R(P) against TB(P).Adversary;
+    CD2().Right compose R(P) against TB(P).Adversary;
+    TB(P).Right against TB(P).Adversary;

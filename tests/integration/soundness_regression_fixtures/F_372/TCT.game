@@ -1,0 +1,35 @@
+import 'Picker.primitive';
+// Both sides are the reduction of bind_order_cond.proof as written: IncC,
+// CopyCtoD (d = the new count, never 0), then DZero decides whether Pick
+// runs. Right tests c == 0 instead of d == 0, which is equal after d = c.
+Game Left(Picker P) {
+    Int c;
+    Int d;
+    Void Initialize() { c = 0; d = 0; }
+    Bool Test(Set<BitString<1>> S) {
+        c = c + 1;
+        d = c;
+        Bool t = d == 0;
+        if (t) {
+            BitString<1> x <- BitString<1> \ S;
+            t = true;
+        }
+        return t;
+    }
+}
+Game Right(Picker P) {
+    Int c;
+    Int d;
+    Void Initialize() { c = 0; d = 0; }
+    Bool Test(Set<BitString<1>> S) {
+        c = c + 1;
+        d = c;
+        Bool t = c == 0;
+        if (t) {
+            BitString<1> x <- BitString<1> \ S;
+            t = true;
+        }
+        return t;
+    }
+}
+export as TCT;

@@ -1,0 +1,25 @@
+import 'Ider.primitive';
+// Both sides are the reduction of bind_order.proof as written: IncC, then
+// CopyCtoD (d = the new count), then ReadD; Test returns the count after
+// the increment. Right returns c instead of d, which is equal after d = c.
+Game Left(Ider P) {
+    Int c;
+    Int d;
+    Void Initialize() { c = 0; d = 0; }
+    Int Test() {
+        c = c + 1;
+        d = c;
+        return d;
+    }
+}
+Game Right(Ider P) {
+    Int c;
+    Int d;
+    Void Initialize() { c = 0; d = 0; }
+    Int Test() {
+        c = c + 1;
+        d = c;
+        return c;
+    }
+}
+export as TBT;

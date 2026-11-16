@@ -1,0 +1,21 @@
+// The two sides behave identically. Left's ReadD also makes a dead read of
+// c (Int z = c;), which changes nothing it returns or stores.
+Game Left() {
+    Int c;
+    Int d;
+    Void Initialize() { c = 0; d = 0; }
+    Int IncC() { c = c + 1; return 0; }
+    Int CopyCtoD() { d = c; return 0; }
+    Int ReadD() { Int z = c; return d; }
+    Int Third(Int a, Int b, Int v) { return v; }
+}
+Game Right() {
+    Int c;
+    Int d;
+    Void Initialize() { c = 0; d = 0; }
+    Int IncC() { c = c + 1; return 0; }
+    Int CopyCtoD() { d = c; return 0; }
+    Int ReadD() { return d; }
+    Int Third(Int a, Int b, Int v) { return v; }
+}
+export as CD2;

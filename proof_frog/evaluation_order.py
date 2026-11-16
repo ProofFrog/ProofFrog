@@ -23,10 +23,13 @@ another challenger call).
 :meth:`EvaluationOrder.bind` binds each such part to a fresh typed variable,
 left to right, in front of the statement before the code is moved: a read of
 a variable the moved code writes, a call whose callee touches state the moved
-code touches, or a short-circuit operation holding such a call. A part
-touching no such state stays where it is, so other canonical forms do not
-change. Draws from types and calls of abstract primitives and of ``Function``
-values touch no state; the order of independent draws is unobservable, and a
+code touches, or a short-circuit operation holding such a call. A bound
+part moves ahead of the earlier parts left in place, so it counts as moved
+code for them: the parts are examined from last to first, and a part that
+conflicts with a part bound after it is bound too. A part touching no such
+state stays where it is, so other canonical forms do not change. Draws
+from types and calls of abstract primitives and of ``Function`` values
+touch no state; the order of independent draws is unobservable, and a
 draw that may not complete hides the state of every later step. A
 ``challenger`` call whose callee is not known reads and writes the
 challenger's state.
@@ -521,49 +524,59 @@ class EvaluationOrder:
 
     def pieces(
         self, node: frog_ast.ASTNode, moved: Footprint, scope: Scope
-    ) -> list[frog_ast.ASTNode]:
+    ) -> tuple[list[frog_ast.ASTNode], Footprint]:
         """The smallest parts of *node* to bind so that the rest of it touches
         nothing *moved* touches, in evaluation order: a variable *moved*
         writes, a call whose callee conflicts with *moved*, or a short-circuit
         operation whose right operand holds such a call (binding the call
-        alone would evaluate it unconditionally)."""
+        alone would evaluate it unconditionally).
+
+        A bound piece moves in front of everything evaluated before it that
+        stays in place, so it counts as moved code for those parts: the
+        parts are examined from last to first, and *moved* grows by the
+        footprint of each piece found. Returns the pieces and the grown
+        footprint."""
         if not self.oracle.of(node).conflicts(moved):
-            return []
+            return [], moved
         if isinstance(node, frog_ast.Variable):
-            return [node]
+            return [node], moved | self.oracle.of(node)
         if isinstance(node, frog_ast.FuncCall) and self.oracle.call_own(node).conflicts(
             moved
         ):
-            return [node]
+            return [node], moved | self.oracle.of(node)
         if isinstance(node, frog_ast.BinaryOperation) and self.is_short_circuit(
             node, scope
         ):
-            right = self.pieces(node.right_expression, moved, scope)
+            right, after_right = self.pieces(node.right_expression, moved, scope)
             if any(not isinstance(piece, frog_ast.Variable) for piece in right):
-                return [node]
-            return self.pieces(node.left_expression, moved, scope) + right
-        return [
-            piece
-            for child in evaluated_children(node)
-            for piece in self.pieces(child, moved, scope)
-        ]
+                return [node], moved | self.oracle.of(node)
+            left, after_left = self.pieces(node.left_expression, after_right, scope)
+            return left + right, after_left
+        found: list[frog_ast.ASTNode] = []
+        for child in reversed(evaluated_children(node)):
+            child_pieces, moved = self.pieces(child, moved, scope)
+            found = child_pieces + found
+        return found, moved
 
     def conflicting(
         self, parts: list[_Part], moved: Footprint, scope: Scope
     ) -> list[frog_ast.ASTNode]:
-        """The pieces of *parts* to bind (see :meth:`pieces`). A piece other
-        than a variable read must be evaluated whenever the statement is,
-        or binding it in front of the statement would evaluate it more
-        often."""
+        """The pieces of *parts* to bind (see :meth:`pieces`), in evaluation
+        order. The parts are examined from last to first: a part before a
+        bound piece that conflicts with it is bound too, so binding keeps
+        their order. A piece other than a variable read must be evaluated
+        whenever the statement is, or binding it in front of the statement
+        would evaluate it more often."""
         found: list[frog_ast.ASTNode] = []
-        for part in parts:
-            for piece in self.pieces(part.node, moved, scope):
+        for part in reversed(parts):
+            part_pieces, moved = self.pieces(part.node, moved, scope)
+            for piece in part_pieces:
                 if part.conditional and not isinstance(piece, frog_ast.Variable):
                     raise UnorderedCallError(
                         f"cannot keep '{piece}' ahead of the code moved in front"
                         " of its statement: it is evaluated only conditionally"
                     )
-                found.append(piece)
+            found = part_pieces + found
         return found
 
     def fresh(self, base: str) -> str:

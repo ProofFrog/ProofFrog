@@ -393,7 +393,8 @@ class _Rewriter:
                 frog_ast.ReturnStatement(site.right_expression),
             ]
         # `L` and `R` move in front of the statement: first bind the parts
-        # written before the site that touch what they touch (F-397's rule).
+        # written before the site that touch what they touch, or what a part
+        # bound after them touches (F-397's rule).
         callee = self._effectful_callee(site)
         parts, _ = self.order.locate(statement, site, self.scope)
         pieces = self.order.conflicting(parts, self.order.oracle.of(site), self.scope)

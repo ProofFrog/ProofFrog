@@ -333,6 +333,12 @@ CASES = [
      "the same, with Left in the order the reduction runs; hop 3 is false"),
     ("F-372", "reorder_control.proof", "accept", "method inliner",
      "positive control: the earlier challenger call stays ahead of the &&"),
+    ("F-372", "bind_order_cond.proof", "reject", "method inliner",
+     "a bound call jumped ahead of an earlier call before a hoisted &&"),
+    ("F-372", "bind_order_cond_control.proof", "reject", "method inliner",
+     "control: the earlier calls in statements of their own; hop 3 is false"),
+    ("F-372", "bind_order_cond_true.proof", "accept", "method inliner",
+     "positive control: both sides are the reduction as written"),
     ("F-372", "cond_name.proof", "reject", "method inliner",
      "a callee local named cond was declared under the && temporary's name"),
     ("F-372", "cond_name_control.proof", "accept", "method inliner",
@@ -564,6 +570,12 @@ CASES = [
      "control: the two calls in separate statements; hop 3 is false"),
     ("F-397", "read_then_inc_true.proof", "accept", "method inliner",
      "positive control: the count is read before the increment"),
+    ("F-397", "bind_order.proof", "reject", "method inliner",
+     "a bound call jumped ahead of an earlier call that conflicts with it"),
+    ("F-397", "bind_order_control.proof", "reject", "method inliner",
+     "control: the earlier calls in statements of their own; hop 3 is false"),
+    ("F-397", "bind_order_true.proof", "accept", "method inliner",
+     "positive control: both sides are the reduction as written"),
     ("F-398", "letcap.proof", "reject", "StandardizeFieldNames",
      "a field was renamed to field1, a let: Int the game reads"),
     ("F-398", "letcap_control.proof", "accept", "StandardizeFieldNames",
@@ -1069,6 +1081,18 @@ FAILED_STEP = {
     ),
     ("F-397", "read_then_inc_control.proof"): (
         "Step 3 failed: Cnt().Right compose R() -> RO().Right"
+    ),
+    ("F-397", "bind_order.proof"): (
+        "Step 3 failed: CD2().Right compose R(P) -> TB(P).Right"
+    ),
+    ("F-397", "bind_order_control.proof"): (
+        "Step 3 failed: CD2().Right compose R(P) -> TB(P).Right"
+    ),
+    ("F-372", "bind_order_cond.proof"): (
+        "Step 3 failed: CDB().Right compose R(P) -> TC(P).Right"
+    ),
+    ("F-372", "bind_order_cond_control.proof"): (
+        "Step 3 failed: CDB().Right compose R(P) -> TC(P).Right"
     ),
     # The hop fails because a game could not be inlined, not on a difference.
     ("F-404", "many.proof"): (

@@ -34,6 +34,10 @@ Scheme S() extends P {
         return v;
     }
 
+    Int IdI(Int v) {
+        return v;
+    }
+
     Bool PickCond(Set<BitString<1>> U) {
         Bool cond = false;
         BitString<1> x <- BitString<1> \\ U;
@@ -45,6 +49,8 @@ Scheme S() extends P {
 _CHALLENGER = """
 Game C() {
     Int c;
+    Int d;
+    Int e;
     Bool Inc() {
         c = c + 1;
         return true;
@@ -58,6 +64,19 @@ Game C() {
     }
     Int Read() {
         return c;
+    }
+    Int Copy() {
+        d = c;
+        return 0;
+    }
+    Int ReadD() {
+        return d;
+    }
+    Bool DZero() {
+        return d == 0;
+    }
+    Int ReadE() {
+        return e;
     }
 }
 """
@@ -279,6 +298,51 @@ def test_f372_temporary_is_apart_from_a_callee_local() -> None:
     assert str(guard.blocks[0].statements[-1]).strip() == (
         "S.PickCond@cond@0 = S.PickCond@cond0;"
     )
+
+
+def test_f397_part_conflicting_with_a_bound_part_is_bound_too() -> None:
+    # The review of S36's retry: ReadD (moved with S.IdI) conflicts only with
+    # Copy, but binding Copy moves it in front of Bump, which writes the `c`
+    # Copy reads, so Bump is bound too, ahead of it. ReadE touches nothing
+    # either of them touches and stays where it is.
+    ordered = order_calls_for_inlining(
+        _game(
+            "return F.h(challenger.ReadE(), challenger.Bump(), challenger.Copy(), "
+            "S.IdI(challenger.ReadD()));",
+            "Int",
+        ),
+        _scheme_lookup(),
+        {},
+        challenger=_challenger(),
+    )
+    assert _statements(ordered) == [
+        "Int S.IdI@prior@0 = challenger.Bump();",
+        "Int S.IdI@prior@1 = challenger.Copy();",
+        "return F.h(challenger.ReadE(), S.IdI@prior@0, S.IdI@prior@1, "
+        "S.IdI(challenger.ReadD()));",
+    ]
+
+
+def test_f372_part_conflicting_with_a_bound_part_is_bound_too() -> None:
+    # The same through the rewrite: the hoisted DZero conflicts only with
+    # Copy, and Copy with the earlier Bump.
+    rewritten = make_conditional_calls_explicit(
+        _game(
+            "return F.h(challenger.Bump(), challenger.Copy(), "
+            "challenger.DZero() && S.Pick(U));"
+        ),
+        _scheme_lookup(),
+        {},
+        None,
+        _challenger(),
+    )
+    assert _statements(rewritten) == [
+        "Int S.Pick@prior@0 = challenger.Bump();",
+        "Int S.Pick@prior@1 = challenger.Copy();",
+        "Bool S.Pick@cond@0 = challenger.DZero();",
+        "if (S.Pick@cond@0) {\nS.Pick@cond@0 = S.Pick(U);\n}",
+        "return F.h(S.Pick@prior@0, S.Pick@prior@1, S.Pick@cond@0);",
+    ]
 
 
 def test_f372_step_detail_shows_the_reduction_resolved_alone() -> None:

@@ -1,0 +1,28 @@
+// F-372, found by the review of S36's retry (2026-11-16).
+// Positive control for bind_order_cond.proof: the same reduction, with a
+// theorem whose two sides are the reduction as written. Every hop is true,
+// including hop 3 on CDB().Right, where only some of the earlier calls
+// conflict with the hoisted && operands.
+// Sound engine: Proof Succeeded!
+import 'Picker.primitive';
+import 'PickImpl.scheme';
+import 'CDB.game';
+import 'TCT.game';
+Reduction R(Picker P) compose CDB() against TCT(P).Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    Bool Test(Set<BitString<1>> S) {
+        return challenger.ThirdB(challenger.IncC(), challenger.CopyCtoD(), challenger.DZero() && P.Pick(S));
+    }
+}
+proof:
+let:
+    PickImpl P = PickImpl();
+assume:
+    CDB();
+theorem:
+    TCT(P);
+games:
+    TCT(P).Left against TCT(P).Adversary;
+    CDB().Left compose R(P) against TCT(P).Adversary;
+    CDB().Right compose R(P) against TCT(P).Adversary;
+    TCT(P).Right against TCT(P).Adversary;

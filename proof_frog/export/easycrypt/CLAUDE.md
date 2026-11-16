@@ -303,9 +303,7 @@ How rungs relate to the registry is set by R3, R4 and R6 above. Today the
 `cached-guided` and `admit-guided` rungs come only from the whole-hop and
 whole-oracle paths listed under "Not yet conforming": do not add entries
 there. A per-transform cache entry (rung 4) is filled as
-`proof_frog/claude_docs/EASYCRYPT_TACTICS.md` describes, but that file's advice to
-climb from whole-hop admits to whole-hop cache entries predates the
-architecture and must not be followed.
+`proof_frog/claude_docs/EASYCRYPT_TACTICS.md` describes.
 
 ## Things to stop and ask before doing
 

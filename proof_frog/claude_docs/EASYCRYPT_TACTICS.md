@@ -11,6 +11,10 @@ on the EasyCrypt side:
 For interactive REPL workflow (which EC MCP tools to load and how to
 drive `cli_step`), see [MCP_GUIDE.md](MCP_GUIDE.md#easycrypt-mcp).
 
+The rules this guide follows are R1 to R9 in the exporter's notes,
+`proof_frog/export/easycrypt/CLAUDE.md` in the repository. Where this
+guide and those rules disagree, the rules win.
+
 ## Per-transform tactic cache
 
 The exporter always emits a per-transform canonicalization chain for each
@@ -37,13 +41,15 @@ scale (best-automated first), and the exporter prints it as a
 1. **`synth-static`** — a fixed canned tactic built into Python.
 2. **`synth-param`** — a tactic computed from the hop's AST (synthesizer,
    swap sequence, cascade). Rungs 1–2 are "Synthesized": no human, no cache.
-3. **`cached-guided`** — closed from a sidecar entry the exporter
-   *scaffolded* (it emitted a `STRATEGY`/`TO CACHE` guided template you
-   filled). Currently the whole-hop `transform = "<hop>"` entries.
+3. **`cached-guided`** — closed from a sidecar entry filled from a
+   guided template the exporter emitted. Today every guided template is
+   for a whole hop or a whole oracle, which rule R6 forbids caching, so
+   no new entry belongs on this rung.
 4. **`cached-unguided`** — closed from a sidecar entry the exporter did
    *not* scaffold (you wrote the per-transform tactic from scratch).
 5. **`admit-guided`** — open `admit.`, but with a targeted fill template
-   for this exact hop (the unfilled form of rung 3).
+   for this exact hop (the unfilled form of rung 3). Today these are
+   whole-hop or whole-oracle templates: leave them admitted.
 6. **`admit-unguided`** — open `admit.` with only the generic
    `(* tactic-cache miss ... *)` comment.
 
@@ -55,17 +61,22 @@ proof counts as `clean` only if EasyCrypt accepts it *and* it is
 admit-free — a 0-admit file that EasyCrypt rejects is `blocked`, not
 clean.
 
-**Your job in this doc is to climb the ladder:** turn a rung-5
-*admit-guided* into a rung-3 *cached-guided* (fill the emitted template,
-then cache it), or a rung-6 *admit-unguided* into a rung-4
-*cached-unguided* (derive a tactic, then cache it). The sidecar cache is
-keyed on
-`(transform_name, canonical_text(game_before), canonical_text(game_after))`.
-The canonical text is what
-`proof_frog.export.easycrypt.canonical_form.canonical_text`
-emits — exactly what shows up in the admit diagnostic. **Copy that text
-verbatim into the sidecar.** Any whitespace or naming drift silently
-turns a hit into a miss.
+**Your job in this doc is to close a rung-6 *admit-unguided*
+micro-lemma with a per-transform entry (rung 4, *cached-unguided*).**
+Each micro-lemma evidences one engine transform application (R1), and a
+cache entry closes it for that transform only (R2, R3). Never write a
+whole-hop entry (`transform = "<hop>"`) or a whole-oracle entry
+(`transform = "<oracle>:..."`): those are fused closures (R6). The
+exporter's `STRATEGY` / `TO CACHE` templates that ask for them predate
+the rule; leave those hops admitted.
+
+The cache is keyed on `(transform_name, game_before, game_after)`, where
+the two game fields hold the *masked shape* of the change
+(`canonical_form.masked_shape`: the changed region, with variable names
+masked), so one entry can serve the same change in other proofs. The
+miss comment prints exactly the key the lookup used. **Copy it
+verbatim.** Any whitespace or naming drift silently turns a hit into a
+miss.
 
 ## Step-by-step workflow
 
@@ -83,7 +94,8 @@ turns a hit into a miss.
    a. Read the (* tactic-cache miss ... *) comment. Extract:
       - transform name
       - sidecar path
-      - expected game_before / game_after canonical text
+      - expected game_before / game_after (the masked key)
+      - the entry skeleton
    b. Locate the surrounding lemma by name and inspect the EC goal:
       grep -n "lemma micro_<i>_<side>_<k>" /tmp/export.ec
       bash scripts/easycrypt-goals.sh /tmp/export.ec <line>
@@ -102,10 +114,16 @@ turns a hit into a miss.
         bash scripts/easycrypt.sh /tmp/export.ec
       Exit 0 with no parse / cannot-close errors before *any* admit
       below the one you just patched = success.
-   e. Append a new [[entry]] to the sidecar TOML. **Format below.**
+   e. Make the negative control: falsify the load-bearing conjunct of
+      the goal and confirm EasyCrypt REJECTS the mutated lemma with a
+      proof failure. A type or parse error does not count: it fails
+      before any goal is attempted. Without a rejected mutation, a
+      tactic that runs proves nothing.
+   f. Paste the entry skeleton from the miss comment into the sidecar
+      and fill every field. **Format below.**
 
 4. Re-export the proof. Each lemma you covered should now resolve as
-   `cached-guided` / `cached-unguided` instead of an `admit-*` rung.
+   `cached-unguided` instead of an `admit-*` rung.
 
 5. Final validation: re-run scripts/easycrypt.sh /tmp/export.ec to
    confirm the chain still verifies end-to-end.
@@ -113,53 +131,48 @@ turns a hit into a miss.
 
 ## Sidecar TOML entry format
 
-Always copy `game_before` / `game_after` *verbatim* from the
-`(* tactic-cache miss ... *)` comment. Indentation matters.
+Start from the skeleton in the miss comment: its `game_before` /
+`game_after` are the key the lookup used, already quoted. Indentation
+matters.
 
 ```toml
 [[entry]]
 transform = "Topological Sorting"
-description = "hop 2R micro_2 — drops c2prime <$ d as unused (Bucket-2 sort-and-drop)"
-added = "2026-05-23"
-
-game_before = '''
-proc enc(m : MessageSpace) : [CiphertextSpace1, CiphertextSpace2] = {
-  var c1 : CiphertextSpace1;
-  c1 <$ CiphertextSpace1;
-  var c2prime : CiphertextSpace2;
-  c2prime <$ CiphertextSpace2;
-  var _r0 : E2.Key;
-  _r0 <@ E2.KeyGen();
-  var _r1 : E2.Ciphertext;
-  _r1 <@ E2.Enc(_r0, m);
-  return (c1, _r1);
-}
-'''
-
-game_after = '''
-proc enc(m : MessageSpace) : [CiphertextSpace1, CiphertextSpace2] = {
-  var c1 : CiphertextSpace1;
-  c1 <$ CiphertextSpace1;
-  var _r0 : E2.Key;
-  _r0 <@ E2.KeyGen();
-  var _r1 : E2.Ciphertext;
-  _r1 <@ E2.Enc(_r0, m);
-  return (c1, _r1);
-}
-'''
-
-tactic = '''
+description = "hop 2R micro_2: drops an unused independent sample"
+added = "2026-11-20"
+derived_on = "<sidecar path> | EC <version> | exporter <commit>"
+scope_note = "why this key is masked as it is"
+negative_control = """
+  mutation: <the load-bearing conjunct you falsified>
+  EasyCrypt said: <its rejection message>
+"""
+refuted = """
+  <approaches that did NOT work, so the next filler skips them>
+"""
+game_before = """
+<the expected game_before from the miss comment>
+"""
+game_after = """
+<the expected game_after from the miss comment>
+"""
+tactic = """
 proc.
 swap{1} 2 2.
 rnd{1}; auto => />.
 sim.
-'''
+"""
 ```
 
 Conventions:
 
-- Use TOML literal multi-line strings (`'''`), not basic (`"""`); they
-  don't interpret backslashes.
+- The four derivation-record fields (`derived_on`, `scope_note`,
+  `negative_control`, `refuted`) are mandatory. Since 2026-08-11 the
+  lookup refuses an entry without all four (`tactic_cache.admissible`),
+  and the micro-lemma stays admitted. `negative_control` is the
+  load-bearing one.
+- The skeleton's basic strings (`"""`) escape backslashes the way
+  `tactic_cache.py` writes them. A hand-written block may use a literal
+  string (`'''`) instead, which does not interpret backslashes.
 - Each block-field starts with a newline immediately after the opening
   delimiter (the writer in `tactic_cache.py` does this; mimic it).
 - The `description` field is required by this workflow (the schema
@@ -173,8 +186,8 @@ Conventions:
 Almost always means the engine pipeline has drifted and the entry is
 stale. Check:
 
-1. Is `canonical_text` itself different? (Run the new export and
-   compare with the sidecar's `game_after`.)
+1. Is the key itself different? (Run the new export and compare the
+   miss comment's key with the sidecar's `game_after`.)
 2. If the transform's behavior really did change, update the entry's
    `game_after` (and probably the `tactic`); add a note in
    `description` about the drift.
@@ -197,7 +210,12 @@ Stop and confirm with the user before:
 - Bumping `schema_version` in any sidecar (or in `tactic_cache.py`).
   That's a maintainer decision; it invalidates every existing entry.
 - Modifying any canonicalization basis: `canonical_text`,
-  `_normalize_for_ec`, or any code in `proof_frog/transforms/`.
+  `masked_shape`, `_normalize_for_ec`, or any code in
+  `proof_frog/transforms/`.
+- Writing any entry that closes more than one transform application
+  at once, such as a whole-hop or whole-oracle entry (R6).
+- Changing the registry API, the conformance test or the
+  provenance-tag format.
 - Promoting a recurring cache shape to a Layer-1 Python synthesizer.
   Wait until at least 5 distinct proofs hit the same recipe.
 

@@ -523,6 +523,12 @@ CASES = [
      "an empty callee body dropped the binding of an argument that draws"),
     ("F-403", "empty_body_control.proof", "accept", "method inliner",
      "positive control: a call-free argument to an empty body has no effect"),
+    ("F-404", "many.proof", "reject", "method inlining",
+     "calls left after the 200-round inlining cap were read as opaque calls"),
+    ("F-404", "few.proof", "reject", "method inlining",
+     "the same games with 5 calls: inlining finishes, the draw is kept"),
+    ("F-404", "cap_control.proof", "accept", "method inlining",
+     "positive control: a game inlined in exactly 200 rounds is resolved"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),
@@ -873,6 +879,11 @@ FAILED_STEP = {
     ),
     ("F-391", "challenger_field_draw.proof"): (
         "Step 3 failed: KI(S).Real compose R(S) -> Twice(S).Right"
+    ),
+    # The hop fails because a game could not be inlined, not on a difference.
+    ("F-404", "many.proof"): (
+        "Step 1 failed: G_many(P).Left -> G_many(P).Right\n"
+        "    G_many(P).Left: inlining did not finish within 200 rounds"
     ),
     ("Z3-FIELD-ACCESS", "group_equality.proof"): (
         "Step 2 failed: Swapped(G) -> GroupEquality(G).Right"

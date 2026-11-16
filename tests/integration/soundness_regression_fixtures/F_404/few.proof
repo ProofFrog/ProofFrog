@@ -1,0 +1,20 @@
+// F-404, the same games with 5 calls before P.Pick(S): inlining finishes,
+// the draw that may not complete is kept, and the hop fails on the
+// difference. Sound engine: Proof Failed!, as before the fix.
+import 'Pk.primitive';
+import 'PkImpl.scheme';
+import 'G_few.game';
+
+proof:
+
+let:
+    PkImpl P = PkImpl();
+
+assume:
+
+theorem:
+    G_few(P);
+
+games:
+    G_few(P).Left against G_few(P).Adversary;
+    G_few(P).Right against G_few(P).Adversary;

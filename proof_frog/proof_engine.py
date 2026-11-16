@@ -6,7 +6,6 @@ import functools
 import os
 import re
 import shutil
-import warnings
 import sys
 from concurrent.futures import Future, ProcessPoolExecutor, as_completed
 from enum import Enum, IntEnum
@@ -1250,10 +1249,13 @@ class ProofEngine:
 
     def _print_diagnostics(self) -> None:
         """Print Level 2 diagnostic output for failed hops."""
+        # A failed hop without a diagnosis is an `upto` hop whose side
+        # condition fails, or a hop with a game that was not resolved
+        # (F-404); its failure detail says why.
         failed = [
             r
             for r in self.hop_results
-            if not r.valid and (r.diagnosis is not None or r.kind == "by_upto")
+            if not r.valid and (r.diagnosis is not None or r.failure_detail)
         ]
         if not failed:
             return
@@ -1348,9 +1350,6 @@ class ProofEngine:
 
             next_step = steps[i]
 
-            current_game_ast: frog_ast.Game
-            next_game_ast: frog_ast.Game
-
             if isinstance(current_step, frog_ast.Step) and isinstance(
                 next_step, frog_ast.Step
             ):
@@ -1403,18 +1402,9 @@ class ProofEngine:
                         )
                     )
                     continue
-                current_game_ast = self._get_game_ast(
-                    current_step.challenger, current_step.reduction
-                )
-                next_game_ast = self._get_game_ast(
-                    next_step.challenger, next_step.reduction
-                )
             elif isinstance(current_step, frog_ast.Step) and isinstance(
                 next_step, frog_ast.Induction
             ):
-                current_game_ast = self._get_game_ast(
-                    current_step.challenger, current_step.reduction
-                )
                 first_inductive_step = next_step.steps[0]
                 assert isinstance(first_inductive_step, frog_ast.Step)
                 ast_map = frog_ast.ASTMap[frog_ast.ASTNode](identity=False)
@@ -1422,16 +1412,10 @@ class ProofEngine:
                 first_inductive_step = visitors.SubstitutionTransformer(
                     ast_map
                 ).transform(first_inductive_step)
-                next_game_ast = self._get_game_ast(
-                    first_inductive_step.challenger, first_inductive_step.reduction
-                )
                 next_step = first_inductive_step
             elif isinstance(current_step, frog_ast.Induction) and isinstance(
                 next_step, frog_ast.Step
             ):
-                next_game_ast = self._get_game_ast(
-                    next_step.challenger, next_step.reduction
-                )
                 last_inductive_step = next(
                     step
                     for step in current_step.steps[::-1]
@@ -1443,13 +1427,27 @@ class ProofEngine:
                 last_inductive_step = visitors.SubstitutionTransformer(
                     ast_map
                 ).transform(last_inductive_step)
-                current_game_ast = self._get_game_ast(
-                    last_inductive_step.challenger, last_inductive_step.reduction
-                )
                 current_step = last_inductive_step
 
             assert isinstance(current_step, frog_ast.Step)
             assert isinstance(next_step, frog_ast.Step)
+
+            induction_step_index = (
+                i if isinstance(steps[i], frog_ast.Induction) else None
+            )
+            resolved = self._resolve_hop_games(current_step, next_step)
+            if isinstance(resolved, str):
+                prepared.append(
+                    ProofEngine._PreparedHop(
+                        step_num=step_num,
+                        current_desc=self._step_display(current_step),
+                        next_desc=self._step_display(next_step),
+                        induction_step_index=induction_step_index,
+                        failure=resolved,
+                    )
+                )
+                continue
+            current_game_ast, next_game_ast = resolved
 
             self.set_up_assumptions(hop_assumptions, current_step, next_step)
 
@@ -1461,13 +1459,24 @@ class ProofEngine:
                     current_game_ast=current_game_ast,
                     next_game_ast=next_game_ast,
                     step_assumptions=list(self.step_assumptions),
-                    induction_step_index=(
-                        i if isinstance(steps[i], frog_ast.Induction) else None
-                    ),
+                    induction_step_index=induction_step_index,
                     hint=self._upto_hint(current_step, next_step),
                 )
             )
         return prepared
+
+    def _resolve_hop_games(
+        self, current_step: frog_ast.Step, next_step: frog_ast.Step
+    ) -> tuple[frog_ast.Game, frog_ast.Game] | str:
+        """The two games of an equivalence hop, or, when one of them could
+        not be resolved (F-404), why not: the hop then fails."""
+        games: list[frog_ast.Game] = []
+        for step in (current_step, next_step):
+            try:
+                games.append(self._get_game_ast(step.challenger, step.reduction))
+            except InliningLimitError as e:
+                return f"{self._step_display(step)}: {e}"
+        return games[0], games[1]
 
     def _register_events_in_scope(self, proof_file: frog_ast.ProofFile) -> None:
         """Record the assumed/lemma events and register their flag games.
@@ -1592,6 +1601,9 @@ class ProofEngine:
             self._print_step_status(
                 hop_desc, "ok (cached)" if equiv_result.cached else "ok", Fore.GREEN
             )
+        elif hop.failure:  # a game was not resolved (F-404)
+            self._print_step_status(hop_desc, "FAILED", Fore.RED)
+            print(f"    {Fore.YELLOW}{hop.failure}{Fore.RESET}")
         else:
             self._print_step_status(hop_desc, "FAILED", Fore.RED)
             self._print_failure_inline(equiv_result)
@@ -1686,7 +1698,11 @@ class ProofEngine:
         results: dict[int, EquivalenceResult] = {}
         cache_keys: dict[int, str | None] = {}
         for idx, hop in enumerate(prepared):
-            if not hop.kind:  # equivalence hop
+            if not hop.kind and hop.failure:  # a game was not resolved
+                results[idx] = EquivalenceResult(
+                    valid=False, failure_detail=hop.failure
+                )
+            elif not hop.kind:  # equivalence hop
                 task = self._make_task(hop)
                 # The worker reads `task.proof_let_types` as well as the
                 # context's copy; the key covers only the latter, so a task
@@ -1788,9 +1804,14 @@ class ProofEngine:
                 continue
 
             self.step_assumptions = hop.step_assumptions
-            equiv_result = self._check_equivalent_cached(
-                hop.current_game_ast, hop.next_game_ast  # type: ignore[arg-type]
-            )
+            if hop.failure:
+                equiv_result = EquivalenceResult(
+                    valid=False, failure_detail=hop.failure
+                )
+            else:
+                equiv_result = self._check_equivalent_cached(
+                    hop.current_game_ast, hop.next_game_ast  # type: ignore[arg-type]
+                )
             self._report_hop(hop, equiv_result, _depth)
 
             if hop.induction_step_index is not None:
@@ -1826,12 +1847,7 @@ class ProofEngine:
                 first_step = visitors.SubstitutionTransformer(ast_map).transform(
                     first_step
                 )
-                first_step_ast = self._get_game_ast(
-                    first_step.challenger, first_step.reduction
-                )
-                last_step_ast = self._get_game_ast(
-                    last_step.challenger, last_step.reduction
-                )
+                rollover_games = self._resolve_hop_games(last_step, first_step)
                 self._current_step += 1
                 rollover_current_desc = self._step_display(last_step)
                 rollover_next_desc = self._step_display(first_step)
@@ -1839,10 +1855,13 @@ class ProofEngine:
                     print("CHECKING INDUCTION ROLLOVER")
                     print(f"Current: {rollover_current_desc}")
                     print(f"Hop To: {rollover_next_desc}\n")
-                self.set_up_assumptions(rollover_assumptions, last_step, first_step)
-                rollover_result = self._check_equivalent_cached(
-                    last_step_ast, first_step_ast
-                )
+                if isinstance(rollover_games, str):
+                    rollover_result = EquivalenceResult(
+                        valid=False, failure_detail=rollover_games
+                    )
+                else:
+                    self.set_up_assumptions(rollover_assumptions, last_step, first_step)
+                    rollover_result = self._check_equivalent_cached(*rollover_games)
                 rollover_hop = (
                     f"[rollover] {rollover_current_desc} -> {rollover_next_desc}"
                 )
@@ -1852,6 +1871,9 @@ class ProofEngine:
                         "ok (cached)" if rollover_result.cached else "ok",
                         Fore.GREEN,
                     )
+                elif isinstance(rollover_games, str):
+                    self._print_step_status(rollover_hop, "FAILED", Fore.RED)
+                    print(f"    {Fore.YELLOW}{rollover_games}{Fore.RESET}")
                 else:
                     self._print_step_status(rollover_hop, "FAILED", Fore.RED)
                     self._print_failure_inline(rollover_result)
@@ -2298,19 +2320,7 @@ class ProofEngine:
 
         if not composed_later:
             game = run_call_initializers_in_initialize(game, lookup)
-        for _iteration in range(_MAX_FIXED_POINT_ITERATIONS):
-            new_game = visitors.InlineTransformer(lookup).transform(game)
-            if game != new_game:
-                game = new_game
-            else:
-                break
-        else:
-            warnings.warn(
-                "Inlining did not converge within "
-                f"{_MAX_FIXED_POINT_ITERATIONS} iterations",
-                stacklevel=2,
-            )
-        return game
+        return inline_calls(game, lookup)
 
     def _argument_types(
         self, args: list[frog_ast.Expression]
@@ -3145,16 +3155,72 @@ class UnsupportedFieldInitializerError(Exception):
     """A field initializer the engine cannot run in Initialize (F-391)."""
 
 
+class InliningLimitError(Exception):
+    """A game whose method calls the engine did not finish inlining (F-404).
+
+    The engine inlines one call per round, for at most
+    ``_MAX_FIXED_POINT_ITERATIONS`` rounds. A call left after that is read
+    by the passes as a call to an opaque method, which always completes and
+    changes no state, so it is dropped when its result is unused. But the
+    callee's body is known: it may draw from a set that can be empty, which
+    does not complete, or change state. So such a game is not resolved, and
+    a hop that needs it fails."""
+
+    def __init__(self, rounds: int, call: frog_ast.FuncCall | None) -> None:
+        left = f"{call} is still a call" if call is not None else "calls are left"
+        super().__init__(
+            f"inlining did not finish within {rounds} rounds (one method call "
+            f"is inlined per round): {left}. The engine checks a game only "
+            "once all its calls are inlined (an engine limit)."
+        )
+        self.rounds = rounds
+
+
+def _first_inlinable_call(
+    node: frog_ast.ASTNode, lookup: MethodLookup
+) -> frog_ast.FuncCall | None:
+    found = visitors.SearchVisitor[frog_ast.ASTNode](
+        lambda n: isinstance(n, frog_ast.FuncCall)
+        and isinstance(n.func, frog_ast.FieldAccess)
+        and isinstance(n.func.the_object, frog_ast.Variable)
+        and (n.func.the_object.name, n.func.name) in lookup
+    ).visit(node)
+    assert found is None or isinstance(found, frog_ast.FuncCall)
+    return found
+
+
 def _makes_inlinable_call(node: frog_ast.ASTNode, lookup: MethodLookup) -> bool:
-    return (
-        visitors.SearchVisitor[frog_ast.ASTNode](
-            lambda n: isinstance(n, frog_ast.FuncCall)
-            and isinstance(n.func, frog_ast.FieldAccess)
-            and isinstance(n.func.the_object, frog_ast.Variable)
-            and (n.func.the_object.name, n.func.name) in lookup
-        ).visit(node)
-        is not None
+    return _first_inlinable_call(node, lookup) is not None
+
+
+def inline_calls(
+    game: frog_ast.Game, lookup: MethodLookup, max_rounds: int | None = None
+) -> frog_ast.Game:
+    """Inline the calls to *lookup*'s methods in *game*'s methods, one call
+    per round, until none is left.
+
+    Raises :class:`InliningLimitError` when calls are still left after
+    *max_rounds* rounds (by default ``_MAX_FIXED_POINT_ITERATIONS``): the game
+    is then not resolved (F-404). A field initializer is not inlined into
+    (``InlineTransformer.transform_field``), so its calls do not count.
+    """
+    rounds = _MAX_FIXED_POINT_ITERATIONS if max_rounds is None else max_rounds
+    for _ in range(rounds):
+        new_game = visitors.InlineTransformer(lookup).transform(game)
+        if new_game == game:
+            return game
+        game = new_game
+    if visitors.InlineTransformer(lookup).transform(game) == game:
+        return game
+    left = next(
+        (
+            call
+            for method in game.methods
+            if (call := _first_inlinable_call(method, lookup)) is not None
+        ),
+        None,
     )
+    raise InliningLimitError(rounds, left)
 
 
 def run_call_initializers_in_initialize(

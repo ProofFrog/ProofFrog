@@ -1,0 +1,14 @@
+import 'Pk.primitive';
+
+// Pick draws outside S: the draw does not complete when S is all of
+// BitString<1>.
+Scheme PkImpl() extends Pk {
+    Bool Pick(Set<BitString<1>> S) {
+        BitString<1> x <- BitString<1> \ S;
+        return true;
+    }
+
+    Bool Id(Bool b) {
+        return b;
+    }
+}

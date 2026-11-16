@@ -1,0 +1,25 @@
+// F-404 (method inlining). The engine inlines one method call per round,
+// for at most 200 rounds. Left makes 206 calls, the last to P.Pick(S), whose
+// draw from BitString<1> \ S does not complete when S is all of
+// BitString<1>; Right makes none. Past the cap the engine only warned and
+// went on with the calls left as calls to an opaque method, and the unused
+// Pick call was then dropped, so the hop verified. Sound engine: Proof
+// Failed!, the hop failing because inlining did not finish within 200
+// rounds.
+import 'Pk.primitive';
+import 'PkImpl.scheme';
+import 'G_many.game';
+
+proof:
+
+let:
+    PkImpl P = PkImpl();
+
+assume:
+
+theorem:
+    G_many(P);
+
+games:
+    G_many(P).Left against G_many(P).Adversary;
+    G_many(P).Right against G_many(P).Adversary;

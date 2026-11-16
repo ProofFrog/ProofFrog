@@ -1,0 +1,4 @@
+Primitive Pk() {
+    Bool Pick(Set<BitString<1>> S);
+    Bool Id(Bool b);
+}

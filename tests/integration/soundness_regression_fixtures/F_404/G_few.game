@@ -1,0 +1,24 @@
+import 'Pk.primitive';
+
+// Left: 5 calls without effect, then Pick (which does not complete when S
+// is full). Right: no Pick. Test(true, {0b0, 0b1}) never returns on Left
+// and returns on Right.
+Game Left(Pk P) {
+    Bool Test(Bool a, Set<BitString<1>> S) {
+        Bool t0 = P.Id(a);
+        Bool t1 = P.Id(a);
+        Bool t2 = P.Id(a);
+        Bool t3 = P.Id(a);
+        Bool t4 = P.Id(a);
+        Bool z = P.Pick(S);
+        return a;
+    }
+}
+
+Game Right(Pk P) {
+    Bool Test(Bool a, Set<BitString<1>> S) {
+        return a;
+    }
+}
+
+export as G_few;

@@ -1,0 +1,21 @@
+// F-404 positive control. Left makes 200 calls, the last to P.Pick(S); the
+// engine inlines one call per round, so Left is resolved in exactly 200
+// rounds, its cap, and the hop to Right (Pick alone) still verifies. Sound
+// engine: Proof Succeeded!
+import 'Pk.primitive';
+import 'PkImpl.scheme';
+import 'G_cap.game';
+
+proof:
+
+let:
+    PkImpl P = PkImpl();
+
+assume:
+
+theorem:
+    G_cap(P);
+
+games:
+    G_cap(P).Left against G_cap(P).Adversary;
+    G_cap(P).Right against G_cap(P).Adversary;

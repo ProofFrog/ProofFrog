@@ -303,6 +303,18 @@ CASES = [
      "positive control: a bound draw read once is forwarded into its read"),
     ("F-371", "unread_draw_control.proof", "accept", "method inliner",
      "positive control: an unread bound draw from a type is removed"),
+    ("F-372", "attack_and.proof", "reject", "method inliner",
+     "a call in the right operand of && ran even when the left one was false"),
+    ("F-372", "attack_or.proof", "reject", "method inliner",
+     "a call in the right operand of || ran even when the left one was true"),
+    ("F-372", "attack_elseif.proof", "reject", "method inliner",
+     "a call in an else if condition ran even when an earlier one held"),
+    ("F-372", "challenger_and_guarded.proof", "reject", "method inliner",
+     "a challenger call in && was made on every trace; hop 3 is the false one"),
+    ("F-372", "completeness_guarded_vs_and.proof", "accept", "method inliner",
+     "b && P.Pick(S) is the guarded if (b) { return P.Pick(S); } return false;"),
+    ("F-372", "control_no_effect.proof", "accept", "method inliner",
+     "positive control: a call with no effect may still run on every trace"),
     ("F-373", "param_write.proof", "reject", "method inliner",
      "a callee's x = 0^n; on its parameter assigned the caller's variable"),
     ("F-373", "param_element_write.proof", "reject", "method inliner",
@@ -989,6 +1001,9 @@ TYPE_ERROR = {
 # (finding, proof file) -> the hop a reject case must fail at. Every other
 # hop in these proofs is true and must still pass.
 FAILED_STEP = {
+    ("F-372", "challenger_and_guarded.proof"): (
+        "Step 3 failed: Counter().Right compose R() -> TG().Right"
+    ),
     ("F-373", "challenger_write.proof"): (
         "Step 1 failed: Probe(n).Left -> Echo(n).Left compose R(n)"
     ),

@@ -1,0 +1,9 @@
+import 'Picker.primitive';
+
+// Pick draws outside S; the draw cannot complete when S is all of BitString<1>.
+Scheme PickImpl() extends Picker {
+    Bool Pick(Set<BitString<1>> S) {
+        BitString<1> x <- BitString<1> \ S;
+        return true;
+    }
+}

@@ -1,0 +1,16 @@
+import 'Picker.primitive';
+
+// Distinguisher: Test(false, {0b0, 0b1}). Left returns false (Pick is
+// short-circuited away); Right runs Pick, whose draw cannot complete.
+Game Left(Picker P) {
+    Bool Test(Bool b, Set<BitString<1>> S) {
+        return b && P.Pick(S);
+    }
+}
+Game Right(Picker P) {
+    Bool Test(Bool b, Set<BitString<1>> S) {
+        Bool t = P.Pick(S);
+        return b && t;
+    }
+}
+export as TT;

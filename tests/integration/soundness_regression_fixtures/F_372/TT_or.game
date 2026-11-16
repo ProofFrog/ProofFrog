@@ -1,0 +1,13 @@
+import 'Picker.primitive';
+Game Left(Picker P) {
+    Bool Test(Bool b, Set<BitString<1>> S) {
+        return b || P.Pick(S);
+    }
+}
+Game Right(Picker P) {
+    Bool Test(Bool b, Set<BitString<1>> S) {
+        Bool t = P.Pick(S);
+        return b || t;
+    }
+}
+export as TT_or;

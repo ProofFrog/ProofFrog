@@ -1,0 +1,25 @@
+import 'Counter.game';
+import 'TG.game';
+
+// A reduction returning `b && challenger.Q()`, where Q increments a
+// challenger counter. `&&` short-circuits, so the composed game counts only
+// Test(true): it is TG().Left (hop 1 is true) and not TG().Right (hop 3 is
+// false). The engine used to make the call on every trace, accepting hop 3
+// and refusing hop 1; the proof must now fail at hop 3 only.
+Reduction R() compose Counter() against TG().Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    Bool Test(Bool b) { return b && challenger.Q(); }
+    Int Count() { return challenger.Count(); }
+}
+
+proof:
+let:
+assume:
+    Counter();
+theorem:
+    TG();
+games:
+    TG().Left against TG().Adversary;
+    Counter().Left compose R() against TG().Adversary;
+    Counter().Right compose R() against TG().Adversary;
+    TG().Right against TG().Adversary;

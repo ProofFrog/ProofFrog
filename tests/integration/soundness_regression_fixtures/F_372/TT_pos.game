@@ -1,0 +1,13 @@
+import 'Picker.primitive';
+Game Left(Picker P) {
+    Bool Test(Bool b, Set<BitString<1>> S) {
+        if (b) { return P.Pick(S); }
+        return false;
+    }
+}
+Game Right(Picker P) {
+    Bool Test(Bool b, Set<BitString<1>> S) {
+        return b && P.Pick(S);
+    }
+}
+export as TT_pos;

@@ -1,0 +1,15 @@
+import 'Picker.primitive';
+Game Left(Picker P) {
+    Bool Test(Bool b, Set<BitString<1>> S) {
+        if (b) { return false; } else if (P.Pick(S)) { return true; }
+        return true;
+    }
+}
+Game Right(Picker P) {
+    Bool Test(Bool b, Set<BitString<1>> S) {
+        Bool t = P.Pick(S);
+        if (b) { return false; }
+        return true;
+    }
+}
+export as TT_elseif;

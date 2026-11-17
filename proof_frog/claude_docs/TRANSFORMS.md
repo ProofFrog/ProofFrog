@@ -151,7 +151,7 @@ The field-level RF rewrites (UniqueRFSimplification, FreshInputRFToUniform, Chal
 | Pass | Description |
 |---|---|
 | FoldTupleIndex | Constant-folds `[e0, e1, ...][i]` to `e_i`. |
-| ExpandTuple | Expands product-typed variables into individual component variables. |
+| ExpandTuple | Expands product-typed variables into individual component variables. A later field's initializer reads the components; a field that its own or an earlier field's initializer reads, or whose initializer is not a tuple literal, is left whole (near miss). A declaration of the same name that is not split (local, parameter, `for` binder) hides the split variable in its scope. |
 | SimplifyTuple | Collapses `[v[0], v[1], ...]` back to `v`. |
 | CollapseSingleIndexTuple | Collapses product-typed variable accessed at a single constant index. |
 

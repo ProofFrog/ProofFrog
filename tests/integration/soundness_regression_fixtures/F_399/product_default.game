@@ -1,0 +1,18 @@
+// The product field w is never assigned, so both games read its default.
+// A tuple's default is the tuple of its components' defaults, so w[0] and
+// w[1] are both the default of BitString<8>.
+Game Left() {
+    [BitString<8>, BitString<8>] w;
+    BitString<8> Q() {
+        return w[1];
+    }
+}
+
+Game Right() {
+    [BitString<8>, BitString<8>] w;
+    BitString<8> Q() {
+        return w[0];
+    }
+}
+
+export as ProductDefault;

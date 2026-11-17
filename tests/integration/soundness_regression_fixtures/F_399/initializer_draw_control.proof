@@ -1,0 +1,19 @@
+// F-399 positive control. The games differ only in w[0], which no method and
+// no initializer reads; once w is split, x's initializer reads the component
+// w[1], a draw in both games. Sound engine: Proof Succeeded!
+import 'Drawer.primitive';
+import 'initializer_draw_control.game';
+
+proof:
+
+let:
+    Drawer D = Drawer(8);
+
+assume:
+
+theorem:
+    InitializerDrawControl(D);
+
+games:
+    InitializerDrawControl(D).Left against InitializerDrawControl(D).Adversary;
+    InitializerDrawControl(D).Right against InitializerDrawControl(D).Adversary;

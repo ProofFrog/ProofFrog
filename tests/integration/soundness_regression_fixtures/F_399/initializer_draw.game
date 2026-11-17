@@ -1,0 +1,25 @@
+import 'Drawer.primitive';
+
+// x's initializer reads w[1], which is a draw in Left and 0^8 in Right. Q
+// returns x on its first call, so the adversary sees w[1].
+Game Left(Drawer D) {
+    [BitString<8>, BitString<8>] w = [D.Draw(), D.Draw()];
+    BitString<8> x = w[1];
+    BitString<8> Q() {
+        BitString<8> r = x;
+        x = 0^8;
+        return r;
+    }
+}
+
+Game Right(Drawer D) {
+    [BitString<8>, BitString<8>] w = [D.Draw(), 0^8];
+    BitString<8> x = w[1];
+    BitString<8> Q() {
+        BitString<8> r = x;
+        x = 0^8;
+        return r;
+    }
+}
+
+export as InitializerDraw;

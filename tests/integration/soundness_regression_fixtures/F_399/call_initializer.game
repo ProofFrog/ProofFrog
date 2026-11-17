@@ -1,0 +1,20 @@
+import 'Pairer.primitive';
+
+// w's initializer is a call returning a pair, not a tuple literal. Right
+// copies w[0] into a local before returning it.
+Game Left(Pairer P) {
+    [BitString<8>, BitString<8>] w = P.Pair();
+    BitString<8> Q() {
+        return w[0];
+    }
+}
+
+Game Right(Pairer P) {
+    [BitString<8>, BitString<8>] w = P.Pair();
+    BitString<8> Q() {
+        BitString<8> r = w[0];
+        return r;
+    }
+}
+
+export as CallInitializer;

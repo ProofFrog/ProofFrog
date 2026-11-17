@@ -3045,6 +3045,88 @@ def test_split_bare_tuple_declarations_no_near_miss_when_it_fires():
     assert not [nm for nm in ctx.near_misses if nm.variable == "v"]
 
 
+def test_expand_tuples_near_miss_f399_field_read_by_earlier_initializer():
+    """Expand Tuples reports a near-miss when a field declared before a
+    product field reads it in its initializer (F-399): that initializer runs
+    before the product field's, so it cannot read a component instead."""
+    game = frog_parser.parse_game("""
+        Game T() {
+            BitString<8> x = w[1];
+            [BitString<8>, BitString<8>] w = [0^8, 1^8];
+            BitString<8> Q() {
+                x = 0^8;
+                return w[0];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = ExpandTuple().apply(game, ctx)
+
+    assert result == game  # transform should NOT have fired
+    matching = [nm for nm in ctx.near_misses if nm.variable == "w"]
+    assert matching
+    assert matching[0].transform_name == "Expand Tuples"
+    assert "field 'x'" in matching[0].reason
+
+
+def test_expand_tuples_near_miss_f399_own_initializer_reads_field():
+    """Expand Tuples reports a near-miss when a product field's initializer
+    reads the field itself (F-399)."""
+    game = frog_parser.parse_game("""
+        Game T() {
+            [BitString<8>, BitString<8>] w = [w[1], 0^8];
+            BitString<8> Q() {
+                return w[0];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = ExpandTuple().apply(game, ctx)
+
+    assert result == game
+    matching = [nm for nm in ctx.near_misses if nm.variable == "w"]
+    assert matching
+    assert "its own declaration" in matching[0].reason
+
+
+def test_expand_tuples_near_miss_f399_non_literal_field_initializer():
+    """Expand Tuples reports a near-miss (and does not crash) when a product
+    field's initializer is not a tuple literal (F-399)."""
+    game = frog_parser.parse_game("""
+        Game T() {
+            [BitString<8>, BitString<8>] w = P.Pair();
+            BitString<8> Q() {
+                return w[0];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    result = ExpandTuple().apply(game, ctx)
+
+    assert result == game
+    matching = [nm for nm in ctx.near_misses if nm.variable == "w"]
+    assert matching
+    assert "not a tuple literal" in matching[0].reason
+
+
+def test_expand_tuples_no_f399_near_miss_when_a_later_field_reads_it():
+    """No near-miss when only a later field's initializer reads the product
+    field: the split goes ahead and the initializer reads the component."""
+    game = frog_parser.parse_game("""
+        Game T() {
+            [BitString<8>, BitString<8>] w = [0^8, 1^8];
+            BitString<8> x = w[1];
+            BitString<8> Q() {
+                x = 0^8;
+                return w[0];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    ExpandTuple().apply(game, ctx)
+    assert not [nm for nm in ctx.near_misses if nm.variable == "w"]
+
+
 def test_cross_method_alias_near_miss_shadowed_match():
     """CrossMethodFieldAlias reports a near-miss when a call matches the
     Initialize-cached field structurally but a parameter rebinds its argument

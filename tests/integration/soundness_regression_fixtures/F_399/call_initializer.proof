@@ -1,0 +1,20 @@
+// F-399 (Expand Tuples). A product field whose initializer is not a tuple
+// literal has no components to give the fields a split would make; Expand
+// Tuples failed an assertion on it and the proof stopped with an error. It
+// now leaves such a field whole. Sound engine: Proof Succeeded!
+import 'Pairer.primitive';
+import 'call_initializer.game';
+
+proof:
+
+let:
+    Pairer P = Pairer(8);
+
+assume:
+
+theorem:
+    CallInitializer(P);
+
+games:
+    CallInitializer(P).Left against CallInitializer(P).Adversary;
+    CallInitializer(P).Right against CallInitializer(P).Adversary;

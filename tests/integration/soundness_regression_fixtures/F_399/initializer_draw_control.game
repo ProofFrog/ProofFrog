@@ -1,0 +1,25 @@
+import 'Drawer.primitive';
+
+// As initializer_draw.game, but the two games differ only in w[0], which
+// nothing reads: x is a draw in both.
+Game Left(Drawer D) {
+    [BitString<8>, BitString<8>] w = [D.Draw(), D.Draw()];
+    BitString<8> x = w[1];
+    BitString<8> Q() {
+        BitString<8> r = x;
+        x = 0^8;
+        return r;
+    }
+}
+
+Game Right(Drawer D) {
+    [BitString<8>, BitString<8>] w = [0^8, D.Draw()];
+    BitString<8> x = w[1];
+    BitString<8> Q() {
+        BitString<8> r = x;
+        x = 0^8;
+        return r;
+    }
+}
+
+export as InitializerDrawControl;

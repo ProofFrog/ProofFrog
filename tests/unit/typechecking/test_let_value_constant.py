@@ -6,9 +6,11 @@ non-deterministic call (``c = R.Draw()``, or a draw nested anywhere inside
 it) would make the call again at each use, though the entry holds one
 value, so a game returning ``[c, c]`` would read as two independent draws.
 Such an entry is ill-formed: the type checker refuses it, naming the entry,
-and ``ProofEngine.prove`` refuses it as well when called without the type
-checker. A call is judged as the passes judge it: a primitive method
-declared ``deterministic`` and a ``Function`` are deterministic.
+and proof set-up (``ProofEngine.set_up_proof_context``, which ``prove`` and
+the step-inspection commands share) refuses it as well for a caller that
+skips the type checker (F-400). A call is judged as the passes judge it: a
+primitive method declared ``deterministic`` and a ``Function`` are
+deterministic.
 """
 
 from __future__ import annotations
@@ -93,29 +95,44 @@ def _type_check(proof_path: Path) -> None:
     semantic_analysis.check_well_formed(root, str(proof_path))
 
 
-@pytest.mark.parametrize(
-    "lets, entry, value",
-    [
-        # A non-deterministic primitive method.
-        ("BitString<8> c = R.Draw();", "c", "R.Draw()"),
-        # Nested in a value whose top is not a call.
-        ("BitString<8> c = R.Draw() + 0^8;", "c", "R.Draw() + 0^8"),
-        ("BitString<8> c = R.Fixed() + R.Draw();", "c", "R.Fixed() + R.Draw()"),
-        # In the argument of a deterministic method.
-        ("BitString<8> c = R.Id(R.Draw());", "c", "R.Id(R.Draw())"),
-        # In the argument of a let: function.
-        ("BitString<8> c = H(R.Draw());", "c", "H(R.Draw())"),
-        (
-            "BitString<8> c = H(R.Fixed() + R.Draw()) + 0^8;",
-            "c",
-            "H(R.Fixed() + R.Draw()) + 0^8",
-        ),
-        # A scheme method that draws.
-        ("DrawWrap W = DrawWrap(R); BitString<8> c = W.Draw();", "c", "W.Draw()"),
-        # The draw in an entry of its own: that entry is refused.
-        ("BitString<8> x = R.Draw(); BitString<8> c = H(x);", "x", "R.Draw()"),
-    ],
-)
+# (lets, refused entry, its value)
+_NONDETERMINISTIC_LETS = [
+    # A non-deterministic primitive method.
+    ("BitString<8> c = R.Draw();", "c", "R.Draw()"),
+    # Nested in a value whose top is not a call.
+    ("BitString<8> c = R.Draw() + 0^8;", "c", "R.Draw() + 0^8"),
+    ("BitString<8> c = R.Fixed() + R.Draw();", "c", "R.Fixed() + R.Draw()"),
+    # In the argument of a deterministic method.
+    ("BitString<8> c = R.Id(R.Draw());", "c", "R.Id(R.Draw())"),
+    # In the argument of a let: function.
+    ("BitString<8> c = H(R.Draw());", "c", "H(R.Draw())"),
+    (
+        "BitString<8> c = H(R.Fixed() + R.Draw()) + 0^8;",
+        "c",
+        "H(R.Fixed() + R.Draw()) + 0^8",
+    ),
+    # A scheme method that draws.
+    ("DrawWrap W = DrawWrap(R); BitString<8> c = W.Draw();", "c", "W.Draw()"),
+    # The draw in an entry of its own: that entry is refused.
+    ("BitString<8> x = R.Draw(); BitString<8> c = H(x);", "x", "R.Draw()"),
+]
+
+_DETERMINISTIC_LETS = [
+    # A primitive method declared deterministic.
+    "BitString<8> c = R.Fixed();",
+    "BitString<8> c = R.Id(R.Fixed()) + 0^8;",
+    # A let: function, sampled or known, on a deterministic argument.
+    "BitString<8> c = H(R.Fixed());",
+    "BitString<8> c = H(0^8);",
+    f"{_FN} K; BitString<8> c = K(H(0^8));",
+    # No call at all.
+    "BitString<8> c = 0^8;",
+    # An instantiation is not a value.
+    "DrawWrap W = DrawWrap(R); BitString<8> c = R.Fixed();",
+]
+
+
+@pytest.mark.parametrize("lets, entry, value", _NONDETERMINISTIC_LETS)
 def test_let_value_making_nondeterministic_call_is_type_error(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -130,22 +147,7 @@ def test_let_value_making_nondeterministic_call_is_type_error(
     assert f"let: entry '{entry}' = {value} makes a non-deterministic call" in error
 
 
-@pytest.mark.parametrize(
-    "lets",
-    [
-        # A primitive method declared deterministic.
-        "BitString<8> c = R.Fixed();",
-        "BitString<8> c = R.Id(R.Fixed()) + 0^8;",
-        # A let: function, sampled or known, on a deterministic argument.
-        "BitString<8> c = H(R.Fixed());",
-        "BitString<8> c = H(0^8);",
-        f"{_FN} K; BitString<8> c = K(H(0^8));",
-        # No call at all.
-        "BitString<8> c = 0^8;",
-        # An instantiation is not a value.
-        "DrawWrap W = DrawWrap(R); BitString<8> c = R.Fixed();",
-    ],
-)
+@pytest.mark.parametrize("lets", _DETERMINISTIC_LETS)
 def test_let_value_making_only_deterministic_calls_type_checks(
     tmp_path: Path, lets: str
 ) -> None:
@@ -188,11 +190,40 @@ def _engine(definitions: dict[str, frog_ast.Root]) -> proof_engine.ProofEngine:
     return engine
 
 
+@pytest.mark.parametrize("lets, entry, value", _NONDETERMINISTIC_LETS)
+def test_set_up_refuses_let_value_making_nondeterministic_call(
+    tmp_path: Path, lets: str, entry: str, value: str
+) -> None:
+    """Set-up is shared by ``prove`` and the step-inspection commands, which
+    skip the type checker: it refuses every such entry, not only a call of a
+    ``let:`` function on a draw, and before it binds any entry (F-400)."""
+    proof, definitions = _proof_and_definitions(tmp_path, lets)
+    engine = _engine(definitions)
+    with pytest.raises(proof_engine.UnsupportedLetEntryError) as error:
+        engine.set_up_proof_context(proof)
+    assert error.value.name == entry
+    assert str(error.value).startswith(
+        f"let: entry '{entry}' = {value} makes a non-deterministic call"
+    )
+    assert entry not in engine.proof_namespace
+
+
+@pytest.mark.parametrize("lets", _DETERMINISTIC_LETS)
+def test_set_up_reads_deterministic_let_value_as_its_expression(
+    tmp_path: Path, lets: str
+) -> None:
+    proof, definitions = _proof_and_definitions(tmp_path, lets)
+    engine = _engine(definitions)
+    engine.set_up_proof_context(proof)
+    (value,) = [let.value for let in proof.lets if let.name == "c"]
+    assert engine.proof_namespace["c"] == value
+
+
 def test_prove_without_type_check_refuses_let_value_making_nondeterministic_call(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """``c = R.Draw()`` is no call of a ``let:`` function, so set-up stores it;
-    ``prove`` still refuses it before any hop is checked."""
+    """``c = R.Draw()`` is no call of a ``let:`` function; set-up still
+    refuses it, and ``prove`` reports it before any hop is checked."""
     proof, definitions = _proof_and_definitions(
         tmp_path, "BitString<8> c = R.Draw() + 0^8;"
     )

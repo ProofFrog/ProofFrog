@@ -1,0 +1,17 @@
+// F-031: a scheme method that writes a field of its scheme (CnImpl.Bump
+// increments cnt) was inlined with the field's bare name, which the game's
+// own field cnt captured, so Left (whose cnt stays 0) was proved
+// interchangeable with Right (whose cnt counts up). A scheme field may not be
+// written in a method body, so this is a type error.
+import 'Cn.primitive';
+import 'CnImpl.scheme';
+import 'GSt.game';
+proof:
+let:
+    CnImpl P = CnImpl();
+assume:
+theorem:
+    GSt(P);
+games:
+    GSt(P).Left against GSt(P).Adversary;
+    GSt(P).Right against GSt(P).Adversary;

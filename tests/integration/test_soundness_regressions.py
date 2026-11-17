@@ -55,6 +55,8 @@ CASES = [
      "a written scheme field, left a bare name, was captured by a game field"),
     ("F-031", "scheme_field_grow.proof", "type_error", "type checker",
      "a written scheme field was read as its initializer after a write"),
+    ("F-031", "scheme_state.proof", "type_error", "type checker",
+     "a written scheme field, read and written by its bare name, was captured"),
     ("F-031", "scheme_const_control.proof", "accept", "type checker",
      "positive control: a scheme field no method writes is read as its value"),
     ("F-048", "J2.proof", "type_error", "MergeUniformSamples",
@@ -749,6 +751,10 @@ TYPE_ERROR = {
     ),
     ("F-031", "scheme_field_grow.proof"): (
         "error: Method Grow writes the scheme field 'len': a scheme field may"
+        " not be written in a method body"
+    ),
+    ("F-031", "scheme_state.proof"): (
+        "error: Method Bump writes the scheme field 'cnt': a scheme field may"
         " not be written in a method body"
     ),
     ("F-048", "J2.proof"): (

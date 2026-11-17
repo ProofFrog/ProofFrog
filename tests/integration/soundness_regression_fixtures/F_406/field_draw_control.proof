@@ -1,0 +1,11 @@
+// F-406 positive control: an unread field drawn from BitString<1> \ {0b0},
+// which is never empty, is still removed (see GField1.game).
+import 'GField1.game';
+proof:
+let:
+assume:
+theorem:
+    GField1();
+games:
+    GField1().Left against GField1().Adversary;
+    GField1().Right against GField1().Adversary;

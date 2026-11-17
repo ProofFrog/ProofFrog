@@ -1,0 +1,21 @@
+// F-406 positive control: the same games with a draw from BitString<1> \ {0b0},
+// which always completes, so it may move past the early return.
+Game Left() {
+    BitString<1> Draw(Bool g) {
+        BitString<1> r <- BitString<1> \ {0b0};
+        if (g) {
+            return 0b0;
+        }
+        return r;
+    }
+}
+Game Right() {
+    BitString<1> Draw(Bool g) {
+        if (g) {
+            return 0b0;
+        }
+        BitString<1> r <- BitString<1> \ {0b0};
+        return r;
+    }
+}
+export as GReturn1;

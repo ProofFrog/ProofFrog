@@ -1,0 +1,11 @@
+// The pair type below has an Int component, which is unbounded.
+import 'Pairs.primitive';
+
+Scheme IntPairs(Int n) extends Pairs {
+    Int n = n;
+    Set Pair = [Int, BitString<n>];
+
+    Pair Make(BitString<n> s) {
+        return [0, s];
+    }
+}

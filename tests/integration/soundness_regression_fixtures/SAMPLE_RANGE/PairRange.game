@@ -1,0 +1,28 @@
+// Both sides draw a random function whose range is the scheme's pair type, named through its alias.
+import 'Pairs.primitive';
+
+Game Left(Pairs E) {
+    Function<BitString<E.n>, E.Pair> H;
+
+    Void Initialize() {
+        H <- Function<BitString<E.n>, E.Pair>;
+    }
+
+    E.Pair Query(BitString<E.n> x) {
+        return H(x);
+    }
+}
+
+Game Right(Pairs E) {
+    Function<BitString<E.n>, E.Pair> H;
+
+    Void Initialize() {
+        H <- Function<BitString<E.n>, E.Pair>;
+    }
+
+    E.Pair Query(BitString<E.n> x) {
+        return H(x);
+    }
+}
+
+export as PairRange;

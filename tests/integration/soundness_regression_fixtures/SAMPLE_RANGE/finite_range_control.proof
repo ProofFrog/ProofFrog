@@ -1,0 +1,16 @@
+// Positive control: a draw of Function<Int, BitString<n>> is well formed (only the range is drawn from).
+import 'FiniteRange.game';
+
+proof:
+
+let:
+    Int n;
+
+assume:
+
+theorem:
+    FiniteRange(n);
+
+games:
+    FiniteRange(n).Left against FiniteRange(n).Adversary;
+    FiniteRange(n).Right against FiniteRange(n).Adversary;

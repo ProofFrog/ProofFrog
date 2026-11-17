@@ -1,0 +1,17 @@
+// Positive control: a let: entry drawing Function<BitString<n>, BitString<n>> is well formed.
+import 'QueryBits.game';
+
+proof:
+
+let:
+    Int n;
+    Function<BitString<n>, BitString<n>> H <- Function<BitString<n>, BitString<n>>;
+
+assume:
+
+theorem:
+    QueryBits(n, H);
+
+games:
+    QueryBits(n, H).Left against QueryBits(n, H).Adversary;
+    QueryBits(n, H).Right against QueryBits(n, H).Adversary;

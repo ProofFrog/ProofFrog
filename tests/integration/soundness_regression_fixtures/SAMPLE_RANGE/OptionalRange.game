@@ -1,0 +1,26 @@
+// Both sides draw a random function whose outputs are optional, which has no uniform distribution.
+Game Left(Int n) {
+    Function<BitString<n>, BitString<n>?> H;
+
+    Void Initialize() {
+        H <- Function<BitString<n>, BitString<n>?>;
+    }
+
+    BitString<n>? Query(BitString<n> x) {
+        return H(x);
+    }
+}
+
+Game Right(Int n) {
+    Function<BitString<n>, BitString<n>?> H;
+
+    Void Initialize() {
+        H <- Function<BitString<n>, BitString<n>?>;
+    }
+
+    BitString<n>? Query(BitString<n> x) {
+        return H(x);
+    }
+}
+
+export as OptionalRange;

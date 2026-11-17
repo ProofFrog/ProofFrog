@@ -1,0 +1,15 @@
+// A draw of Map<Bool, Int> draws its values from Int: ill-formed.
+import 'IntMapValue.game';
+
+proof:
+
+let:
+
+assume:
+
+theorem:
+    IntMapValue();
+
+games:
+    IntMapValue().Left against IntMapValue().Adversary;
+    IntMapValue().Right against IntMapValue().Adversary;

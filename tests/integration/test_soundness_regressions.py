@@ -678,6 +678,21 @@ CASES = [
      "a product draw with an Int component was accepted"),
     ("SAMPLE-COMPONENTS", "finite_components_control.proof", "accept",
      "type checker", "positive control: a product of finite types is drawn"),
+    ("SAMPLE-RANGE", "int_range.proof", "type_error", "type checker",
+     "a random function with an Int range was drawn"),
+    ("SAMPLE-RANGE", "optional_range.proof", "type_error", "type checker",
+     "a random function with an optional range was drawn"),
+    ("SAMPLE-RANGE", "alias_range.proof", "type_error", "type checker",
+     "a random function whose range alias has an Int component was drawn"),
+    ("SAMPLE-RANGE", "int_map_value.proof", "type_error", "type checker",
+     "a map with Int values was drawn"),
+    ("SAMPLE-RANGE", "let_int_range.proof", "type_error", "type checker",
+     "a let: entry drew a random function with an Int range"),
+    ("SAMPLE-RANGE", "finite_range_control.proof", "accept", "type checker",
+     "positive control: a random function with a finite range and Int domain"),
+    ("SAMPLE-RANGE", "let_finite_range_control.proof", "accept",
+     "type checker",
+     "positive control: a let: entry draws a function with a finite range"),
     ("F-367", "written_field_length.proof", "type_error", "type checker",
      "a type length named a field an oracle writes"),
     ("F-367", "written_local_length.proof", "type_error", "type checker",
@@ -809,6 +824,27 @@ TYPE_ERROR = {
     ("SAMPLE-COMPONENTS", "int_component.proof"): (
         "error: Cannot sample from [Int, BitString<n>]: its component Int has"
         " no uniform distribution"
+    ),
+    ("SAMPLE-RANGE", "int_range.proof"): (
+        "error: Cannot sample from Function<BitString<n>, Int>: its range Int"
+        " has no uniform distribution"
+    ),
+    ("SAMPLE-RANGE", "optional_range.proof"): (
+        "error: Cannot sample from Function<BitString<n>, BitString<n>?>: its"
+        " range BitString<n>? has no uniform distribution"
+    ),
+    ("SAMPLE-RANGE", "alias_range.proof"): (
+        "error: Cannot sample from Function<BitString<n>, [Int, BitString<n>]>:"
+        " its range [Int, BitString<n>] has the component Int, which has no"
+        " uniform distribution"
+    ),
+    ("SAMPLE-RANGE", "int_map_value.proof"): (
+        "error: Cannot sample from Map<Bool, Int>: its value type Int has no"
+        " uniform distribution"
+    ),
+    ("SAMPLE-RANGE", "let_int_range.proof"): (
+        "let_int_range.proof:8:4: error: Cannot sample from"
+        " Function<BitString<n>, Int>: its range Int has no uniform distribution"
     ),
     ("F-367", "written_field_length.proof"): (
         "error: The size in BitString<m> names field 'm', which is assigned or"

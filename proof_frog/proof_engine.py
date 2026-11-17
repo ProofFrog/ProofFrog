@@ -108,8 +108,10 @@ class UnsupportedLetEntryError(Exception):
     A ``let:`` value is a constant (ruling Q13): it is read as its expression
     wherever the entry is used. The entry holds one value, but each use of
     ``R.Draw()`` would make a draw of its own, so such an entry is
-    ill-formed. The type checker refuses it, naming the entry, and ``prove``
-    reports it as a failed proof (F-389, F-395)."""
+    ill-formed. The type checker refuses it, naming the entry, and so does
+    :meth:`ProofEngine.set_up_proof_context` for a caller that skips the
+    type checker: ``prove`` reports it as a failed proof, the step-inspection
+    commands as an error (F-389, F-395, F-400)."""
 
     def __init__(self, name: str, value: frog_ast.Expression) -> None:
         super().__init__(
@@ -774,10 +776,22 @@ class ProofEngine:
         seeds `variables`/`max_calls`, builds the method lookup, and
         extracts subset relations. Shared by the prover and the
         diagnostic CLI/web commands so both see the same simplification
-        context.
+        context. Raises :class:`UnsupportedLetEntryError` for the first
+        ``let:`` value that makes a non-deterministic call.
         """
         for game in proof_file.helpers:
             self.definition_namespace[game.name] = game
+
+        # Ill-formed (ruling Q13): each use would make the call again. The
+        # type checker refuses it too; set-up refuses it for every caller
+        # that skips the type checker (`prove` and the step-inspection
+        # commands alike), before building any state (F-389, F-395, F-400).
+        refused = nondeterministic_let_values(
+            proof_file.lets, proof_file.sampled_let_names, self.definition_namespace
+        )
+        if refused:
+            assert refused[0].value is not None
+            raise UnsupportedLetEntryError(refused[0].name, refused[0].value)
 
         # Here, we are substituting the lets with the parameters they are given
         self.sampled_let_names = proof_file.sampled_let_names
@@ -815,22 +829,10 @@ class ProofEngine:
                     )
                 else:
                     raise TypeError("Must instantiate either a Primitive or Scheme ")
-            elif (
-                isinstance(let.value, frog_ast.FuncCall)
-                and isinstance(let.value.func, frog_ast.Variable)
-                and has_nondeterministic_call(
-                    let.value, self.proof_namespace, self.proof_let_types
-                )
-            ):
-                # `c = H(0b0)` reads as H(0b0) at every use, which is exact
-                # because a Function is deterministic and its argument makes
-                # no call that is not; `c = H(R.Draw())` would read as a
-                # fresh draw at every use (F-389). The type checker and
-                # `prove` refuse every let: value that makes a
-                # non-deterministic call (`nondeterministic_let_values`,
-                # F-395); set-up refuses this shape itself as well.
-                raise UnsupportedLetEntryError(let.name, let.value)
             else:
+                # A value, read as its expression at every use: exact, since
+                # the check above leaves only values that make no
+                # non-deterministic call (`c = H(0b0)`, F-389).
                 self.proof_namespace[let.name] = copy.deepcopy(let.value)
                 # For abstract primitive-typed lets (e.g. `TrapdoorTest T;`
                 # with no initializer), bind the primitive itself into
@@ -865,14 +867,6 @@ class ProofEngine:
     def prove(self, proof_file: frog_ast.ProofFile, proof_path: str = "") -> None:
         try:
             self.set_up_proof_context(proof_file)
-            # Ill-formed (ruling Q13), so the type checker refuses it too; a
-            # caller that skips the type checker must not see it verify.
-            refused = nondeterministic_let_values(
-                proof_file.lets, self.sampled_let_names, self.definition_namespace
-            )
-            if refused:
-                assert refused[0].value is not None
-                raise UnsupportedLetEntryError(refused[0].name, refused[0].value)
         except UnsupportedLetEntryError as e:
             print(Fore.RED + str(e) + Fore.RESET)
             print(

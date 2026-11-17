@@ -174,7 +174,7 @@ def test_f389_let_value_calling_function_is_a_value() -> None:
         # A let: function in the argument.
         ("BitString<m> c = H(H(0b0)[0 : 1]);", "c", "H(H(0b0)[0 : 1])"),
         # A let: entry in the argument stays a name: c is H at its one value.
-        ("Drawer R; BitString<1> x = R.Draw(); BitString<m> c = H(x);", "c", "H(x)"),
+        ("Drawer R; BitString<1> x = R.Fixed(); BitString<m> c = H(x);", "c", "H(x)"),
     ],
 )
 def test_f389_let_value_with_deterministic_argument_is_a_value(

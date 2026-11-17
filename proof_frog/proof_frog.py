@@ -362,7 +362,12 @@ def export_latex(  # pylint: disable=too-many-arguments,too-many-positional-argu
             diff=diff,
             diff_style=diff_style,
         )
-    except (frog_parser.ParseError, FileNotFoundError, ValueError) as e:
+    except (
+        frog_parser.ParseError,
+        FileNotFoundError,
+        ValueError,
+        proof_engine.UnsupportedLetEntryError,
+    ) as e:
         click.echo(str(e), err=True)
         sys.exit(1)
 

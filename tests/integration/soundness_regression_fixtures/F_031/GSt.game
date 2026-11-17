@@ -1,0 +1,22 @@
+import 'Cn.primitive';
+// Left: the game's own counter cnt is never written; Bump changes only the
+// scheme's state. Test returns 0 every time.
+// Right: the game's counter is incremented and returned: 1, 2, ...
+// Distinguisher: one Test() call returns 0 on Left and 1 on Right.
+Game Left(Cn P) {
+    Int cnt;
+    Void Initialize() { cnt = 0; }
+    Int Test() {
+        Int r = P.Bump();
+        return cnt;
+    }
+}
+Game Right(Cn P) {
+    Int cnt;
+    Void Initialize() { cnt = 0; }
+    Int Test() {
+        cnt = cnt + 1;
+        return cnt;
+    }
+}
+export as GSt;

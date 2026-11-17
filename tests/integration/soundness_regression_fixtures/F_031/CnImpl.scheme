@@ -1,0 +1,8 @@
+import 'Cn.primitive';
+Scheme CnImpl() extends Cn {
+    Int cnt = 0;
+    Int Bump() {
+        cnt = cnt + 1;
+        return cnt;
+    }
+}

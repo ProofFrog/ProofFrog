@@ -129,3 +129,117 @@ class TestUnsamplableDomains:
                 }
             }
             """)
+
+
+class TestFunctionAndMapDraws:
+    """A drawn ``Function<D, R>`` draws each output from ``R``, and a drawn
+    ``Map<K, V>`` each value from ``V``, so ``R`` and ``V`` must be samplable
+    (ruling Q10(b)); ``D`` and ``K`` are not drawn from."""
+
+    def test_function_with_finite_range_is_samplable(self) -> None:
+        _check_game("""
+            Game G(Int n) {
+                Function<Int, BitString<n>> H;
+                Void Initialize() {
+                    H <- Function<Int, BitString<n>>;
+                }
+            }
+            """)
+
+    def test_function_with_abstract_range_is_samplable(self) -> None:
+        _check_game("""
+            Game G(Set D, Set R) {
+                Function<D, R> H;
+                Void Initialize() {
+                    H <- Function<D, R>;
+                }
+            }
+            """)
+
+    def test_map_with_finite_values_is_samplable(self) -> None:
+        _check_game("""
+            Game G(Int n) {
+                Map<Int, BitString<n>> M;
+                Void Initialize() {
+                    M <- Map<Int, BitString<n>>;
+                }
+            }
+            """)
+
+    def test_function_with_int_range_is_not_samplable(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _check_game_fails("""
+            Game G(Int n) {
+                Function<BitString<n>, Int> H;
+                Void Initialize() {
+                    H <- Function<BitString<n>, Int>;
+                }
+            }
+            """)
+        assert (
+            "Cannot sample from Function<BitString<n>, Int>: its range Int has"
+            " no uniform distribution" in capsys.readouterr().err
+        )
+
+    def test_function_with_optional_range_is_not_samplable(self) -> None:
+        _check_game_fails("""
+            Game G(Int n) {
+                Function<BitString<n>, Bool?> H;
+                Void Initialize() {
+                    H <- Function<BitString<n>, Bool?>;
+                }
+            }
+            """)
+
+    def test_function_with_int_range_component_is_not_samplable(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _check_game_fails("""
+            Game G(Int n) {
+                Function<BitString<n>, [Bool, Int]> H;
+                Void Initialize() {
+                    H <- Function<BitString<n>, [Bool, Int]>;
+                }
+            }
+            """)
+        assert (
+            "its range [Bool, Int] has the component Int, which has no uniform"
+            " distribution" in capsys.readouterr().err
+        )
+
+    def test_local_function_draw_is_checked(self) -> None:
+        _check_game_fails("""
+            Game G(Int n) {
+                Int Run(BitString<n> x) {
+                    Function<BitString<n>, Int> H <- Function<BitString<n>, Int>;
+                    return H(x);
+                }
+            }
+            """)
+
+    def test_map_with_int_values_is_not_samplable(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _check_game_fails("""
+            Game G() {
+                Map<Bool, Int> M;
+                Void Initialize() {
+                    M <- Map<Bool, Int>;
+                }
+            }
+            """)
+        assert (
+            "Cannot sample from Map<Bool, Int>: its value type Int has no"
+            " uniform distribution" in capsys.readouterr().err
+        )
+
+    def test_map_of_functions_with_optional_range_is_not_samplable(self) -> None:
+        _check_game_fails("""
+            Game G(Int n) {
+                Map<Bool, Function<BitString<n>, Int?>> M;
+                Void Initialize() {
+                    M <- Map<Bool, Function<BitString<n>, Int?>>;
+                }
+            }
+            """)

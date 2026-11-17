@@ -1,0 +1,14 @@
+// Both sides answer queries with a function given as a parameter.
+Game Left(Int n, Function<BitString<n>, BitString<n>> H) {
+    BitString<n> Query(BitString<n> x) {
+        return H(x);
+    }
+}
+
+Game Right(Int n, Function<BitString<n>, BitString<n>> H) {
+    BitString<n> Query(BitString<n> x) {
+        return H(x);
+    }
+}
+
+export as QueryBits;

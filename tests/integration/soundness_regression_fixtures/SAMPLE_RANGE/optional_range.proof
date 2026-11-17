@@ -1,0 +1,16 @@
+// A draw of Function<BitString<n>, BitString<n>?> draws each output from an optional type: ill-formed.
+import 'OptionalRange.game';
+
+proof:
+
+let:
+    Int n;
+
+assume:
+
+theorem:
+    OptionalRange(n);
+
+games:
+    OptionalRange(n).Left against OptionalRange(n).Adversary;
+    OptionalRange(n).Right against OptionalRange(n).Adversary;

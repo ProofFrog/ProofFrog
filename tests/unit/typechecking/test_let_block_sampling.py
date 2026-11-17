@@ -103,3 +103,34 @@ def test_non_function_sample_in_let_rejected(
     with pytest.raises(semantic_analysis.FailedTypeCheck):
         semantic_analysis.check_well_formed(root, str(proof_path))
     assert "only function types can be sampled" in capsys.readouterr().err.lower()
+
+
+@pytest.mark.parametrize(
+    "let_line, message",
+    [
+        (
+            "Function<BitString<8>, Int> H <- Function<BitString<8>, Int>;",
+            "its range Int has no uniform distribution",
+        ),
+        (
+            "Function<BitString<8>, BitString<8>?> H"
+            " <- Function<BitString<8>, BitString<8>?>;",
+            "its range BitString<8>? has no uniform distribution",
+        ),
+    ],
+)
+def test_function_sample_in_let_with_unsamplable_range_rejected(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    let_line: str,
+    message: str,
+) -> None:
+    """A sampled let entry draws each output from the function's range, so an
+    Int or optional range is refused, as for a draw in a game (ruling Q10(b))."""
+    _write_fixtures(tmp_path)
+    proof_path = tmp_path / "test.proof"
+    proof_path.write_text(_make_proof(let_line))
+    root = frog_parser.parse_file(str(proof_path))
+    with pytest.raises(semantic_analysis.FailedTypeCheck):
+        semantic_analysis.check_well_formed(root, str(proof_path))
+    assert message in capsys.readouterr().err

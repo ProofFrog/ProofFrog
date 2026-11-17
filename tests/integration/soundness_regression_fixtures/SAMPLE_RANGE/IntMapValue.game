@@ -1,0 +1,26 @@
+// Both sides draw a whole map whose values are Int, which is unbounded.
+Game Left() {
+    Map<Bool, Int> M;
+
+    Void Initialize() {
+        M <- Map<Bool, Int>;
+    }
+
+    Int Query(Bool b) {
+        return M[b];
+    }
+}
+
+Game Right() {
+    Map<Bool, Int> M;
+
+    Void Initialize() {
+        M <- Map<Bool, Int>;
+    }
+
+    Int Query(Bool b) {
+        return M[b];
+    }
+}
+
+export as IntMapValue;

@@ -170,7 +170,7 @@ Draws a value uniformly at random from the specified type's domain. Each samplin
 - `GroupElem<G> u <- GroupElem<G>;` — sample a uniformly random element of the group G
 - `Function<D, R> RF <- Function<D, R>;` — instantiate a fresh random function
 
-A sampled type must have a uniform distribution. `Int` (unbounded) and an optional type `T?` (no weight for `None`) do not, and neither does a product or array type with such a component, written directly or reached through an alias (`Set Pair = [BitString<n>?, BitString<n>];` then `Pair p <- Pair;`). The type checker rejects all of these, for both sampling forms.
+A sampled type must have a uniform distribution. `Int` (unbounded) and an optional type `T?` (no weight for `None`) do not, and neither does a product or array type with such a component, written directly or reached through an alias (`Set Pair = [BitString<n>?, BitString<n>];` then `Pair p <- Pair;`). A drawn `Function<D, R>` draws each of its outputs from `R`, and a drawn `Map<K, V>` each of its values from `V`, so `R` and `V` are held to the same rule (ruling Q10(b)): `Function<BitString<n>, Int> H <- Function<BitString<n>, Int>;` and `Map<Bool, BitString<n>?> M <- Map<Bool, BitString<n>?>;` are refused, in a game and as a sampled proof `let:` entry. The domain `D` and the key type `K` are not drawn from, so `Function<Int, BitString<n>>` may be drawn. The type checker rejects all of these, for both sampling forms.
 
 **Sampling from a variable**: `Type x <- someSetVariable;` — sample uniformly from the elements currently in a set or the values of a map.
 

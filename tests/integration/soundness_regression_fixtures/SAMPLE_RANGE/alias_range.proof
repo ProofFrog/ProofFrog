@@ -1,0 +1,19 @@
+// The range E.Pair is [Int, BitString<n>] for this scheme, so the draw takes an Int component: ill-formed.
+import 'Pairs.primitive';
+import 'IntPairs.scheme';
+import 'PairRange.game';
+
+proof:
+
+let:
+    Int n;
+    Pairs E = IntPairs(n);
+
+assume:
+
+theorem:
+    PairRange(E);
+
+games:
+    PairRange(E).Left against PairRange(E).Adversary;
+    PairRange(E).Right against PairRange(E).Adversary;

@@ -1189,6 +1189,8 @@ def check_proof_well_formed(
                 )
         # Always visit to register the type in the checker's scope
         type_check_visitor.visit(let)
+        if let.name in proof.sampled_let_names:
+            type_check_visitor.check_sampled_let(let)
     # A let: value is a constant (ruling Q13), read as its expression at
     # every use, so a value that makes a non-deterministic call is
     # ill-formed: each use would make the call again (F-389, F-395).
@@ -2912,10 +2914,31 @@ class CheckTypeVisitor(VariableTypeVisitor):
         sampling forms ('<-' and '<-uniq[S]' / '<- T \\ E'), and to every
         component of a product or array type, written directly or reached
         through an alias: a draw of '[BitString<n>?, BitString<n>]' draws its
-        first component from an optional type.
+        first component from an optional type. A drawn 'Function<D, R>' draws
+        each output from R, and a drawn 'Map<K, V>' each value from V, so R
+        and V are held to the same rule (ruling Q10(b)).
         """
         resolved = self._resolve_type_alias(sampled_from)
         component = self._unsamplable_component(resolved, frozenset())
+        if component is not None and isinstance(
+            resolved, (frog_ast.FunctionType, frog_ast.MapType)
+        ):
+            if isinstance(resolved, frog_ast.FunctionType):
+                part, part_type = "range", resolved.range_type
+            else:
+                part, part_type = "value type", resolved.value_type
+            inner = (
+                ""
+                if component == self._resolve_type_alias(part_type)
+                else f" has the component {component}, which"
+            )
+            self.print_error(
+                location,
+                f"Cannot sample from {resolved}: its {part} {part_type}{inner}"
+                " has no uniform distribution (uniform sampling requires a"
+                " finite type)",
+                hint=f"use a finite {part} such as BitString<n> or ModInt<q>",
+            )
         if component is not None and component is not resolved:
             self.print_error(
                 location,
@@ -2938,14 +2961,21 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 hint=f"sample from {resolved.the_type} instead",
             )
 
+    def check_sampled_let(self, let: frog_ast.Field) -> None:
+        """A sampled proof 'let:' entry ('Function<D, R> H <- Function<D, R>;')
+        is a draw of its type, held to the same rule as a '<-' statement."""
+        self._check_samplable(let, let.type)
+
     def _unsamplable_component(
         self, the_type: PossibleType | frog_ast.Expression, seen: frozenset[str]
     ) -> Optional[frog_ast.Type]:
         """The first part of a sampled type that has no uniform distribution:
         the type itself when it is Int or optional, else such a component of a
-        product or array type at any depth, each part resolved through its
+        product or array type, of the range of a Function type or of the
+        value type of a Map type, at any depth, each part resolved through its
         aliases (a 'Set P = [A, [Int, B]];' alias holds a tuple of types);
-        None if there is none."""
+        None if there is none. A Function's domain and a Map's key type are
+        not drawn from, so they may be anything."""
         if isinstance(the_type, frog_ast.Variable):
             if the_type.name in seen:
                 return None
@@ -2967,6 +2997,10 @@ class CheckTypeVisitor(VariableTypeVisitor):
             parts = list(the_type.values)
         elif isinstance(the_type, frog_ast.ArrayType):
             parts = [the_type.element_type]
+        elif isinstance(the_type, frog_ast.FunctionType):
+            parts = [the_type.range_type]
+        elif isinstance(the_type, frog_ast.MapType):
+            parts = [the_type.value_type]
         for part in parts:
             found = self._unsamplable_component(part, seen)
             if found is not None:

@@ -1,0 +1,16 @@
+// A draw of Function<BitString<n>, Int> draws each output from Int: ill-formed.
+import 'IntRange.game';
+
+proof:
+
+let:
+    Int n;
+
+assume:
+
+theorem:
+    IntRange(n);
+
+games:
+    IntRange(n).Left against IntRange(n).Adversary;
+    IntRange(n).Right against IntRange(n).Adversary;

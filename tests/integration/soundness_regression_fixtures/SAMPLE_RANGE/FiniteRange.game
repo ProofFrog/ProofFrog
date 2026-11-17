@@ -1,0 +1,26 @@
+// Both sides draw a random function with a finite range; its domain Int is not drawn from.
+Game Left(Int n) {
+    Function<Int, BitString<n>> H;
+
+    Void Initialize() {
+        H <- Function<Int, BitString<n>>;
+    }
+
+    BitString<n> Query(Int x) {
+        return H(x);
+    }
+}
+
+Game Right(Int n) {
+    Function<Int, BitString<n>> H;
+
+    Void Initialize() {
+        H <- Function<Int, BitString<n>>;
+    }
+
+    BitString<n> Query(Int x) {
+        return H(x);
+    }
+}
+
+export as FiniteRange;

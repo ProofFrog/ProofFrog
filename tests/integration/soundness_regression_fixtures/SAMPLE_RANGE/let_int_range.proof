@@ -1,0 +1,17 @@
+// The let: entry draws a random function whose outputs are Int: ill-formed.
+import 'QueryInt.game';
+
+proof:
+
+let:
+    Int n;
+    Function<BitString<n>, Int> H <- Function<BitString<n>, Int>;
+
+assume:
+
+theorem:
+    QueryInt(n, H);
+
+games:
+    QueryInt(n, H).Left against QueryInt(n, H).Adversary;
+    QueryInt(n, H).Right against QueryInt(n, H).Adversary;

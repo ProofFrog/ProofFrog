@@ -1,0 +1,26 @@
+// Both sides draw a random function whose outputs are Int, which is unbounded.
+Game Left(Int n) {
+    Function<BitString<n>, Int> H;
+
+    Void Initialize() {
+        H <- Function<BitString<n>, Int>;
+    }
+
+    Int Query(BitString<n> x) {
+        return H(x);
+    }
+}
+
+Game Right(Int n) {
+    Function<BitString<n>, Int> H;
+
+    Void Initialize() {
+        H <- Function<BitString<n>, Int>;
+    }
+
+    Int Query(BitString<n> x) {
+        return H(x);
+    }
+}
+
+export as IntRange;

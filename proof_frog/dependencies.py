@@ -69,8 +69,11 @@ def _domain_size_lower_bound(domain: frog_ast.ASTNode, value_names: set[str]) ->
     """A lower bound on the number of elements of the sampling domain
     *domain*; 0 when it may be empty.
 
-    A type is non-empty (every length and modulus is at least 1), and Bool and
-    BitString have at least two elements. A runtime value -- a variable in
+    A type is non-empty. Bool has two elements, and ``BitString<k>`` for an
+    integer literal ``k`` has ``2^k``: ``BitString<0>`` has one, the empty
+    string. A length or modulus written other than as a literal denotes an
+    integer of at least 1, so such a ``BitString`` has at least two elements
+    and such a ``ModInt`` at least one. A runtime value -- a variable in
     *value_names*, a view of one such as ``M.keys``, a set literal or any
     other expression -- may be empty.
     """
@@ -78,8 +81,9 @@ def _domain_size_lower_bound(domain: frog_ast.ASTNode, value_names: set[str]) ->
         return 2
     if isinstance(domain, frog_ast.BitStringType):
         length = domain.parameterization
-        if isinstance(length, frog_ast.Integer) and length.num >= 1:
-            return 1 << min(length.num, 64)
+        if isinstance(length, frog_ast.Integer):
+            # A negative literal is ill-formed; count it as one element.
+            return 1 << min(max(length.num, 0), 64)
         return 2
     if isinstance(domain, frog_ast.ModIntType):
         modulus = domain.modulus

@@ -1,0 +1,22 @@
+// F-406: Left draws r from BitString<0> \ {0^0} (an empty domain) before an
+// early return, Right after it.
+// Distinguisher: Draw(true) never returns on Left and returns 0^0 on Right.
+Game Left() {
+    BitString<0> Draw(Bool g) {
+        BitString<0> r <- BitString<0> \ {0^0};
+        if (g) {
+            return 0^0;
+        }
+        return r;
+    }
+}
+Game Right() {
+    BitString<0> Draw(Bool g) {
+        if (g) {
+            return 0^0;
+        }
+        BitString<0> r <- BitString<0> \ {0^0};
+        return r;
+    }
+}
+export as GReturn0;

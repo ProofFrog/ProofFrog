@@ -636,6 +636,85 @@ def test_possibly_empty_draw_depends_on_value_names() -> None:
     assert dependencies.is_possibly_empty_draw(minus, set())
 
 
+@pytest.mark.parametrize(
+    "statement, expected",
+    [
+        # BitString<0> has one element, the empty string 0^0: excluding it
+        # leaves nothing.
+        ("BitString<0> x <- BitString<0> \\ {0^0};", True),
+        ("BitString<0> x <-uniq[{0^0}] BitString<0>;", True),
+        ("BitString<0> x <- BitString<0> \\ {y};", True),
+        # Excluding nothing, or drawing from the type, still completes.
+        ("BitString<0> x <- BitString<0> \\ {};", False),
+        ("BitString<0> x <- BitString<0>;", False),
+        # A literal length k gives 2^k elements.
+        ("BitString<1> x <- BitString<1> \\ {0b0};", False),
+        ("BitString<2> x <- BitString<2> \\ {0b00, 0b01, 0b10, 0b11};", True),
+    ],
+)
+def test_f406_literal_bit_string_length_counts_its_elements(
+    statement: str, expected: bool
+) -> None:
+    node = _first_statement(statement)
+    assert dependencies.is_possibly_empty_draw(node, set()) is expected
+
+
+def test_f406_domain_size_lower_bound_of_bit_strings() -> None:
+    def bound(length: frog_ast.Expression) -> int:
+        domain = frog_ast.BitStringType(length)
+        # pylint: disable-next=protected-access
+        return dependencies._domain_size_lower_bound(domain, set())
+
+    assert bound(frog_ast.Integer(0)) == 1
+    assert bound(frog_ast.Integer(1)) == 2
+    assert bound(frog_ast.Integer(3)) == 8
+    # Capped, so a long literal length costs no big integer.
+    assert bound(frog_ast.Integer(1000)) == 1 << 64
+    # A negative literal is ill-formed; it counts as one element, not as a
+    # crash on a negative shift.
+    assert bound(frog_ast.Integer(-1)) == 1
+    # A length written other than as a literal is at least 1.
+    assert bound(frog_ast.Variable("n")) == 2
+
+
+def test_f406_sort_keeps_dead_draw_from_bit_string_zero_minus_its_element() -> None:
+    """F-406: the unused draw from BitString<0> \\ {0^0} never completes, so it
+    is not pruned; the same draw from BitString<1> \\ {0b0} still is."""
+    statements = _sorted_statements("""
+        Game G() {
+            Int Draw() {
+                BitString<0> junk <- BitString<0> \\ {0^0};
+                BitString<1> other <- BitString<1> \\ {0b0};
+                return 0;
+            }
+        }
+        """)
+    assert statements == ["BitString<0> junk <- BitString<0> \\ {0^0};", "return 0;"]
+
+
+def test_f406_remove_unnecessary_fields_keeps_draw_from_bit_string_zero() -> None:
+    """F-406: an unread field drawn from BitString<0> \\ {0^0} keeps its draw,
+    which never completes, and so the field it writes; one drawn from
+    BitString<1> \\ {0b0} goes."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            BitString<0> f;
+            BitString<1> g;
+            Bool Probe() {
+                f <- BitString<0> \\ {0^0};
+                g <- BitString<1> \\ {0b0};
+                return true;
+            }
+        }
+        """)
+    result = dependencies.remove_unnecessary_fields(game, [])
+    assert [field.name for field in result.fields] == ["f"]
+    assert [str(s) for s in result.get_method("Probe").block.statements] == [
+        "f <- BitString<0> \\ {0^0};",
+        "return true;",
+    ]
+
+
 def test_may_not_complete_looks_inside_nested_blocks() -> None:
     nested = _first_statement(
         "if (c) { for (Int i = 0 to 2) { BitString<1> x <- BitString<1> \\ E; } }"

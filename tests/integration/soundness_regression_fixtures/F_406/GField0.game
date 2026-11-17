@@ -1,0 +1,16 @@
+// F-406: Left's oracle draws a field from BitString<0> \ {0^0} (an empty
+// domain) that nothing reads; Right's oracle only returns.
+// Distinguisher: Probe() never returns on Left and returns true on Right.
+Game Left() {
+    BitString<0> f;
+    Bool Probe() {
+        f <- BitString<0> \ {0^0};
+        return true;
+    }
+}
+Game Right() {
+    Bool Probe() {
+        return true;
+    }
+}
+export as GField0;

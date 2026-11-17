@@ -1,0 +1,11 @@
+// F-406 positive control: an unused draw from BitString<1> \ {0b0}, which is
+// never empty, is still dropped as dead code (see G1d.game).
+import 'G1d.game';
+proof:
+let:
+assume:
+theorem:
+    G1d();
+games:
+    G1d().Left against G1d().Adversary;
+    G1d().Right against G1d().Adversary;

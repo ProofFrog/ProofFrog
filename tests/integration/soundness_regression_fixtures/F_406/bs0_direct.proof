@@ -1,0 +1,13 @@
+// F-406: claims G0d.Left and G0d.Right are interchangeable. They are not:
+// Left's draw from BitString<0> \ {0^0} never completes (see G0d.game). The
+// draw was counted as having two elements to choose from and dropped as
+// dead code.
+import 'G0d.game';
+proof:
+let:
+assume:
+theorem:
+    G0d();
+games:
+    G0d().Left against G0d().Adversary;
+    G0d().Right against G0d().Adversary;

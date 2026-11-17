@@ -1,0 +1,15 @@
+// F-406 positive control: the same games with a draw from BitString<1> \ {0b0},
+// which always completes, so the unread field may be removed.
+Game Left() {
+    BitString<1> f;
+    Bool Probe() {
+        f <- BitString<1> \ {0b0};
+        return true;
+    }
+}
+Game Right() {
+    Bool Probe() {
+        return true;
+    }
+}
+export as GField1;

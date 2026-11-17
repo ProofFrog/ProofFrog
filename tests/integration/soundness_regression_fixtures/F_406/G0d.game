@@ -1,0 +1,16 @@
+// F-406: BitString<0> has one element, the empty string 0^0, so a draw from
+// BitString<0> \ {0^0} has an empty domain and never completes.
+// Left: such a draw, its result unused. Right: returns true.
+// Distinguisher: Test() never returns on Left and returns true on Right.
+Game Left() {
+    Bool Test() {
+        BitString<0> x <- BitString<0> \ {0^0};
+        return true;
+    }
+}
+Game Right() {
+    Bool Test() {
+        return true;
+    }
+}
+export as G0d;

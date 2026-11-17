@@ -1,0 +1,11 @@
+// F-406 positive control: a draw from BitString<1> \ {0b0} still moves past
+// an early return (see GReturn1.game).
+import 'GReturn1.game';
+proof:
+let:
+assume:
+theorem:
+    GReturn1();
+games:
+    GReturn1().Left against GReturn1().Adversary;
+    GReturn1().Right against GReturn1().Adversary;

@@ -1,0 +1,12 @@
+// F-406: claims GField0.Left and GField0.Right are interchangeable. They are
+// not (see GField0.game): the unread field and its draw from
+// BitString<0> \ {0^0} were removed as if the draw always completed.
+import 'GField0.game';
+proof:
+let:
+assume:
+theorem:
+    GField0();
+games:
+    GField0().Left against GField0().Adversary;
+    GField0().Right against GField0().Adversary;

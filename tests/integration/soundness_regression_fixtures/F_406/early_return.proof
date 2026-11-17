@@ -1,0 +1,12 @@
+// F-406: claims GReturn0.Left and GReturn0.Right are interchangeable. They
+// are not (see GReturn0.game): the draw from BitString<0> \ {0^0} was moved
+// past the early return as if it always completed.
+import 'GReturn0.game';
+proof:
+let:
+assume:
+theorem:
+    GReturn0();
+games:
+    GReturn0().Left against GReturn0().Adversary;
+    GReturn0().Right against GReturn0().Adversary;

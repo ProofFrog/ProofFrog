@@ -1,0 +1,19 @@
+// F-399, the default of a tuple (FROGLANG_REFERENCE 6.9): the default of
+// [T1, ..., Tn] is the tuple of the defaults of T1, ..., Tn. Expand Tuples
+// splits the never-assigned w into two default-valued component fields, so
+// Left's w[1] and Right's w[0] are the same value. Sound engine: Proof
+// Succeeded!
+import 'product_default.game';
+
+proof:
+
+let:
+
+assume:
+
+theorem:
+    ProductDefault();
+
+games:
+    ProductDefault().Left against ProductDefault().Adversary;
+    ProductDefault().Right against ProductDefault().Adversary;

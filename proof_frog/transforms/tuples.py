@@ -13,6 +13,7 @@ canonicalization, then collapsed back when possible.
 from __future__ import annotations
 
 import copy
+from typing import TypeVar
 
 from .. import frog_ast
 from ..visitors import (
@@ -105,6 +106,30 @@ def _count_var_decls(node: frog_ast.ASTNode, name: str) -> int:
     return count[0]
 
 
+_Declaration = TypeVar(
+    "_Declaration", frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample
+)
+
+
+def _declared_names(statement: frog_ast.Statement) -> list[str]:
+    """The locals *statement* declares (a typed assignment or draw, a bare
+    declaration, a destructuring binding); a loop binder is handled with
+    the loop's body."""
+    if isinstance(statement, frog_ast.VariableDeclaration):
+        return [statement.name]
+    if isinstance(statement, frog_ast.DestructuringBinding):
+        return list(statement.names)
+    if (
+        isinstance(
+            statement, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        )
+        and statement.the_type is not None
+        and isinstance(statement.var, frog_ast.Variable)
+    ):
+        return [statement.var.name]
+    return []
+
+
 class ExpandTupleTransformer(Transformer):
     """Expands product-typed variables into individual component variables.
 
@@ -127,6 +152,16 @@ class ExpandTupleTransformer(Transformer):
     reads (F-396). Statements are rewritten in order, and ``v[i]`` resolves
     to the innermost expanded ``v`` in scope, so a read before a local's
     declaration still reads the outer variable of that name.
+
+    A declaration of ``v`` that is not split (a typed local, a bare
+    declaration, a method parameter, a ``for`` binder) hides an outer
+    expanded ``v`` for the rest of its scope, so its reads and writes keep
+    going to the new variable (F-399). The fields are rewritten in
+    declaration order too: a field's type and initializer read the fields
+    split before it through their components. A field is not split when its
+    initializer is not a tuple literal, or when its own initializer or an
+    earlier field's reads it (that initializer runs before the field's own
+    and would have to read a component declared after it).
     """
 
     def __init__(
@@ -146,9 +181,10 @@ class ExpandTupleTransformer(Transformer):
         self.bare_locals_only = bare_locals_only
         self.pass_name = pass_name
         # Each expanded variable in scope, innermost last: its name and the
-        # names of its components. A local's entry is dropped at the end of
-        # the block that declares it.
-        self._expanded: list[tuple[str, list[str]]] = []
+        # names of its components, or None for a declaration that is not
+        # split and hides an outer expanded variable of its name. A local's
+        # entry is dropped at the end of the block that declares it.
+        self._expanded: list[tuple[str, list[str] | None]] = []
         # Names a new component may not take: every name of the game (set by
         # transform_game, with the field components added), and in
         # ``_taken`` also the components minted so far in this method.
@@ -163,6 +199,12 @@ class ExpandTupleTransformer(Transformer):
             if expanded_name == name:
                 return components
         return None
+
+    def _hide(self, name: str) -> None:
+        """Bring a variable *name* that is not split into scope: an outer
+        expanded *name* is hidden until the scope ends (F-399)."""
+        if self._components(name) is not None:
+            self._expanded.append((name, None))
 
     def _mint(self, name: str, count: int) -> list[str]:
         """Fresh names for the *count* components of *name* (F-396)."""
@@ -203,9 +245,86 @@ class ExpandTupleTransformer(Transformer):
             self._taken = set(self._game_taken)
         else:
             self._taken = bound_names(method) | referenced_variable_names(method)
-        result = self._transform_children(method)
-        assert isinstance(result, frog_ast.Method)
+        # The signature's types are read in the game's scope; in the body a
+        # parameter hides an expanded field of its name (F-399).
+        signature = self.transform(method.signature)
+        depth = len(self._expanded)
+        for parameter in method.signature.parameters:
+            self._hide(parameter.name)
+        block = self.transform(method.block)
+        del self._expanded[depth:]
+        if signature is method.signature and block is method.block:
+            return method
+        result = copy.copy(method)
+        result.signature = signature
+        result.block = block
         return result
+
+    def _transform_loop_body(
+        self, binder: str, block: frog_ast.Block
+    ) -> frog_ast.Block:
+        """The body of a loop whose binder *binder* hides an expanded
+        variable of its name inside the body (F-399)."""
+        depth = len(self._expanded)
+        self._hide(binder)
+        new_block = self.transform(block)
+        del self._expanded[depth:]
+        return new_block
+
+    def transform_numeric_for(self, loop: frog_ast.NumericFor) -> frog_ast.NumericFor:
+        start = self.transform(loop.start)
+        end = self.transform(loop.end)
+        block = self._transform_loop_body(loop.name, loop.block)
+        if start is loop.start and end is loop.end and block is loop.block:
+            return loop
+        result = copy.copy(loop)
+        result.start, result.end, result.block = start, end, block
+        return result
+
+    def transform_generic_for(self, loop: frog_ast.GenericFor) -> frog_ast.GenericFor:
+        var_type = self.transform(loop.var_type)
+        over = self.transform(loop.over)
+        block = self._transform_loop_body(loop.var_name, loop.block)
+        if var_type is loop.var_type and over is loop.over and block is loop.block:
+            return loop
+        result = copy.copy(loop)
+        result.var_type, result.over, result.block = var_type, over, block
+        return result
+
+    def _transform_declaration(self, statement: _Declaration) -> _Declaration:
+        """A typed assignment or draw: rewrite every child but the declared
+        variable, which names the new local, never an outer variable."""
+        if statement.the_type is None or not isinstance(
+            statement.var, frog_ast.Variable
+        ):
+            return self._transform_children(statement)
+        changed: dict[str, frog_ast.ASTNode] = {}
+        for attr in ("the_type", "value", "unique_set", "sampled_from"):
+            if not hasattr(statement, attr):
+                continue
+            old = getattr(statement, attr)
+            new = self.transform(old)
+            if new is not old:
+                changed[attr] = new
+        if not changed:
+            return statement
+        result = copy.copy(statement)
+        for attr, new in changed.items():
+            setattr(result, attr, new)
+        return result
+
+    def transform_assignment(
+        self, statement: frog_ast.Assignment
+    ) -> frog_ast.Assignment:
+        return self._transform_declaration(statement)
+
+    def transform_sample(self, statement: frog_ast.Sample) -> frog_ast.Sample:
+        return self._transform_declaration(statement)
+
+    def transform_unique_sample(
+        self, statement: frog_ast.UniqueSample
+    ) -> frog_ast.UniqueSample:
+        return self._transform_declaration(statement)
 
     def _local_escapes_block(self, block: frog_ast.Block, name: str) -> bool:
         """F-324 scope guard (mirrors the SinkUniformSample F-042 guard).
@@ -324,6 +443,63 @@ class ExpandTupleTransformer(Transformer):
             return False
         return True
 
+    def _can_expand_field(
+        self,
+        game: frog_ast.Game,
+        position: int,
+        field: frog_ast.Field,
+        value: frog_ast.Expression | None,
+    ) -> bool:
+        """Whether the field at *position* of *game* may be split, given its
+        rewritten initializer *value* (F-399)."""
+        if not isinstance(field.type, frog_ast.ProductType):
+            return False
+        if not self._is_transformable_tuple(field.type, field.name, game):
+            # near-miss emitted by _is_transformable_tuple
+            return False
+        for earlier in game.fields[: position + 1]:
+            if _count_var_refs(earlier.type, field.name) == 0 and (
+                earlier.value is None or _count_var_refs(earlier.value, field.name) == 0
+            ):
+                continue
+            # The initializer runs before the field's own (or is the field's
+            # own), so it reads the whole field's starting value; a component
+            # declared after it is no substitute.
+            reader = (
+                "its own declaration"
+                if earlier is field
+                else f"the declaration of field '{earlier.name}', which comes "
+                "before it,"
+            )
+            self._near_miss(
+                reason=(
+                    f"product-typed field '{field.name}' was not split into "
+                    f"components: {reader} reads it"
+                ),
+                suggestion=(
+                    f"Declare the fields that read '{field.name}' after it, "
+                    "and do not read a field in its own initializer"
+                ),
+                variable=field.name,
+                location=field.origin,
+            )
+            return False
+        if value is not None and frog_ast.tuple_literal_values(value) is None:
+            self._near_miss(
+                reason=(
+                    f"product-typed field '{field.name}' was not split into "
+                    "components: its initializer is not a tuple literal"
+                ),
+                suggestion=(
+                    f"Initialize '{field.name}' with a tuple literal, or assign "
+                    "it in Initialize"
+                ),
+                variable=field.name,
+                location=field.origin,
+            )
+            return False
+        return True
+
     def transform_game(self, game: frog_ast.Game) -> frog_ast.Game:
         self._taken = game_names(game)
         if self.bare_locals_only:
@@ -336,24 +512,35 @@ class ExpandTupleTransformer(Transformer):
                     [self.transform(method) for method in game.methods],
                 )
             )
-        new_fields = []
-        for field in game.fields:
-            if self._is_transformable_tuple(field.type, field.name, game):
-                assert isinstance(field.type, frog_ast.ProductType)
-                unfolded_types = field.type.types
+        new_fields: list[frog_ast.Field] = []
+        for position, field in enumerate(game.fields):
+            # A field's type and initializer read the fields declared before
+            # it, so they are rewritten with the fields split so far (F-399).
+            field_type = self.transform(field.type)
+            value = None if field.value is None else self.transform(field.value)
+            if self._can_expand_field(game, position, field, value):
+                assert isinstance(field_type, frog_ast.ProductType)
+                unfolded_types = field_type.types
                 components = self._mint(field.name, len(unfolded_types))
+                field_values = (
+                    None if value is None else frog_ast.tuple_literal_values(value)
+                )
                 for index, the_type in enumerate(unfolded_types):
-                    expression = None
-                    if field.value:
-                        field_values = frog_ast.tuple_literal_values(field.value)
-                        assert field_values is not None
-                        expression = field_values[index]
                     new_fields.append(
-                        frog_ast.Field(the_type, components[index], expression)
+                        frog_ast.Field(
+                            the_type,
+                            components[index],
+                            None if field_values is None else field_values[index],
+                        )
                     )
                 self._expanded.append((field.name, components))
-            else:
+            elif field_type is field.type and value is field.value:
                 new_fields.append(field)
+            else:
+                new_field = copy.copy(field)
+                new_field.type = field_type
+                new_field.value = value
+                new_fields.append(new_field)
         self._game_taken = set(self._taken)
         return frog_ast.Game(
             (
@@ -371,11 +558,16 @@ class ExpandTupleTransformer(Transformer):
         new_statements: list[frog_ast.Statement] = []
         outer_depth = len(self._expanded)
         for stmt_idx, statement in enumerate(block.statements):
-            replacement, declared = self._expand_statement(block, stmt_idx, statement)
+            replacement, expanded = self._expand_statement(block, stmt_idx, statement)
             # A declaration's values are read in the scope before it.
             new_statements.extend(self.transform(new) for new in replacement)
-            if declared is not None:
-                self._expanded.append(declared)
+            if expanded is not None:
+                self._expanded.append(expanded)
+            else:
+                # A declaration that is not split hides an outer expanded
+                # variable of its name (F-399).
+                for name in _declared_names(statement):
+                    self._hide(name)
         del self._expanded[outer_depth:]
         return frog_ast.Block(new_statements)
 
@@ -384,10 +576,12 @@ class ExpandTupleTransformer(Transformer):
     ) -> tuple[list[frog_ast.Statement], tuple[str, list[str]] | None]:
         """The statements that replace *statement* (before their children
         are rewritten), and the local it declares as expanded, if any."""
-        # Assigning to the tuple means assigning each individual value
+        # Assigning to the tuple means assigning each individual value. A
+        # typed assignment declares a new local instead (F-399).
         whole_target = (
             self._components(statement.var.name)
             if isinstance(statement, frog_ast.Assignment)
+            and statement.the_type is None
             and isinstance(statement.var, frog_ast.Variable)
             else None
         )

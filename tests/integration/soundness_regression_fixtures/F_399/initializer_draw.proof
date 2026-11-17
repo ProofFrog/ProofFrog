@@ -1,0 +1,22 @@
+// F-399 (Expand Tuples). Q writes x, so x stays a field whose initializer
+// reads w[1]; w calls a primitive in its initializer, so it stays a field
+// too. Expand Tuples split w into one field per component but left x's
+// initializer reading w[1], a field that no longer existed. The components
+// were then unread and removed, so Left (x is a draw) and Right (x is 0^8)
+// had the same canonical form. Sound engine: Proof Failed!
+import 'Drawer.primitive';
+import 'initializer_draw.game';
+
+proof:
+
+let:
+    Drawer D = Drawer(8);
+
+assume:
+
+theorem:
+    InitializerDraw(D);
+
+games:
+    InitializerDraw(D).Left against InitializerDraw(D).Adversary;
+    InitializerDraw(D).Right against InitializerDraw(D).Adversary;

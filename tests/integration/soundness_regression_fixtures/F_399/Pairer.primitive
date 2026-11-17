@@ -1,0 +1,3 @@
+Primitive Pairer(Int n) {
+    [BitString<n>, BitString<n>] Pair();
+}

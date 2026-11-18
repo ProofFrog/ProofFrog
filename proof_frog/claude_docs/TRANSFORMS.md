@@ -28,7 +28,7 @@ The core pipeline runs in a fixed-point loop until convergence.
 
 | Pass | Description |
 |---|---|
-| SymbolicComputation | Evaluates arithmetic over Int literals and Int parameters symbolically using SymPy. A division by the literal 0 is left unfolded (its value is unspecified), with a near-miss. |
+| SymbolicComputation | Evaluates arithmetic over Int literals and Int parameters symbolically using SymPy. A division by the literal 0 is left unfolded (its value is unspecified), with a near-miss. `e + 0` and `0 + e` become `e` when `e` is an Int by its declared type, whatever its value (a field, a local, a call); a ModInt, BitString or untyped `e`, or one reading a name the method binds more than once, keeps the `+ 0`, with a near-miss. |
 
 ### Structural (`structural.py`)
 

@@ -18,8 +18,16 @@ from sympy.printing.str import StrPrinter
 
 from .. import frog_ast
 from .. import frog_parser
-from ..visitors import Transformer
+from ..visitors import (
+    NameTypeMap,
+    Transformer,
+    build_method_type_map,
+    expression_type,
+    referenced_variable_names,
+    with_proof_let_types,
+)
 from ._base import NearMiss, TransformPass, PipelineContext
+from ._definedness import note_redeclared_name, redeclared_names
 
 # The nodes whose transform pushes their own value.  Any other node leaves
 # what its children pushed: the length of ``1^2``, the ``3`` of ``-3``.
@@ -56,6 +64,15 @@ def _is_natural(value: object) -> bool:
         isinstance(value, (int, sympy.Integer))
         and not isinstance(value, bool)
         and value >= 0
+    )
+
+
+def _is_zero(value: object) -> bool:
+    """The known integer 0 (a Python or SymPy integer)."""
+    return (
+        isinstance(value, (int, sympy.Integer))
+        and not isinstance(value, bool)
+        and value == 0
     )
 
 
@@ -119,25 +136,50 @@ class SymbolicComputationTransformer(Transformer):
     populating the dict.  Likewise, only an ``Integer``, a ``Variable`` or
     a ``BinaryOperation`` operand has a value, so a bit-string literal or a
     negation is never read as an Int.
+
+    One rewrite needs no value for an operand: ``e + 0`` and ``0 + e``
+    become ``e`` when ``e`` is an ``Int``, by its declared type
+    (:meth:`_fold_add_zero`).  The types come from *game* (its fields) and
+    the method being transformed (its parameters and locals), with the
+    proof's ``let:`` types from *ctx* underneath.
     """
 
     def __init__(
         self,
         variables: dict[str, Symbol | frog_ast.Expression],
         ctx: PipelineContext | None = None,
+        game: frog_ast.Game | None = None,
     ) -> None:
         self.variables = variables
         self.ctx = ctx
         self.computation_stack: List[Symbol | int | None] = []
         self._method_name: str | None = None
+        self._game = game
+        # Outside a method (a field's type or initializer) only the fields
+        # and the proof's let: names are in scope.
+        field_types = NameTypeMap()
+        for field in game.fields if game is not None else []:
+            field_types.set(field.name, field.type)
+        self._types: NameTypeMap = with_proof_let_types(
+            field_types, ctx.proof_let_types if ctx is not None else None
+        )
+        self._redeclared: set[str] = set()
 
     def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
-        saved = self._method_name
+        saved = (self._method_name, self._types, self._redeclared)
         self._method_name = method.signature.name
+        game = self._game
+        if game is None:
+            game = frog_ast.Game(("", [], [], [method]))
+        self._types = build_method_type_map(
+            game, method, self.ctx.proof_let_types if self.ctx is not None else None
+        )
+        # The map gives a name one type for the whole method.
+        self._redeclared = redeclared_names(self._game, method)
         try:
             return self._transform_children(method)
         finally:
-            self._method_name = saved
+            self._method_name, self._types, self._redeclared = saved
 
     def transform_variable(self, variable: frog_ast.Variable) -> frog_ast.Variable:
         if variable.name in self.variables:
@@ -187,6 +229,15 @@ class SymbolicComputationTransformer(Transformer):
             frog_ast.BinaryOperators.EXPONENTIATE: operator.pow,
         }
         if binary_operation.operator in operators:
+            folded = self._fold_add_zero(
+                binary_operation,
+                (transformed_left, left_val),
+                (transformed_right, right_val),
+            )
+            if folded is not None:
+                # Its value is still not known.
+                self.computation_stack.append(None)
+                return folded
             if left_val is None or right_val is None:
                 self._note_negated_operand(binary_operation, left_val, right_val)
             # For division, only simplify when both operands are
@@ -230,6 +281,80 @@ class SymbolicComputationTransformer(Transformer):
             return frog_parser.parse_expression(text)
         return frog_ast.BinaryOperation(
             binary_operation.operator, transformed_left, transformed_right
+        )
+
+    def _fold_add_zero(
+        self,
+        binary_operation: frog_ast.BinaryOperation,
+        left: tuple[frog_ast.Expression, Symbol | int | None],
+        right: tuple[frog_ast.Expression, Symbol | int | None],
+    ) -> frog_ast.Expression | None:
+        """``e`` for ``e + 0`` or ``0 + e`` when ``e`` is an ``Int`` whose
+        value the pass does not know (a field, a local, a call); None
+        otherwise.  Each pair is an operand after its own transform and its
+        value.
+
+        ``e + 0 == e`` for every Int ``e``, and dropping the literal leaves
+        every evaluation of ``e`` in place.  A ``ModInt`` or ``BitString``
+        ``e`` keeps its form: an integer literal next to a ``ModInt`` is an
+        Int (F-357), and ``+`` on a bit string is XOR.  The type is read from
+        the declarations in scope, so an operand reading a name the method
+        binds more than once, or one shadowing a field, is not folded."""
+        if binary_operation.operator != frog_ast.BinaryOperators.ADD:
+            return None
+        (left_expr, left_val), (right_expr, right_val) = left, right
+        if _is_zero(right_val) and left_val is None:
+            operand = left_expr
+        elif _is_zero(left_val) and right_val is None:
+            operand = right_expr
+        else:
+            return None
+        redeclared = sorted(referenced_variable_names(operand) & self._redeclared)
+        if redeclared:
+            note_redeclared_name(
+                self.ctx, "Symbolic Computation", redeclared[0], self._method_name
+            )
+            return None
+        operand_type = expression_type(
+            operand,
+            self._types,
+            self.ctx.proof_namespace if self.ctx is not None else None,
+        )
+        if isinstance(operand_type, frog_ast.IntType):
+            return operand
+        self._note_zero_kept(binary_operation, operand, operand_type)
+        return None
+
+    def _note_zero_kept(
+        self,
+        binary_operation: frog_ast.BinaryOperation,
+        operand: frog_ast.Expression,
+        operand_type: frog_ast.Type | None,
+    ) -> None:
+        """Records an addition of 0 left unfolded because the other operand
+        is not known to be an Int."""
+        if self.ctx is None:
+            return
+        if operand_type is None:
+            why = f"the type of '{operand}' is not known"
+        else:
+            why = f"'{operand}' is a {operand_type}"
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Symbolic Computation",
+                reason=(
+                    f"'{binary_operation}' not folded: {why}, and '+ 0' is "
+                    "dropped only next to an Int (an integer literal next to "
+                    "a ModInt is an Int, and + on a BitString is XOR)"
+                ),
+                location=binary_operation.origin,
+                suggestion=(
+                    "Write the same addition in the other game, or give the "
+                    "operand a declared Int type (a typed local)"
+                ),
+                variable=None,
+                method=self._method_name,
+            )
         )
 
     def _note_unprintable(
@@ -361,4 +486,4 @@ class SymbolicComputation(TransformPass):
                 f"{type(val).__name__}, expected Symbol or Integer.  "
                 f"Only Int-typed proof parameters may enter the variables dict."
             )
-        return SymbolicComputationTransformer(ctx.variables, ctx).transform(game)
+        return SymbolicComputationTransformer(ctx.variables, ctx, game).transform(game)

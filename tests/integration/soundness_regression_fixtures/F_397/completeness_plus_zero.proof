@@ -1,0 +1,16 @@
+// Completeness control (Symbolic Computation): an Int local copied from a
+// field before the field is written, then returned plus 0. Blocked Local
+// Absorption moves the `+ 0` into the local's definition
+// (`Int v1 = field1 + 0;`), and Symbolic Computation drops it there because
+// `field1` is an Int, so the two equal games meet. The true hop 1 of
+// read_then_inc.proof needs the same fold.
+// Expected: Proof Succeeded!
+import 'RO0.game';
+proof:
+let:
+assume:
+theorem:
+    RO0();
+games:
+    RO0().Left against RO0().Adversary;
+    RO0().Right against RO0().Adversary;

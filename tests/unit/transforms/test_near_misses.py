@@ -6411,3 +6411,93 @@ def test_guarded_true_return_no_near_miss_on_other_shapes() -> None:
         }
         """)
     assert not misses
+
+
+# ---------------------------------------------------------------------------
+# Symbolic Computation drops ``+ 0`` next to an Int only
+# ---------------------------------------------------------------------------
+
+
+def _plus_zero_misses(source: str) -> tuple[frog_ast.Game, list[NearMiss]]:
+    ctx = _make_ctx()
+    game = SymbolicComputation().apply(frog_parser.parse_game(source), ctx)
+    return game, [
+        nm for nm in ctx.near_misses if nm.transform_name == "Symbolic Computation"
+    ]
+
+
+def test_symbolic_near_miss_on_plus_zero_with_mod_int_operand() -> None:
+    game, misses = _plus_zero_misses("""
+        Game G() {
+            ModInt<q> Test(ModInt<q> u) {
+                return u + 0;
+            }
+        }
+        """)
+    assert "return u + 0;" in str(game)
+    assert len(misses) == 1
+    assert misses[0].method == "Test"
+    assert "'u + 0' not folded: 'u' is a ModInt<q>" in misses[0].reason
+    assert "dropped only next to an Int" in misses[0].reason
+    assert misses[0].suggestion is not None
+    assert "Write the same addition in the other game" in misses[0].suggestion
+
+
+def test_symbolic_near_miss_on_plus_zero_with_bit_string_operand() -> None:
+    game, misses = _plus_zero_misses("""
+        Game G() {
+            BitString<8> Test(BitString<8> s) {
+                return 0 + s;
+            }
+        }
+        """)
+    assert "return 0 + s;" in str(game)
+    assert len(misses) == 1
+    assert "'0 + s' not folded: 's' is a BitString<8>" in misses[0].reason
+
+
+def test_symbolic_near_miss_on_plus_zero_with_untyped_operand() -> None:
+    game, misses = _plus_zero_misses("""
+        Game G() {
+            Int Test() {
+                return y + 0;
+            }
+        }
+        """)
+    assert "return y + 0;" in str(game)
+    assert len(misses) == 1
+    assert "'y + 0' not folded: the type of 'y' is not known" in misses[0].reason
+
+
+def test_symbolic_near_miss_on_plus_zero_with_redeclared_name() -> None:
+    # x is an Int in one branch and a ModInt after it: the method's type map
+    # gives it one type, so neither reading is trusted.
+    game, misses = _plus_zero_misses("""
+        Game G() {
+            Int Test(Bool b) {
+                if (b) {
+                    Int x = 1;
+                    return x + 0;
+                }
+                ModInt<q> x = 2;
+                return 5;
+            }
+        }
+        """)
+    assert "return x + 0;" in str(game)
+    assert len(misses) == 1
+    assert misses[0].variable == "x"
+    assert "declares more than once or which shadows a field" in misses[0].reason
+
+
+def test_symbolic_no_near_miss_on_plus_zero_with_int_operand() -> None:
+    game, misses = _plus_zero_misses("""
+        Game G() {
+            Int c;
+            Int Test(Int x) {
+                return (c + 0) + (0 + x);
+            }
+        }
+        """)
+    assert "return c + x;" in str(game)
+    assert not misses

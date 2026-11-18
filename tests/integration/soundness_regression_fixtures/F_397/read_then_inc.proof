@@ -5,9 +5,9 @@
 // every later call in the same statement, whose body the inliner puts in
 // front of the statement: `challenger.Read() + challenger.Inc()` reads the
 // counter after Inc's increment.
-// Sound engine: fails at hop 3. Hop 1 is true, but the engine does not fold
-// the `+ 0` of Inc's result there (read_then_inc_plus_zero.proof writes
-// Left with it).
+// Sound engine: fails at hop 3 only. Hop 1 is true; it needs Symbolic
+// Computation to drop the `+ 0` of Inc's result, an Int
+// (completeness_plus_zero.proof).
 // Unsound engine: fails at hop 1 only; hop 3 (false) accepted.
 import 'Cnt.game';
 import 'RO.game';

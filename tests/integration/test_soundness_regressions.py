@@ -573,6 +573,8 @@ CASES = [
      "control: the two calls in separate statements; hop 3 is false"),
     ("F-397", "read_then_inc_true.proof", "accept", "method inliner",
      "positive control: the count is read before the increment"),
+    ("F-397", "completeness_plus_zero.proof", "accept", "SymbolicComputation",
+     "completeness: an Int r + 0 is r, which read_then_inc.proof's hop 1 needs"),
     ("F-397", "bind_order.proof", "reject", "method inliner",
      "a bound call jumped ahead of an earlier call that conflicts with it"),
     ("F-397", "bind_order_control.proof", "reject", "method inliner",
@@ -1132,6 +1134,10 @@ FAILED_STEP = {
     ),
     ("F-391", "challenger_field_draw.proof"): (
         "Step 3 failed: KI(S).Real compose R(S) -> Twice(S).Right"
+    ),
+    # Hop 1 also needs Symbolic Computation to drop Inc's Int `+ 0`.
+    ("F-397", "read_then_inc.proof"): (
+        "Step 3 failed: Cnt().Right compose R() -> RO().Right"
     ),
     ("F-397", "read_then_inc_plus_zero.proof"): (
         "Step 3 failed: Cnt().Right compose R() -> ROZ().Right"

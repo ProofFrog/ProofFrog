@@ -513,3 +513,118 @@ class TestEnhancedErrorMessages:
         source = "Scheme Foo(Int lambda) {\n" "    Set Key = BitString<lambda>;\n" "}\n"
         err = _expect_scheme_error(tmp_path, source)
         assert "extends" in str(err)
+
+
+class TestPowerInTypeSize:
+    """A power in a type size (``BitString<2 ^ k>``) is outside the type
+    grammar. The error names the ``^``, not a cascade far from it (F-402:
+    "Game body cannot be empty" at the last closing brace of a .game file)."""
+
+    _SIZE_POW_GAME = (
+        "Game Left(Int k) {\n"
+        "    BitString<2 ^ k> Get() {\n"
+        "        BitString<2 ^ k> x <- BitString<2 ^ k>;\n"
+        "        return x;\n"
+        "    }\n"
+        "}\n"
+        "Game Right(Int k) {\n"
+        "    BitString<2 ^ k> Get() {\n"
+        "        BitString<2 ^ k> x <- BitString<2 ^ k>;\n"
+        "        return x;\n"
+        "    }\n"
+        "}\n"
+        "export as SizePow;\n"
+    )
+
+    def test_bitstring_size_in_game_file(self, tmp_path: Path) -> None:
+        err = _expect_game_error(tmp_path, self._SIZE_POW_GAME)
+        assert (err.line, err.column, err.token) == (2, 16, "^")
+        assert "'^' is not allowed in the size of BitString<...>" in str(err)
+        assert "Game body cannot be empty" not in str(err)
+
+    def test_modint_size_in_primitive(self, tmp_path: Path) -> None:
+        source = (
+            "Primitive ModPow(Int k) {\n"
+            "    ModInt<2 ^ k> F(ModInt<2 ^ k> x);\n"
+            "}\n"
+        )
+        err = _expect_error(tmp_path, source)
+        assert (err.line, err.column) == (2, 13)
+        assert "'^' is not allowed in the size of ModInt<...>" in str(err)
+
+    def test_array_size_after_a_nested_type(self, tmp_path: Path) -> None:
+        source = (
+            "Primitive ArrPow(Int k) {\n"
+            "    Array<BitString<k>, 2 ^ k> F(Int x);\n"
+            "}\n"
+        )
+        err = _expect_error(tmp_path, source)
+        assert (err.line, err.column) == (2, 26)
+        assert "'^' is not allowed in the size of Array<...>" in str(err)
+
+    def test_type_size_in_proof_let(self, tmp_path: Path) -> None:
+        source = (
+            "proof:\n"
+            "let:\n"
+            "    Int k;\n"
+            "    Function<BitString<2 ^ k>, Bool> H;\n"
+            "theorem:\n"
+            "    Foo(k);\n"
+            "games:\n"
+            "    Foo(k).Left against Foo(k).Adversary;\n"
+            "    Foo(k).Right against Foo(k).Adversary;\n"
+        )
+        err = _expect_proof_error(tmp_path, source)
+        assert (err.line, err.column) == (4, 25)
+        assert "'^' is not allowed in the size of BitString<...>" in str(err)
+
+    def test_power_outside_a_type_keeps_its_message(self, tmp_path: Path) -> None:
+        source = (
+            "Primitive ExprPow(Int k) {\n"
+            "    Int lambda = ^ k;\n"
+            "    BitString<lambda> F(BitString<lambda> x);\n"
+            "}\n"
+        )
+        err = _expect_error(tmp_path, source)
+        assert "type size" not in str(err)
+
+    def test_power_in_an_expression_beside_a_sized_type_parses(
+        self, tmp_path: Path
+    ) -> None:
+        """A power in an expression, beside a sized type, is not an error."""
+        source = (
+            "Game Left(Int k) {\n"
+            "    Int Get() {\n"
+            "        BitString<k> x <- BitString<k>;\n"
+            "        return 2 ^ k;\n"
+            "    }\n"
+            "}\n"
+            "Game Right(Int k) {\n"
+            "    Int Get() {\n"
+            "        return 2 ^ k;\n"
+            "    }\n"
+            "}\n"
+            "export as Ok;\n"
+        )
+        game_file = tmp_path / "Ok.game"
+        game_file.write_text(source, encoding="utf-8")
+        parse_game_file(str(game_file))
+
+    @pytest.mark.parametrize(
+        "line_text, expected",
+        [
+            ("    BitString<2 ^ k> Get() {", "BitString"),
+            ("    Map<BitString<n>, BitString<2 ^ k>> M;", "BitString"),
+            ("    Array<BitString<n>, 2 ^ k> A;", "Array"),
+            ("    ModInt<(2 ^ k)> x;", "ModInt"),
+            ("    Int y <- ^ k;", None),
+            ("    Bool b = a < ^ c;", None),
+            ("    Set<2 ^ k> S;", None),
+            ("    Int z = ^ k;", None),
+        ],
+    )
+    def test_sized_type_around(self, line_text: str, expected: str | None) -> None:
+        # pylint: disable-next=import-outside-toplevel
+        from proof_frog.frog_parser import _sized_type_around
+
+        assert _sized_type_around(line_text, line_text.index("^")) == expected

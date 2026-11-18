@@ -596,6 +596,58 @@ def _to_parse_error(
     )
 
 
+# Types whose angle brackets hold a size: an integer expression built with
+# +, -, *, / and parentheses (``integerExpression`` in Shared.g4).
+_SIZED_TYPES = ("BitString", "ModInt", "Array")
+
+
+def _sized_type_around(line_text: str, col: int) -> str | None:
+    """The sized type (``BitString``, ``ModInt``, ``Array``) whose ``<...>``
+    encloses column *col* of *line_text*, or None."""
+    depth = 0
+    for i in range(min(col, len(line_text)) - 1, -1, -1):
+        if line_text[i] == ">":
+            depth += 1
+        elif line_text[i] == "<":
+            if depth > 0:
+                depth -= 1
+                continue
+            name = re.search(r"(\w+)\s*$", line_text[:i])
+            if name is not None and name.group(1) in _SIZED_TYPES:
+                return name.group(1)
+            return None
+    return None
+
+
+def _power_in_type_size_error(
+    errors: list[tuple[int, int, str, str]], source: str
+) -> ParseError | None:
+    """A ParseError for the first ``^`` among *errors* (line, column, token,
+    message) that sits in a type size, such as ``BitString<2 ^ k>``, or None.
+
+    The type grammar has no power, and the parser's recovery from one
+    cascades into errors far from it (at a closing brace it reads as an empty
+    game body), so the ``^`` itself is reported.
+    """
+    all_lines = _read_source_lines(source)
+    for line, col, token_text, _ in errors:
+        if token_text != "^" or not 1 <= line <= len(all_lines):
+            continue
+        sized = _sized_type_around(all_lines[line - 1], col)
+        if sized is None:
+            continue
+        return ParseError(
+            f"'^' is not allowed in the size of {sized}<...>; a type size "
+            "may use only +, -, *, / and parentheses",
+            file_name=source if os.path.isfile(source) else "<input>",
+            line=line,
+            column=col,
+            token=token_text,
+            source_line=all_lines[line - 1].rstrip(),
+        )
+    return None
+
+
 def _reparse_for_error(
     source: str,
     lexer_functor: type[PrimitiveLexer],
@@ -624,6 +676,10 @@ def _reparse_for_error(
         pass
     if not collector.errors:
         return None
+
+    power_in_size = _power_in_type_size_error(collector.errors, source)
+    if power_in_size is not None:
+        return power_in_size
 
     # Heuristic for choosing the most useful error among potentially many:
     # When there are few errors (1-3), the first non-EOF error is usually

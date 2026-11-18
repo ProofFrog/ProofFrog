@@ -1,0 +1,8 @@
+import 'Taker.primitive';
+
+// Take's body has a statement but no return: it falls off its end.
+Scheme TakeSome() extends Taker {
+    Void Take(Bool b) {
+        Bool z = b;
+    }
+}

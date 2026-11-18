@@ -1,0 +1,16 @@
+// F-407: as void_return_empty.proof, with a callee whose body has a
+// statement but no return (`Bool z = b;`): the inliner replaced the call
+// statement by that body and the return was lost the same way. A Void
+// method has no return, so this is a type error.
+import 'Taker.primitive';
+import 'TakeSome.scheme';
+import 'VR.game';
+proof:
+let:
+    TakeSome T = TakeSome();
+assume:
+theorem:
+    VR(T);
+games:
+    VR(T).Left against VR(T).Adversary;
+    VR(T).Right against VR(T).Adversary;

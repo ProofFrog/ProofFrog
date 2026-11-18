@@ -651,6 +651,13 @@ CASES = [
      "an unread field drawn from the same empty domain was removed"),
     ("F-406", "field_draw_control.proof", "accept", "RemoveUnnecessaryFields",
      "positive control: an unread field drawn from BitString<1> \\ {0b0} goes"),
+    ("F-407", "void_return_empty.proof", "type_error", "method inliner",
+     "return T.Take(true); in a Void method lost its return when the empty "
+     "callee body replaced it, so the update after the if ran"),
+    ("F-407", "void_return_body.proof", "type_error", "method inliner",
+     "the same, with a callee body that has a statement but no return"),
+    ("F-407", "void_return_control.proof", "type_error", "method inliner",
+     "the same return as the method's last statement, also refused"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),
@@ -1064,6 +1071,19 @@ TYPE_ERROR = {
     ),
     ("F-395", "letcall_xor.proof"): (
         "error: let: entry 'c' = H(R.Draw()) + 0^m makes a non-deterministic call"
+    ),
+    # A Void method contains no return (ruling Q18).
+    ("F-407", "void_return_empty.proof"): (
+        "VR.game:8:12: error: Method Test has return type Void but contains a"
+        " return statement: a Void method has no return"
+    ),
+    ("F-407", "void_return_body.proof"): (
+        "VR.game:8:12: error: Method Test has return type Void but contains a"
+        " return statement: a Void method has no return"
+    ),
+    ("F-407", "void_return_control.proof"): (
+        "VRC.game:8:8: error: Method Test has return type Void but contains a"
+        " return statement: a Void method has no return"
     ),
 }
 

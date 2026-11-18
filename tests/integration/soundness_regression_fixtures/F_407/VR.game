@@ -1,0 +1,25 @@
+import 'Taker.primitive';
+// Left's Test(true) returns at `return T.Take(true);`, before the counter
+// update; Right's Test always updates the counter. Get reveals it.
+Game Left(Taker T) {
+    Int c = 0;
+    Void Test(Bool b) {
+        if (b) {
+            return T.Take(true);
+        }
+        c = c + 1;
+    }
+    Int Get() {
+        return c;
+    }
+}
+Game Right(Taker T) {
+    Int c = 0;
+    Void Test(Bool b) {
+        c = c + 1;
+    }
+    Int Get() {
+        return c;
+    }
+}
+export as VR;

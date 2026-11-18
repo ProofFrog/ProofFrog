@@ -23,6 +23,7 @@ from proof_frog.transforms.control_flow import (
     GuardConditionSimplification,
     IfToBooleanAssignment,
     IfFalseReturnToConjunction,
+    GuardedTrueReturnToCondition,
 )
 from proof_frog.transforms.inlining import (
     RedundantCopy,
@@ -6321,4 +6322,92 @@ def test_simplify_if_no_near_miss_when_branches_merge() -> None:
         }
         """)
     assert "if (true)" in str(result)
+    assert not misses
+
+
+def _guarded_true_return_misses(game_src: str) -> tuple[object, list[NearMiss]]:
+    game = frog_parser.parse_game(game_src)
+    ctx = _make_ctx()
+    result = GuardedTrueReturnToCondition().apply(game, ctx)
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Guarded True Return To Condition"
+    ]
+    return result, misses
+
+
+def test_guarded_true_return_near_miss_on_call_in_condition() -> None:
+    game_src = """
+        Game G() {
+            Int c;
+            Bool Test(Int x) {
+                if (F.Check(x)) {
+                    c = c + 1;
+                    return true;
+                }
+                return false;
+            }
+        }
+        """
+    result, misses = _guarded_true_return_misses(game_src)
+    assert result == frog_parser.parse_game(game_src)
+    assert len(misses) == 1
+    assert misses[0].method == "Test"
+    assert misses[0].variable == "F.Check(x)"
+    assert "makes a call" in misses[0].reason
+
+
+def test_guarded_true_return_near_miss_on_branch_writing_condition() -> None:
+    game_src = """
+        Game G() {
+            Map<Int, Int> M;
+            Bool Test(Int k, Int v) {
+                if (!(k in M)) {
+                    M[k] = v;
+                    return true;
+                }
+                return false;
+            }
+        }
+        """
+    result, misses = _guarded_true_return_misses(game_src)
+    assert result == frog_parser.parse_game(game_src)
+    assert len(misses) == 1
+    assert misses[0].method == "Test"
+    assert "writes or rebinds a variable the condition reads" in misses[0].reason
+
+
+def test_guarded_true_return_no_near_miss_when_folded() -> None:
+    result, misses = _guarded_true_return_misses("""
+        Game G() {
+            Int c;
+            Bool Test(Bool b) {
+                if (b) {
+                    c = c + 1;
+                    return true;
+                }
+                return false;
+            }
+        }
+        """)
+    assert "return b;" in str(result)
+    assert not misses
+
+
+def test_guarded_true_return_no_near_miss_on_other_shapes() -> None:
+    # Neither an else block nor swapped literals is a near miss: the shape
+    # does not match at all.
+    _, misses = _guarded_true_return_misses("""
+        Game G() {
+            Int c;
+            Bool Test(Bool b) {
+                if (b) {
+                    c = c + 1;
+                    return false;
+                }
+                return true;
+            }
+        }
+        """)
     assert not misses

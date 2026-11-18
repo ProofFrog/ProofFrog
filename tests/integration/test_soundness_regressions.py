@@ -311,6 +311,9 @@ CASES = [
      "a call in an else if condition ran even when an earlier one held"),
     ("F-372", "challenger_and_guarded.proof", "reject", "method inliner",
      "a challenger call in && was made on every trace; hop 3 is the false one"),
+    ("F-372", "challenger_and.proof", "reject", "method inliner",
+     "the same reduction against T, whose Left returns b after the if; hop 3"
+     " is the false one"),
     ("F-372", "completeness_guarded_vs_and.proof", "accept", "method inliner",
      "b && P.Pick(S) is the guarded if (b) { return P.Pick(S); } return false;"),
     ("F-372", "control_no_effect.proof", "accept", "method inliner",
@@ -1098,6 +1101,11 @@ TYPE_ERROR = {
 FAILED_STEP = {
     ("F-372", "challenger_and_guarded.proof"): (
         "Step 3 failed: Counter().Right compose R() -> TG().Right"
+    ),
+    # Hop 1 also needs Guarded True Return To Condition: the composed game
+    # returns true in the guarded branch, T().Left returns b after the if.
+    ("F-372", "challenger_and.proof"): (
+        "Step 3 failed: Counter().Right compose R() -> T().Right"
     ),
     ("F-372", "deferred_challenger.proof"): (
         "Step 3 failed: Echo().Right compose R(P) -> TT_temp(P).Right"

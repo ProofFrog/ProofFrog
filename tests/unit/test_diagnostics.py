@@ -12,6 +12,7 @@ from proof_frog.diagnostics import (
     detect_unfolded_negation_diff,
     detect_possibly_empty_draw_diff,
     detect_power_of_zero_diff,
+    detect_guarded_bool_return_diff,
     DiffHunk,
 )
 from proof_frog.transforms._base import NearMiss
@@ -396,3 +397,29 @@ def test_detect_power_of_zero(
 ) -> None:
     hunk = DiffHunk(method="Probe", current_lines=current_lines, next_lines=next_lines)
     assert detect_power_of_zero_diff(hunk) is expected
+
+
+@pytest.mark.parametrize(
+    "current_lines, next_lines, expected",
+    [
+        # Guarded returns of literals against a return of the condition: the
+        # swapped form Guarded True Return To Condition does not fold.
+        (
+            ["-      return false;", "-    return true;"],
+            ["+    return !(arg1);"],
+            True,
+        ),
+        (["-    return arg1;"], ["+      return true;", "+    return false;"], True),
+        # Literal returns on both sides are not this difference.
+        (["-    return true;"], ["+    return false;"], False),
+        # Neither side returns a literal.
+        (["-    return arg1;"], ["+    return arg2;"], False),
+        # A literal return against a hunk with no return at all.
+        (["-      return true;"], ["+    field1 = 0;"], False),
+    ],
+)
+def test_detect_guarded_bool_return(
+    current_lines: list[str], next_lines: list[str], expected: bool
+) -> None:
+    hunk = DiffHunk(method="Probe", current_lines=current_lines, next_lines=next_lines)
+    assert detect_guarded_bool_return_diff(hunk) is expected

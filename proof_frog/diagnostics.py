@@ -394,6 +394,36 @@ def detect_power_of_zero_diff(hunk: DiffHunk) -> bool:
     return current != next_side
 
 
+_BOOL_LITERAL_RETURN = re.compile(r"^return (true|false);$")
+_RETURN_STATEMENT = re.compile(r"^return .+;$")
+
+
+def detect_guarded_bool_return_diff(hunk: DiffHunk) -> bool:
+    """Check if one side returns Boolean literals where the other returns an
+    expression.
+
+    Guarded True Return To Condition folds ``if (C) { S; return true; }
+    return false;`` into ``if (C) { S; } return C;`` only when ``C`` makes
+    no call and ``S`` changes nothing ``C`` reads; other guarded Boolean
+    returns, such as ``return false;`` in the branch and ``return true;``
+    after it, are not folded.
+    """
+    current = [_strip_diff_prefix(line) for line in hunk.current_lines]
+    next_lines = [_strip_diff_prefix(line) for line in hunk.next_lines]
+
+    def literal_side(lines: list[str]) -> bool:
+        return any(_BOOL_LITERAL_RETURN.match(line) for line in lines)
+
+    def expression_side(lines: list[str]) -> bool:
+        return not literal_side(lines) and any(
+            _RETURN_STATEMENT.match(line) for line in lines
+        )
+
+    return (literal_side(current) and expression_side(next_lines)) or (
+        literal_side(next_lines) and expression_side(current)
+    )
+
+
 _DETECTORS: list[tuple[Callable[[DiffHunk], bool], str, str]] = []
 
 
@@ -454,6 +484,16 @@ _register(
     + " stored as its ModInt type, or a factor of a ModInt product",
     "Write the same power in both games, multiply it into a ModInt operand"
     + " (x ^ 0 * y becomes y), or store it in a ModInt local first",
+)
+_register(
+    detect_guarded_bool_return_diff,
+    "The engine folds 'if (C) { ...; return true; } return false;' into"
+    + " 'if (C) { ... } return C;' only when C makes no call and the branch"
+    + " changes nothing C reads; other guarded returns of true and false"
+    + " (such as 'return false;' in the branch and 'return true;' after it)"
+    + " are not folded",
+    "Write the same form in both games: either the guarded 'return true;'"
+    + " and 'return false;', or a return of the condition after the if",
 )
 
 ENGINE_LIMITATION_DETECTORS = _DETECTORS

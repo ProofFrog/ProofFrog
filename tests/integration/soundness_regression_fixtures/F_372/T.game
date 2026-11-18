@@ -1,0 +1,15 @@
+// Left counts only Test(true); Right counts every Test call.
+// Distinguisher: Test(false); Count() is 0 on Left, 1 on Right.
+Game Left() {
+    Int c;
+    Void Initialize() { c = 0; }
+    Bool Test(Bool b) { if (b) { c = c + 1; } return b; }
+    Int Count() { return c; }
+}
+Game Right() {
+    Int c;
+    Void Initialize() { c = 0; }
+    Bool Test(Bool b) { c = c + 1; return b; }
+    Int Count() { return c; }
+}
+export as T;

@@ -1,0 +1,22 @@
+import 'Counter.game';
+import 'T.game';
+
+// The composed game equals T.Left if && short-circuits, T.Right if it
+// evaluates both operands. Both outer hops passing would be a false accept.
+Reduction R() compose Counter() against T().Adversary {
+    Void Initialize() { challenger.Initialize(); }
+    Bool Test(Bool b) { return b && challenger.Q(); }
+    Int Count() { return challenger.Count(); }
+}
+
+proof:
+let:
+assume:
+    Counter();
+theorem:
+    T();
+games:
+    T().Left against T().Adversary;
+    Counter().Left compose R() against T().Adversary;
+    Counter().Right compose R() against T().Adversary;
+    T().Right against T().Adversary;

@@ -131,7 +131,9 @@ def check(file: str, json_output: bool) -> None:
         print(f"{file} is well-formed.")
     except semantic_analysis.FailedTypeCheck:
         sys.exit(1)
-    except FileNotFoundError as e:
+    except (frog_parser.ParseError, FileNotFoundError) as e:
+        # Imports are parsed during type checking; a parse error in one is
+        # reported like one in the file itself.
         click.echo(str(e), err=True)
         sys.exit(1)
 
@@ -235,7 +237,9 @@ def prove(  # pylint: disable=too-many-arguments,too-many-positional-arguments
         semantic_analysis.check_well_formed(proof_file, file)
     except semantic_analysis.FailedTypeCheck:
         sys.exit(1)
-    except FileNotFoundError as e:
+    except (frog_parser.ParseError, FileNotFoundError) as e:
+        # Imports are parsed during type checking; a parse error in one is
+        # reported like one in the proof itself.
         click.echo(str(e), err=True)
         sys.exit(1)
     click.echo()

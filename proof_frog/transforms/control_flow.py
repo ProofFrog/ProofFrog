@@ -2791,6 +2791,125 @@ class IfFalseReturnToConjunctionTransformer(BlockTransformer):
         return False
 
 
+def _is_bool_return(stmt: frog_ast.Statement, value: bool) -> bool:
+    return (
+        isinstance(stmt, frog_ast.ReturnStatement)
+        and isinstance(stmt.expression, frog_ast.Boolean)
+        and bool(stmt.expression.bool) is value
+    )
+
+
+class GuardedTrueReturnToConditionTransformer(BlockTransformer):
+    """Folds a guarded ``return true;`` into a return of the guard itself.
+
+    Pattern (an if-statement immediately followed by ``return false;`` in
+    the same block)::
+
+        if (C) { S; return true; }        ->   if (C) { S; }
+        return false;                          return C;
+
+        if (C) { return true; }           ->   return C;
+        return false;
+
+    Both forms return the branch condition: the value returned is ``true``
+    exactly when ``C`` held at the if. This is the shape the conditional-call
+    rewrite gives ``return L && R;`` once ``R`` is inlined to ``true``, next
+    to the same oracle written with a separate ``return L;``.
+
+    Soundness: when ``C`` is false, the original returns ``false``; the
+    rewrite skips the if and returns ``C``, evaluated again in the same state,
+    so ``false``. When ``C`` is true, both run ``S``; a ``return`` inside
+    ``S`` exits both the same way, and otherwise the original returns
+    ``true`` while the rewrite returns ``C`` evaluated after ``S``. The
+    preconditions make the second evaluation of ``C`` equal to the first:
+
+    - ``C`` makes no call (a call may draw, change state or not complete,
+      so evaluating it twice is not evaluating it once), so evaluating it has
+      no effect and, every expression being total (FROGLANG_REFERENCE 6.9),
+      depends only on the variables it reads;
+    - ``S`` writes none of those variables (assignment, draw, element write,
+      ``<-uniq`` insertion) and rebinds none of them
+      (``reassigns_or_rebinds``).
+
+    The if must have one condition and no else block; ``return false;`` must
+    be the very next statement, so nothing runs between the if and it.
+    """
+
+    _NAME = "Guarded True Return To Condition"
+
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
+        self._method: str | None = None
+
+    def transform_method(self, method: frog_ast.Method) -> frog_ast.Method:
+        saved = self._method
+        self._method = method.signature.name
+        try:
+            return self._transform_children(method)
+        finally:
+            self._method = saved
+
+    def _note(self, stmt: frog_ast.IfStatement, reason: str, suggestion: str) -> None:
+        if self.ctx is None:
+            return
+        cond = stmt.conditions[0]
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name=self._NAME,
+                reason=(
+                    f"'if ({cond}) {{ ...; return true; }} return false;' was not"
+                    f" folded into 'if ({cond}) {{ ... }} return {cond};': " + reason
+                ),
+                location=stmt.origin,
+                suggestion=suggestion,
+                variable=str(cond),
+                method=self._method,
+            )
+        )
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        statements = block.statements
+        for index in range(len(statements) - 1):
+            stmt = statements[index]
+            if not isinstance(stmt, frog_ast.IfStatement):
+                continue
+            if len(stmt.conditions) != 1 or stmt.has_else_block():
+                continue
+            body = stmt.blocks[0].statements
+            if not body or not _is_bool_return(body[-1], True):
+                continue
+            if not _is_bool_return(statements[index + 1], False):
+                continue
+            cond = stmt.conditions[0]
+            if any(isinstance(node, frog_ast.FuncCall) for node in _walk_nodes(cond)):
+                self._note(
+                    stmt,
+                    "the condition makes a call, which the fold would evaluate"
+                    " a second time",
+                    "bind the call's result to a local before the if",
+                )
+                continue
+            prefix = frog_ast.Block(list(body[:-1]))
+            if reassigns_or_rebinds(referenced_variable_names(cond), prefix):
+                self._note(
+                    stmt,
+                    "the branch writes or rebinds a variable the condition"
+                    " reads, so the condition may be false after the branch",
+                    "return the value the branch leaves rather than true",
+                )
+                continue
+            folded: list[frog_ast.Statement] = []
+            if prefix.statements:
+                folded.append(frog_ast.IfStatement([copy.deepcopy(cond)], [prefix]))
+            folded.append(frog_ast.ReturnStatement(copy.deepcopy(cond)))
+            return self.transform_block(
+                frog_ast.Block(
+                    list(statements[:index]) + folded + list(statements[index + 2 :])
+                )
+            )
+        return block
+
+
 class FoldEquivalentReturnBranchTransformer(BlockTransformer):
     """Folds ``if (P) { return X; } return Y;`` to ``return Y;`` when Z3
     proves ``P ⇒ (X ↔ Y)`` with FuncCalls modelled as opaque atoms.
@@ -3928,6 +4047,13 @@ class IfFalseReturnToConjunction(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return IfFalseReturnToConjunctionTransformer(ctx).transform(game)
+
+
+class GuardedTrueReturnToCondition(TransformPass):
+    name = "Guarded True Return To Condition"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return GuardedTrueReturnToConditionTransformer(ctx).transform(game)
 
 
 class FoldEquivalentReturnBranch(TransformPass):

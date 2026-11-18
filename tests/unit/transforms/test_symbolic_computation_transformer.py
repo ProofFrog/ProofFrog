@@ -332,3 +332,127 @@ def test_sympy_readers_read_natural_powers(expression: str, ok: bool) -> None:
     else:
         assert from_visitor is None
         assert from_reader is None
+
+
+# ``e + 0`` and ``0 + e`` become ``e`` for an Int ``e`` whose value the pass
+# does not know (a field, a local, a call), by its declared type. Before,
+# only literals and proof let: Int parameters had values, so
+# ``Int r = c; c = c + 1; return r + 0;`` never met the same method
+# returning ``r``. A ModInt or BitString operand keeps its form.
+
+
+def _typed(params: str, expression: str, return_type: str = "Int") -> frog_ast.Method:
+    return frog_parser.parse_method(
+        f"{return_type} f({params}) {{ return {expression}; }}"
+    )
+
+
+@pytest.mark.parametrize(
+    "params, expression, expected",
+    [
+        ("Int x", "x + 0", "x"),
+        ("Int x", "0 + x", "x"),
+        ("Int x", "(x + 0) + 0", "x"),
+        ("Int x", "x + 0 + 1", "x + 1"),
+        # The zero may come from a fold.
+        ("Int x", "x + (1 - 1)", "x"),
+        ("Int x", "x + (lambda - lambda)", "x"),
+        ("Int x, Int y", "(x * y) + 0", "x * y"),
+        ("Int x", "-x + 0", "-x"),
+        ("Set<Int> S", "|S| + 0", "|S|"),
+        ("Map<Int, Int> M, Int k", "0 + M[k]", "M[k]"),
+    ],
+)
+def test_plus_zero_folds_for_int(params: str, expression: str, expected: str) -> None:
+    transformed = SymbolicComputationTransformer(_LAMBDA).transform(
+        _typed(params, expression)
+    )
+    assert transformed == _typed(params, expected)
+
+
+@pytest.mark.parametrize(
+    "params, expression, return_type",
+    [
+        # An integer literal next to a ModInt is an Int (F-357).
+        ("ModInt<q> u", "u + 0", "ModInt<q>"),
+        ("ModInt<q> u", "0 + u", "ModInt<q>"),
+        # + on a bit string is XOR.
+        ("BitString<8> s", "s + 0", "BitString<8>"),
+        ("BitString<8> s", "s + 0^8", "BitString<8>"),
+        # y has no declared type.
+        ("Int x", "y + 0", "Int"),
+    ],
+)
+def test_plus_zero_kept_unless_int(
+    params: str, expression: str, return_type: str
+) -> None:
+    method = _typed(params, expression, return_type)
+    assert SymbolicComputationTransformer(_LAMBDA).transform(method) == method
+
+
+def test_plus_zero_folds_for_int_field_and_initializer() -> None:
+    game = frog_parser.parse_game("""
+        Game G() {
+            Int c;
+            Int d = c + 0;
+            ModInt<q> u;
+            Int Test() { return c + 0; }
+            ModInt<q> Other() { return u + 0; }
+        }
+        """)
+    expected = frog_parser.parse_game("""
+        Game G() {
+            Int c;
+            Int d = c;
+            ModInt<q> u;
+            Int Test() { return c; }
+            ModInt<q> Other() { return u + 0; }
+        }
+        """)
+    assert SymbolicComputationTransformer({}, None, game).transform(game) == expected
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # x shadows the ModInt field x.
+        "Int x = 1; return x + 0;",
+        # x is declared twice, the second time as a ModInt.
+        "if (b) { Int x = 1; return x + 0; } ModInt<q> x = 2; return 5;",
+    ],
+)
+def test_plus_zero_not_folded_for_name_bound_twice(body: str) -> None:
+    """The type map gives such a name one type for the whole method."""
+    game = frog_parser.parse_game(f"""
+        Game G() {{
+            ModInt<q> x;
+            Int Test(Bool b) {{ {body} }}
+        }}
+        """)
+    assert SymbolicComputationTransformer({}, None, game).transform(game) == game
+
+
+_READ_THEN_INC = """
+    Game G() {{
+        Int c;
+        Void Initialize() {{ c = 0; }}
+        Int Test() {{ Int r = c; c = c + 1; return {returned}; }}
+    }}
+"""
+
+
+def test_engine_accepts_read_then_increment_plus_zero() -> None:
+    assert _equivalent(
+        _READ_THEN_INC.format(returned="r"), _READ_THEN_INC.format(returned="r + 0")
+    )
+    assert _equivalent(
+        _READ_THEN_INC.format(returned="0 + r"), _READ_THEN_INC.format(returned="r")
+    )
+
+
+@pytest.mark.parametrize("returned", ["c", "r + 1", "c + 0"])
+def test_engine_rejects_read_then_increment_other_value(returned: str) -> None:
+    assert not _equivalent(
+        _READ_THEN_INC.format(returned="r + 0"),
+        _READ_THEN_INC.format(returned=returned),
+    )

@@ -876,3 +876,122 @@ def test_f394_stable_value_names_excludes_written_parameters() -> None:
     stable = _stable_value_names(game.get_method("Test"), game)
     assert {"k", "c", "f", "t"} <= stable, stable
     assert not {"m", "r", "s"} & stable, stable
+
+
+# ---------------------------------------------------------------------------
+# F-401: a name with two bindings in the method (a local shadowing a field or
+# game parameter) is not a value that never changes
+# ---------------------------------------------------------------------------
+
+
+def test_f401_local_shadowing_field_not_stable() -> None:
+    """``v = T.Enc1(f); BitString<n> f = m;``: v encodes the field f, so
+    ``v == T.Enc1(m)`` must not become ``f == m``, which reads the local f
+    (always true)."""
+    out, _ = _simplify_enc1("""
+        Game G(Int n) {
+            BitString<n> f;
+            [Bool, BitString<n>] Test(BitString<n> m) {
+                BitString<n> v = T.Enc1(f);
+                BitString<n> f = m;
+                return [v == T.Enc1(m), f];
+            }
+        }
+        """)
+    assert "v == T.Enc1(m)" in out, out
+    assert "f == m" not in out, out
+
+
+def test_f401_binding_named_like_field_not_resolved_before_declaration() -> None:
+    """The binding v shadows the field v: the comparison written before the
+    declaration reads the field, so it must not become ``x == m``."""
+    out, _ = _simplify_enc1("""
+        Game G(Int n) {
+            BitString<n> v;
+            [Bool, BitString<n>] Test(BitString<n> m, BitString<n> x) {
+                Bool b = v == T.Enc1(m);
+                BitString<n> v = T.Enc1(x);
+                return [b, v];
+            }
+        }
+        """)
+    assert "v == T.Enc1(m)" in out, out
+    assert "x == m" not in out, out
+
+
+def test_f401_loop_binder_shadowing_field_not_resolved() -> None:
+    """A loop binder f shadows the field f inside the loop body: v encodes
+    the field, the comparison reads the binder."""
+    out, _ = _simplify_enc1("""
+        Game G(Int n) {
+            BitString<n> f;
+            Bool Test(Array<BitString<n>, 2> xs) {
+                BitString<n> v = T.Enc1(f);
+                Bool r = false;
+                for (BitString<n> f in xs) {
+                    r = v == T.Enc1(f);
+                }
+                return r;
+            }
+        }
+        """)
+    assert "v == T.Enc1(f)" in out, out
+    assert "f == f" not in out, out
+
+
+def test_f401_local_shadowing_game_parameter_not_stable() -> None:
+    """The local k shadows the game parameter k that v's value reads."""
+    out, _ = _simplify_enc1("""
+        Game G(Int n, BitString<n> k) {
+            [Bool, BitString<n>] Test(BitString<n> m) {
+                BitString<n> v = T.Enc1(k);
+                BitString<n> k = m;
+                return [v == T.Enc1(m), k];
+            }
+        }
+        """)
+    assert "v == T.Enc1(m)" in out, out
+    assert "k == m" not in out, out
+
+
+def test_f401_distinct_local_still_resolves() -> None:
+    """Control: the same method with the local named apart from the field
+    still resolves v and simplifies the comparison."""
+    out, _ = _simplify_enc1("""
+        Game G(Int n) {
+            BitString<n> f;
+            [Bool, BitString<n>] Test(BitString<n> m) {
+                BitString<n> v = T.Enc1(f);
+                BitString<n> g = m;
+                return [v == T.Enc1(m), g];
+            }
+        }
+        """)
+    assert "f == m" in out, out
+
+
+def test_f401_stable_value_names_excludes_shadowed_names() -> None:
+    """``_stable_value_names`` drops a field or game parameter that a local or
+    loop binder shadows, and the local itself."""
+    from proof_frog.transforms.algebraic import _stable_value_names
+
+    game = frog_parser.parse_game("""
+        Game G(Int n, BitString<n> k) {
+            BitString<n> f;
+            BitString<n> h;
+            BitString<n> e;
+            Bool Test(BitString<n> m, Array<BitString<n>, 2> xs) {
+                BitString<n> f = m;
+                BitString<n> k = m;
+                BitString<n> t = m;
+                Bool r = false;
+                for (BitString<n> h in xs) {
+                    r = r || h == t;
+                }
+                return r;
+            }
+        }
+        """)
+    stable = _stable_value_names(game.get_method("Test"), game)
+    assert {"m", "t", "e", "xs"} <= stable, stable
+    assert not {"f", "k", "h"} & stable, stable

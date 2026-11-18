@@ -1,0 +1,32 @@
+// F-401: in Left's Probe, v = F.Enc(f) reads the FIELD f; the next line
+// declares a local f that shadows the field from there on. So v encodes the
+// field, and Left's first component is Enc(field) == Enc(m), false whenever
+// the field differs from m (Enc is injective); Right's is always true.
+// Distinguisher: Put(a), then Probe(b) with a != b. Injective Equality
+// Simplify judged by name whether a value can change, counted the local f
+// (declared once) as a value that never changes, and so could read v as
+// F.Enc(f) at the comparison, where f is the local m, turning v == F.Enc(m)
+// into f == m. The canonicalization renames the local apart first, so this
+// proof was refused before the fix too; the unit tests in
+// tests/unit/transforms/test_injective_equality_simplify.py pin the pass.
+import 'DetInj.primitive';
+
+Game Left(DetInj F) {
+    F.Block f;
+    Void Put(F.Block s) { f = s; }
+    [Bool, F.Block] Probe(F.Block m) {
+        F.Block v = F.Enc(f);
+        F.Block f = m;
+        return [v == F.Enc(m), f];
+    }
+}
+
+Game Right(DetInj F) {
+    F.Block f;
+    Void Put(F.Block s) { f = s; }
+    [Bool, F.Block] Probe(F.Block m) {
+        return [true, m];
+    }
+}
+
+export as FieldShadow;

@@ -2754,8 +2754,9 @@ def _stable_value_names(method: frog_ast.Method, game: frog_ast.Game) -> set[str
     A name is value-stable if it is a method parameter the method never
     writes (see :func:`_written_parameter_names`), a game field never written
     in this method (``_count_field_assigns == 0``), or a top-level write-once
-    typed-init local (nested-aware via :func:`_scan_top_level_single_writes`)
-    that is not named like a parameter.
+    typed-init local (nested-aware via :func:`_scan_top_level_single_writes`),
+    and it has one binding in the method: no name of
+    :func:`~proof_frog.transforms._definedness.redeclared_names` is stable.
 
     Used to decide whether a local binding ``v = f(...free...)`` /
     ``v = a || b`` may be substituted at a later comparison site: the
@@ -2763,7 +2764,12 @@ def _stable_value_names(method: frog_ast.Method, game: frog_ast.Game) -> set[str
     RHS must hold the same value it did at the binding site (audit F-252,
     and the Gap-D stability set of InjectiveEqualitySimplify / F-247). A
     parameter the method writes does not (F-394): after ``v = F.Enc(k);
-    k = m;`` the comparison ``v == F.Enc(m)`` would read the new ``k``.
+    k = m;`` the comparison ``v == F.Enc(m)`` would read the new ``k``. A
+    name with two bindings does not either (F-401): in ``v = F.Enc(f);
+    T f = m; return v == F.Enc(m);`` the binding reads the field ``f`` and
+    the comparison the local ``f``, and a name-based scan sees one ``f``.
+    The same holds for a parameter re-declared by a local and for a field
+    or game parameter that a local or loop binder at any depth shadows.
     """
     param_names = {p.name for p in method.signature.parameters}
     stable_param_names = param_names - _written_parameter_names(method)
@@ -2773,11 +2779,9 @@ def _stable_value_names(method: frog_ast.Method, game: frog_ast.Game) -> set[str
     all_locals, all_reassigned = _scan_top_level_single_writes(
         method.block, value_predicate=lambda v: True
     )
-    # A typed declaration named like a parameter re-declares it (the type
-    # checker refuses one); the name then has two bindings, so neither is
-    # known to keep its value.
-    single_write_locals = set(all_locals.keys()) - all_reassigned - param_names
-    return stable_param_names | stable_field_names | single_write_locals
+    single_write_locals = set(all_locals.keys()) - all_reassigned
+    stable = stable_param_names | stable_field_names | single_write_locals
+    return stable - redeclared_names(game, method)
 
 
 def _note_written_parameter(
@@ -2824,21 +2828,32 @@ def _drop_unstable_bindings(
     :func:`_stable_value_names`, or a name of the method's state read only
     through a member access (``M`` in ``F.Enc(|M.keys|)``) that is not
     stable either. A binding dropped because it reads a parameter the method
-    writes gets a near miss."""
+    writes gets a near miss.
+
+    A binding whose own name has another binding in the method (it shadows a
+    field or game parameter, F-401) is removed too: a read of the name before
+    the declaration reads the outer variable, not the binding's value. Such a
+    binding, and one dropped because its value reads a name with two
+    bindings, get a near miss."""
     stable_names = _stable_value_names(method, game)
     state_names = _method_state_names(method, game)
     written_parameters = _written_parameter_names(method)
+    redeclared = redeclared_names(game, method)
     for name in list(bindings):
         value = bindings[name]
         free = {v.name for v in VariableCollectionVisitor().visit(copy.deepcopy(value))}
+        read = free | _member_only_names(value)
+        clash = [name] if name in redeclared else sorted(read & redeclared)
+        if clash:
+            del bindings[name]
+            note_redeclared_name(ctx, transform_name, clash[0], method.signature.name)
+            continue
         if free.issubset(stable_names) and not _reads_unstable_member(
             value, stable_names, state_names
         ):
             continue
         del bindings[name]
-        read_parameters = sorted(
-            (free | _member_only_names(value)) & written_parameters
-        )
+        read_parameters = sorted(read & written_parameters)
         if read_parameters:
             _note_written_parameter(
                 ctx, transform_name, name, read_parameters[0], method.signature.name

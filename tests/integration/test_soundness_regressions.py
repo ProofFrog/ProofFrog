@@ -598,6 +598,12 @@ CASES = [
      "a product field initialized by a call crashed the split"),
     ("F-399", "product_default.proof", "accept", "ExpandTuple",
      "a tuple's default is the tuple of its components' defaults (6.9)"),
+    ("F-401", "field_shadow.proof", "reject", "InjectiveEqualitySimplify",
+     "a local shadowing the field v's value reads counted as never changing "
+     "(the pipeline renames it apart first; unit tests pin the pass)"),
+    ("F-401", "field_shadow_control.proof", "accept",
+     "InjectiveEqualitySimplify",
+     "positive control: v encodes the field, so v == F.Enc(m) is field == m"),
     ("F-403", "empty_body_drop.proof", "reject", "method inliner",
      "an empty callee body dropped the binding of an argument that draws"),
     ("F-403", "empty_body_control.proof", "accept", "method inliner",

@@ -1,0 +1,23 @@
+import 'Taker.primitive';
+// Left returns T.Take(true) as its last statement, after the counter
+// update: nothing follows the return, so Left and Right agree.
+Game Left(Taker T) {
+    Int c = 0;
+    Void Test(Bool b) {
+        c = c + 1;
+        return T.Take(true);
+    }
+    Int Get() {
+        return c;
+    }
+}
+Game Right(Taker T) {
+    Int c = 0;
+    Void Test(Bool b) {
+        c = c + 1;
+    }
+    Int Get() {
+        return c;
+    }
+}
+export as VRC;

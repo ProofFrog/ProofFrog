@@ -14,7 +14,7 @@ The fundamental semantic unit is the **game**: a stateful interactive system tha
 
 - **`Int`**: Unbounded integers. Used for security parameters, lengths, loop bounds, and arithmetic.
 - **`Bool`**: Boolean values `true` and `false`.
-- **`Void`**: The unit type. Used only as the return type for methods that produce no value (typically `Initialize`).
+- **`Void`**: The unit type. Used only as the return type for methods that produce no value (typically `Initialize`). Such a method contains no `return` (section 4.3).
 
 ### 2.2 Parameterized Types
 
@@ -188,6 +188,8 @@ Draws uniformly from `Type` conditioned on the result not being in the set `S`. 
 ### 4.3 Return
 
 `return expr;` — exits the current method and returns the value of `expr`. The type of `expr` must match the method's declared return type.
+
+A method whose return type is `Void` contains no `return` statement, at any depth (ruling Q18, 2026-11-18): it ends at the end of its body. FrogLang has no bare `return;`, and `return T.Take(b);` with a `Void` call `T.Take(b)` is refused too, in a scheme, a game, a reduction, and an intermediate game or reduction in a proof, including as the method's last statement (write the call as a statement, `T.Take(b);`). To skip the rest of a `Void` method, put that rest in an `else` block. The type checker rejects a `return` in a `Void` method.
 
 ### 4.4 Conditional
 

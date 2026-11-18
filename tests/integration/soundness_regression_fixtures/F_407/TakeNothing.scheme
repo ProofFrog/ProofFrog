@@ -1,0 +1,7 @@
+import 'Taker.primitive';
+
+// Take ignores its argument: its body is empty.
+Scheme TakeNothing() extends Taker {
+    Void Take(Bool b) {
+    }
+}

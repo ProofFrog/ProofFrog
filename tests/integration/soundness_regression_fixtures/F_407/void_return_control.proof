@@ -1,0 +1,15 @@
+// F-407: `return T.Take(true);` as the last statement of a Void method,
+// where dropping the return changes nothing, used to verify. A Void method
+// has no return at any position, so this is a type error too.
+import 'Taker.primitive';
+import 'TakeNothing.scheme';
+import 'VRC.game';
+proof:
+let:
+    TakeNothing T = TakeNothing();
+assume:
+theorem:
+    VRC(T);
+games:
+    VRC(T).Left against VRC(T).Adversary;
+    VRC(T).Right against VRC(T).Adversary;

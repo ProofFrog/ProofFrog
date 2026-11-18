@@ -1,0 +1,18 @@
+// F-407: a Void method returned a Void call, `return T.Take(true);`, inside
+// an if. The method inliner replaced that statement by Take's body, here
+// empty, so the return went with it and Left's Test(true) made the counter
+// update it should skip: Left was proved interchangeable with Right, though
+// Test(true) then Get() returns 0 on Left and 1 on Right. A Void method has
+// no return, so this is a type error.
+import 'Taker.primitive';
+import 'TakeNothing.scheme';
+import 'VR.game';
+proof:
+let:
+    TakeNothing T = TakeNothing();
+assume:
+theorem:
+    VR(T);
+games:
+    VR(T).Left against VR(T).Adversary;
+    VR(T).Right against VR(T).Adversary;

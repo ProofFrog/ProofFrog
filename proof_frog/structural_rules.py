@@ -25,6 +25,11 @@ type checker:
   anywhere: only parameters, proof ``let:`` entries and variables never
   written after their declaration.  So a type means the same thing
   throughout an execution.
+- A method whose return type is ``Void`` contains no ``return`` statement,
+  at any depth (ruling Q18).  FrogLang has no bare ``return;``, so such a
+  method ends only at the end of its body.  A ``return e;`` with a ``Void``
+  call ``e`` would be an early exit that the method inliner drops when it
+  replaces the statement by the callee's body (F-407).
 
 ``check_structural_rules`` returns the violations in source order; the caller
 reports them.
@@ -163,6 +168,7 @@ class _ComponentChecker:
         self.violations: list[Violation] = []
         self.method_params: dict[str, _Binding] = {}
         self.method_name = ""
+        self.method_returns_void = False
         self.is_scheme = False
 
     def _lookup(self, name: str) -> Optional[_Binding]:
@@ -280,8 +286,10 @@ class _ComponentChecker:
         self.scopes.append(dict(params))
         self.method_params = params
         self.method_name = signature.name
+        self.method_returns_void = isinstance(signature.return_type, frog_ast.Void)
         self._check_block(method.block)
         self.method_params = {}
+        self.method_returns_void = False
         self.scopes.pop()
 
     def _check_block(self, block: frog_ast.Block) -> None:
@@ -338,6 +346,17 @@ class _ComponentChecker:
                 self._write(statement.var, statement)
         else:
             self._record_sizes(statement)
+            if self.method_returns_void and isinstance(
+                statement, frog_ast.ReturnStatement
+            ):
+                self.violations.append(
+                    Violation(
+                        statement,
+                        f"Method {self.method_name} has return type Void but"
+                        " contains a return statement: a Void method has no"
+                        " return; it ends at the end of its body",
+                    )
+                )
 
 
 def _components(root: frog_ast.ASTNode) -> list[frog_ast.ASTNode]:

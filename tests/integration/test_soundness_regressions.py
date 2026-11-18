@@ -636,6 +636,11 @@ CASES = [
      "the same calls against their true value"),
     ("F-406", "bs0_direct.proof", "reject", "TopologicalSort",
      "a draw from BitString<0> minus its one element was dropped as dead code"),
+    ("F-406", "cond_call.proof", "reject", "method inliner",
+     "a callee making that draw counted as having no effect, so the call in "
+     "the right operand of && was inlined unconditionally"),
+    ("F-406", "cond_call_control.proof", "accept", "method inliner",
+     "positive control: the same games with a draw from BitString<1> \\ {0b0}"),
     ("F-406", "dead_draw_control.proof", "accept", "TopologicalSort",
      "positive control: an unused draw from BitString<1> \\ {0b0} is dropped"),
     ("F-406", "early_return.proof", "reject", "TopologicalSort",

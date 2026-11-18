@@ -1,0 +1,17 @@
+import 'Pick.primitive';
+// F-406: Left calls P.Draw() only when a holds (the right operand of &&).
+// Right calls it always.
+// With P's Draw never returning, Test(false) returns false on Left and never
+// returns on Right. With a Draw that always returns true, both return a.
+Game Left(Pick P) {
+    Bool Test(Bool a) {
+        return a && P.Draw();
+    }
+}
+Game Right(Pick P) {
+    Bool Test(Bool a) {
+        Bool t = P.Draw();
+        return a && t;
+    }
+}
+export as GCond;

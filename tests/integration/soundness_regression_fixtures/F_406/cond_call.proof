@@ -1,0 +1,17 @@
+// F-406: claims GCond.Left and GCond.Right are interchangeable for PickEmpty.
+// They are not: Right always calls Draw, whose draw from BitString<0> \ {0^0}
+// never completes, while Left skips the call when a is false (see
+// GCond.game). The draw was counted as having two elements to choose from,
+// so the call looked like one that always returns and has no effect.
+import 'Pick.primitive';
+import 'PickEmpty.scheme';
+import 'GCond.game';
+proof:
+let:
+    PickEmpty P = PickEmpty();
+assume:
+theorem:
+    GCond(P);
+games:
+    GCond(P).Left against GCond(P).Adversary;
+    GCond(P).Right against GCond(P).Adversary;

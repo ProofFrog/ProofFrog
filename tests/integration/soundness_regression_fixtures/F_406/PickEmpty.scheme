@@ -1,0 +1,9 @@
+import 'Pick.primitive';
+// F-406: BitString<0> has one element, the empty string 0^0, so this draw
+// has an empty domain and Draw never returns.
+Scheme PickEmpty() extends Pick {
+    Bool Draw() {
+        BitString<0> x <- BitString<0> \ {0^0};
+        return true;
+    }
+}

@@ -1,0 +1,15 @@
+// F-406 positive control: the same games for PickNonempty, whose draw from
+// BitString<1> \ {0b0} always completes, so Draw always returns true and
+// both sides return a.
+import 'Pick.primitive';
+import 'PickNonempty.scheme';
+import 'GCond.game';
+proof:
+let:
+    PickNonempty P = PickNonempty();
+assume:
+theorem:
+    GCond(P);
+games:
+    GCond(P).Left against GCond(P).Adversary;
+    GCond(P).Right against GCond(P).Adversary;

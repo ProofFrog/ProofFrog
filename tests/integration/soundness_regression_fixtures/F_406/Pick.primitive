@@ -1,0 +1,4 @@
+// F-406: a primitive with one method that may make a draw.
+Primitive Pick() {
+    Bool Draw();
+}

@@ -197,6 +197,36 @@ def test_tool_calls_run_one_at_a_time(
     assert most == 1
 
 
+def test_inlined_game_ignores_comments(workdir: Path) -> None:
+    """A comment saying `let:` is not the let: block (F-409)."""
+    (workdir / "Same.game").write_text(
+        "Game Left(Int n) { Int Get() { return n; } }\n"
+        "Game Right(Int n) { Int Get() { return n; } }\n"
+        "export as Same;\n"
+    )
+    (workdir / "same.proof").write_text(
+        "// The let: block names n; theorem: and games: follow. {\n"
+        "import 'Same.game';\n"
+        "proof:\n"
+        "let:\n    Int n; /* assume: nothing */\n"
+        "theorem:\n    Same(n);\n"
+        "games:\n"
+        "    Same(n).Left against Same(n).Adversary;\n"
+        "    Same(n).Right against Same(n).Adversary;\n"
+    )
+    text, err = _call(
+        "get_inlined_game",
+        {
+            "proof_path": "same.proof",
+            "step_text": "Same(n).Left against Same(n).Adversary",
+        },
+    )
+    assert not err
+    result = json.loads(text)
+    assert result["success"] is True, result
+    assert "return n;" in result["canonical"]
+
+
 @pytest.mark.skipif(
     not EXAMPLES.joinpath("Proofs").is_dir(),
     reason="examples submodule not checked out",

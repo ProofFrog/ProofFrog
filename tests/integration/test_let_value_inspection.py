@@ -42,17 +42,10 @@ _STEP = {
 
 
 def _copy_fixtures(tmp_path: Path) -> Path:
+    # Comments included: their header comments say "let:", which inlined-game's
+    # block extraction (`_build_minimal_proof`) once took for the block (F-409).
     for source in _FIXTURES.iterdir():
-        if source.suffix == ".proof":
-            # The header comments say "let:", which inlined-game's block
-            # extraction (`_build_minimal_proof`) would take for the block.
-            lines = source.read_text(encoding="utf-8").splitlines(keepends=True)
-            (tmp_path / source.name).write_text(
-                "".join(line for line in lines if not line.startswith("//")),
-                encoding="utf-8",
-            )
-        else:
-            shutil.copy(source, tmp_path / source.name)
+        shutil.copy(source, tmp_path / source.name)
     return tmp_path
 
 
@@ -93,6 +86,17 @@ def test_inlined_game_reports_refused_let_entry(
     detail = json.loads(result.stdout)
     assert detail["success"] is False
     assert message in detail["output"]
+
+
+def test_inlined_game_shows_deterministic_let_value(tmp_path: Path) -> None:
+    result = _cli(
+        "inlined-game",
+        str(_copy_fixtures(tmp_path) / "letfixed_control.proof"),
+        "LetFixed(n, R, c).Left against LetFixed(n, R, c).Adversary",
+    )
+    detail = json.loads(result.stdout)
+    assert detail["success"] is True
+    assert "R.Fixed()" in detail["canonical"]
 
 
 @pytest.mark.parametrize("proof, message", _ILL_FORMED)

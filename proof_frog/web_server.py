@@ -114,27 +114,56 @@ def _get_file_type(file_name: str) -> frog_ast.FileType:
     return frog_ast.FileType(extension)
 
 
+# A comment, as the lexer reads one (`//` to the end of the line, `/*` to the
+# next `*/`; an unclosed `/*` is no comment), or a quoted file path, which may
+# contain `//` and is kept (the lexer's FILESTRING).
+_COMMENT_OR_FILE_PATH = re.compile(
+    r"(?P<path>'[-0-9a-zA-Z_$/.=>< ]+')|//[^\n]*|/\*.*?\*/", re.DOTALL
+)
+
+
+def _blank_comments(text: str) -> str:
+    """Return *text* with every comment replaced by spaces, line breaks kept.
+
+    Everything else keeps its position, so line and column numbers still
+    match the original text.
+    """
+
+    def blank(match: re.Match[str]) -> str:
+        if match.group("path") is not None:
+            return match.group()
+        return re.sub(r"[^\n]", " ", match.group())
+
+    return _COMMENT_OR_FILE_PATH.sub(blank, text)
+
+
 def _build_minimal_proof(proof_text: str, step_text: str) -> str | None:
     """Build a minimal parseable proof containing only one game step.
 
     Extracts imports, intermediate Game definitions, Reduction definitions,
     and the let:/assume:/theorem: blocks from *proof_text*, then wraps
     *step_text* as the only step (listed twice so the grammar's two-game
-    requirement is met).
+    requirement is met). The blocks are found by matching keywords and
+    braces in the text, which need not parse as a whole, after blanking its
+    comments: a comment's words (`let:`, `theorem`, `{`) are not code.
 
     Returns the minimal proof as a string, or None if a theorem could not be
     extracted from *proof_text*.
     """
-    # Import lines
+    proof_text = _blank_comments(proof_text)
+
+    # Import lines (a blanked comment may leave spaces in front of one)
     import_lines = "\n".join(
-        re.findall(r"^import\s+'[^']+'(?:\s+as\s+\w+)?\s*;", proof_text, re.MULTILINE)
+        re.findall(
+            r"^[ \t]*(import\s+'[^']+'(?:\s+as\s+\w+)?\s*;)", proof_text, re.MULTILINE
+        )
     )
 
     # Top-level Game and Reduction blocks. We must include Reductions because
     # *step_text* may reference them via `compose ... compose Reduction(...)`.
     game_defs: list[str] = []
-    for match in re.finditer(r"^(Game|Reduction)\s+", proof_text, re.MULTILINE):
-        start = match.start()
+    for match in re.finditer(r"^[ \t]*(Game|Reduction)\s+", proof_text, re.MULTILINE):
+        start = match.start(1)
         brace_start = proof_text.find("{", start)
         if brace_start == -1:
             continue

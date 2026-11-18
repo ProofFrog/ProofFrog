@@ -1,0 +1,25 @@
+// F-401 positive control: the same Left as FieldShadow.game. v encodes the
+// field f, so v == F.Enc(m) is field == m (Enc is injective), which is
+// Right's first component; the second is the local f, which is m. The two
+// games are interchangeable.
+import 'DetInj.primitive';
+
+Game Left(DetInj F) {
+    F.Block f;
+    Void Put(F.Block s) { f = s; }
+    [Bool, F.Block] Probe(F.Block m) {
+        F.Block v = F.Enc(f);
+        F.Block f = m;
+        return [v == F.Enc(m), f];
+    }
+}
+
+Game Right(DetInj F) {
+    F.Block f;
+    Void Put(F.Block s) { f = s; }
+    [Bool, F.Block] Probe(F.Block m) {
+        return [f == m, m];
+    }
+}
+
+export as FieldShadowControl;

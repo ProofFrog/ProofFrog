@@ -1,0 +1,18 @@
+// F-401 positive control: claims FieldShadowControl(F).Left and
+// FieldShadowControl(F).Right are interchangeable, which they are (see
+// FieldShadowControl.game). Sound engine: Proof Succeeded!
+import 'DetInj.primitive';
+import 'FieldShadowControl.game';
+
+proof:
+
+let:
+    Int n;
+    DetInj F = DetInj(BitString<n>);
+
+theorem:
+    FieldShadowControl(F);
+
+games:
+    FieldShadowControl(F).Left against FieldShadowControl(F).Adversary;
+    FieldShadowControl(F).Right against FieldShadowControl(F).Adversary;

@@ -1,0 +1,6 @@
+// A deterministic injective map on a Set alias.
+Primitive DetInj(Set S) {
+    Set Block = S;
+
+    deterministic injective Block Enc(Block x);
+}

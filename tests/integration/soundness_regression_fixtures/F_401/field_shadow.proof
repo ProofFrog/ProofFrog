@@ -1,0 +1,18 @@
+// F-401: claims FieldShadow(F).Left and FieldShadow(F).Right are
+// interchangeable. They are not (see FieldShadow.game). Sound engine:
+// Proof Failed!
+import 'DetInj.primitive';
+import 'FieldShadow.game';
+
+proof:
+
+let:
+    Int n;
+    DetInj F = DetInj(BitString<n>);
+
+theorem:
+    FieldShadow(F);
+
+games:
+    FieldShadow(F).Left against FieldShadow(F).Adversary;
+    FieldShadow(F).Right against FieldShadow(F).Adversary;

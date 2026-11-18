@@ -545,3 +545,59 @@ def test_f394_other_parameter_written_still_decomposes() -> None:
         nm.transform_name == "Concat Equality Decompose" and nm.variable == "v"
         for nm in ctx.near_misses
     ), ctx.near_misses
+
+
+# --------------------------------------------------------------------------
+# F-401: a name with two bindings in the method (a local shadowing a field)
+# is not a value that never changes
+# --------------------------------------------------------------------------
+
+
+def test_f401_local_shadowing_field_not_decomposed() -> None:
+    """``v = f || b; BitString<n> f = b;``: v holds the field f, so ``v == x``
+    must not be decomposed against the local f."""
+    game, _ = _apply_with_ctx("""
+        Game G(Int n) {
+            BitString<n> f;
+            [Bool, BitString<n>] O(BitString<n> b, BitString<n + n> x) {
+                BitString<n + n> v = f || b;
+                BitString<n> f = b;
+                return [v == x, f];
+            }
+        }
+        """)
+    assert "v == x" in str(game), str(game)
+    assert "x[0 : n] == f" not in str(game), str(game)
+
+
+def test_f401_binding_named_like_field_not_decomposed_before_declaration() -> None:
+    """The binding v shadows the field v: the comparison written before the
+    declaration reads the field, so it is not decomposed against a || b."""
+    game, _ = _apply_with_ctx("""
+        Game G(Int n) {
+            BitString<n + n> v;
+            [Bool, BitString<n + n>] O(BitString<n> a, BitString<n> b, BitString<n + n> x) {
+                Bool r = v == x;
+                BitString<n + n> v = a || b;
+                return [r, v];
+            }
+        }
+        """)
+    assert "v == x" in str(game), str(game)
+    assert "x[0 : n] == a" not in str(game), str(game)
+
+
+def test_f401_distinct_local_still_decomposes() -> None:
+    """Control: with the local named apart from the field, ``v == x`` still
+    decomposes."""
+    game, _ = _apply_with_ctx("""
+        Game G(Int n) {
+            BitString<n> f;
+            [Bool, BitString<n>] O(BitString<n> b, BitString<n + n> x) {
+                BitString<n + n> v = f || b;
+                BitString<n> g = b;
+                return [v == x, g];
+            }
+        }
+        """)
+    assert "x[0 : n] == f" in str(game), str(game)

@@ -5904,6 +5904,115 @@ def test_concat_equality_no_near_miss_on_unwritten_parameter() -> None:
 
 
 # ---------------------------------------------------------------------------
+# F-401: Injective Equality Simplify and Concat Equality Decompose do not
+# read a local again when it, or a name its value reads, has two bindings
+# ---------------------------------------------------------------------------
+
+
+def test_injective_equality_near_miss_on_local_shadowing_field() -> None:
+    # The local f shadows the field f that v's value reads.
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            BitString<n> f;
+            [Bool, BitString<n>] Probe(BitString<n> m) {
+                BitString<n> v = T.Enc1(f);
+                BitString<n> f = m;
+                return [v == T.Enc1(m), f];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    ctx.proof_namespace["T"] = frog_parser.parse_primitive_file(
+        _F394_INJECTIVE_PRIMITIVE_SRC
+    )
+    assert InjectiveEqualitySimplify().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "Injective Equality Simplify")
+    assert len(misses) == 1
+    assert misses[0].variable == "f"
+    assert misses[0].method == "Probe"
+
+
+def test_injective_equality_near_miss_on_binding_named_like_field() -> None:
+    # The binding v shadows the field v, read before the declaration.
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            BitString<n> v;
+            [Bool, BitString<n>] Probe(BitString<n> m, BitString<n> x) {
+                Bool b = v == T.Enc1(m);
+                BitString<n> v = T.Enc1(x);
+                return [b, v];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    ctx.proof_namespace["T"] = frog_parser.parse_primitive_file(
+        _F394_INJECTIVE_PRIMITIVE_SRC
+    )
+    assert InjectiveEqualitySimplify().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "Injective Equality Simplify")
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+
+
+def test_injective_equality_no_redeclared_near_miss_without_shadowing() -> None:
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            BitString<n> f;
+            [Bool, BitString<n>] Probe(BitString<n> m) {
+                BitString<n> v = T.Enc1(f);
+                BitString<n> g = m;
+                return [v == T.Enc1(m), g];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    ctx.proof_namespace["T"] = frog_parser.parse_primitive_file(
+        _F394_INJECTIVE_PRIMITIVE_SRC
+    )
+    InjectiveEqualitySimplify().apply(game, ctx)
+    assert not _redeclared_reasons(ctx, "Injective Equality Simplify")
+
+
+def test_concat_equality_near_miss_on_local_shadowing_field() -> None:
+    from proof_frog.transforms.algebraic import ConcatEqualityDecompose
+
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            BitString<n> f;
+            [Bool, BitString<n>] Probe(BitString<n> b, BitString<n + n> x) {
+                BitString<n + n> v = f || b;
+                BitString<n> f = b;
+                return [v == x, f];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    assert ConcatEqualityDecompose().apply(game, ctx) == game
+    misses = _redeclared_reasons(ctx, "Concat Equality Decompose")
+    assert len(misses) == 1
+    assert misses[0].variable == "f"
+    assert misses[0].method == "Probe"
+
+
+def test_concat_equality_no_redeclared_near_miss_without_shadowing() -> None:
+    from proof_frog.transforms.algebraic import ConcatEqualityDecompose
+
+    game = frog_parser.parse_game("""
+        Game G(Int n) {
+            BitString<n> f;
+            [Bool, BitString<n>] Probe(BitString<n> b, BitString<n + n> x) {
+                BitString<n + n> v = f || b;
+                BitString<n> g = b;
+                return [v == x, g];
+            }
+        }
+        """)
+    ctx = _make_ctx()
+    ConcatEqualityDecompose().apply(game, ctx)
+    assert not _redeclared_reasons(ctx, "Concat Equality Decompose")
+
+
+# ---------------------------------------------------------------------------
 # F-326: a field rename that a method's own binder would capture is declined
 # ---------------------------------------------------------------------------
 

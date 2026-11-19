@@ -669,6 +669,13 @@ CASES = [
      "the same, with a callee body that has a statement but no return"),
     ("F-407", "void_return_control.proof", "type_error", "method inliner",
      "the same return as the method's last statement, also refused"),
+    ("F-413", "cover_dec.proof", "accept", "RemoveUnreachable",
+     "the last if of a run of returning ifs covering every execution was "
+     "kept, its condition always true, so Dec did not reduce to return None"),
+    ("F-413", "other_set_dec.proof", "reject", "RemoveUnreachable",
+     "control: a second test that is not the complement of the first stays"),
+    ("F-413", "write_between_dec.proof", "reject", "RemoveUnreachable",
+     "control: a write between a test and its complement keeps the second"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),

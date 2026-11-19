@@ -1,0 +1,17 @@
+// F-413 control: claims WriteBetweenDec(n).Left and WriteBetweenDec(n).Right
+// are interchangeable. They are not (see WriteBetweenDec.game): S is
+// written between Left.Dec's test and its complement, so the second test
+// is not always taken and must stay. Sound engine: Proof Failed!
+import 'WriteBetweenDec.game';
+
+proof:
+
+let:
+    Int n;
+
+theorem:
+    WriteBetweenDec(n);
+
+games:
+    WriteBetweenDec(n).Left against WriteBetweenDec(n).Adversary;
+    WriteBetweenDec(n).Right against WriteBetweenDec(n).Adversary;

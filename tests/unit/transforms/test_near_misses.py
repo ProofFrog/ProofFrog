@@ -6501,3 +6501,134 @@ def test_symbolic_no_near_miss_on_plus_zero_with_int_operand() -> None:
         """)
     assert "return c + x;" in str(game)
     assert not misses
+
+
+# ---------------------------------------------------------------------------
+# F-413: Remove Unreachable replaces an if whose condition the path facts
+# imply by its block; it reports where it declines
+# ---------------------------------------------------------------------------
+
+
+def _always_taken_misses(source: str) -> tuple[frog_ast.Game, list[NearMiss]]:
+    from proof_frog.transforms.control_flow import RemoveUnreachable
+
+    ctx = _make_ctx()
+    game = RemoveUnreachable().apply(frog_parser.parse_game(source), ctx)
+    return game, [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Remove unreachable blocks of code"
+        and nm.reason.startswith("The if-statement on")
+    ]
+
+
+def test_remove_unreachable_always_taken_near_miss_on_call() -> None:
+    source = """
+        Game G(F f) {
+            Set<Int> S;
+            Int Test(Int x) {
+                if (x in S) {
+                    return 1;
+                }
+                if (!(x in S) || F.Get(x) in S) {
+                    return 2;
+                }
+                return 3;
+            }
+        }
+        """
+    game, misses = _always_taken_misses(source)
+    assert game == frog_parser.parse_game(source)
+    assert len(misses) == 1
+    assert misses[0].variable == "!(x in S) || F.Get(x) in S"
+    assert "makes a call" in misses[0].reason
+
+
+def test_remove_unreachable_always_taken_near_miss_on_else() -> None:
+    source = """
+        Game G() {
+            Int c;
+            Int Test(Bool b) {
+                if (b) {
+                    return 1;
+                }
+                if (!b) {
+                    c = 1;
+                } else {
+                    c = 2;
+                }
+                return c;
+            }
+        }
+        """
+    game, misses = _always_taken_misses(source)
+    assert game == frog_parser.parse_game(source)
+    assert len(misses) == 1
+    assert "has an else branch" in misses[0].reason
+
+
+def test_remove_unreachable_always_taken_near_miss_on_declared_name() -> None:
+    source = """
+        Game G() {
+            Int c;
+            Int y;
+            Int Test(Bool b) {
+                if (b) {
+                    return 1;
+                }
+                if (!b) {
+                    Int y = 2;
+                    c = y;
+                }
+                return y;
+            }
+        }
+        """
+    game, misses = _always_taken_misses(source)
+    assert game == frog_parser.parse_game(source)
+    assert len(misses) == 1
+    assert "its block declares 'y'" in misses[0].reason
+
+
+def test_remove_unreachable_always_taken_no_near_miss_when_replaced() -> None:
+    game, misses = _always_taken_misses("""
+        Game G() {
+            Set<Int> S;
+            Int Test(Int x) {
+                if (x in S) {
+                    return 1;
+                }
+                if (!(x in S)) {
+                    return 2;
+                }
+                return 3;
+            }
+        }
+        """)
+    assert "return 2;" in str(game)
+    assert "!(x in S)" not in str(game)
+    assert not misses
+
+
+def test_remove_unreachable_always_taken_no_near_miss_when_not_implied() -> None:
+    source = """
+        Game G() {
+            Set<Int> S;
+            Set<Int> T;
+            Int Test(Int x) {
+                if (x in S) {
+                    return 1;
+                }
+                if (!(x in T) || F.Get(x) in S) {
+                    return 2;
+                }
+                if (!(x in T)) {
+                    return 3;
+                }
+                return 4;
+            }
+        }
+        """
+    game, misses = _always_taken_misses(source)
+    assert "return 4;" in str(game)
+    assert not misses

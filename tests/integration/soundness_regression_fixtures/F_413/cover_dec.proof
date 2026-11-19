@@ -1,0 +1,18 @@
+// F-413: claims CoverDec(n).Left and CoverDec(n).Right are
+// interchangeable, which they are (see CoverDec.game). Remove Unreachable
+// dropped Left.Dec's unreachable final return but kept the second test,
+// whose condition always holds there, so Left.Dec did not reduce to
+// `return None;`. Sound and complete engine: Proof Succeeded!
+import 'CoverDec.game';
+
+proof:
+
+let:
+    Int n;
+
+theorem:
+    CoverDec(n);
+
+games:
+    CoverDec(n).Left against CoverDec(n).Adversary;
+    CoverDec(n).Right against CoverDec(n).Adversary;

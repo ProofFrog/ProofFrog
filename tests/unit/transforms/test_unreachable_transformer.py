@@ -73,14 +73,14 @@ from proof_frog.transforms.control_flow import RemoveUnreachableTransformer
                 return 3;
             }
             """,
+            # F-413: once `b` has returned, `!b` always holds, so the second
+            # if is replaced by its block.
             """
             Int f(Bool b) {
                 if (b) {
                     return 1;
                 }
-                if (!b) {
-                    return 2;
-                }
+                return 2;
             }
             """,
         ),
@@ -128,9 +128,7 @@ from proof_frog.transforms.control_flow import RemoveUnreachableTransformer
                 if (x == 0) {
                     return 2;
                 }
-                if (x < 0) {
-                    return 3;
-                }
+                return 3;
             }
             """,
         ),
@@ -217,9 +215,7 @@ from proof_frog.transforms.control_flow import RemoveUnreachableTransformer
                 if (a && !b) {
                     return 3;
                 }
-                if (a && b) {
-                    return 4;
-                }
+                return 4;
             }
             """,
         ),
@@ -270,9 +266,7 @@ from proof_frog.transforms.control_flow import RemoveUnreachableTransformer
                 if (x in S) {
                     return 1;
                 }
-                if (!(x in S)) {
-                    return 2;
-                }
+                return 2;
             }
             """,
         ),
@@ -386,9 +380,7 @@ from proof_frog.transforms.control_flow import RemoveUnreachableTransformer
                 if (x in s && !(x in t)) {
                     return 3;
                 }
-                if (!(x in s) && !(x in t)) {
-                    return 4;
-                }
+                return 4;
             }
             """,
         ),

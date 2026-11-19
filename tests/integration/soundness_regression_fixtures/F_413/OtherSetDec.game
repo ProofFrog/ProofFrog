@@ -1,0 +1,41 @@
+// F-413 control: Dec's second test reads another set than the first, so it
+// is not the complement: Dec(c) for a c given to Mark but not to Enc
+// returns c in Left and None in Right. Distinguishable.
+
+Game Left(Int n) {
+    Set<BitString<n>> S;
+    Set<BitString<n>> T;
+    BitString<n> Enc(BitString<n> m) {
+        S = S union {m};
+        return m;
+    }
+    Void Mark(BitString<n> m) {
+        T = T union {m};
+    }
+    BitString<n>? Dec(BitString<n> c) {
+        if (c in S) {
+            return None;
+        }
+        if (!(c in T)) {
+            return None;
+        }
+        return c;
+    }
+}
+
+Game Right(Int n) {
+    Set<BitString<n>> S;
+    Set<BitString<n>> T;
+    BitString<n> Enc(BitString<n> m) {
+        S = S union {m};
+        return m;
+    }
+    Void Mark(BitString<n> m) {
+        T = T union {m};
+    }
+    BitString<n>? Dec(BitString<n> c) {
+        return None;
+    }
+}
+
+export as OtherSetDec;

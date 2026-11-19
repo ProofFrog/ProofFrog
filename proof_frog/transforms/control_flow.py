@@ -1530,6 +1530,37 @@ def _walk_nodes(node: object) -> list[frog_ast.ASTNode]:
     return found
 
 
+def _facts_imply(
+    facts: list[z3.AstRef], formula: z3.BoolRef
+) -> z3.CheckSatResult | None:
+    """``z3.unsat`` when *facts* imply *formula* (their conjunction with its
+    negation has no model); ``None`` when Z3 refuses the formulas."""
+    try:
+        solver = z3.Solver()
+        solver.set("timeout", 30000)
+        solver.add(z3.And(*facts, z3.Not(formula)))
+        return solver.check()
+    except (z3.Z3Exception, TypeError):
+        return None
+
+
+def _top_level_binders(statement: frog_ast.Statement) -> list[str]:
+    """The names *statement* declares in the block that holds it: a typed
+    assignment or draw, or a bare declaration (a loop's binder and the
+    locals of a nested block are scoped to their own block)."""
+    if isinstance(statement, frog_ast.VariableDeclaration):
+        return [statement.name]
+    if (
+        isinstance(
+            statement, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        )
+        and statement.the_type is not None
+        and isinstance(statement.var, frog_ast.Variable)
+    ):
+        return [statement.var.name]
+    return []
+
+
 # Consider case where else if condition might have a return but then the if condition doesn't
 # Then in order to check whether it's definitely true we need (not A and B) where A is first condition and B is second.
 
@@ -1584,6 +1615,113 @@ class RemoveUnreachableTransformer(BlockTransformer):
                 )
             return True
         return False
+
+    def _note_always_taken(
+        self, statement: frog_ast.IfStatement, reason: str, suggestion: str | None
+    ) -> None:
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Remove unreachable blocks of code",
+                reason=f"The if-statement on '{statement.conditions[0]}' {reason}",
+                location=statement.origin,
+                suggestion=suggestion,
+                variable=str(statement.conditions[0]),
+                method=None,
+            )
+        )
+
+    # pylint: disable-next=too-many-arguments,too-many-positional-arguments
+    def _replace_always_taken_if(
+        self,
+        block: frog_ast.Block,
+        index: int,
+        dead_indices: list[int],
+        facts: list[z3.AstRef],
+        condition_formula: Callable[[frog_ast.Expression], z3.BoolRef | None],
+        opaque_visitor: Z3FormulaVisitor,
+    ) -> frog_ast.Block | None:
+        """*block* with the if-statement at *index* replaced by its block,
+        when *facts* (the path facts there) imply its condition; else None.
+
+        Only an if with one condition and no else is replaced, and only when
+        its condition makes no call: evaluating a call may have an effect
+        (a draw, a change of state, not completing), which removing the test
+        would drop. A condition that only reads is total (reads never fail),
+        so once it always holds the test can go. Writes between two tests,
+        and writes in a kept branch, are seen through the variable versions
+        the facts and the condition are built with.
+
+        A local the replaced block declares at its top level would come into
+        scope for the statements after the if, so the if is kept when one of
+        them names it (or an earlier statement of *block* declares it). When
+        the block returns, the statements after the if are unreachable and
+        dropped."""
+        statement = block.statements[index]
+        assert isinstance(statement, frog_ast.IfStatement)
+        condition = statement.conditions[0]
+        if any(isinstance(node, frog_ast.FuncCall) for node in _walk_nodes(condition)):
+            # With each call read as a fixed value, would the facts imply it?
+            formula = opaque_visitor.visit(condition)
+            if (
+                isinstance(formula, z3.BoolRef)
+                and _facts_imply(facts, formula) == z3.unsat
+            ):
+                self._note_always_taken(
+                    statement,
+                    "always holds if its calls are read as fixed values, but it"
+                    " makes a call, which may have an effect, so the test was"
+                    " kept",
+                    "compute the call's result into a local before the test,"
+                    " or test a value the method already holds",
+                )
+            return None
+        formula = condition_formula(condition)
+        if formula is None:
+            return None
+        verdict = _facts_imply(facts, formula)
+        if verdict == z3.unknown:
+            self._note_always_taken(
+                statement,
+                "may always hold, but Z3 could not decide whether the path"
+                " facts imply it, so the test was kept",
+                None,
+            )
+            return None
+        if verdict != z3.unsat:
+            return None
+        if len(statement.conditions) > 1 or statement.has_else_block():
+            self._note_always_taken(
+                statement,
+                "always holds, but the if-statement has an else branch, so it"
+                " was kept",
+                "drop the branches after the first one, which never run",
+            )
+            return None
+        body = list(statement.blocks[0].statements)
+        prefix = [
+            s for i, s in enumerate(block.statements[:index]) if i not in dead_indices
+        ]
+        returns = any(
+            isinstance(s, frog_ast.ReturnStatement) for s in body
+        ) or block_unconditionally_returns(statement.blocks[0])
+        rest = [] if returns else list(block.statements[index + 1 :])
+        declared = {name for s in body for name in _top_level_binders(s)}
+        clash = declared & (
+            block_mentioned_names(frog_ast.Block(rest))
+            | {name for s in prefix for name in _top_level_binders(s)}
+        )
+        if clash:
+            self._note_always_taken(
+                statement,
+                f"always holds, but its block declares '{sorted(clash)[0]}',"
+                " which another statement of the enclosing block names, so the"
+                " block was not moved out of the if-statement",
+                "rename the local declared inside the if-statement",
+            )
+            return None
+        return frog_ast.Block(prefix + body + rest)
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         # Any statement following an unconditional top-level return is
@@ -1755,13 +1893,14 @@ class RemoveUnreachableTransformer(BlockTransformer):
                 dead_indices.append(index)
                 continue
 
+            type_map = GetTypeMapVisitor(statement).visit(self.ast)
+            formula_visitor.set_type_map(type_map)
+            formula_visitor.set_variable_version_map(variable_version_map)
+
             # Z3-based check for more complex subsumption
             if (
                 formula_so_far is not None or path_constraints
             ) and not statement.has_else_block():
-                type_map = GetTypeMapVisitor(statement).visit(self.ast)
-                formula_visitor.set_type_map(type_map)
-                formula_visitor.set_variable_version_map(variable_version_map)
                 all_conditions_dead = True
                 for condition in statement.conditions:
                     cond_formula = condition_formula(condition)
@@ -1795,12 +1934,34 @@ class RemoveUnreachableTransformer(BlockTransformer):
                     dead_indices.append(index)
                     continue
 
+            # F-413: an if whose condition the path facts imply always runs
+            # its block when it is reached, so it is replaced by that block.
+            # Otherwise, after a run of returning ifs that together cover
+            # every execution, the last if of the run stays in place with a
+            # condition that always holds, and the method appears to run off
+            # its end.
+            if formula_so_far is not None or path_constraints:
+                facts = list(path_constraints)
+                if formula_so_far is not None:
+                    facts.append(z3.Not(formula_so_far))
+                taken = self._replace_always_taken_if(
+                    block,
+                    index,
+                    dead_indices,
+                    facts,
+                    condition_formula,
+                    Z3FormulaVisitor(
+                        type_map,
+                        dict(variable_version_map),
+                        opaque_func_call_fallback=True,
+                    ),
+                )
+                if taken is not None:
+                    return taken
+
             solver = z3.Solver()
             solver.set("timeout", 30000)
 
-            type_map = GetTypeMapVisitor(statement).visit(self.ast)
-            formula_visitor.set_type_map(type_map)
-            formula_visitor.set_variable_version_map(variable_version_map)
             # Save formula_so_far before this statement's return guards are added,
             # so inner block tagging uses only constraints from prior statements.
             formula_before_stmt = formula_so_far

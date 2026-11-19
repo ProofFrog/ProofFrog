@@ -327,8 +327,10 @@ def get_inlined_game(proof_path: str, step_text: str) -> dict[str, Any]:
     you can write a matching Game definition.
 
     This tool reads the imports, intermediate Game definitions, let:, assume:,
-    and theorem: blocks from the proof file. Stub Reduction definitions are
-    ignored. The provided step is then evaluated in that context.
+    and theorem: blocks from the proof file, and the Reduction definitions the
+    step names. Other Reduction definitions, stubs included, are ignored; a
+    step that names a stub reduction fails with the stub's parse error. The
+    provided step is then evaluated in that context.
 
     proof_path — path to the proof file (must have a valid let:/theorem: block)
     step_text  — the game step expression to evaluate, e.g.:

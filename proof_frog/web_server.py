@@ -156,20 +156,28 @@ def _blank_comments(text: str) -> str:
     return _COMMENT_OR_FILE_PATH.sub(blank, text)
 
 
+# A name, as the lexer reads one (Shared.g4's ID).
+_IDENTIFIER = r"[a-zA-Z_$][a-zA-Z_0-9$]*"
+
+
 def _build_minimal_proof(proof_text: str, step_text: str) -> str | None:
     """Build a minimal parseable proof containing only one game step.
 
-    Extracts imports, intermediate Game definitions, Reduction definitions,
-    and the let:/assume:/theorem: blocks from *proof_text*, then wraps
-    *step_text* as the only step (listed twice so the grammar's two-game
-    requirement is met). The blocks are found by matching keywords and
-    braces in the text, which need not parse as a whole, after blanking its
-    comments: a comment's words (`let:`, `theorem`, `{`) are not code.
+    Extracts imports, intermediate Game definitions, the Reduction
+    definitions *step_text* names, and the let:/assume:/theorem: blocks from
+    *proof_text*, then wraps *step_text* as the only step (listed twice so
+    the grammar's two-game requirement is met). The blocks are found by
+    matching keywords and braces in the text, which need not parse as a
+    whole, after blanking its comments: a comment's words (`let:`,
+    `theorem`, `{`) are not code. A reduction the step does not name is
+    left out, so an unfinished one (a stub with no method, which does not
+    parse) does not stop the step from being shown.
 
     Returns the minimal proof as a string, or None if a theorem could not be
     extracted from *proof_text*.
     """
     proof_text = _blank_comments(proof_text)
+    step_names = set(re.findall(_IDENTIFIER, step_text))
 
     # Import lines (a blanked comment may leave spaces in front of one)
     import_lines = "\n".join(
@@ -178,10 +186,17 @@ def _build_minimal_proof(proof_text: str, step_text: str) -> str | None:
         )
     )
 
-    # Top-level Game and Reduction blocks. We must include Reductions because
-    # *step_text* may reference them via `compose ... compose Reduction(...)`.
+    # Top-level Game blocks, and the Reduction blocks the step names: a step
+    # may compose one (`... compose R(...) against ...`), and resolving the
+    # step reads no other reduction.
     game_defs: list[str] = []
-    for match in re.finditer(r"^[ \t]*(Game|Reduction)\s+", proof_text, re.MULTILINE):
+    for match in re.finditer(
+        rf"^[ \t]*(Game|Reduction)\s+(?P<name>{_IDENTIFIER})?",
+        proof_text,
+        re.MULTILINE,
+    ):
+        if match.group(1) == "Reduction" and match.group("name") not in step_names:
+            continue
         start = match.start(1)
         brace_start = proof_text.find("{", start)
         if brace_start == -1:

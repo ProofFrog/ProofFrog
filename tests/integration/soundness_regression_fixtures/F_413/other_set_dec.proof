@@ -1,0 +1,17 @@
+// F-413 control: claims OtherSetDec(n).Left and OtherSetDec(n).Right are
+// interchangeable. They are not (see OtherSetDec.game): Left.Dec's second
+// test is not the complement of its first, so it is not always taken and
+// must stay. Sound engine: Proof Failed!
+import 'OtherSetDec.game';
+
+proof:
+
+let:
+    Int n;
+
+theorem:
+    OtherSetDec(n);
+
+games:
+    OtherSetDec(n).Left against OtherSetDec(n).Adversary;
+    OtherSetDec(n).Right against OtherSetDec(n).Adversary;

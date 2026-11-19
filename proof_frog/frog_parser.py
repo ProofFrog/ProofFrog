@@ -1896,6 +1896,22 @@ def _desugar_destructuring(node: T) -> T:
     return node
 
 
+def _desugar_file(node: T, source: str) -> T:
+    """``_desugar_destructuring`` for the AST parsed from *source* (a file
+    path, or source text).
+
+    The desugaring sees only the AST, so a ParseError it raises is given the
+    source's file name here, as the parser's own errors are (a caller
+    compares it with the file it checked).
+    """
+    try:
+        return _desugar_destructuring(node)
+    except ParseError as e:
+        if not e.file_name:
+            e.file_name = source if os.path.isfile(source) else "<input>"
+        raise
+
+
 def parse_primitive_file(primitive: str) -> frog_ast.Primitive:
     try:
         visitor = _PrimitiveASTGenerator()
@@ -1920,7 +1936,7 @@ def parse_scheme_file(scheme: str, desugar: bool = True) -> frog_ast.Scheme:
         ast: frog_ast.Scheme = visitor.visit(
             _get_parser(scheme, SchemeLexer, SchemeParser).program()
         )
-        return _desugar_destructuring(ast) if desugar else ast
+        return _desugar_file(ast, scheme) if desugar else ast
     except antlr_error.Errors.ParseCancellationException as e:
         better = _reparse_for_error(scheme, SchemeLexer, SchemeParser)
         raise (better or _to_parse_error(e, scheme)) from e
@@ -1945,7 +1961,7 @@ def parse_game_file(game_file: str, desugar: bool = True) -> frog_ast.GameFile:
         ast: frog_ast.GameFile = visitor.visit(
             _get_parser(game_file, GameLexer, GameParser).program()
         )
-        return _desugar_destructuring(ast) if desugar else ast
+        return _desugar_file(ast, game_file) if desugar else ast
     except antlr_error.Errors.ParseCancellationException as e:
         better = _reparse_for_error(game_file, GameLexer, GameParser)
         raise (better or _to_parse_error(e, game_file)) from e
@@ -1959,7 +1975,7 @@ def parse_proof_file(proof_file: str, desugar: bool = True) -> frog_ast.ProofFil
         ast: frog_ast.ProofFile = visitor.visit(
             _get_parser(proof_file, ProofLexer, ProofParser).program()
         )
-        return _desugar_destructuring(ast) if desugar else ast
+        return _desugar_file(ast, proof_file) if desugar else ast
     except antlr_error.Errors.ParseCancellationException as e:
         better = _reparse_for_error(proof_file, ProofLexer, ProofParser)
         raise (better or _to_parse_error(e, proof_file)) from e

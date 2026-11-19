@@ -224,3 +224,38 @@ def test_non_product_leading_type_is_a_parse_error() -> None:
                 return [a, b];
             }
             """)
+
+
+_GAME_WITH_NON_PRODUCT_BINDING = """
+Game Left(Int n) {
+    BitString<n> Get() {
+        BitString<n> [a, b] = 0^n;
+        return a;
+    }
+}
+Game Right(Int n) {
+    BitString<n> Get() {
+        return 0^n;
+    }
+}
+export as Destr;
+"""
+
+
+def test_desugaring_error_names_the_file(tmp_path) -> None:
+    # The desugaring sees only the AST; the file parser names the file in
+    # the error, as it does for a syntax error, so a caller can tell an
+    # error in the file it checked from one in a file it imports.
+    path = tmp_path / "Destr.game"
+    path.write_text(_GAME_WITH_NON_PRODUCT_BINDING, encoding="utf-8")
+    with pytest.raises(frog_parser.ParseError, match="tuple type") as info:
+        frog_parser.parse_game_file(str(path))
+    assert info.value.file_name == str(path)
+    assert (info.value.line, info.value.column) == (4, 8)
+    assert str(info.value).startswith(f"{path}:4:8: parse error:")
+
+
+def test_desugaring_error_in_source_text_names_input() -> None:
+    with pytest.raises(frog_parser.ParseError, match="tuple type") as info:
+        frog_parser.parse_game_file(_GAME_WITH_NON_PRODUCT_BINDING)
+    assert info.value.file_name == "<input>"

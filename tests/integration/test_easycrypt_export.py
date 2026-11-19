@@ -2898,38 +2898,42 @@ def test_sample_reorder_twin_template_compiles(tmp_path: Path) -> None:
     reason="Docker is not available; cannot run EasyCrypt.",
 )
 def test_export_kemprf_indcpa_compiles_in_easycrypt(tmp_path: Path) -> None:
-    """KEMPRF_INDCPA (the multi-oracle + multi-primitive epic target) is
-    admit-free AND EasyCrypt ACCEPTS the file (exit 0) -- the M5 "clean"
-    milestone. It exercises the lifted-Initialize multi-oracle wrappers, the
-    reduction-adversary forward-pk lift (blocker B), the intermediate-game
-    module, requires-equality type aliases, multi-primitive type qualification,
-    the live-state couplings, the abstract-scheme footprint restrictions, the
-    seeded per-oracle challenge bodies, AND the assumption-hop Pr-lemma wrapper
-    bridges all composing in EC.
+    """KEMPRF_INDCPA (the multi-oracle + multi-primitive epic target) exports a
+    file EasyCrypt ACCEPTS (exit 0) whose only admits are its four
+    ``challenge`` per-oracle bodies. It exercises the lifted-Initialize
+    multi-oracle wrappers, the reduction-adversary forward-pk lift (blocker
+    B), the intermediate-game module, requires-equality type aliases,
+    multi-primitive type qualification, the live-state couplings, the
+    abstract-scheme footprint restrictions and the assumption-hop Pr-lemma
+    wrapper bridges, all composing in EC.
 
     The four lifted-``Initialize`` per-oracle equiv lemmas
     (``hop_{0,2,3,5}_initialize``) close via the canned inline-equivalence
-    tactic under the ``={glob K} /\\ ={glob F}`` coupling; all four ``challenge``
-    per-oracle bodies (``hop_{0,2,3,5}_challenge``) close via seeded per-oracle
-    (``<oracle>``) tactic-cache entries (the det-axiom finishers + per-hop
-    order-swap / distribution-coupling / dead-call-drop variants); and the two
+    tactic under the ``={glob K} /\\ ={glob F}`` coupling, and the two
     assumption hops' four Pr-lemma bridges (``hop_{1,4}_pr`` hL/hR) close via
-    the synthesized name-independent ``byequiv ...; proc; inline *; sim`` tactic
-    under the widened adversary footprint. So this test asserts EC ACCEPTANCE
-    (no parse/type/tactic error) AND zero admits. If it regresses to a nonzero
-    exit, a structural multi-oracle/multi-primitive gap has reopened; if the
-    admit count rises, an init lemma or one of the seeded ``hop_*_challenge``
-    cache entries reopened (EC inline-name drift, or a canonical-text shift
-    turning a cache hit into a miss -- see the per-oracle tactic-cache design
-    doc), or the assumption-bridge tactic stopped closing.
+    the synthesized name-independent ``byequiv ...; proc; inline *; sim``
+    tactic under the widened adversary footprint. The four ``challenge``
+    bodies (``hop_{0,2,3,5}_challenge``) admit: they were closed by whole-oracle
+    tactic-cache entries, which rule R6 retired, and close again once the
+    transforms they apply have registered entries. An admit anywhere else
+    means an init lemma or an assumption bridge reopened; a nonzero exit
+    means a structural multi-oracle/multi-primitive gap reopened.
     """
     output = exporter.export_proof_file(str(KEMPRF_INDCPA_PROOF))
-    n_admits = len([ln for ln in output.splitlines() if ln.strip() == "admit."])
-    assert n_admits == 0, (
-        f"expected 0 admits (the M5 'KEMPRF clean' milestone), got {n_admits}; "
-        f"an init equiv lemma, one of the seeded hop_*_challenge cache entries, "
-        f"or an assumption-hop Pr bridge may have reopened, or a new gap "
-        f"appeared."
+    challenge_bodies = []
+    for hop_i in (0, 2, 3, 5):
+        assert f"lemma hop_{hop_i}_challenge :" in output
+        challenge_bodies.append(
+            output.split(f"lemma hop_{hop_i}_challenge :", 1)[1].split("qed.", 1)[0]
+        )
+    rest = output
+    for body in challenge_bodies:
+        rest = rest.replace(body, "")
+    stray = [ln for ln in rest.splitlines() if ln.strip() == "admit."]
+    assert not stray, (
+        f"{len(stray)} admit(s) outside the four challenge bodies; an init "
+        f"equiv lemma or an assumption-hop Pr bridge may have reopened, or a "
+        f"new gap appeared."
     )
     # The assumption-hop Pr bridges close via the synthesized name-independent
     # tactic (option B), not admits -- guard the exact bridge shape.
@@ -2938,16 +2942,6 @@ def test_export_kemprf_indcpa_compiles_in_easycrypt(tmp_path: Path) -> None:
         assert "by byequiv (_: " in body and "proc; inline *; sim." in body, (
             f"hop_{hop_i}_pr no longer closes via the synthesized assumption-"
             f"bridge tactic (byequiv; proc; inline *; sim)."
-        )
-    # The seeded per-oracle cache entries must drive every challenge body to a
-    # cached-guided (rung 3) resolution -- a regression to an admit rung means
-    # the canonical-text key drifted (cache miss) and the entry is now orphaned.
-    for hop_i in (0, 2, 3, 5):
-        assert f"lemma hop_{hop_i}_challenge :" in output
-        body = output.split(f"lemma hop_{hop_i}_challenge :", 1)[1].split("qed.", 1)[0]
-        assert "(* resolution: cached-guided *)" in body, (
-            f"hop_{hop_i}_challenge no longer resolves cached-guided; the seeded "
-            f"<oracle>:challenge cache entry likely missed (canonical-text drift)."
         )
     ec_file = tmp_path / "kemprf_indcpa.ec"
     ec_file.write_text(output)
@@ -3025,29 +3019,6 @@ def test_export_modotp_indot_compiles_in_easycrypt(tmp_path: Path) -> None:
         f"game emission or concrete-scheme instantiation path has reopened.\n"
         f"stderr:\n{result.stderr}\nstdout:\n{result.stdout[-2000:]}"
     )
-
-
-def test_export_kemprf_indcpa_requests_per_oracle_cache_keys() -> None:
-    """The multi-oracle post-init (``challenge``) path consults the per-oracle
-    (``<oracle>``) tactic cache: one key per non-assumption hop's challenge
-    oracle. All four challenge bodies (``hop_{0,2,3,5}_challenge``) HIT their
-    seeded entries (resolve cached-guided). Init oracles never consult the
-    cache. Not Docker-gated -- it inspects the requested-key list and the
-    emitted resolution tags only."""
-    output = exporter.export_proof_file(str(KEMPRF_INDCPA_PROOF))
-    keys = getattr(exporter, "_last_requested_cache_keys", [])
-    oracle_keys = [k for k in keys if k[0].startswith("<oracle>")]
-    # Four non-assumption multi-oracle hops, each requesting its challenge body;
-    # init oracles close synth-static and request nothing.
-    assert [k[0] for k in oracle_keys] == [
-        "<oracle>:challenge"
-    ] * 4, f"expected 4 <oracle>:challenge keys, got {[k[0] for k in oracle_keys]}"
-    # All four challenge bodies hit their seeded entry -> cached-guided.
-    for hop_i in (0, 2, 3, 5):
-        body = output.split(f"lemma hop_{hop_i}_challenge :", 1)[1].split("qed.", 1)[0]
-        assert (
-            "(* resolution: cached-guided *)" in body
-        ), f"hop_{hop_i}_challenge expected cached-guided (seeded hit)"
 
 
 def test_export_single_oracle_proof_requests_no_oracle_cache_keys() -> None:

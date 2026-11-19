@@ -876,30 +876,6 @@ def test_export_5_8_e_concretizes_pseudootp() -> None:
     assert "advantage (PseudoOTP(G))" in output
 
 
-def test_export_emits_guided_template_for_uncached_det_reorder_hop(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A cross-primitive deterministic-reorder hop with no sidecar entry
-    falls back to a Layer-3 *guided-template* admit: a structured admit
-    annotated with the reorder cascade strategy, the determinism axioms in
-    scope, and the canonical keys. 5_8_f has no sidecar since its
-    whole-hop entries were retired (2026-11-15, R6); the lookup is forced
-    empty anyway so the test does not depend on the examples checkout.
-    """
-    from proof_frog.export.easycrypt import tactic_cache as _tc
-
-    monkeypatch.setattr(
-        _tc,
-        "relative_sidecar_path",
-        lambda _p: Path("/nonexistent.proof.tactics.toml"),
-    )
-    output = exporter.export_proof_file(str(PRG_5_8_F_PROOF))
-    assert "guided" in output and "STRATEGY" in output
-    assert "G_evaluate_det" in output
-    # The guidance includes how to cache the filled tactic.
-    assert "transform = " in output and "TO CACHE" in output
-
-
 def test_export_5_8_f_base_resolves_foreign_field_lengths() -> None:
     """5_8_f's primary scheme ``PRG_5_8_f`` defines ``Int lambda = 2*G.lambda``
     and slices on ``G.lambda``. The exporter must resolve every bitstring

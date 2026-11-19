@@ -2,7 +2,7 @@ from __future__ import annotations
 import copy
 import functools
 import operator
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 from abc import ABC, abstractmethod
 from typing import (
     Any,
@@ -26,6 +26,11 @@ class InstantiableType:
     name: str
     members: dict[str, frog_ast.ASTNode]
     superclass: str
+    # The members declared with the bare kind `Set` (`Set Key = X;`), whose
+    # `members` entry is the type they name. Any other field is a value whose
+    # entry is its declared type, so `members` alone cannot tell `Set Key =
+    # Set<T>;` from `Set<T> Key = ...;`.
+    set_aliases: frozenset[str] = dataclass_field(default=frozenset(), compare=False)
 
 
 @functools.lru_cache(maxsize=None)

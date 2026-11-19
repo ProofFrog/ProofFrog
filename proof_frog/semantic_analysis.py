@@ -3039,6 +3039,79 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 return found
         return None
 
+    def _check_domain_is_a_type(
+        self, location: frog_ast.ASTNode, domain: PossibleType | frog_ast.Expression
+    ) -> None:
+        """Refuse a draw from a name declared with a set or map type
+        (ruling Q20).
+
+        `frog_ast.Variable` (and `FieldAccess`) stands for both a value and a
+        type name, so for a field `Set<BitString<n>> S` the draw
+        `Set<BitString<n>> U <- S;` would check as a draw from the type of
+        `S`: a draw of a whole set, which nothing defines. A draw's domain must
+        be a type, so a domain naming a value whose declared type is
+        `Set<T>` or `Map<K, V>` is refused: a field, local or parameter of any
+        kind, a proof `let:` entry, a member `E.S` of an instance whose field
+        is declared so, and the `keys`, `values`, `entries` or `domain` of a
+        map or function. A name declared with the bare kind `Set` (a `Set K`
+        parameter, a `Set Key = ...;` alias, `E.Key`, a `let:` `Set K;`) is a
+        type and is unaffected. A map is refused first as a whole-map draw
+        (`_check_samplable`), whose message it keeps."""
+        declared: PossibleType = None
+        if isinstance(domain, frog_ast.Variable):
+            declared = self._recorded_type(domain)
+        elif isinstance(domain, frog_ast.FieldAccess):
+            owner = self._recorded_type(domain.the_object)
+            if isinstance(owner, frog_ast.Type):
+                owner = self._resolve_type_alias(owner)
+            if (
+                isinstance(owner, visitors.InstantiableType)
+                and domain.name in owner.set_aliases
+            ):
+                return
+            declared = self._recorded_type(domain)
+        element: Optional[frog_ast.Type] = None
+        if (
+            isinstance(declared, frog_ast.SetType)
+            and declared.parameterization is not None
+        ):
+            element = declared.parameterization
+        elif not isinstance(declared, frog_ast.MapType):
+            return
+        hint = ""
+        # Suggest the element type only where a draw from it is accepted.
+        not_drawable = (
+            frog_ast.IntType,
+            frog_ast.OptionalType,
+            frog_ast.MapType,
+            frog_ast.SetType,
+        )
+        if element is not None and (
+            self._drawn_part(
+                element, frozenset(), lambda part: isinstance(part, not_drawable)
+            )
+            is None
+        ):
+            hint = (
+                f"draw from a type such as {element}; to leave out the members"
+                f" of {domain}, draw from {element} \\ {domain}"
+            )
+        self.print_error(
+            location,
+            f"Cannot sample from {domain}: {domain} is a value of type"
+            f" {declared}, not a type (a draw's domain must be a type)",
+            hint=hint,
+        )
+
+    def _recorded_type(self, node: frog_ast.ASTNode) -> PossibleType:
+        """The type recorded for `node` when it was visited (None if none):
+        for a name, the type it was declared with, not resolved through
+        aliases."""
+        try:
+            return self.ast_type_map.get(node)
+        except KeyError:
+            return None
+
     def leave_sample(self, sample: frog_ast.Sample) -> None:
         super().leave_sample(sample)
         if not isinstance(sample.sampled_from, frog_ast.Type):
@@ -3055,6 +3128,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
         )
         found_type = self.get_type_from_ast(sample.sampled_from)
         self._check_samplable(sample, found_type)
+        self._check_domain_is_a_type(sample, sample.sampled_from)
         if not self.check_types(expected_type, found_type):
             self.print_error(
                 sample,
@@ -3064,6 +3138,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
     def leave_unique_sample(self, unique_sample: frog_ast.UniqueSample) -> None:
         super().leave_unique_sample(unique_sample)
         self._check_samplable(unique_sample, unique_sample.sampled_from)
+        self._check_domain_is_a_type(unique_sample, unique_sample.sampled_from)
         # Check that unique_set has type Set<D> and sampled_from has type D
         set_type = self.get_type_from_ast(unique_sample.unique_set)
         if not isinstance(set_type, frog_ast.SetType):
@@ -3983,5 +4058,10 @@ def get_type_from_instantiable(
     superclass = (
         instantiable.primitive_name if isinstance(instantiable, frog_ast.Scheme) else ""
     )
+    set_aliases = frozenset(
+        field.name
+        for field in ([] if just_methods else instantiable.fields)
+        if field.type == frog_ast.SetType()
+    )
 
-    return visitors.InstantiableType(name, type_dict, superclass)
+    return visitors.InstantiableType(name, type_dict, superclass, set_aliases)

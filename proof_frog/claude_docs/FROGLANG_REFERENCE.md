@@ -176,7 +176,7 @@ Draws a value uniformly at random from the specified type's domain. Each samplin
 - `GroupElem<G> u <- GroupElem<G>;` — sample a uniformly random element of the group G
 - `Function<D, R> RF <- Function<D, R>;` — instantiate a fresh random function
 
-A sampled type must have a uniform distribution. `Int` (unbounded) and an optional type `T?` (no weight for `None`) do not, and neither does a product or array type with such a component, written directly or reached through an alias (`Set Pair = [BitString<n>?, BitString<n>];` then `Pair p <- Pair;`). A drawn `Function<D, R>` draws each of its outputs from `R`, and a drawn `Map<K, V>` each of its values from `V`, so `R` and `V` are held to the same rule (ruling Q10(b)): `Function<BitString<n>, Int> H <- Function<BitString<n>, Int>;` and `Map<Bool, BitString<n>?> M <- Map<Bool, BitString<n>?>;` are refused, in a game and as a sampled proof `let:` entry. The domain `D` and the key type `K` are not drawn from, so `Function<Int, BitString<n>>` may be drawn. The type checker rejects all of these, for both sampling forms.
+A sampled type must have a uniform distribution. `Int` (unbounded) and an optional type `T?` (no weight for `None`) do not, and neither does a product or array type with such a component, written directly or reached through an alias (`Set Pair = [BitString<n>?, BitString<n>];` then `Pair p <- Pair;`). A drawn `Function<D, R>` draws each of its outputs from `R`, so `R` is held to the same rule (ruling Q10(b)): `Function<BitString<n>, Int> H <- Function<BitString<n>, Int>;` is refused, in a game and as a sampled proof `let:` entry. The domain `D` is not drawn from, so `Function<Int, BitString<n>>` may be drawn. A whole map is never drawn (ruling Q16): which keys a drawn map would hold is undefined, so `Map<K, V> M <- Map<K, V>;` is refused, and so is any draw that would draw a map (a `Map` component of a drawn product or array, the range of a drawn `Function`, a `Map` reached through an alias). Draw a `Function<K, V>` for a random table, or single entries with `M[k] <- V;` (section 6.7). The type checker rejects all of these, for both sampling forms.
 
 **Sampling from a variable**: `Type x <- someSetVariable;` — sample uniformly from the elements currently in a set or the values of a map.
 
@@ -477,6 +477,7 @@ Maps (`Map<K, V>`) are finite partial functions:
 - **Lookup**: `M[k]` returns the value associated with key `k`. For a key not in the domain it returns an unspecified value of the value type (section 6.9); test `k in M` first when the difference matters.
 - **Update**: `M[k] = v;` associates key `k` with value `v`, extending or modifying the map.
 - **Sampling into map**: `M[k] <- Type;` samples a uniform value from `Type` and stores it at key `k`.
+- **No whole-map draw**: a map is filled only through its elements. `M <- Map<K, V>;` is a type error (ruling Q16; section 4.2), since nothing would say which keys the drawn map holds; a sampled `Function<K, V>` is the random table.
 - **Membership**: `k in M` tests whether `k` is in the map's domain.
 - **Size**: `|M|` returns the number of key-value pairs.
 - **Read-only members**: `M.keys`, `M.values` and `M.entries` can be read but not assigned (section 4.1); change a map through its elements.

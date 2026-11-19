@@ -1,6 +1,7 @@
 import os
 import sys
 import copy
+from collections.abc import Callable
 from typing import Optional, TypeVar, Union, TypeAlias
 from sympy import Integer, Rational, Symbol
 from . import advantage
@@ -2915,29 +2916,45 @@ class CheckTypeVisitor(VariableTypeVisitor):
         component of a product or array type, written directly or reached
         through an alias: a draw of '[BitString<n>?, BitString<n>]' draws its
         first component from an optional type. A drawn 'Function<D, R>' draws
-        each output from R, and a drawn 'Map<K, V>' each value from V, so R
-        and V are held to the same rule (ruling Q10(b)).
+        each output from R, so R is held to the same rule (ruling Q10(b)).
+
+        A whole map is never drawn (ruling Q16): which keys a drawn
+        'Map<K, V>' would hold is undefined, and 'Function<K, V>' gives a
+        random table. So a Map anywhere a draw draws from (the sampled type,
+        a component of a product or array, a Function's range) is refused;
+        the element draw 'M[k] <- V;' samples from V and is unaffected.
         """
         resolved = self._resolve_type_alias(sampled_from)
-        component = self._unsamplable_component(resolved, frozenset())
-        if component is not None and isinstance(
-            resolved, (frog_ast.FunctionType, frog_ast.MapType)
-        ):
-            if isinstance(resolved, frog_ast.FunctionType):
-                part, part_type = "range", resolved.range_type
+        drawn_map = self._drawn_part(
+            resolved, frozenset(), lambda part: isinstance(part, frog_ast.MapType)
+        )
+        if isinstance(drawn_map, frog_ast.MapType):
+            inner = "" if drawn_map is resolved else f" (it draws the map {drawn_map})"
+            key, value = drawn_map.key_type, drawn_map.value_type
+            if self._unsamplable_component(value, frozenset()) is None:
+                table, entry = f"Function<{key}, {value}>", str(value)
             else:
-                part, part_type = "value type", resolved.value_type
+                table, entry = f"Function<{key}, R> with a finite range R", "R"
+            self.print_error(
+                location,
+                f"Cannot sample from {resolved}: a whole map cannot be"
+                f" drawn{inner}",
+                hint=f"draw a {table} for a random table, or draw single"
+                f" entries with M[k] <- {entry};",
+            )
+        component = self._unsamplable_component(resolved, frozenset())
+        if component is not None and isinstance(resolved, frog_ast.FunctionType):
             inner = (
                 ""
-                if component == self._resolve_type_alias(part_type)
+                if component == self._resolve_type_alias(resolved.range_type)
                 else f" has the component {component}, which"
             )
             self.print_error(
                 location,
-                f"Cannot sample from {resolved}: its {part} {part_type}{inner}"
-                " has no uniform distribution (uniform sampling requires a"
-                " finite type)",
-                hint=f"use a finite {part} such as BitString<n> or ModInt<q>",
+                f"Cannot sample from {resolved}: its range"
+                f" {resolved.range_type}{inner} has no uniform distribution"
+                " (uniform sampling requires a finite type)",
+                hint="use a finite range such as BitString<n> or ModInt<q>",
             )
         if component is not None and component is not resolved:
             self.print_error(
@@ -2969,13 +2986,30 @@ class CheckTypeVisitor(VariableTypeVisitor):
     def _unsamplable_component(
         self, the_type: PossibleType | frog_ast.Expression, seen: frozenset[str]
     ) -> Optional[frog_ast.Type]:
-        """The first part of a sampled type that has no uniform distribution:
-        the type itself when it is Int or optional, else such a component of a
-        product or array type, of the range of a Function type or of the
-        value type of a Map type, at any depth, each part resolved through its
-        aliases (a 'Set P = [A, [Int, B]];' alias holds a tuple of types);
-        None if there is none. A Function's domain and a Map's key type are
-        not drawn from, so they may be anything."""
+        """The first part of a sampled type that has no uniform distribution
+        (Int or optional), as `_drawn_part` finds it; None if there is
+        none."""
+        found = self._drawn_part(
+            the_type,
+            seen,
+            lambda part: isinstance(part, (frog_ast.IntType, frog_ast.OptionalType)),
+        )
+        return found if isinstance(found, frog_ast.Type) else None
+
+    def _drawn_part(
+        self,
+        the_type: PossibleType | frog_ast.Expression,
+        seen: frozenset[str],
+        matches: Callable[[PossibleType | frog_ast.Expression], bool],
+    ) -> PossibleType | frog_ast.Expression | None:
+        """The first part of a sampled type that a draw draws from and that
+        `matches` accepts: the type itself, else a component of a product or
+        array type or the range of a Function type, at any depth, each part
+        resolved through its aliases (a 'Set P = [A, [Int, B]];' alias holds a
+        tuple of types); None if there is none. A Function's domain is not
+        drawn from, so it may be anything. A Map is not descended into: a
+        whole map is never drawn (ruling Q16), which `_check_samplable`
+        checks first."""
         if isinstance(the_type, frog_ast.Variable):
             if the_type.name in seen:
                 return None
@@ -2988,7 +3022,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 if resolved is the_type or not isinstance(resolved, frog_ast.Type):
                     return None
                 the_type = resolved
-        if isinstance(the_type, (frog_ast.IntType, frog_ast.OptionalType)):
+        if matches(the_type):
             return the_type
         parts: list[PossibleType | frog_ast.Expression] = []
         if isinstance(the_type, frog_ast.ProductType):
@@ -2999,10 +3033,8 @@ class CheckTypeVisitor(VariableTypeVisitor):
             parts = [the_type.element_type]
         elif isinstance(the_type, frog_ast.FunctionType):
             parts = [the_type.range_type]
-        elif isinstance(the_type, frog_ast.MapType):
-            parts = [the_type.value_type]
         for part in parts:
-            found = self._unsamplable_component(part, seen)
+            found = self._drawn_part(part, seen, matches)
             if found is not None:
                 return found
         return None

@@ -170,7 +170,7 @@ The essentials for writing correct FrogLang:
 - `Type x <-uniq[S] Type;` — sample uniformly from `Type \ S` (rejection sampling)
 - `M[k] <- Type;` — sample into a map entry
 - `Function<D, R> H <- Function<D, R>;` — sample a random function (ROM)
-- A sampling domain must be finite: `Bool`, `BitString<n>`, `ModInt<q>`, `Set` members etc. are samplable, but `Int` (unbounded) and optional types `T?` (no weight for `None`) are rejected on both sampling forms, as components of a drawn product or array, as the range of a drawn `Function<D, R>` (a sampled `let:` entry included) and as the value type of a drawn `Map<K, V>` (ruling Q10(b); the domain and key type are not drawn from)
+- A sampling domain must be finite: `Bool`, `BitString<n>`, `ModInt<q>`, `Set` members etc. are samplable, but `Int` (unbounded) and optional types `T?` (no weight for `None`) are rejected on both sampling forms, as components of a drawn product or array, and as the range of a drawn `Function<D, R>` (a sampled `let:` entry included; ruling Q10(b); the domain is not drawn from). A whole map is never drawn (ruling Q16): a draw whose type is or contains a `Map<K, V>` (directly, through an alias, as a product or array component or as a drawn `Function`'s range) is a type error; use `Function<K, V>` or element draws `M[k] <- V;`
 
 **Calls and assignment targets:** a game or reduction may not call its own methods or any game's (only primitive/scheme methods, plus `challenger.` in a reduction; `this.` is scheme-only), and the target of `=` / `<-` / `<-uniq` is a variable or an element `a[i]` / `M[k]`, never a member access such as `M.keys` or `E.lambda`. The type checker rejects both.
 

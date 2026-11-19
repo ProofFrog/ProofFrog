@@ -953,8 +953,7 @@ TYPE_ERROR = {
         " uniform distribution"
     ),
     ("SAMPLE-RANGE", "int_map_value.proof"): (
-        "error: Cannot sample from Map<Bool, Int>: its value type Int has no"
-        " uniform distribution"
+        "error: Cannot sample from Map<Bool, Int>: a whole map cannot be drawn"
     ),
     ("SAMPLE-RANGE", "let_int_range.proof"): (
         "let_int_range.proof:8:4: error: Cannot sample from"

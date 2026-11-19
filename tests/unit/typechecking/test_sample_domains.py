@@ -132,9 +132,10 @@ class TestUnsamplableDomains:
 
 
 class TestFunctionAndMapDraws:
-    """A drawn ``Function<D, R>`` draws each output from ``R``, and a drawn
-    ``Map<K, V>`` each value from ``V``, so ``R`` and ``V`` must be samplable
-    (ruling Q10(b)); ``D`` and ``K`` are not drawn from."""
+    """A drawn ``Function<D, R>`` draws each output from ``R``, so ``R`` must
+    be samplable (ruling Q10(b)); ``D`` is not drawn from. A whole map is
+    never drawn (ruling Q16, ``test_whole_map_draw.py``), so a ``Map`` draw is
+    refused whatever its value type."""
 
     def test_function_with_finite_range_is_samplable(self) -> None:
         _check_game("""
@@ -152,16 +153,6 @@ class TestFunctionAndMapDraws:
                 Function<D, R> H;
                 Void Initialize() {
                     H <- Function<D, R>;
-                }
-            }
-            """)
-
-    def test_map_with_finite_values_is_samplable(self) -> None:
-        _check_game("""
-            Game G(Int n) {
-                Map<Int, BitString<n>> M;
-                Void Initialize() {
-                    M <- Map<Int, BitString<n>>;
                 }
             }
             """)
@@ -230,8 +221,8 @@ class TestFunctionAndMapDraws:
             }
             """)
         assert (
-            "Cannot sample from Map<Bool, Int>: its value type Int has no"
-            " uniform distribution" in capsys.readouterr().err
+            "Cannot sample from Map<Bool, Int>: a whole map cannot be drawn"
+            in capsys.readouterr().err
         )
 
     def test_map_of_functions_with_optional_range_is_not_samplable(self) -> None:

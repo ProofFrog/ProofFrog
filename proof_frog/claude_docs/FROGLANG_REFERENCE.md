@@ -18,7 +18,7 @@ The fundamental semantic unit is the **game**: a stateful interactive system tha
 
 ### 2.2 Parameterized Types
 
-- **`BitString<n>`**: The set of all bit strings of length `n`, where `n` is an `Int` expression. The cardinality of `BitString<n>` is `2^n`. An unparameterized `BitString` appears in primitive signatures as a placeholder to be instantiated later.
+- **`BitString<n>`**: The set of all bit strings of length `n`, where `n` is an `Int` expression. The cardinality of `BitString<n>` is `2^n`. An unparameterized `BitString` appears in primitive signatures as a placeholder to be instantiated later. Every bit-string length is at least 1 (ruling Q17), so the type checker refuses a length written as an integer literal below 1, or as a constant expression of integer literals whose value is below 1 (`BitString<0>`, `BitString<1 - 1>`), in a type and in a literal `0^n` / `1^n` (`0^0`, `1^0`), wherever it is written: a declaration, parameter, return type, field, type alias, sampling domain, a component of another type, or a proof `let:` entry. A length that names a parameter or a `let:` entry (`BitString<lambda>`, `BitString<lambda - 1>`) is not checked, and is taken to be at least 1.
 
 - **`ModInt<q>`**: The set of integers modulo `q`, i.e., `{0, 1, ..., q-1}` with arithmetic operations performed modulo `q`. The cardinality of `ModInt<q>` is `q`.
 
@@ -67,7 +67,7 @@ This makes `Key` (or `E.Key` when accessed through an instance `E`) usable as a 
 
 - **Integer literals**: `0`, `42`, `1024`
 - **Binary literals**: `0bXYZ` where each digit is `0` or `1`. The declared bit length is the number of digits after `0b`, so `0b0` is a 1-bit literal, `0b01` is a 2-bit literal, `0b101` is a 3-bit literal. The value is the unsigned big-endian integer interpretation of the digits. Typed as `BitString<length>`. Unlike general programming languages, `0b0` is NOT length-polymorphic — for "all zeros of length $n$" (including symbolic $n$), use the bitstring-literal form below.
-- **Bitstring literals**: `0^n` (n-bit string of all zeros), `1^n` (n-bit string of all ones). The length `n` is an arbitrary length expression, concrete or symbolic.
+- **Bitstring literals**: `0^n` (n-bit string of all zeros), `1^n` (n-bit string of all ones). The length `n` is an arbitrary length expression, concrete or symbolic, and at least 1 like any bit-string length: `0^0` is refused (section 2.2).
 - **Boolean literals**: `true`, `false`
 - **`None`**: The null value for optional types
 - **`G.generator`**: The canonical generator of group `G` (type `GroupElem<G>`)

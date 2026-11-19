@@ -227,6 +227,53 @@ def test_inlined_game_ignores_comments(workdir: Path) -> None:
     assert "return n;" in result["canonical"]
 
 
+def test_inlined_game_reads_only_the_named_reduction(workdir: Path) -> None:
+    """A stub reduction the step does not name is ignored (F-412)."""
+    (workdir / "Same.game").write_text(
+        "Game Left(Int n) { Int Get() { return n; } }\n"
+        "Game Right(Int n) { Int Get() { return n; } }\n"
+        "export as Same;\n"
+    )
+    (workdir / "stub.proof").write_text(
+        "import 'Same.game';\n"
+        "Reduction R(Int n) compose Same(n) against Same(n).Adversary {\n"
+        "    Int Get() { return challenger.Get(); }\n"
+        "}\n"
+        "Reduction R_Stub(Int n) compose Same(n) against Same(n).Adversary {\n"
+        "    // to do\n"
+        "}\n"
+        "proof:\n"
+        "let:\n    Int n;\n"
+        "theorem:\n    Same(n);\n"
+        "games:\n"
+        "    Same(n).Left against Same(n).Adversary;\n"
+        "    Same(n).Right against Same(n).Adversary;\n"
+    )
+    for step in (
+        "Same(n).Left against Same(n).Adversary",
+        "Same(n).Left compose R(n) against Same(n).Adversary",
+    ):
+        text, err = _call(
+            "get_inlined_game", {"proof_path": "stub.proof", "step_text": step}
+        )
+        assert not err
+        result = json.loads(text)
+        assert result["success"] is True, (step, result)
+        assert "return n;" in result["canonical"]
+    text, err = _call(
+        "get_inlined_game",
+        {
+            "proof_path": "stub.proof",
+            "step_text": "Same(n).Left compose R_Stub(n) against Same(n).Adversary",
+        },
+    )
+    assert not err
+    result = json.loads(text)
+    assert result["success"] is False
+    assert "parse error" in result["output"]
+    assert "mismatched input '}'" in result["output"]
+
+
 @pytest.mark.skipif(
     not EXAMPLES.joinpath("Proofs").is_dir(),
     reason="examples submodule not checked out",

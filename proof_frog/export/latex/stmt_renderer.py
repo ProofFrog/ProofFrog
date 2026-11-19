@@ -14,6 +14,7 @@ from .expr_renderer import ExprRenderer
 # overload of the same operator.
 _PREDICATE_BINOPS = frozenset(
     {
+        # pylint: disable=duplicate-code
         frog_ast.BinaryOperators.EQUALS,
         frog_ast.BinaryOperators.NOTEQUALS,
         frog_ast.BinaryOperators.GT,
@@ -24,6 +25,7 @@ _PREDICATE_BINOPS = frozenset(
         frog_ast.BinaryOperators.OR,
         frog_ast.BinaryOperators.IN,
         frog_ast.BinaryOperators.SUBSETS,
+        # pylint: enable=duplicate-code
     }
 )
 

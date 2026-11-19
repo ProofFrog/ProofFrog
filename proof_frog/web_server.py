@@ -55,6 +55,26 @@ def _safe_path(base: str, rel: str) -> Path | None:
         return None
 
 
+def _parse_error_position(
+    error: frog_parser.ParseError, file_path: str
+) -> tuple[int | None, int | None]:
+    """The line and column of *error* in the file at *file_path*.
+
+    The editor marks the returned position in that file's own tab, so an
+    error located in another file (one the file imports, say) gets no
+    position: (None, None). Its message still names the other file.
+    """
+    try:
+        same_file = os.path.samefile(error.file_name, file_path)
+    except (OSError, ValueError):
+        same_file = False
+    if not same_file:
+        return None, None
+    line = error.line if error.line >= 0 else None
+    col = error.column if error.column >= 0 else None
+    return line, col
+
+
 def _capture_parse(
     file_path: str,
 ) -> tuple[str, bool, int | None, int | None]:
@@ -67,8 +87,7 @@ def _capture_parse(
     except ValueError as e:
         return _strip_ansi(buf.getvalue()) + f"\nError: {e}", False, None, None
     except frog_parser.ParseError as e:
-        line = e.line if e.line >= 0 else None
-        col = e.column if e.column >= 0 else None
+        line, col = _parse_error_position(e, file_path)
         return _strip_ansi(buf.getvalue()) + f"\n{e}", False, line, col
     except FileNotFoundError as e:
         return _strip_ansi(buf.getvalue()) + f"\n{e}", False, None, None
@@ -88,8 +107,8 @@ def _capture_check(
             )
         return f"{file_path} is well-formed.", True, None, None
     except frog_parser.ParseError as e:
-        line = e.line if e.line >= 0 else None
-        col = e.column if e.column >= 0 else None
+        # Type checking parses the imported files too.
+        line, col = _parse_error_position(e, file_path)
         return str(e), False, line, col
     except FileNotFoundError as e:
         return str(e), False, None, None
@@ -530,8 +549,7 @@ def _capture_prove(
             advantage_bound,
         )
     except frog_parser.ParseError as e:
-        line = e.line if e.line >= 0 else None
-        col = e.column if e.column >= 0 else None
+        line, col = _parse_error_position(e, file_path)
         return (
             _strip_ansi(buf.getvalue()) + f"\n{e}",
             False,

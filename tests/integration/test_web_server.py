@@ -252,3 +252,141 @@ def test_inlined_game_endpoint_invalid_path(examples_client):
         headers=POST_HEADERS,
     )
     assert resp.status_code == 403
+
+
+# A parse error in a file the checked file imports is reported with no
+# position: the editor marks error_line/error_column in the checked file's
+# own tab, and the message names the imported file. An error in the checked
+# file keeps its position.
+
+_GAME_POWER_IN_SIZE = """Game Left(Int k) {
+    BitString<2 ^ k> Get() {
+        BitString<2 ^ k> x <- BitString<2 ^ k>;
+        return x;
+    }
+}
+Game Right(Int k) {
+    BitString<2 ^ k> Get() {
+        BitString<2 ^ k> x <- BitString<2 ^ k>;
+        return x;
+    }
+}
+export as SizePow;
+"""
+
+_GAME_NON_PRODUCT_BINDING = """Game Left(Int k) {
+    BitString<k> Get() {
+        BitString<k> x <- BitString<k>;
+        BitString<k> [a, b] = x;
+        return a;
+    }
+}
+Game Right(Int k) {
+    BitString<k> Get() {
+        BitString<k> x <- BitString<k>;
+        return x;
+    }
+}
+export as Destr;
+"""
+
+_GAME_WELL_FORMED = """Game Left(Int k) {
+    BitString<k> Get() {
+        BitString<k> x <- BitString<k>;
+        return x;
+    }
+}
+Game Right(Int k) {
+    BitString<k> Get() {
+        BitString<k> x <- BitString<k>;
+        return x;
+    }
+}
+export as Fine;
+"""
+
+
+def _proof_importing(file_name: str, game: str) -> str:
+    return (
+        f"import '{file_name}';\n"
+        "proof:\n"
+        "let:\n"
+        "    Int kl;\n"
+        "theorem:\n"
+        f"    {game}(kl);\n"
+        "games:\n"
+        f"    {game}(kl).Left against {game}(kl).Adversary;\n"
+        f"    {game}(kl).Right against {game}(kl).Adversary;\n"
+    )
+
+
+@pytest.fixture
+def parse_error_client(tmp_path):
+    (tmp_path / "SizePow.game").write_text(_GAME_POWER_IN_SIZE, encoding="utf-8")
+    (tmp_path / "Destr.game").write_text(_GAME_NON_PRODUCT_BINDING, encoding="utf-8")
+    (tmp_path / "Fine.game").write_text(_GAME_WELL_FORMED, encoding="utf-8")
+    app, _observer = create_app(str(tmp_path), watch=False)
+    app.testing = True
+    with app.test_client() as c:
+        yield c
+
+
+def _post(client, endpoint: str, rel: str, content: str) -> dict:
+    resp = client.post(
+        endpoint,
+        data=json.dumps({"path": rel, "content": content}),
+        content_type="application/json",
+        headers=POST_HEADERS,
+    )
+    assert resp.status_code == 200
+    return resp.get_json()
+
+
+@pytest.mark.parametrize("endpoint", ["/api/check", "/api/prove"])
+@pytest.mark.parametrize(
+    "imported, game, location",
+    [
+        pytest.param(
+            "SizePow.game",
+            "SizePow",
+            "SizePow.game:2:16: parse error",
+            id="syntax",
+        ),
+        pytest.param(
+            "Destr.game", "Destr", "Destr.game:4:8: parse error", id="desugaring"
+        ),
+    ],
+)
+def test_import_parse_error_has_no_position(
+    parse_error_client, endpoint, imported, game, location
+):
+    body = _post(
+        parse_error_client,
+        endpoint,
+        "uses_import.proof",
+        _proof_importing(imported, game),
+    )
+    assert body["success"] is False
+    assert location in body["output"]
+    assert "error_line" not in body
+    assert "error_column" not in body
+
+
+@pytest.mark.parametrize("endpoint", ["/api/check", "/api/prove"])
+def test_own_parse_error_keeps_position(parse_error_client, endpoint):
+    content = _proof_importing("Fine.game", "Fine").replace(
+        "    Int kl;\n", "    Int kl = ;\n"
+    )
+    body = _post(parse_error_client, endpoint, "own_error.proof", content)
+    assert body["success"] is False
+    assert "own_error.proof:4:" in body["output"]
+    assert body["error_line"] == 4
+    assert "error_column" in body
+
+
+@pytest.mark.parametrize("endpoint", ["/api/parse", "/api/check"])
+def test_own_desugaring_error_keeps_position(parse_error_client, endpoint):
+    body = _post(parse_error_client, endpoint, "Destr.game", _GAME_NON_PRODUCT_BINDING)
+    assert body["success"] is False
+    assert "Destr.game:4:8: parse error" in body["output"]
+    assert (body["error_line"], body["error_column"]) == (4, 8)

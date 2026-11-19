@@ -645,20 +645,20 @@ CASES = [
      "the same, for the bindings of a callee's returned ModInt values"),
     ("F-405", "return_control.proof", "accept", "method inliner",
      "the same calls against their true value"),
-    ("F-406", "bs0_direct.proof", "reject", "TopologicalSort",
+    ("F-406", "bs0_direct.proof", "type_error", "TopologicalSort",
      "a draw from BitString<0> minus its one element was dropped as dead code"),
-    ("F-406", "cond_call.proof", "reject", "method inliner",
+    ("F-406", "cond_call.proof", "type_error", "method inliner",
      "a callee making that draw counted as having no effect, so the call in "
      "the right operand of && was inlined unconditionally"),
     ("F-406", "cond_call_control.proof", "accept", "method inliner",
      "positive control: the same games with a draw from BitString<1> \\ {0b0}"),
     ("F-406", "dead_draw_control.proof", "accept", "TopologicalSort",
      "positive control: an unused draw from BitString<1> \\ {0b0} is dropped"),
-    ("F-406", "early_return.proof", "reject", "TopologicalSort",
+    ("F-406", "early_return.proof", "type_error", "TopologicalSort",
      "the same empty draw was moved past an early return"),
     ("F-406", "early_return_control.proof", "accept", "TopologicalSort",
      "positive control: a draw from BitString<1> \\ {0b0} moves past it"),
-    ("F-406", "field_draw.proof", "reject", "RemoveUnnecessaryFields",
+    ("F-406", "field_draw.proof", "type_error", "RemoveUnnecessaryFields",
      "an unread field drawn from the same empty domain was removed"),
     ("F-406", "field_draw_control.proof", "accept", "RemoveUnnecessaryFields",
      "positive control: an unread field drawn from BitString<1> \\ {0b0} goes"),
@@ -1088,6 +1088,24 @@ TYPE_ERROR = {
     ),
     ("F-395", "letcall_xor.proof"): (
         "error: let: entry 'c' = H(R.Draw()) + 0^m makes a non-deterministic call"
+    ),
+    # A bit-string length written as a literal is at least 1 (ruling Q17), so
+    # F-406's empty domain BitString<0> \ {0^0} cannot be written.
+    ("F-406", "bs0_direct.proof"): (
+        "G0d.game:7:8: error: BitString<0> has length 0: a bit-string length"
+        " must be at least 1"
+    ),
+    ("F-406", "cond_call.proof"): (
+        "PickEmpty.scheme:6:8: error: BitString<0> has length 0: a bit-string"
+        " length must be at least 1"
+    ),
+    ("F-406", "early_return.proof"): (
+        "GReturn0.game:5:4: error: BitString<0> has length 0: a bit-string"
+        " length must be at least 1"
+    ),
+    ("F-406", "field_draw.proof"): (
+        "GField0.game:5:4: error: BitString<0> has length 0: a bit-string"
+        " length must be at least 1"
     ),
     # A Void method contains no return (ruling Q18).
     ("F-407", "void_return_empty.proof"): (

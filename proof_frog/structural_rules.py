@@ -30,18 +30,31 @@ type checker:
   method ends only at the end of its body.  A ``return e;`` with a ``Void``
   call ``e`` would be an early exit that the method inliner drops when it
   replaces the statement by the callee's body (F-407).
+- A bit-string length written as an integer literal, or as a constant
+  expression of integer literals (``1 - 1``), is at least 1, in a type
+  ``BitString<k>`` and in a literal ``0^k`` / ``1^k``, wherever the file
+  writes one (ruling Q17).  Every bit-string length is at least 1; a length
+  that names a parameter or a ``let:`` entry is taken to be, and is not
+  checked.
 
 ``check_structural_rules`` returns the violations in source order; the caller
 reports them.
 """
 
+import operator
 import re
-from typing import Optional
+from typing import Callable, Optional
 
 from . import frog_ast
 from . import visitors
 
 _RESERVED_NAME = re.compile(r"__a\d+__")
+
+_CONSTANT_OPERATIONS: dict[frog_ast.BinaryOperators, Callable[[int, int], int]] = {
+    frog_ast.BinaryOperators.ADD: operator.add,
+    frog_ast.BinaryOperators.SUBTRACT: operator.sub,
+    frog_ast.BinaryOperators.MULTIPLY: operator.mul,
+}
 
 
 class Violation:
@@ -134,6 +147,55 @@ class _VariableNameVisitor(visitors.Visitor[list[str]]):
 
 def _variable_names(node: frog_ast.ASTNode) -> list[str]:
     return _VariableNameVisitor().visit(node)
+
+
+def _constant_value(node: frog_ast.ASTNode) -> Optional[int]:
+    """The value of an integer expression built from integer literals with
+    ``+``, ``-``, ``*`` and unary minus; None for anything else (a name, a
+    division, which ``Int`` does not have)."""
+    if isinstance(node, frog_ast.Integer):
+        return node.num
+    if (
+        isinstance(node, frog_ast.UnaryOperation)
+        and node.operator == frog_ast.UnaryOperators.MINUS
+    ):
+        value = _constant_value(node.expression)
+        return None if value is None else -value
+    if (
+        isinstance(node, frog_ast.BinaryOperation)
+        and node.operator in _CONSTANT_OPERATIONS
+    ):
+        left = _constant_value(node.left_expression)
+        right = _constant_value(node.right_expression)
+        if left is not None and right is not None:
+            return _CONSTANT_OPERATIONS[node.operator](left, right)
+    return None
+
+
+class _ShortBitStringVisitor(visitors.Visitor[list[tuple[frog_ast.ASTNode, int]]]):
+    """Every ``BitString<k>`` and ``0^k`` / ``1^k`` whose length is a constant
+    below 1, with that length."""
+
+    def __init__(self) -> None:
+        self.found: list[tuple[frog_ast.ASTNode, int]] = []
+
+    def result(self) -> list[tuple[frog_ast.ASTNode, int]]:
+        return self.found
+
+    def _check(
+        self, node: frog_ast.ASTNode, length: Optional[frog_ast.ASTNode]
+    ) -> None:
+        if length is None:
+            return
+        value = _constant_value(length)
+        if value is not None and value < 1:
+            self.found.append((node, value))
+
+    def visit_bit_string_type(self, node: frog_ast.BitStringType) -> None:
+        self._check(node, node.parameterization)
+
+    def visit_bit_string_literal(self, node: frog_ast.BitStringLiteral) -> None:
+        self._check(node, node.length)
 
 
 def _sizes_in(node: Optional[frog_ast.ASTNode]) -> list[tuple[frog_ast.ASTNode, str]]:
@@ -389,6 +451,14 @@ def check_structural_rules(root: frog_ast.ASTNode) -> list[Violation]:
                 node,
                 f"'{name}' is reserved: identifiers of the form __a<N>__"
                 " are the engine's fresh names",
+            )
+        )
+    for node, length in _ShortBitStringVisitor().visit(root):
+        violations.append(
+            Violation(
+                node,
+                f"{node} has length {length}: a bit-string length must be at"
+                " least 1",
             )
         )
     for component in _components(root):

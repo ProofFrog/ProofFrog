@@ -45,12 +45,7 @@ EXPECTED_CORRECTNESS_COUNT = 8
 # refuses the file), so every entry here is a known regression with a fix
 # queued, never a place to park a new one. ``strict`` makes the test fail as
 # soon as the proof compiles again, so the entry cannot outlive the fix.
-KNOWN_EC_REJECTED = {
-    "CK_seedbased_Correctness": (
-        "micro_0_left_18 (Topological Sorting): the rendered-swap-sim entry "
-        "emits one swap, but the step reorders two statement pairs"
-    ),
-}
+KNOWN_EC_REJECTED: dict[str, str] = {}
 
 
 def _docker_available() -> bool:

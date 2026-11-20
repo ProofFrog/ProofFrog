@@ -472,6 +472,8 @@ def emit_chain_for_hop(
             # call subsequence, i.e. it is purely *cross-module* (EC ``swap`` is
             # rejected on two same-module abstract calls; those take the
             # det-functional route at the head of this function instead).
+            # ``exact``: the swaps must leave ``sim`` nothing to reorder, or the
+            # entry declines (an open reorder makes a 0-admit file EC rejects).
             if _reorder_cross_module_safe(left_state, right_state):
                 ec_swaps = _rendered_state_swaps(
                     modules,
@@ -480,6 +482,7 @@ def emit_chain_for_hop(
                     external_module_types,
                     method_return_types,
                     flat_params,
+                    exact=True,
                 )
                 if ec_swaps:
                     return [
@@ -9790,14 +9793,45 @@ def _ec_indep(a: ec_ast.EcStmt, b: ec_ast.EcStmt, local_vars: set[str]) -> bool:
     return True
 
 
-def _swaps_dep_valid(exec_stmts: list[ec_ast.EcStmt], swaps: list[str]) -> bool:
+def _straight_line_indep(
+    a: ec_ast.EcStmt, b: ec_ast.EcStmt, local_vars: set[str]
+) -> bool:
+    """:func:`_ec_indep` for a move that must be justified in full.
+
+    :func:`_ec_stmt_rw` reads a footprint off a statement's top-level text,
+    so an ``if`` or ``while`` shows none of the reads, writes or calls inside
+    it, and a sample shows no read of the locals its distribution names. A
+    move that involves a branch or loop is therefore refused, and a sample
+    whose distribution reads what the other statement writes is dependent.
+    """
+    compound = (ec_ast.If, ec_ast.While)
+    if isinstance(a, compound) or isinstance(b, compound):
+        return False
+    if not _ec_indep(a, b, local_vars):
+        return False
+    for smp, other in ((a, b), (b, a)):
+        if (
+            isinstance(smp, ec_ast.Sample)
+            and isinstance(other, (ec_ast.Assign, ec_ast.Sample, ec_ast.Call))
+            and other.var in _RENAME_TOKEN_RE.findall(smp.distr)
+        ):
+            return False
+    return True
+
+
+def _swaps_dep_valid(
+    exec_stmts: list[ec_ast.EcStmt],
+    swaps: list[str],
+    indep: Callable[[ec_ast.EcStmt, ec_ast.EcStmt, set[str]], bool] = _ec_indep,
+) -> bool:
     """Whether every ``swap{1} pos delta`` in ``swaps`` moves a statement only
     across statements independent of it -- i.e. EC will accept the sequence.
 
     Simulates the moves on a copy of ``exec_stmts``. A coarse-signature bubble
     sort (:func:`_ec_perm_swaps`) can emit a swap that crosses a data
     dependency when duplicate signatures make it pick the wrong source; this
-    catches that so the caller can retry with the full-signature sort."""
+    catches that so the caller can retry with the full-signature sort.
+    ``indep`` decides whether two statements may be exchanged."""
     cur = list(exec_stmts)
     local = _ec_local_vars(exec_stmts)
     for sw in swaps:
@@ -9811,7 +9845,7 @@ def _swaps_dep_valid(exec_stmts: list[ec_ast.EcStmt], swaps: list[str]) -> bool:
             return False
         moved = cur[pos]
         crossed = cur[new:pos] if delta < 0 else cur[pos + 1 : new + 1]
-        if any(not _ec_indep(moved, c, local) for c in crossed):
+        if any(not indep(moved, c, local) for c in crossed):
             return False
         cur.insert(new, cur.pop(pos))
     return True
@@ -9967,6 +10001,121 @@ def _swaps_realign(
     return [_reorder_sig(s) for s in moved] == [_reorder_sig(s) for s in right_exec]
 
 
+def _pair_binders(
+    left: list[ec_ast.EcStmt],
+    right: list[ec_ast.EcStmt],
+    left_types: dict[str, ec_ast.EcType],
+    right_types: dict[str, ec_ast.EcType],
+    rename: dict[str, str],
+) -> bool:
+    """Extend ``rename`` with the locals ``left`` and ``right`` bind at the
+    same positions (descending into branches and loops), False on a clash.
+
+    A local pairs only with a local of the same type and always with the same
+    one; a binder that is not a local (a state var) must keep its name.
+    """
+    if len(left) != len(right):
+        return False
+    binding = (ec_ast.Assign, ec_ast.Sample, ec_ast.Call)
+    for lst, rst in zip(left, right):
+        if isinstance(lst, binding) and isinstance(rst, binding):
+            if (lst.var in left_types) != (rst.var in right_types):
+                return False
+            if lst.var not in left_types:
+                if lst.var != rst.var:
+                    return False
+            elif (
+                left_types[lst.var] != right_types[rst.var]
+                or rename.setdefault(lst.var, rst.var) != rst.var
+            ):
+                return False
+        elif isinstance(lst, ec_ast.If) and isinstance(rst, ec_ast.If):
+            if not _pair_binders(
+                _exec_stmts(lst.then_body),
+                _exec_stmts(rst.then_body),
+                left_types,
+                right_types,
+                rename,
+            ) or not _pair_binders(
+                _exec_stmts(lst.else_body),
+                _exec_stmts(rst.else_body),
+                left_types,
+                right_types,
+                rename,
+            ):
+                return False
+        elif isinstance(lst, ec_ast.While) and isinstance(rst, ec_ast.While):
+            if not _pair_binders(
+                _exec_stmts(lst.body),
+                _exec_stmts(rst.body),
+                left_types,
+                right_types,
+                rename,
+            ):
+                return False
+    return True
+
+
+def _swaps_realign_exactly(
+    swaps: list[str], left_mod: ec_ast.Module, right_mod: ec_ast.Module
+) -> bool:
+    """True if every move in ``swaps`` crosses only statements independent of
+    it and the moves turn the left module's body into the right module's up
+    to a renaming of locals, so the ``sim`` after them has nothing to reorder.
+
+    :func:`_swaps_realign` compares statements with every identifier masked,
+    so two independent assignments of the same shape in swapped order
+    (``a <- x.`2; b <- y.`2`` against ``b <- y.`2; a <- x.`2``) look aligned
+    already, the coarse sort emits no swap for them, and ``sim`` is left an
+    open reorder. Here the renaming is read off the binders the swapped
+    bodies put side by side; it must be injective, type-preserving and
+    confined to locals, and once applied the rendered statements must match
+    exactly. Every move must be independent by :func:`_straight_line_indep`.
+    """
+    if not left_mod.procs or not right_mod.procs:
+        return False
+    lproc, rproc = left_mod.procs[0], right_mod.procs[0]
+    if (
+        left_mod.params != right_mod.params
+        or _name_sorted_vars(left_mod).module_vars
+        != _name_sorted_vars(right_mod).module_vars
+        or lproc.params != rproc.params
+        or lproc.return_type != rproc.return_type
+    ):
+        return False
+    left_exec = _exec_stmts(lproc.body)
+    right_exec = _exec_stmts(rproc.body)
+    if not _swaps_dep_valid(left_exec, swaps, indep=_straight_line_indep):
+        return False
+    moved = _apply_swaps(left_exec, swaps)
+    if moved is None:
+        return False
+    rename: dict[str, str] = {}
+    if not _pair_binders(
+        moved,
+        right_exec,
+        {d.name: d.type for d in lproc.body if isinstance(d, ec_ast.VarDecl)},
+        {d.name: d.type for d in rproc.body if isinstance(d, ec_ast.VarDecl)},
+        rename,
+    ):
+        return False
+    if len(set(rename.values())) != len(rename):
+        return False
+    reserved = (
+        {v.name for v in left_mod.module_vars}
+        | {p.name for p in left_mod.params}
+        | {p.name for p in lproc.params}
+    )
+    if reserved & (set(rename) | set(rename.values())):
+        return False
+    return _procs_equal_under_rename(
+        left_mod,
+        replace(lproc, body=moved),
+        replace(rproc, body=right_exec),
+        rename,
+    )
+
+
 def _swaps_align_rendered(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     swaps: list[str],
     modules: mt.ModuleTranslator,
@@ -9977,7 +10126,8 @@ def _swaps_align_rendered(  # pylint: disable=too-many-arguments,too-many-positi
     flat_params: list[ec_ast.ModuleParam],
 ) -> bool:
     """True if applying ``swaps`` to the *rendered* left flat-state body yields
-    the rendered right body (modulo renaming).
+    the rendered right body up to a renaming of locals
+    (:func:`_swaps_realign_exactly`).
 
     The raw-AST :func:`_permutation_swaps` is normalized differently from the
     rendered modules the micro lemma actually relates, so it can return a
@@ -10004,12 +10154,36 @@ def _swaps_align_rendered(  # pylint: disable=too-many-arguments,too-many-positi
         method_return_types,
         flat_params,
     )
+    return _swaps_realign_exactly(swaps, left_mod, right_mod)
+
+
+def _exact_rendered_swaps(
+    left_mod: ec_ast.Module, right_mod: ec_ast.Module
+) -> list[str] | None:
+    """The first of the coarse and the full-signature sort's ``swap{1}``
+    sequences that :func:`_swaps_realign_exactly` accepts, else ``None``.
+
+    The coarse sort comes first so that a micro it already closed keeps its
+    tactic. Where it leaves statements of the same coarse signature out of
+    order (two assignments), the full-signature sort, which tells every
+    statement apart, supplies the missing swaps.
+    """
     if not left_mod.procs or not right_mod.procs:
-        return False
-    return _swaps_realign(
-        swaps,
-        _exec_stmts(left_mod.procs[0].body),
-        _exec_stmts(right_mod.procs[0].body),
+        return None
+    left_body = left_mod.procs[0].body
+    right_body = right_mod.procs[0].body
+    full = _ec_full_perm_swaps(left_body, right_body)
+    candidates = [
+        _ec_perm_swaps(left_body, right_body),
+        None if full is None else [s.rstrip(".") for s in full],
+    ]
+    return next(
+        (
+            c
+            for c in candidates
+            if c is not None and _swaps_realign_exactly(c, left_mod, right_mod)
+        ),
+        None,
     )
 
 
@@ -10020,6 +10194,7 @@ def _rendered_state_swaps(  # pylint: disable=too-many-arguments,too-many-positi
     external_module_types: dict[str, str],
     method_return_types: dict[tuple[str, str], frog_ast.Type],
     flat_params: list[ec_ast.ModuleParam],
+    exact: bool = False,
 ) -> list[str] | None:
     """``swap{1}`` tactics computed from the *rendered* flat-state EC modules.
 
@@ -10040,6 +10215,14 @@ def _rendered_state_swaps(  # pylint: disable=too-many-arguments,too-many-positi
     the ``swap{1} <pos> <delta>`` strings (no trailing period, matching
     :func:`_ec_perm_swaps`) or ``None`` when the two bodies are not a
     permutation of each other (the caller then keeps the canned tactic).
+
+    With ``exact``, a sequence is returned only if it is dependency-valid and
+    turns the left body into the right one up to a renaming of locals
+    (:func:`_swaps_realign_exactly`), so ``sim`` alone closes what it leaves;
+    when neither sort yields one, the answer is ``None``, a decline. Without
+    it the check is :func:`_swaps_realign`'s masked one, which suits a caller
+    that closes with ``sp; wp; sim`` and so tolerates deterministic
+    differences between the bodies.
     """
     if left_state is None or right_state is None:
         return None
@@ -10059,6 +10242,8 @@ def _rendered_state_swaps(  # pylint: disable=too-many-arguments,too-many-positi
         method_return_types,
         flat_params,
     )
+    if exact:
+        return _exact_rendered_swaps(left_mod, right_mod)
     if not left_mod.procs or not right_mod.procs:
         return None
     left_body = left_mod.procs[0].body

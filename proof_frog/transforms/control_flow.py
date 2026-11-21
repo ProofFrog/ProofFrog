@@ -303,6 +303,148 @@ class FoldLiteralConditionsTransformer(Transformer):
         )
 
 
+class EmptyCollectionFieldTransformer(Transformer):
+    """Folds ``e in F`` to ``false`` and ``|F|`` to ``0`` for the collection
+    fields named in *fields*.
+
+    The caller (:class:`EmptyCollectionField`) picks the fields and checks
+    afterwards that no other occurrence of them survives. Folding ``e in F``
+    drops the evaluation of ``e``. Evaluation is total (FROGLANG_REFERENCE.md
+    section 6.9), so that is unobservable unless ``e`` makes a call, which
+    may be non-deterministic or sample a random function lazily. An
+    ``e in F`` whose ``e`` makes a call is kept, and ``blocked`` records why.
+    """
+
+    def __init__(self, fields: frozenset[str]) -> None:
+        self.fields = fields
+        self.blocked: dict[str, str] = {}
+
+    def transform_binary_operation(
+        self, binary_op: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        new_op = self._transform_children(binary_op)
+        field = new_op.right_expression
+        if not (
+            new_op.operator == frog_ast.BinaryOperators.IN
+            and isinstance(field, frog_ast.Variable)
+            and field.name in self.fields
+        ):
+            return new_op
+        call = next(
+            (
+                node
+                for node in _walk_nodes(new_op.left_expression)
+                if isinstance(node, frog_ast.FuncCall)
+            ),
+            None,
+        )
+        if call is None:
+            return frog_ast.Boolean(False)
+        self.blocked.setdefault(
+            field.name, f"'{new_op}' was kept: its element makes the call '{call}'"
+        )
+        return new_op
+
+    def transform_unary_operation(
+        self, unary_op: frog_ast.UnaryOperation
+    ) -> frog_ast.Expression:
+        new_op = self._transform_children(unary_op)
+        field = new_op.expression
+        if (
+            new_op.operator == frog_ast.UnaryOperators.SIZE
+            and isinstance(field, frog_ast.Variable)
+            and field.name in self.fields
+        ):
+            return frog_ast.Integer(0)
+        return new_op
+
+
+def _collection_field_candidates(
+    game: frog_ast.Game, ctx: PipelineContext
+) -> frozenset[str]:
+    """The ``Set<T>`` and ``Map`` fields of *game* declared without an
+    initializer whose name nothing else in scope can bind: no game
+    parameter, proof ``let:`` name, method parameter, loop binder or local
+    declaration shares it (a typed declaration with a value is also an
+    occurrence of the name, which :class:`EmptyCollectionField` rejects
+    anyway).
+
+    Nor is any ``X.name`` in the game: a game does not reach its own fields
+    through a field access, but the check that no occurrence of the field
+    survives sees only bare variables, so such a spelling declines.
+
+    Nor is a field of a scheme in the proof's namespace
+    (:func:`_scheme_field_names`). Inlining a scheme method leaves its
+    reads of the scheme's own fields as bare names, which a game field of
+    the same name captures. Before the scheme-field rule (F-031) a written
+    scheme field kept such reads; with it, and with instantiation refusing a
+    scheme field whose initializer may change, a remaining bare read is of
+    an unwritten field with no initializer, which is empty too. The
+    exclusion stays as defense in depth.
+    """
+    bound = {parameter.name for parameter in game.parameters}
+    for method in game.methods:
+        bound.update(parameter.name for parameter in method.signature.parameters)
+        for node in _walk_nodes(method.block):
+            if isinstance(node, frog_ast.NumericFor):
+                bound.add(node.name)
+            elif isinstance(node, frog_ast.GenericFor):
+                bound.add(node.var_name)
+            elif isinstance(node, frog_ast.VariableDeclaration):
+                bound.add(node.name)
+    bound.update(
+        node.name
+        for node in _walk_nodes(game)
+        if isinstance(node, frog_ast.FieldAccess)
+    )
+    bound.update(_scheme_field_names(ctx))
+    return frozenset(
+        field.name
+        for field in game.fields
+        if field.value is None
+        and (
+            isinstance(field.type, frog_ast.MapType)
+            or (
+                isinstance(field.type, frog_ast.SetType)
+                and field.type.parameterization is not None
+            )
+        )
+        and field.name not in bound
+        and field.name not in ctx.proof_namespace
+        and ctx.proof_let_types.get(field.name) is None
+    )
+
+
+def _scheme_field_names(ctx: PipelineContext) -> set[str]:
+    """The field names of every scheme reachable from the proof's namespace."""
+    names: set[str] = set()
+    for value in ctx.proof_namespace.values():
+        for node in _walk_nodes(value):
+            if isinstance(node, frog_ast.Scheme):
+                names.update(field.name for field in node.fields)
+    return names
+
+
+def _writes_name(game: frog_ast.Game, name: str) -> bool:
+    """True if some statement of *game* assigns, samples into or
+    accumulates into (``<-uniq[name]``) the variable *name* or an element
+    of it."""
+    for node in _walk_nodes(game):
+        if (
+            isinstance(
+                node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            )
+            and lvalue_base_name(node.var) == name
+        ):
+            return True
+        if (
+            isinstance(node, frog_ast.UniqueSample)
+            and lvalue_base_name(node.unique_set) == name
+        ):
+            return True
+    return False
+
+
 class BranchEliminiationTransformer(BlockTransformer):
     """Removes if/else-if branches whose conditions are statically known.
 
@@ -4229,6 +4371,101 @@ class FoldLiteralConditions(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return FoldLiteralConditionsTransformer(ctx).transform(game)
+
+
+class EmptyCollectionField(TransformPass):
+    """A collection field nothing writes is empty: ``e in F`` is ``false``
+    and ``|F|`` is ``0``.
+
+    A ``Set`` or ``Map`` field declared without an initializer starts empty
+    (FROGLANG_REFERENCE.md section 6.9). The pass folds a field ``F`` only
+    if, after folding, no occurrence of ``F`` is left anywhere in the game.
+    So every occurrence was ``e in F`` or ``|F|``: nothing assigns, samples
+    into, accumulates into (``<-uniq[F]``), iterates over, copies or passes
+    ``F``, and ``F`` is empty at every point of every run. A field whose
+    name a game parameter, ``let:`` name, method parameter, loop binder,
+    local declaration or scheme field could also mean is never folded (see
+    :func:`_collection_field_candidates`), nor is an ``e in F`` whose ``e``
+    makes a call (then ``F`` keeps an occurrence).
+
+    Typical source: a reduction that never forwards a challenger's
+    ``Corrupt`` oracle leaves the challenger's corruption set ``C`` with
+    only its membership tests.
+    """
+
+    name = "Empty Collection Field"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        fields = _collection_field_candidates(game, ctx)
+        self._note_scheme_field_collisions(game, ctx)
+        while fields:
+            transformer = EmptyCollectionFieldTransformer(fields)
+            new_game = transformer.transform(game)
+            survivors = fields & {
+                node.name
+                for node in _walk_nodes(new_game)
+                if isinstance(node, frog_ast.Variable)
+            }
+            if not survivors:
+                return new_game
+            for name in sorted(survivors):
+                if _writes_name(game, name):
+                    continue
+                ctx.near_misses.append(
+                    NearMiss(
+                        transform_name=self.name,
+                        reason=(
+                            f"field '{name}' is never written, so it is always"
+                            " empty, but it was not folded: "
+                            + transformer.blocked.get(
+                                name,
+                                f"'{name}' is used other than in"
+                                f" 'e in {name}' or '|{name}|'",
+                            )
+                        ),
+                        location=None,
+                        suggestion=(
+                            f"Use '{name}' only in membership tests"
+                            f" 'e in {name}' whose element makes no call, or"
+                            f" as '|{name}|'"
+                        ),
+                        variable=name,
+                        method=None,
+                    )
+                )
+            fields = fields - survivors
+        return game
+
+    def _note_scheme_field_collisions(
+        self, game: frog_ast.Game, ctx: PipelineContext
+    ) -> None:
+        """A near miss for each unwritten collection field skipped only
+        because a scheme in the proof has a field of the same name."""
+        scheme_fields = _scheme_field_names(ctx)
+        for field in game.fields:
+            if (
+                field.name in scheme_fields
+                and field.value is None
+                and isinstance(field.type, (frog_ast.SetType, frog_ast.MapType))
+                and not _writes_name(game, field.name)
+            ):
+                ctx.near_misses.append(
+                    NearMiss(
+                        transform_name=self.name,
+                        reason=(
+                            f"field '{field.name}' is never written, but a scheme"
+                            " in the proof has a field of the same name, which"
+                            " an inlined scheme method could mean"
+                        ),
+                        location=field.origin,
+                        suggestion=(
+                            f"Rename the game field '{field.name}' so it shares"
+                            " no name with a scheme field"
+                        ),
+                        variable=field.name,
+                        method=None,
+                    )
+                )
 
 
 class BranchElimination(TransformPass):

@@ -15,6 +15,7 @@ from proof_frog.transforms.algebraic import (
     XorCancellation,
 )
 from proof_frog.transforms.control_flow import (
+    EmptyCollectionField,
     FoldEquivalentReturnBranch,
     FoldLiteralConditions,
     FlagSetToAssignment,
@@ -6632,3 +6633,83 @@ def test_remove_unreachable_always_taken_no_near_miss_when_not_implied() -> None
     game, misses = _always_taken_misses(source)
     assert "return 4;" in str(game)
     assert not misses
+
+
+# ---------------------------------------------------------------------------
+# EmptyCollectionField
+# ---------------------------------------------------------------------------
+
+
+def _empty_field_misses(ctx: PipelineContext) -> list[NearMiss]:
+    return [
+        nm for nm in ctx.near_misses if nm.transform_name == "Empty Collection Field"
+    ]
+
+
+def test_empty_field_near_miss_element_makes_call() -> None:
+    """C is never written, but dropping E.f(x) would drop a call."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Set<Int> C;
+            Bool Query(Int x) { return E.f(x) in C; }
+        }
+        """)
+    ctx = _make_ctx()
+    assert EmptyCollectionField().apply(game, ctx) == game
+    misses = _empty_field_misses(ctx)
+    assert [nm.variable for nm in misses] == ["C"]
+    assert "never written" in misses[0].reason
+    assert "makes the call" in misses[0].reason
+
+
+def test_empty_field_near_miss_field_copied() -> None:
+    """C is never written, but it is read other than in a membership test."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Set<Int> C;
+            Set<Int> Leak() { return C; }
+            Bool Query(Int x) { return x in C; }
+        }
+        """)
+    ctx = _make_ctx()
+    assert EmptyCollectionField().apply(game, ctx) == game
+    misses = _empty_field_misses(ctx)
+    assert [nm.variable for nm in misses] == ["C"]
+    assert "used other than in 'e in C' or '|C|'" in misses[0].reason
+
+
+def test_empty_field_near_miss_scheme_field_name() -> None:
+    """C is never written but shares its name with a field of a scheme in
+    the proof, so the pass skips it and says why."""
+    scheme = frog_parser.parse_scheme_file("""
+        Scheme Sch() extends P {
+            Set<Int> C;
+            Bool Check(Int x) { return x in C; }
+        }
+        """)
+    game = frog_parser.parse_game("""
+        Game G() {
+            Set<Int> C;
+            Bool Query(Int x) { return x in C; }
+        }
+        """)
+    ctx = _make_ctx()
+    ctx.proof_namespace["E"] = scheme
+    assert EmptyCollectionField().apply(game, ctx) == game
+    misses = _empty_field_misses(ctx)
+    assert [nm.variable for nm in misses] == ["C"]
+    assert "scheme in the proof has a field of the same name" in misses[0].reason
+
+
+def test_empty_field_no_near_miss_when_field_is_written() -> None:
+    """A written field is simply not empty: nothing to report."""
+    game = frog_parser.parse_game("""
+        Game G() {
+            Set<Int> C;
+            Void Corrupt(Int i) { C = C union {i}; }
+            Bool Query(Int x) { return x in C; }
+        }
+        """)
+    ctx = _make_ctx()
+    assert EmptyCollectionField().apply(game, ctx) == game
+    assert not _empty_field_misses(ctx)

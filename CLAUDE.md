@@ -201,6 +201,7 @@ The essentials for writing correct FrogLang:
 - Relations between fields: a field proven equal to an expression of other fields after Initialize and after every oracle (`FieldInvariantElimination`, e.g. `pk == g^sk` kept by every key update) is removed; a group field maintained by generator powers is kept as its exponent; a fixed `g^e` and an additive offset `D` read only together become one evolving secret (`OffsetFusion`)
 - ModInt arithmetic whose terms cancel (`sk + ((d + H(x)) - H(x))` -> `sk + d`, also through a pure local), a uniform ModInt used only inside copies of one `e + u` in a single statement (-> `u`), a product sample used only through constant indices (-> independent samples), and `(a * b)^e` -> `a^e * b^e` in a group
 - Branch folding with Initialize facts: `if (P) { return X; } return Y;` → `return Y;` when Z3 proves `P ⇒ (X ↔ Y)`, using the definitions of fields assigned once in Initialize (calls or comparisons over values fixed from then on) and the injectivity of `injective` methods (`FoldEquivalentReturnBranch`)
+- An unwritten collection is empty: for a `Set` or `Map` field with no initializer whose every occurrence is `e in F` (with `e` call-free) or `|F|`, the tests fold to `false` and the size to `0` (`EmptyCollectionField`)
 
 ### Guidelines for creating FrogLang files
 

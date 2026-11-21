@@ -14,6 +14,7 @@ from typing import (
     final,
     Tuple,
     Dict,
+    Sequence,
 )
 import z3
 from sympy import Integer, Symbol, Rational
@@ -2723,20 +2724,147 @@ def _unpaired_field_write(
     )
 
 
+def _element_write_base(
+    statement: frog_ast.Statement, names: tuple[str, str]
+) -> Optional[str]:
+    """The field written if *statement* is an untyped assignment to one
+    element ``X[e] = v;`` of a field ``X`` in *names*, else None.
+
+    Only these element writes can pair (SameFieldVisitor); a sample into an
+    element, a slice write and a write to a nested element ``X[i][j]`` cannot.
+    """
+    if not (
+        isinstance(statement, frog_ast.Assignment)
+        and statement.the_type is None
+        and isinstance(statement.var, frog_ast.ArrayAccess)
+        and isinstance(statement.var.the_array, frog_ast.Variable)
+        and statement.var.the_array.name in names
+    ):
+        return None
+    return statement.var.the_array.name
+
+
+_PAIR_ELEMENT_WRITE_SUGGESTION = (
+    "Write the same element of the other field right after it, with nothing "
+    "in between that can return, uses either field, or changes what the "
+    "write reads"
+)
+
+
 class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
     """Checks that every write keeps two fields equal.
 
     The result is the list of second writes of each pair, which the caller
     deletes, or None.  Initial values are the caller's to check.
+
+    A pair is two writes in one block: whole writes ``f1 = e; ... f2 = e;``
+    (or a copy ``f2 = f1;``), or writes of one element
+    ``A[i] = v; ... B[i] = v;`` (see ``_pair_element_write``).
     """
 
     def __init__(self, field_name_pair: tuple[str, str]):
         self.field_name_pair = field_name_pair
         self.are_same = True
         self.paired_statements: list[frog_ast.Statement] = []
-        # Writes the pairing does not model, with their method names.
-        self.unpaired_writes: list[tuple[frog_ast.Statement, Optional[str]]] = []
+        # Writes the pairing does not model, with their method names and,
+        # for an element write that could pair, why it did not and what
+        # would make it pair.
+        self.unpaired_writes: list[
+            tuple[frog_ast.Statement, Optional[str], Optional[tuple[str, str]]]
+        ] = []
         self._method_name: Optional[str] = None
+
+    def _pair_element_write(
+        self, statements: Sequence[frog_ast.Statement], index: int
+    ) -> Optional[tuple[str, str]]:
+        """Pair the element write ``statements[index]``, ``A[i] = v;`` for a
+        field ``A`` of the pair, with a later ``B[i] = v;`` in the same block
+        that writes the same element of the other field ``B``.  Return None
+        if it pairs, else why not and what would make it pair.
+
+        The two writes store the same value at the same key of two equal
+        fields, so the fields are equal again after the second, and nothing
+        in between can see them differ, provided that:
+
+        - neither write makes a call (a call may return something else the
+          second time), and ``i`` and ``v`` read neither field;
+        - no statement in between can return (the second write would be
+          skipped), uses either field (it would see them differ), or writes
+          or rebinds a name that ``i`` or ``v`` reads (the second write
+          would store another value or at another key).
+
+        Evaluation is total and a partial operation's value is determined by
+        its operands (FROGLANG_REFERENCE section 6.9), so ``i`` and ``v``
+        evaluate to the same values at both writes.
+        """
+        statement = statements[index]
+        assert isinstance(statement, frog_ast.Assignment)
+        assert isinstance(statement.var, frog_ast.ArrayAccess)
+        pair = set(self.field_name_pair)
+        written = _element_write_base(statement, self.field_name_pair)
+        other = (pair - {written}).pop()
+        if (
+            SearchVisitor(lambda node: isinstance(node, frog_ast.FuncCall)).visit(
+                statement
+            )
+            is not None
+        ):
+            return (
+                "it makes a call, which may store another value the second time",
+                "Store the call's result in a local before the first write, "
+                "and write that local to both fields",
+            )
+        read = referenced_variable_names(
+            statement.var.index
+        ) | referenced_variable_names(statement.value)
+        if read & pair:
+            return (
+                f"its index or value reads '{sorted(read & pair)[0]}'",
+                "Read the field into a local before the first write, and use "
+                "that local in both writes",
+            )
+        partner = frog_ast.Assignment(
+            None,
+            frog_ast.ArrayAccess(frog_ast.Variable(other), statement.var.index),
+            statement.value,
+        )
+        later_statements = statements[index + 1 :]
+        if not any(later == partner for later in later_statements):
+            return (
+                f"no write '{partner}' follows it in the same block",
+                _PAIR_ELEMENT_WRITE_SUGGESTION,
+            )
+        for later in later_statements:
+            if later == partner and not any(
+                later is paired for paired in self.paired_statements
+            ):
+                self.paired_statements.append(later)
+                return None
+            if _statement_can_exit(later):
+                return (
+                    f"a statement before '{partner}' can return",
+                    _PAIR_ELEMENT_WRITE_SUGGESTION,
+                )
+            if referenced_variable_names(later) & pair or reassigns_or_rebinds(
+                pair, later
+            ):
+                return (
+                    f"a statement before '{partner}' uses '{written}' or '{other}'",
+                    _PAIR_ELEMENT_WRITE_SUGGESTION,
+                )
+            changed = sorted(
+                name for name in read if reassigns_or_rebinds({name}, later)
+            )
+            if changed:
+                return (
+                    f"a statement before '{partner}' changes '{changed[0]}', "
+                    f"which the write reads",
+                    _PAIR_ELEMENT_WRITE_SUGGESTION,
+                )
+        return (
+            f"no write '{partner}' follows it in the same block",
+            _PAIR_ELEMENT_WRITE_SUGGESTION,
+        )
 
     def result(self) -> Optional[list[frog_ast.Statement]]:
         if not self.are_same or self.unpaired_writes:
@@ -2770,7 +2898,14 @@ class SameFieldVisitor(Visitor[Optional[list[frog_ast.Statement]]]):
             # Recorded rather than returned on, so the caller can tell a
             # merge refused only for these.
             if _unpaired_field_write(statement, self.field_name_pair):
-                self.unpaired_writes.append((statement, self._method_name))
+                why_unpaired = None
+                if _element_write_base(statement, self.field_name_pair):
+                    why_unpaired = self._pair_element_write(block.statements, index)
+                    if why_unpaired is None:
+                        continue
+                self.unpaired_writes.append(
+                    (statement, self._method_name, why_unpaired)
+                )
                 continue
 
             if not isinstance(statement, (frog_ast.Sample, frog_ast.Assignment)):

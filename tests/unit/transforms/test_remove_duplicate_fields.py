@@ -388,8 +388,9 @@ class TestInitialValues:
 
 
 class TestUnpairedWrites:
-    """The pass pairs only whole-field assignments and samples.  Any other
-    write to a field changes it alone, so the pair is not merged."""
+    """The pass pairs whole-field assignments and samples, and matching
+    element writes (``TestPairedElementWrites``).  Any other write to a field
+    changes it alone, so the pair is not merged."""
 
     @pytest.mark.parametrize(
         "the_type, write",
@@ -400,9 +401,8 @@ class TestUnpairedWrites:
             ("Array<Array<Int, 4>, 4>", "A[0][1] = 1;"),
             ("[Int, Int]", "A[0] = 1;"),
             ("Map<Int, Int>", "if (k == 0) { A[k] = 1; }"),
-            # Paired element writes keep the fields equal, but the pass does
-            # not pair them.
-            ("Map<Int, Int>", "A[k] = 1; B[k] = 1;"),
+            # A nested element write does not pair.
+            ("Array<Array<Int, 4>, 4>", "A[0][1] = 1; B[0][1] = 1;"),
         ],
     )
     def test_element_write_not_merged(self, the_type: str, write: str) -> None:
@@ -545,6 +545,179 @@ class TestUnpairedWrites:
                     return |A| + |B|;
                 }}
             }}
+            """)
+
+
+class TestPairedElementWrites:
+    """`A[i] = v; ...; B[i] = v;` in one block keeps two equal fields equal
+    when neither write makes a call, `i` and `v` read neither field, and
+    nothing in between can return, uses either field, or changes what `i`
+    or `v` reads."""
+
+    @staticmethod
+    def _game(put: str, the_type: str = "Map<Int, Int>") -> str:
+        return f"""
+            Game G() {{
+                {the_type} A;
+                {the_type} B;
+                Int ell;
+                Int Put(Int k, Int v, Bool b) {{
+                    {put}
+                    return 0;
+                }}
+                {the_type} Get() {{
+                    return B;
+                }}
+            }}
+            """
+
+    @pytest.mark.parametrize(
+        "put",
+        [
+            "A[k] = v;\nB[k] = v;",
+            # Either field may come first.
+            "B[k] = v;\nA[k] = v;",
+            # Statements in between that touch neither field nor change
+            # `k` or `v` (reading them is fine).
+            "A[k] = v;\nInt y = k + v;\nell = y;\nB[k] = v;",
+            # The shape a reduction's copy of a challenger table takes.
+            "ell = ell + 1;\nA[ell] = v;\nB[ell] = v;",
+            # Several pairs in a row, and a pair in a nested block.
+            "A[k] = v;\nB[k] = v;\nA[v] = k;\nB[v] = k;",
+            "if (b) {\nA[k] = v;\nB[k] = v;\n}",
+            # A return before both writes skips both.
+            "if (b) {\nreturn 1;\n}\nA[k] = v;\nB[k] = v;",
+        ],
+        ids=[
+            "adjacent",
+            "reversed",
+            "unrelated_between",
+            "counter_key",
+            "two_pairs",
+            "nested_block",
+            "return_before_both",
+        ],
+    )
+    def test_paired_element_writes_merged(self, put: str) -> None:
+        assert _merges(self._game(put))
+
+    def test_array_and_tuple_element_writes_merged(self) -> None:
+        assert _merges(self._game("A[0] = v;\nB[0] = v;", "Array<Int, 4>"))
+        assert _merges(self._game("A[1] = v;\nB[1] = v;", "[Int, Int]"))
+
+    def test_merge_deletes_the_second_write(self) -> None:
+        merged = remove_duplicate_fields(
+            frog_parser.parse_game(self._game("A[k] = v;\nInt y = k;\nB[k] = v;"))
+        )
+        assert merged == frog_parser.parse_game("""
+            Game G() {
+                Map<Int, Int> A;
+                Int ell;
+                Int Put(Int k, Int v, Bool b) {
+                    A[k] = v;
+                    Int y = k;
+                    return 0;
+                }
+                Map<Int, Int> Get() {
+                    return A;
+                }
+            }
+            """)
+
+    @pytest.mark.parametrize(
+        "put",
+        [
+            # Two calls may return different values: after Put, B[k] and
+            # A[k] differ, which Get shows.
+            "A[k] = S.F(v);\nB[k] = S.F(v);",
+            # The second index reads A after the first write: Put(_, 5, _)
+            # on empty maps sets A[0] and B[1].
+            "A[|A|] = v;\nB[|A|] = v;",
+            # The second value reads A after the first write: B[k] holds 1,
+            # the merged A[k] holds 0.
+            "A[k] = |A|;\nB[k] = |A|;",
+            # The reply reads B between the writes: 0 on the first Put, but
+            # 1 after the merge (B is A, already written).
+            "A[k] = v;\nell = |B|;\nB[k] = v;",
+            # A write to `v` in between: B[k] holds v + 1, A[k] holds v.
+            "A[k] = v;\nv = v + 1;\nB[k] = v;",
+            # A write to `k` in between: the writes go to different keys.
+            "A[k] = v;\nk = k + 1;\nB[k] = v;",
+            # A return in between: Put(_, _, true) writes A only.
+            "A[k] = v;\nif (b) {\nreturn 1;\n}\nB[k] = v;",
+            # Different blocks: Put(_, _, false) writes A only.
+            "A[k] = v;\nif (b) {\nB[k] = v;\n}",
+            # Different keys or values.
+            "A[k] = v;\nB[v] = v;",
+            "A[k] = v;\nB[k] = k;",
+            # Another write to A in between (two pairs interleaved): not
+            # modelled, so not merged, although A and B do end up equal.
+            "A[k] = v;\nA[v] = k;\nB[k] = v;\nB[v] = k;",
+        ],
+        ids=[
+            "call",
+            "index_reads_field",
+            "value_reads_field",
+            "other_field_read_between",
+            "value_written_between",
+            "index_written_between",
+            "return_between",
+            "different_blocks",
+            "different_key",
+            "different_value",
+            "interleaved",
+        ],
+    )
+    def test_element_writes_not_merged(self, put: str) -> None:
+        assert not _merges(self._game(put))
+
+    @pytest.mark.parametrize(
+        "put",
+        [
+            # An element write to a map the value reads: B[k] holds 1, the
+            # merged A[k] holds M's old entry.
+            "A[k] = M[0];\nM[0] = 1;\nB[k] = M[0];",
+            # A local declared in between shadows the field `ell` the value
+            # reads, so the second write stores 5.
+            "A[k] = ell;\nInt ell = 5;\nB[k] = ell;",
+        ],
+        ids=["map_element_written_between", "read_field_shadowed_between"],
+    )
+    def test_change_to_what_the_write_reads_not_merged(self, put: str) -> None:
+        assert not _merges(f"""
+            Game G() {{
+                Map<Int, Int> M;
+                Map<Int, Int> A;
+                Map<Int, Int> B;
+                Int ell;
+                Void Put(Int k) {{
+                    {put}
+                }}
+                Map<Int, Int> Get() {{
+                    return B;
+                }}
+            }}
+            """)
+
+    def test_one_partner_per_write(self) -> None:
+        """F-299's rule for element writes: `B[k] = v;` alone in `Put2` is
+        not paired by the structurally equal pair in `Put1`.  After
+        `Put2(0, 1)`, B[0] is 1 and A has no key 0."""
+        assert not _merges("""
+            Game G() {
+                Map<Int, Int> A;
+                Map<Int, Int> B;
+                Void Put1(Int k, Int v) {
+                    A[k] = v;
+                    B[k] = v;
+                }
+                Void Put2(Int k, Int v) {
+                    B[k] = v;
+                }
+                Map<Int, Int> Get() {
+                    return A;
+                }
+            }
             """)
 
 
@@ -818,6 +991,69 @@ class TestEndToEnd:
                 Map<Int, Int> B;
                 Void Put(Int k) {{
                     A[k] = 1;
+                }}
+                Int? Get(Int k) {{
+                    if (k in {read}) {{
+                        return {read}[k];
+                    }}
+                    return None;
+                }}
+            }}
+            """
+        assert not _engine_equal(
+            game.format(side="Left", read="B"), game.format(side="Right", read="A")
+        )
+
+    def test_accepts_merge_of_maps_written_by_paired_elements(self) -> None:
+        assert _engine_equal(
+            """
+            Game Left() {
+                Map<Int, Int> A;
+                Map<Int, Int> B;
+                Int ell;
+                Int Put(Int v) {
+                    ell = ell + 1;
+                    A[ell] = v;
+                    B[ell] = v;
+                    return ell;
+                }
+                Int? Get(Int k) {
+                    if (k in B) {
+                        return B[k];
+                    }
+                    return None;
+                }
+            }
+            """,
+            """
+            Game Right() {
+                Map<Int, Int> A;
+                Int ell;
+                Int Put(Int v) {
+                    ell = ell + 1;
+                    A[ell] = v;
+                    return ell;
+                }
+                Int? Get(Int k) {
+                    if (k in A) {
+                        return A[k];
+                    }
+                    return None;
+                }
+            }
+            """,
+        )
+
+    def test_rejects_merge_when_index_reads_the_field(self) -> None:
+        """`Put(5)` on empty maps sets A[0] and B[1], so `Get(1)` returns 5
+        in Left and None in Right."""
+        game = """
+            Game {side}() {{
+                Map<Int, Int> A;
+                Map<Int, Int> B;
+                Void Put(Int v) {{
+                    A[|A|] = v;
+                    B[|A|] = v;
                 }}
                 Int? Get(Int k) {{
                     if (k in {read}) {{

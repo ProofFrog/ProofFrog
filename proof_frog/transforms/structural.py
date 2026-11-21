@@ -114,10 +114,13 @@ def _initializer_mismatch(field: frog_ast.Field, other: frog_ast.Field) -> str |
 
 
 def _describe_unpaired_write(
-    statement: frog_ast.Statement, pair: tuple[str, str]
+    statement: frog_ast.Statement,
+    pair: tuple[str, str],
+    why_unpaired: str | None = None,
 ) -> str:
     """Say what *statement*, a write the pairing does not model, does to
-    the fields in *pair*, for a near-miss message."""
+    the fields in *pair*, for a near-miss message.  *why_unpaired* says why
+    an element write that could pair did not."""
     if isinstance(statement, frog_ast.NumericFor):
         return f"a loop binder rebinds '{statement.name}'"
     if isinstance(statement, frog_ast.GenericFor):
@@ -139,6 +142,8 @@ def _describe_unpaired_write(
     if statement.the_type is not None:
         return f"a local declaration rebinds '{base}'"
     if not isinstance(statement.var, frog_ast.Variable):
+        if why_unpaired is not None:
+            return f"an element write changes '{base}' alone: {why_unpaired}"
         return f"an element write changes '{base}' alone"
     return f"an exclusion sample changes '{base}' alone"
 
@@ -183,13 +188,17 @@ def remove_duplicate_fields(
                 duplicated_statements = same_field_visitor.visit(game)
                 # Reported only where every other write pairs.
                 if same_field_visitor.are_same and same_field_visitor.unpaired_writes:
-                    write, method = same_field_visitor.unpaired_writes[0]
+                    write, method, element_miss = same_field_visitor.unpaired_writes[0]
+                    why_unpaired, suggestion = element_miss or (
+                        None,
+                        "Use one field in place of both if they always hold "
+                        "the same value",
+                    )
                     _report_unmerged_fields(
                         ctx,
                         (field, other_field),
-                        _describe_unpaired_write(write, pair),
-                        "Use one field in place of both if they always hold "
-                        "the same value",
+                        _describe_unpaired_write(write, pair, why_unpaired),
+                        suggestion,
                         method,
                     )
                 if duplicated_statements is not None:

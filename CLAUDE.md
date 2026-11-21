@@ -202,6 +202,7 @@ The essentials for writing correct FrogLang:
 - ModInt arithmetic whose terms cancel (`sk + ((d + H(x)) - H(x))` -> `sk + d`, also through a pure local), a uniform ModInt used only inside copies of one `e + u` in a single statement (-> `u`), a product sample used only through constant indices (-> independent samples), and `(a * b)^e` -> `a^e * b^e` in a group
 - Branch folding with Initialize facts: `if (P) { return X; } return Y;` → `return Y;` when Z3 proves `P ⇒ (X ↔ Y)`, using the definitions of fields assigned once in Initialize (calls or comparisons over values fixed from then on) and the injectivity of `injective` methods (`FoldEquivalentReturnBranch`)
 - An unwritten collection is empty: for a `Set` or `Map` field with no initializer whose every occurrence is `e in F` (with `e` call-free) or `|F|`, the tests fold to `false` and the size to `0` (`EmptyCollectionField`)
+- Two fields that always hold the same value become one: they start equal and every write to one is followed, in the same block, by the same write to the other, whole (`f1 = e; f2 = e;`, or `f2 = f1;` after a call or sample) or one element (`A[i] = v; B[i] = v;`, call-free, `i` and `v` reading neither field), with nothing in between that can return, reads the field not yet written, or changes what the value reads (`RemoveDuplicateFields`, via `visitors.SameFieldVisitor`). So a reduction's copy of a challenger's table, written entry by entry alongside it, merges into the table
 
 ### Guidelines for creating FrogLang files
 

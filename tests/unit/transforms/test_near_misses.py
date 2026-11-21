@@ -4057,8 +4057,31 @@ def test_duplicate_fields_near_miss_on_initial_values(fields: str, why: str) -> 
         ("Map<Int, Int> A; Map<Int, Int> B;", "A[k] = 1;", "an element write"),
         (
             "Map<Int, Int> A; Map<Int, Int> B;",
-            "A[k] = 1; B[k] = 1;",
-            "an element write changes 'A' alone",
+            "A[k] = 1; B[k] = 2;",
+            "an element write changes 'A' alone: no write 'B[k] = 1;' follows "
+            "it in the same block",
+        ),
+        (
+            "Map<Int, Int> A; Map<Int, Int> B;",
+            "A[k] = 1; k = 2; B[k] = 1;",
+            "an element write changes 'A' alone: a statement before "
+            "'B[k] = 1;' changes 'k', which the write reads",
+        ),
+        (
+            "Map<Int, Int> A; Map<Int, Int> B;",
+            "A[k] = 1; Int y = |B|; B[k] = 1;",
+            "an element write changes 'A' alone: a statement before "
+            "'B[k] = 1;' uses 'A' or 'B'",
+        ),
+        (
+            "Map<Int, Int> A; Map<Int, Int> B;",
+            "A[|A|] = 1; B[|A|] = 1;",
+            "an element write changes 'A' alone: its index or value reads 'A'",
+        ),
+        (
+            "Map<Int, Int> A; Map<Int, Int> B;",
+            "A[k] = S.F(); B[k] = S.F();",
+            "an element write changes 'A' alone: it makes a call",
         ),
         (
             "Set<Int> S; BitString<8> A; BitString<8> B;",
@@ -4098,10 +4121,37 @@ def test_duplicate_fields_near_miss_on_unpaired_write(
 
 
 @pytest.mark.parametrize(
+    "body, suggestion",
+    [
+        ("A[k] = 1; k = 2; B[k] = 1;", "Write the same element of the other field"),
+        ("A[k] = 1;", "Write the same element of the other field"),
+        ("A[k] = S.F(); B[k] = S.F();", "Store the call's result in a local"),
+        ("A[|A|] = 1; B[|A|] = 1;", "Read the field into a local"),
+    ],
+)
+def test_duplicate_fields_near_miss_suggestion_for_element_write(
+    body: str, suggestion: str
+) -> None:
+    misses = _duplicate_fields_misses(f"""
+        Game G() {{
+            Map<Int, Int> A;
+            Map<Int, Int> B;
+            Void Put(Int k) {{
+                {body}
+            }}
+        }}
+        """)
+    assert len(misses) == 1
+    assert misses[0].suggestion is not None
+    assert suggestion in misses[0].suggestion
+
+
+@pytest.mark.parametrize(
     "fields, body",
     [
         # Merged.
         ("Int A = 0; Int B = 0;", "A = A + k; B = B + k;"),
+        ("Map<Int, Int> A; Map<Int, Int> B;", "A[k] = 1; B[k] = 1;"),
         # A write to one field only.
         ("Int A = 0; Int B = 1;", "A = k;"),
         ("Map<Int, Int> A; Map<Int, Int> B;", "A[k] = 1; B = A;"),

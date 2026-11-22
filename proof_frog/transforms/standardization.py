@@ -23,14 +23,17 @@ from ..visitors import (
     BlockTransformer,
     SearchVisitor,
     Transformer,
+    lvalue_base_name,
+    reassigns_or_rebinds,
     referenced_variable_names,
+    referenced_variables_in_order,
     rename_value_references,
     type_position_names,
     walk_children,
 )
 from ._base import NearMiss, TransformPass, PipelineContext
 from ._ordering import node_sort_key
-from .alpha_rename import _RefRewriter
+from .alpha_rename import _RefRewriter, block_binder_names
 
 # ---------------------------------------------------------------------------
 # Transformer class (moved from visitors.py)
@@ -1116,23 +1119,114 @@ class BubbleSortFieldAssignments(TransformPass):
         return dependencies.BubbleSortFieldAssignment().transform(game)
 
 
+def _abstract_names(
+    key: tuple,  # type: ignore[type-arg]
+    names: set[str],
+    mapping: dict[str, str],
+    fixed: dict[str, str],
+) -> tuple:  # type: ignore[type-arg]
+    """*key* (a :func:`node_sort_key` tuple) with each string in *names*
+    replaced by ``@<k>``, numbering the names in order of appearance, and
+    each string in *fixed* by its value."""
+    abstracted: list[object] = []
+    for item in key:
+        if isinstance(item, tuple):
+            abstracted.append(_abstract_names(item, names, mapping, fixed))
+        elif isinstance(item, str) and item in names:
+            if item not in mapping:
+                mapping[item] = f"@{len(mapping)}"
+            abstracted.append(mapping[item])
+        elif isinstance(item, str) and item in fixed:
+            abstracted.append(fixed[item])
+        else:
+            abstracted.append(item)
+    return tuple(abstracted)
+
+
+def _written_names(statement: frog_ast.Statement) -> set[str]:
+    """The base names of every assignment and sample target in *statement*,
+    at any depth (``M`` for ``M[k] = v``). A tuple target is left out: the
+    result only orders statements, so a missing name costs canonicity, not
+    soundness."""
+    names: set[str] = set()
+
+    def _collect(node: frog_ast.ASTNode) -> bool:
+        if isinstance(
+            node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+        ):
+            base = lvalue_base_name(node.var)
+            if base is not None:
+                names.add(base)
+        return False
+
+    SearchVisitor(_collect).visit(statement)
+    return names
+
+
+def _binder_counts(block: frog_ast.Block) -> dict[str, int]:
+    """How many times each name is bound in *block*, at any depth: bare
+    declarations, typed assignments and samples, and ``for`` binders."""
+    counts: dict[str, int] = {}
+
+    def _count(node: frog_ast.ASTNode) -> bool:
+        name: str | None = None
+        if isinstance(node, frog_ast.VariableDeclaration):
+            name = node.name
+        elif isinstance(node, frog_ast.NumericFor):
+            name = node.name
+        elif isinstance(node, frog_ast.GenericFor):
+            name = node.var_name
+        elif (
+            isinstance(
+                node, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            )
+            and node.the_type is not None
+            and isinstance(node.var, frog_ast.Variable)
+        ):
+            name = node.var.name
+        if name is not None:
+            counts[name] = counts.get(name, 0) + 1
+        return False
+
+    SearchVisitor(_count).visit(block)
+    return counts
+
+
 class _StabilizeIndependentStatementsTransformer(BlockTransformer):
-    """Sorts independent assignment/sample statements by their value expression.
+    """Sorts independent statements of a block into a canonical order.
 
     After variable standardization, two semantically equivalent games may still
     differ in the order of independent statements (e.g.,
     ``v1 = KEM2.KeyGen(); v2 = KEM1.KeyGen()`` vs.
-    ``v1 = KEM1.KeyGen(); v2 = KEM2.KeyGen()``).  This transform sorts such
-    independent pairs by a key derived from the value expression (with the
-    assigned variable name replaced by a placeholder), producing a canonical
-    order.  A subsequent ``VariableStandardize`` pass re-normalises variable
-    names after the reordering.
+    ``v1 = KEM1.KeyGen(); v2 = KEM2.KeyGen()``).  This transform sorts them
+    with a topological sort of the block's dependency graph
+    (:func:`dependencies.generate_dependency_graph`, the graph Topological
+    Sorting uses), choosing among the statements free to go next by a key
+    that does not depend on the order the code arrived in. A subsequent
+    ``VariableStandardize`` pass re-normalises variable names after the
+    reordering.
 
-    Only adjacent typed declaration pairs whose values differ and that have no
-    dependency between them are swapped.
+    The sorted statements are the typed declarations, assignments and
+    samples (keyed by return position, then by value expression) and the
+    ``if`` statements that contain no ``return`` (keyed by their structure,
+    with the names they write or bind replaced by placeholders numbered in
+    order of appearance, since those names come from the order itself).
+    Every other statement (``for``, an ``if`` holding a ``return``, a bare
+    declaration, a ``return``) keeps its position, and the sorted statements
+    fill the positions they held, never crossing one of the fixed statements
+    that depends on them or that they depend on.
+
+    Then each bare declaration ``T v;`` moves down to just before the first
+    statement that mentions ``v`` (several before one statement are ordered
+    by first appearance in it), so that ``VariableStandardize`` names a
+    result variable after the statement that computes it. A declaration is
+    not moved past a statement that writes a name in its type, nor when ``v``
+    is bound more than once in the block or its type mentions a name the
+    block binds.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, ctx: PipelineContext | None = None) -> None:
+        self.ctx = ctx
         self.fields: list[str] = []
         # Names bound to runtime values anywhere in the game, so the
         # dependency graph can tell a draw that may not complete (from a set
@@ -1326,12 +1420,32 @@ class _StabilizeIndependentStatementsTransformer(BlockTransformer):
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         stmts = list(block.statements)
+        movable = self._movable_declarations(stmts)
+        # The bare declarations go to the top while the other statements are
+        # sorted, so that where an earlier run left one does not pin the
+        # statements around it, and then down to their first use.
+        new_stmts = self._sink_bare_declarations(
+            self._sorted_statements(self._lift_bare_declarations(stmts, movable)),
+            movable,
+        )
+        if new_stmts == stmts:
+            return block
+        return frog_ast.Block(new_stmts)
+
+    def _sorted_statements(
+        self, stmts: list[frog_ast.Statement]
+    ) -> list[frog_ast.Statement]:
+        block = frog_ast.Block(stmts)
         # Collect sortable statement indices.  If fewer than two are
         # sortable, no reordering is possible and we can skip the
         # (expensive) dependency-graph construction.
-        sortable_indices = [i for i, s in enumerate(stmts) if self._is_typed_decl(s)]
+        sortable_indices = [
+            i
+            for i, s in enumerate(stmts)
+            if self._is_typed_decl(s) or self._is_sortable_if(s)
+        ]
         if len(sortable_indices) < 2:
-            return block
+            return stmts
         # The graph pins a draw whose domain may be empty relative to every
         # statement containing a return, so the reordering below never moves
         # it across an `if` that returns (F-327).
@@ -1414,6 +1528,9 @@ class _StabilizeIndependentStatementsTransformer(BlockTransformer):
                 s, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
             ) and isinstance(s.var, frog_ast.Variable):
                 name = s.var.name
+            if isinstance(s, frog_ast.IfStatement):
+                # After the declarations free to go at the same point.
+                return (rank, 2, self._if_key(s, placed_writers), "", i)
             is_field = name in self.fields
             if is_field:
                 # Field name is canonical — use it as primary tiebreaker
@@ -1422,12 +1539,21 @@ class _StabilizeIndependentStatementsTransformer(BlockTransformer):
             # is secondary (will be restandardised by the next pass).
             return (rank, 1, self._value_key(stmts[i]), name, i)
 
+        # The position in the sorted order of the last placed statement that
+        # writes each local: an if is keyed by these positions rather than
+        # by the names it reads, which still reflect the input order.
+        placed_writers: dict[str, int] = {}
         heap = [_heap_key(i) for i in sortable_indices if in_deg[i] == 0]
         heapq.heapify(heap)
         topo_order: list[int] = []
         while heap:
-            _, _, _, _, idx = heapq.heappop(heap)
+            popped = heapq.heappop(heap)
+            idx = popped[-1]
+            if popped[1] == 2 and heap and heap[0][:3] == popped[:3]:
+                self._note_tied_ifs()
             topo_order.append(idx)
+            for written in _written_names(stmts[idx]) - set(self.fields):
+                placed_writers[written] = len(topo_order) - 1
             for j in adj[idx]:
                 in_deg[j] -= 1
                 if in_deg[j] == 0:
@@ -1439,14 +1565,148 @@ class _StabilizeIndependentStatementsTransformer(BlockTransformer):
         new_stmts = list(stmts)
         for pos, orig_idx in zip(positions, topo_order):
             new_stmts[pos] = stmts[orig_idx]
+        return new_stmts
 
-        if new_stmts == stmts:
-            return block
-        return frog_ast.Block(new_stmts)
+    @staticmethod
+    def _is_sortable_if(stmt: frog_ast.Statement) -> bool:
+        return (
+            isinstance(stmt, frog_ast.IfStatement)
+            and SearchVisitor(
+                lambda node: isinstance(node, frog_ast.ReturnStatement)
+            ).visit(stmt)
+            is None
+        )
+
+    def _if_key(
+        self, stmt: frog_ast.IfStatement, placed_writers: dict[str, int]
+    ) -> tuple:  # type: ignore[type-arg]
+        """Structural key of *stmt*: every local it writes or binds becomes a
+        placeholder numbered in order of appearance, and every other local
+        that a placed statement writes becomes that statement's position in
+        the sorted order (*placed_writers*)."""
+        own = set(_written_names(stmt))
+        for branch in stmt.blocks:
+            own.update(block_binder_names(branch))
+        own -= set(self.fields)
+        placed = {
+            name: f"#{position}"
+            for name, position in placed_writers.items()
+            if name not in own
+        }
+        return _abstract_names(node_sort_key(stmt), own, {}, placed)
+
+    def _note_tied_ifs(self) -> None:
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Stabilize Independent Statements",
+                reason=(
+                    "Two independent if statements have the same structure "
+                    "up to the names they write, so their order follows the "
+                    "input"
+                ),
+                location=None,
+                suggestion=(
+                    "Make the two branches differ in what they read, or "
+                    "write them in the same order on both sides of the hop"
+                ),
+                variable=None,
+                method=None,
+            )
+        )
+
+    @staticmethod
+    def _movable_declarations(
+        stmts: list[frog_ast.Statement],
+    ) -> list[frog_ast.VariableDeclaration]:
+        """The bare declarations of *stmts* whose name nothing else in the
+        block binds and whose type mentions no name the block binds."""
+        binder_counts = _binder_counts(frog_ast.Block(stmts))
+        bound = set(binder_counts)
+        return [
+            statement
+            for statement in stmts
+            if isinstance(statement, frog_ast.VariableDeclaration)
+            and binder_counts[statement.name] == 1
+            and not referenced_variable_names(statement.type) & bound
+        ]
+
+    @staticmethod
+    def _lift_bare_declarations(
+        stmts: list[frog_ast.Statement],
+        movable: list[frog_ast.VariableDeclaration],
+    ) -> list[frog_ast.Statement]:
+        """*stmts* with each movable bare declaration that no earlier
+        statement mentions (by its name, or by writing a name in its type)
+        moved to the top, in their original order."""
+        lifted: list[frog_ast.Statement] = []
+        for index, statement in enumerate(stmts):
+            if not any(statement is declaration for declaration in movable):
+                continue
+            assert isinstance(statement, frog_ast.VariableDeclaration)
+            type_names = referenced_variable_names(statement.type)
+            if not any(
+                statement.name in referenced_variable_names(earlier)
+                or (type_names and reassigns_or_rebinds(type_names, earlier))
+                for earlier in stmts[:index]
+            ):
+                lifted.append(statement)
+        return lifted + [
+            statement
+            for statement in stmts
+            if not any(statement is declaration for declaration in lifted)
+        ]
+
+    def _sink_bare_declarations(
+        self,
+        stmts: list[frog_ast.Statement],
+        declarations: list[frog_ast.VariableDeclaration],
+    ) -> list[frog_ast.Statement]:
+        """*stmts* with each of *declarations* moved down to just before the
+        first statement that mentions its name."""
+        movable = [
+            index
+            for index, statement in enumerate(stmts)
+            if any(statement is declaration for declaration in declarations)
+        ]
+        if not movable:
+            return stmts
+        rest = [s for index, s in enumerate(stmts) if index not in set(movable)]
+        groups: dict[int, list[tuple[int, int, frog_ast.Statement]]] = {}
+        for index in movable:
+            declaration = stmts[index]
+            assert isinstance(declaration, frog_ast.VariableDeclaration)
+            type_names = referenced_variable_names(declaration.type)
+            anchor = sum(1 for other in range(index) if other not in movable)
+            target = anchor
+            order = -1
+            for position in range(anchor, len(rest)):
+                candidate = rest[position]
+                if declaration.name in referenced_variable_names(candidate):
+                    target = position
+                    order = [
+                        variable.name
+                        for variable in referenced_variables_in_order(candidate)
+                    ].index(declaration.name)
+                    break
+                if type_names and reassigns_or_rebinds(type_names, candidate):
+                    target = position
+                    break
+            groups.setdefault(target, []).append((order, index, declaration))
+        result: list[frog_ast.Statement] = []
+        for position in range(len(rest) + 1):
+            for _, _, declaration in sorted(
+                groups.get(position, []), key=lambda entry: entry[:2]
+            ):
+                result.append(declaration)
+            if position < len(rest):
+                result.append(rest[position])
+        return result
 
 
 class StabilizeIndependentStatements(TransformPass):
     name = "Stabilize Independent Statements"
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
-        return _StabilizeIndependentStatementsTransformer().transform(game)
+        return _StabilizeIndependentStatementsTransformer(ctx).transform(game)

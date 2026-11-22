@@ -5768,6 +5768,47 @@ def test_no_near_miss_merge_bare_declaration_when_no_merge_was_close(
     assert not _merge_bare_declaration_misses(body)
 
 
+# ---------------------------------------------------------------------------
+# Stabilize Independent Statements
+# ---------------------------------------------------------------------------
+
+
+def test_near_miss_stabilize_tied_independent_ifs() -> None:
+    """Two independent ifs with the same structure up to the names they
+    write keep the input order, which the near miss says."""
+    from proof_frog.transforms.standardization import StabilizeIndependentStatements
+
+    game = frog_parser.parse_game(
+        "Game T() {\n Bool f(Int p) {\n"
+        "if (p == 0) { a = 1; } if (p == 0) { b = 1; } return a == b;\n}\n}"
+    )
+    ctx = _make_ctx()
+    StabilizeIndependentStatements().apply(game, ctx)
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Stabilize Independent Statements"
+    ]
+    assert len(misses) == 1
+    assert "same structure" in misses[0].reason
+
+
+def test_no_near_miss_stabilize_distinct_ifs() -> None:
+    from proof_frog.transforms.standardization import StabilizeIndependentStatements
+
+    game = frog_parser.parse_game(
+        "Game T() {\n Bool f(Int p, Int q) {\n"
+        "if (q == 0) { a = 1; } if (p == 0) { b = 1; } return a == b;\n}\n}"
+    )
+    ctx = _make_ctx()
+    StabilizeIndependentStatements().apply(game, ctx)
+    assert not [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Stabilize Independent Statements"
+    ]
+
+
 def test_near_miss_forward_literal_field_write_keeps_modint_zero() -> None:
     # F-379: the Int literal 0 for a ModInt field is not put into a power's
     # base, where it would make an Int power.

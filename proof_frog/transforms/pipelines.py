@@ -272,4 +272,9 @@ STANDARDIZATION_PIPELINE: list[TransformPass] = [
     # Re-number locals so canonical forms with the same final declaration
     # order use the same names.
     VariableStandardize(),
+    # That renumbering can leave the operands of == and != out of order
+    # again (StabilizeIndependentStatements moved two if statements whose
+    # results a final `r1 == r2` compares). A local is declared before any
+    # expression reads it, so swapping operands changes no name.
+    NormalizeCommutativeChains(),
 ]

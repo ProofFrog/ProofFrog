@@ -1,0 +1,19 @@
+// Attack g5: a game-level Set alias field whose value is a value
+// (F = c, c : BitString<8>?), not a type. The type checker reads F as the
+// type of c, so the adversary may pass None to Test; the engine reads the
+// instantiated parameter type as the name of the argument, never None.
+// UNSOUND if a proof of Left == Right is accepted: Test(None) returns true
+// in Left, false in Right.
+Game Left(BitString<8>? c) {
+    Set F = c;
+    Bool Test(F y) {
+        return y == None;
+    }
+}
+Game Right(BitString<8>? c) {
+    Set F = c;
+    Bool Test(F y) {
+        return false;
+    }
+}
+export as G5;

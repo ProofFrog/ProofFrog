@@ -1,0 +1,16 @@
+// Attack v4: a scheme whose element set is defined as a *value* parameter
+// (c : BitString<8>?), not a type. The type checker reads Elem as the type of
+// c, BitString<8>?; after instantiation the engine sees the name of the
+// argument, which is not syntactically optional.
+import 'Checker.primitive';
+Scheme ValCheck(BitString<8>? c) extends Checker {
+    Set Elem = c;
+
+    Bool Check(Elem x) {
+        return this.IsNone(x);
+    }
+
+    Bool IsNone(BitString<8>? v) {
+        return v == None;
+    }
+}

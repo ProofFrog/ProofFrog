@@ -735,6 +735,23 @@ CASES = [
      "with a scheme whose Elem is BitString<8>?"),
     ("F-422", "r6.proof", "type_error", "type checker",
      "the same through a forwarding scheme"),
+    ("F-423", "c7.proof", "type_error", "type checker",
+     "F-422 bypass: requires se subsets so; with value sides "
+     "se : Set<P.Elem> and so : Set<BitString<8>?> paired their types, so a "
+     "None element reached a P.Elem variable"),
+    ("F-423", "c7g.proof", "type_error", "type checker",
+     "the same with an else-less guard (accepted by v0.6.0)"),
+    ("F-423", "g6.proof", "type_error", "type checker",
+     "a game parameter c : BitString<8>? used as the type of a method "
+     "parameter (c y), read by the engine as an abstract never-None type"),
+    ("F-423", "g5.proof", "type_error", "type checker",
+     "a game's Set alias of a value (Set F = c;)"),
+    ("F-423", "v1.proof", "type_error", "type checker",
+     "a let: Set alias of a value (Set K = c;)"),
+    ("F-423", "v2.proof", "type_error", "type checker",
+     "a primitive's member alias of a value parameter (Set Elem = c;)"),
+    ("F-423", "v4.proof", "type_error", "type checker",
+     "a scheme's member alias of a value parameter (Set Elem = c;)"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),
@@ -944,6 +961,33 @@ TYPE_ERROR = {
         "error: The requirement K subsets BitString<8>? involves the optional"
         " type BitString<8>?: a type requirement may not involve an optional"
         " type"
+    ),
+    ("F-423", "c7.proof"): (
+        "error: The requirement se subsets so0 relates se, a value of type"
+        " Set<K>: a type requirement relates types"
+    ),
+    ("F-423", "c7g.proof"): (
+        "error: The requirement se subsets so0 relates se, a value of type"
+        " Set<K>: a type requirement relates types"
+    ),
+    ("F-423", "g6.proof"): (
+        "error: c0 is a value of type BitString<8>?, not a type"
+    ),
+    ("F-423", "g5.proof"): (
+        "error: The set F is defined as c0: c0 is a value of type"
+        " BitString<8>?, not a type"
+    ),
+    ("F-423", "v1.proof"): (
+        "error: The set K is defined as c: c is a value of type BitString<8>?,"
+        " not a type"
+    ),
+    ("F-423", "v2.proof"): (
+        "error: The set Elem is defined as c0: c0 is a value of type"
+        " BitString<8>?, not a type"
+    ),
+    ("F-423", "v4.proof"): (
+        "error: The set Elem is defined as c0: c0 is a value of type"
+        " BitString<8>?, not a type"
     ),
     ("F-421", "ng.proof"): (
         "error: The set E is defined as None, which is a value, not a type"

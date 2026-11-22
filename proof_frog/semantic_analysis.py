@@ -202,6 +202,37 @@ class VariableTypeVisitor(visitors.Visitor[None]):
         self.instantiation_namespace: frog_ast.Namespace = (
             instantiation_namespace if instantiation_namespace is not None else {}
         )
+        # F-423: the names declared as types (the bare kind `Set`: a `Set K`
+        # parameter, a `Set K = ...;` alias, a `let:` `Set K;`), each set with
+        # the scope frame that declares them. Every other declaration declares
+        # a value, and the name map alone cannot tell the two apart: a value
+        # `K d;` and an alias `Set D = K;` are both recorded as `K`.
+        self.type_name_frames: list[tuple[dict[str, PossibleType], set[str]]] = []
+
+    def _declare_type_name(self, name: str) -> None:
+        frame = self.variable_type_map_stack[-1]
+        for declared_in, names in self.type_name_frames:
+            if declared_in is frame:
+                names.add(name)
+                return
+        self.type_name_frames.append((frame, {name}))
+
+    def type_names_declared_in(self, frame: dict[str, PossibleType]) -> set[str]:
+        """The names *frame* declares as types (F-423)."""
+        for declared_in, names in self.type_name_frames:
+            if declared_in is frame:
+                return names
+        return set()
+
+    def names_a_value(self, name: str) -> bool:
+        """True if the innermost declaration of *name* in scope declares a
+        value: anything but a bare `Set` parameter, a `Set` alias or a `let:`
+        `Set` entry (F-423). An imported primitive, scheme or game and an
+        unknown name are not values here."""
+        for frame in reversed(self.variable_type_map_stack):
+            if name in frame:
+                return name not in self.type_names_declared_in(frame)
+        return False
 
     def instantiate_and_get_type(
         self,
@@ -248,10 +279,13 @@ class VariableTypeVisitor(visitors.Visitor[None]):
                 if member is not None:
                     resolved_type = member  # type: ignore[assignment]
         self.variable_type_map_stack[-1][param.name] = resolved_type
+        if param.type == frog_ast.SetType():
+            self._declare_type_name(param.name)
 
     def leave_field(self, field: frog_ast.Field) -> None:
         was_scheme = False
         if isinstance(field.type, frog_ast.SetType) and not field.type.parameterization:
+            self._declare_type_name(field.name)
             the_type = (
                 field.value
                 if isinstance(field.value, frog_ast.Variable)
@@ -1589,6 +1623,17 @@ def _type_children(the_type: frog_ast.ASTNode) -> list[frog_ast.ASTNode]:
     return []
 
 
+def _type_leaves(the_type: frog_ast.ASTNode) -> list[frog_ast.ASTNode]:
+    """The names (``Variable`` or ``FieldAccess``) *the_type* is built from,
+    outside lengths, moduli, sizes and groups (F-423)."""
+    if isinstance(the_type, (frog_ast.Variable, frog_ast.FieldAccess)):
+        return [the_type]
+    leaves: list[frog_ast.ASTNode] = []
+    for child in _type_children(the_type):
+        leaves.extend(_type_leaves(child))
+    return leaves
+
+
 def _holds_optional(the_type: PossibleType | frog_ast.ASTNode) -> bool:
     """True if *the_type* is, or is built from, an optional type or None."""
     if isinstance(the_type, (frog_ast.OptionalType, frog_ast.NoneExpression)):
@@ -2045,6 +2090,72 @@ class CheckTypeVisitor(VariableTypeVisitor):
                     return found
         return None
 
+    def _requirement_value_side(
+        self, side: frog_ast.Type, scheme: Optional[frog_ast.Scheme]
+    ) -> Optional[tuple[frog_ast.ASTNode, PossibleType]]:
+        """A name in *side* of a type requirement that denotes a value other
+        than an ``Int``, with its declared type (F-422, F-423). The scheme's
+        own parameters and fields are read from the scheme, since they are not
+        yet in scope when the requirements are read. An ``Int`` value is let
+        through: ``requires G.lambda == lambda;`` relates lengths."""
+        params = {p.name: p.type for p in scheme.parameters} if scheme else {}
+        fields = {f.name: f.type for f in scheme.fields} if scheme else {}
+        for leaf in _type_leaves(side):
+            declared: PossibleType = None
+            if isinstance(leaf, frog_ast.Variable):
+                own = fields.get(leaf.name, params.get(leaf.name))
+                if own is not None:
+                    declared = None if own == frog_ast.SetType() else own
+                elif self.names_a_value(leaf.name):
+                    declared = self.get_type(leaf.name)
+            else:
+                found = self._value_in_type(leaf)
+                declared = None if found is None else found[1]
+            if declared is not None and not isinstance(declared, frog_ast.IntType):
+                return leaf, declared
+        return None
+
+    def _value_in_type(
+        self, the_type: PossibleType | frog_ast.ASTNode
+    ) -> Optional[tuple[frog_ast.ASTNode, PossibleType]]:
+        """The first name *the_type* is built from (outside lengths, moduli,
+        sizes and groups) that denotes a value, with the value's declared type
+        (F-423). A name declared with the bare kind ``Set``, a member alias
+        ``E.Key`` and a primitive, scheme or game name are types."""
+        if not isinstance(the_type, frog_ast.ASTNode):
+            return None
+        for leaf in _type_leaves(the_type):
+            if isinstance(leaf, frog_ast.Variable):
+                if self.names_a_value(leaf.name):
+                    return leaf, self.get_type(leaf.name)
+            elif isinstance(leaf, frog_ast.FieldAccess) and isinstance(
+                leaf.the_object, frog_ast.Variable
+            ):
+                owner = self.get_type(leaf.the_object.name)
+                if isinstance(owner, frog_ast.Type):
+                    owner = self._resolve_type_alias(owner)
+                if (
+                    isinstance(owner, visitors.InstantiableType)
+                    and leaf.name in owner.members
+                    and leaf.name not in owner.set_aliases
+                ):
+                    return leaf, owner.members[leaf.name]  # type: ignore[return-value]
+        return None
+
+    def _refuse_value_as_type(
+        self, location: frog_ast.ASTNode, the_type: PossibleType | frog_ast.ASTNode
+    ) -> bool:
+        """Refuse a value name where a type is expected (F-423): with
+        ``BitString<8>? c``, a parameter ``c y`` would have the type of ``c``,
+        while the engine reads ``c`` as an abstract type, whose values are
+        never None. True if refused."""
+        found = self._value_in_type(the_type)
+        if found is None:
+            return False
+        leaf, declared = found
+        self.print_error(location, f"{leaf} is a value of type {declared}, not a type")
+        return True
+
     def _extract_requires_pairs(
         self, expr: frog_ast.Expression, scheme: Optional[frog_ast.Scheme] = None
     ) -> None:
@@ -2073,6 +2184,19 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 self.expression_equality_pairs.append((left, right))
                 return
             if isinstance(left, frog_ast.Type) and isinstance(right, frog_ast.Type):
+                # F-422, F-423: a type requirement relates types. A value name
+                # was read as the value's type (`requires se subsets so;` with
+                # `so : Set<BitString<8>?>`), with the effect below.
+                for side in (left, right):
+                    value = self._requirement_value_side(side, scheme)
+                    if value is not None:
+                        self.print_error(
+                            expr,
+                            f"The requirement {expr} relates {value[0]}, a value"
+                            f" of type {value[1]}: a type requirement relates"
+                            " types",
+                        )
+                        return
                 # F-422: a pair makes its two types compatible both ways, so a
                 # requirement with an optional side would let a value that may
                 # be None into a variable of an abstract set, which the engine
@@ -2159,6 +2283,19 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 numeric_for, f"End expression has type {end_type}, expected Int"
             )
 
+    def visit_generic_for(self, generic_for: frog_ast.GenericFor) -> None:
+        self._refuse_value_as_type(generic_for, generic_for.var_type)
+        super().visit_generic_for(generic_for)
+
+    def leave_parameter(self, param: frog_ast.Parameter) -> None:
+        self._refuse_value_as_type(param, param.type)
+
+    def visit_variable_declaration(
+        self, declaration: frog_ast.VariableDeclaration
+    ) -> None:
+        self._refuse_value_as_type(declaration, declaration.type)
+        super().visit_variable_declaration(declaration)
+
     def leave_generic_for(self, generic_for: frog_ast.GenericFor) -> None:
         super().leave_generic_for(generic_for)
         over_type = self.get_type_from_ast(generic_for.over)
@@ -2234,6 +2371,7 @@ class CheckTypeVisitor(VariableTypeVisitor):
         parameter_names = [param.name for param in method_signature.parameters]
         if len(parameter_names) != len(set(parameter_names)):
             self.print_error(method_signature, "Duplicated parameter name")
+        self._refuse_value_as_type(method_signature, method_signature.return_type)
 
     def visit_step(self, step: frog_ast.Step) -> None:
         if step.adversary.name not in self.import_namespace:
@@ -2900,6 +3038,20 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 " not a type",
             )
             return
+        if field.type == frog_ast.SetType():
+            # F-423: an alias names a type; with `BitString<8>? c`, `Set K =
+            # c;` made K stand for the type of c, while the engine reads K
+            # as an abstract set, whose values are never None.
+            found = self._value_in_type(field.value)
+            if found is not None:
+                self.print_error(
+                    field,
+                    f"The set {field.name} is defined as {field.value}:"
+                    f" {found[0]} is a value of type {found[1]}, not a type",
+                )
+                return
+        elif self._refuse_value_as_type(field, field.type):
+            return
         if field.value:
             the_type = self.get_type_from_ast(field.value)
             if not self.check_types(field.type, the_type):
@@ -3005,6 +3157,10 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
     def leave_assignment(self, assignment: frog_ast.Assignment) -> None:
         super().leave_assignment(assignment)
+        if assignment.the_type is not None and self._refuse_value_as_type(
+            assignment, assignment.the_type
+        ):
+            return
         expected_type = (
             assignment.the_type
             if assignment.the_type is not None
@@ -3242,6 +3398,11 @@ class CheckTypeVisitor(VariableTypeVisitor):
         found_type = self.get_type_from_ast(sample.sampled_from)
         self._check_samplable(sample, found_type)
         self._check_domain_is_a_type(sample, sample.sampled_from)
+        if (
+            sample.the_type is not None
+            and self._refuse_value_as_type(sample, sample.the_type)
+        ) or self._refuse_value_as_type(sample, sample.sampled_from):
+            return
         if not self.check_types(expected_type, found_type):
             self.print_error(
                 sample,
@@ -3252,6 +3413,11 @@ class CheckTypeVisitor(VariableTypeVisitor):
         super().leave_unique_sample(unique_sample)
         self._check_samplable(unique_sample, unique_sample.sampled_from)
         self._check_domain_is_a_type(unique_sample, unique_sample.sampled_from)
+        if (
+            unique_sample.the_type is not None
+            and self._refuse_value_as_type(unique_sample, unique_sample.the_type)
+        ) or self._refuse_value_as_type(unique_sample, unique_sample.sampled_from):
+            return
         # Check that unique_set has type Set<D> and sampled_from has type D
         set_type = self.get_type_from_ast(unique_sample.unique_set)
         if not isinstance(set_type, frog_ast.SetType):
@@ -3490,6 +3656,17 @@ class CheckTypeVisitor(VariableTypeVisitor):
             self.subsets_pairs,
         )
         nested.stripped_adversaries = self.stripped_adversaries
+        # The copied frames declare the same type names as the frames they
+        # copy (F-423): the caller passes copies of this visitor's frames.
+        originals = (
+            self.variable_type_map_stack
+            if variable_type_map_stack is not None
+            else self.variable_type_map_stack[:1]
+        )
+        nested.type_name_frames = [
+            (copied, set(self.type_names_declared_in(original)))
+            for copied, original in zip(stack, originals)
+        ]
         nested.visit(instantiated_scheme)
 
         self._instantiation_cache[cache_key] = instantiated_scheme
@@ -3512,6 +3689,20 @@ class CheckTypeVisitor(VariableTypeVisitor):
         holds only for sets without None, so no ``Set`` may stand for ``T?``.
         The argument is read through ``let:`` and member aliases."""
         if param.type != frog_ast.SetType() or not isinstance(arg_type, frog_ast.Type):
+            return
+        value = self._value_in_type(arg)
+        if value is not None:
+            # F-423: a Set parameter stands for a type, not a value.
+            named = (
+                f"is a value of type {value[1]}"
+                if value[0] is arg
+                else f"names the value {value[0]} of type {value[1]}"
+            )
+            self.print_error(
+                location,
+                f"Argument {arg} for the Set parameter '{param.name}' of"
+                f" {scheme.name} {named}, not a type",
+            )
             return
         resolved = self._resolve_type_alias(arg_type)
         if isinstance(resolved, frog_ast.NoneExpression) or isinstance(

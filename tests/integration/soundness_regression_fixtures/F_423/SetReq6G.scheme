@@ -1,0 +1,38 @@
+// Attack c7g (guard form of c7): a type requirement between two *value* names whose types are
+// Set<P.Elem> and Set<BitString<8>?> (se a field, so a parameter). Neither
+// side is an optional type, so the narrow F-422 check records the pair; the
+// type checker resolves each side to the value's type, and the pair makes
+// Set<BitString<8>?> and Set<P.Elem> compatible. Iterating `so` as a
+// Set<P.Elem> copies an element that may be None into z : P.Elem, which the
+// engine reads as never None (P.Elem is the abstract K).
+import 'Conv2.primitive';
+import 'Src.primitive';
+Scheme SetReq6G(Src P, Set<BitString<8>?> so) extends Conv2 {
+    requires se subsets so;
+    Set<P.Elem> se;
+
+    Bool Check(Bool b, BitString<8>? y) {
+        Set<P.Elem> s = so;
+        P.Elem z = P.Pick();
+        for (P.Elem e in s) {
+            z = e;
+        }
+        return this.IsNone(z);
+    }
+
+    Bool Check2(Bool b, BitString<8>? y) {
+        Set<P.Elem> s = so;
+        P.Elem z = P.Pick();
+        for (P.Elem e in s) {
+            z = e;
+        }
+        return false;
+    }
+
+    Bool IsNone(P.Elem? a2) {
+        if (a2 == None) {
+            return true;
+        }
+        return false;
+    }
+}

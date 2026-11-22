@@ -1,0 +1,22 @@
+// Attack v1: Left reports whether its optional constant is None, in the
+// return form and in the else-less guard form; Right always answers false.
+Game Left(BitString<8>? y) {
+    Bool Test() {
+        return y == None;
+    }
+    Bool Guard() {
+        if (y == None) {
+            return true;
+        }
+        return false;
+    }
+}
+Game Right(BitString<8>? y) {
+    Bool Test() {
+        return false;
+    }
+    Bool Guard() {
+        return false;
+    }
+}
+export as V1;

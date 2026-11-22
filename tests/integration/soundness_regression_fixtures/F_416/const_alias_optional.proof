@@ -1,0 +1,23 @@
+// F-416: the let constant c has the alias type K. After inlining, Check(c)
+// becomes `c == None`, and the let type of c is the bare name K, which the
+// pass must read through the alias.
+// Expected if sound: Proof Failed. Distinguisher (c = None): Test() returns true on Real, false on Ideal.
+import 'Checker.primitive';
+import 'NoneCheck.scheme';
+import 'ConstPair.game';
+
+proof:
+
+let:
+    Set K = BitString<8>?;
+    K c;
+    NoneCheck C = NoneCheck(K);
+
+assume:
+
+theorem:
+    ConstPair(C, c);
+
+games:
+    ConstPair(C, c).Real against ConstPair(C, c).Adversary;
+    ConstPair(C, c).Ideal against ConstPair(C, c).Adversary;

@@ -1,0 +1,20 @@
+// Pre-existing-class probe for the a7 mechanism: the else-less guard `if (c == None)` on the
+// let constant c : K, K = BitString<8>?, removed because K is not syntactically optional.
+// Distinguisher (c = None): Hit(); Get() returns 1 on Left, 0 on Right.
+// Expected if sound: Proof Failed.
+import 'a7g_guard.game';
+
+proof:
+
+let:
+    Set K = BitString<8>?;
+    K c;
+
+assume:
+
+theorem:
+    A7GGuard(c);
+
+games:
+    A7GGuard(c).Left against A7GGuard(c).Adversary;
+    A7GGuard(c).Right against A7GGuard(c).Adversary;

@@ -1,0 +1,23 @@
+// Target pass: Dead Null Guard Elimination (None-test folding, gap23 change A).
+// Hypothesis: the let constant c is declared with the alias type K, and K = BitString<8>?.
+// After instantiation the game reads the let name c, whose let type is the bare name K,
+// which is not syntactically optional, so `c == None` folds to false.
+// Distinguisher: the theorem is claimed for every c : K; for c = None, one call Test()
+// returns true on Left and false on Right.
+// Expected if sound: Proof Failed.
+import 'a7_letconst.game';
+
+proof:
+
+let:
+    Set K = BitString<8>?;
+    K c;
+
+assume:
+
+theorem:
+    A7LetConst(c);
+
+games:
+    A7LetConst(c).Left against A7LetConst(c).Adversary;
+    A7LetConst(c).Right against A7LetConst(c).Adversary;

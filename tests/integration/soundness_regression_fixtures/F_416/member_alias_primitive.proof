@@ -1,0 +1,24 @@
+// Target: Dead Null Guard Elimination (None-test folding), F-416 fix, gap1 item D.
+// Hypothesis: as d2r, but the let constant's type is a PRIMITIVE member alias P.Elem
+// (Source(K) with Elem = K = BitString<8>?). The let type P.Elem is a FieldAccess, which
+// _resolve_alias does not read, so `c == None` folds to false.
+// Distinguisher (c = None): Test() returns true on Left, false on Right.
+// Expected if sound: Proof Failed.
+import 'Source.primitive';
+import 'a7_letconst.game';
+
+proof:
+
+let:
+    Set K = BitString<8>?;
+    Source P = Source(K);
+    P.Elem c;
+
+assume:
+
+theorem:
+    A7LetConst(c);
+
+games:
+    A7LetConst(c).Left against A7LetConst(c).Adversary;
+    A7LetConst(c).Right against A7LetConst(c).Adversary;

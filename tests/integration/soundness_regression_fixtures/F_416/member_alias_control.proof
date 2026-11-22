@@ -1,0 +1,22 @@
+// Positive control for d2: the same let constant c : C.Elem, but K = BitString<8> is not
+// optional, so c is never None and the games agree.
+// Expected (sound engine): Proof Succeeded.
+import 'Checker.primitive';
+import 'NoneCheck.scheme';
+import 'ConstPair.game';
+
+proof:
+
+let:
+    Set K = BitString<8>;
+    NoneCheck C = NoneCheck(K);
+    C.Elem c;
+
+assume:
+
+theorem:
+    ConstPair(C, c);
+
+games:
+    ConstPair(C, c).Real against ConstPair(C, c).Adversary;
+    ConstPair(C, c).Ideal against ConstPair(C, c).Adversary;

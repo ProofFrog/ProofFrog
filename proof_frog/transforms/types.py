@@ -125,14 +125,80 @@ def _conflicting_names(
     return conflicting
 
 
+def _makes_call(node: frog_ast.ASTNode) -> bool:
+    """Whether *node* contains a call anywhere."""
+    return (
+        SearchVisitor[frog_ast.ASTNode](
+            lambda inner: isinstance(inner, frog_ast.FuncCall)
+        ).visit(node)
+        is not None
+    )
+
+
+class _NoneTestFolder(Transformer):
+    """Folds the tests `e == None` / `e != None` of one statement whose
+    operand can never be None, for :class:`DeadNullGuardEliminator`.
+
+    Does not descend into the statement's nested blocks: the eliminator folds
+    those when it reaches them, with the statements they hold, so that every
+    fold is judged at its own statement.
+    """
+
+    def __init__(
+        self,
+        owner: DeadNullGuardEliminator,
+        statement: frog_ast.Statement,
+        report: bool,
+    ) -> None:
+        self.owner = owner
+        self.statement = statement
+        self.report = report
+
+    def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
+        return block
+
+    def transform_binary_operation(
+        self, binary_op: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        new_op = self._transform_children(binary_op)
+        if new_op.operator not in (
+            frog_ast.BinaryOperators.EQUALS,
+            frog_ast.BinaryOperators.NOTEQUALS,
+        ):
+            return new_op
+        if isinstance(new_op.right_expression, frog_ast.NoneExpression):
+            tested = new_op.left_expression
+        elif isinstance(new_op.left_expression, frog_ast.NoneExpression):
+            tested = new_op.right_expression
+        else:
+            return new_op
+        if self.owner.can_fold_none_test(self.statement, tested, self.report):
+            return frog_ast.Boolean(
+                new_op.operator == frog_ast.BinaryOperators.NOTEQUALS
+            )
+        return new_op
+
+
 class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
-    """Removes if (x == None) { ... } guards that can never execute.
+    """Removes if (x == None) { ... } guards that can never execute, and
+    folds the tests `x == None` / `x != None` that can never be true / false.
 
     Two cases are handled:
     1. x has non-nullable declared type (can never be None).
     2. x was declared as `T? x = expr` where expr is provably non-nullable,
        based on the return type of a method call on a known instantiable
        (primitive or scheme) in the proof namespace.
+
+    A test that is not a removable guard (an if with an else, an else-if
+    condition, a return, an operand of `&&`, ...) is folded to a Boolean
+    literal when its operand qualifies by a rule that holds at every point of
+    the method: a variable with a non-nullable declared type, a tuple literal
+    that makes no call (folding drops the evaluation of the operand), or a
+    call on a primitive or scheme whose return type is not optional (such a
+    call has no effect, so dropping it is safe).  Case 2 depends on the
+    position of the test and is used for guards only.  Inlining a method
+    with a `T?` parameter at a call that passes a `T` produces such tests:
+    `k == None` for a `k` drawn from the key space.
 
     After inlining, reduction bodies with null-narrowing guards produce
     patterns like `T? v = E.Enc(...); if (v == None) { return ...; } return v;`
@@ -195,11 +261,70 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
             self._method_name, self._conflicting, self._method = saved
 
     def _declared_type(self, name: str) -> Optional[frog_ast.Type]:
-        """The type *name* is declared with, or None if it is unknown or the
-        method binds *name* under more than one type."""
+        """The type *name* is declared with, read through proof ``let:``
+        type aliases, or None if it is unknown or the method binds *name*
+        under more than one type."""
         if name in self._conflicting:
             return None
-        return self.type_map.get(name)
+        return self._resolve_alias(self.type_map.get(name))
+
+    def _resolve_alias(
+        self, the_type: Optional[frog_ast.Type]
+    ) -> Optional[frog_ast.Type]:
+        """*the_type* read through the type names of the proof namespace,
+        repeatedly: a name a ``let:`` entry defines as a type
+        (``Set K = BitString<8>?;``) becomes that type, and a member alias
+        of an instantiated scheme or primitive (``C.Elem``, with
+        ``Set Elem = K;`` in it) becomes the member's type.
+
+        A ``let:`` constant keeps its declared type as written (``K``,
+        ``C.Elem``), which is not syntactically optional even when it stands
+        for an optional type (F-416). A name with no definition (an abstract
+        ``Set K;``, or a member ``Set Elem;`` with no value) is left as it
+        is; a member alias that names no member of a namespace entry is
+        unknown (None)."""
+        namespace = self.ctx.proof_namespace if self.ctx is not None else {}
+        seen: set[str] = set()
+        while str(the_type) not in seen:
+            seen.add(str(the_type))
+            if isinstance(the_type, frog_ast.Variable):
+                definition = namespace.get(the_type.name)
+                if not isinstance(definition, frog_ast.Type):
+                    return the_type
+                the_type = definition
+            elif isinstance(the_type, frog_ast.FieldAccess):
+                member = self._member_type(the_type, namespace)
+                if member is None:
+                    return None
+                if member is the_type:
+                    return the_type
+                the_type = member
+            else:
+                return the_type
+        return the_type
+
+    @staticmethod
+    def _member_type(
+        access: frog_ast.FieldAccess, namespace: frog_ast.Namespace
+    ) -> Optional[frog_ast.Type]:
+        """The type the member alias *access* (``C.Elem``) stands for: the
+        value of the member in the instantiated scheme or primitive
+        *namespace* binds ``C`` to; *access* itself for a member with no
+        value; None when ``C`` is no such entry or has no such member."""
+        if not isinstance(access.the_object, frog_ast.Variable):
+            return None
+        instantiable = namespace.get(access.the_object.name)
+        if not isinstance(instantiable, (frog_ast.Primitive, frog_ast.Scheme)):
+            return None
+        for field in instantiable.fields:
+            if field.name != access.name:
+                continue
+            if field.value is None:
+                return access
+            if isinstance(field.value, frog_ast.Type):
+                return field.value
+            return None
+        return None
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         # A nullable declaration `T? v = expr` with a provably non-nullable
@@ -226,7 +351,14 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
                 else:
                     self._report_unassigned_initialiser(statement, unassigned_inits)
                 self._report_kept_guard(statement, written_locals)
-            new_statements.append(statement)
+            # An else-less guard was judged above, which reported why it stays.
+            report = not (
+                isinstance(statement, frog_ast.IfStatement)
+                and self._null_guard_subject(statement) is not None
+            )
+            new_statements.append(
+                _NoneTestFolder(self, statement, report).transform(statement)
+            )
             if (
                 isinstance(statement, frog_ast.Assignment)
                 and isinstance(statement.the_type, frog_ast.OptionalType)
@@ -255,6 +387,60 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
                     written_locals[name] = (statement, write)
         return frog_ast.Block(new_statements)
 
+    def can_fold_none_test(
+        self,
+        statement: frog_ast.Statement,
+        tested: frog_ast.Expression,
+        report: bool = True,
+    ) -> bool:
+        """Whether a test of *tested* against None, in *statement*, may be
+        folded: *tested* can never be None, by a rule that holds at every
+        point of the method, and reads nothing that may be unassigned (the
+        caution the guards get; more than soundness needs, see the class
+        docstring).  With *report*, a test that almost folds is recorded as
+        a near-miss."""
+        if isinstance(tested, frog_ast.NoneExpression):
+            return False
+        if isinstance(tested, frog_ast.Tuple) and _makes_call(tested):
+            return False
+        if not self._is_nonnullable_expr(tested):
+            if (
+                report
+                and isinstance(tested, frog_ast.Variable)
+                and tested.name in self._conflicting
+            ):
+                self._report_untrusted_type(statement, tested.name)
+            return False
+        unassigned = self._unassigned_reads(statement, tested)
+        if unassigned:
+            if report:
+                self._report_unassigned(
+                    statement, "the expression it compares with None", unassigned[0]
+                )
+            return False
+        return True
+
+    def _report_untrusted_type(self, statement: frog_ast.Statement, name: str) -> None:
+        """Record a near-miss for a None test not folded because the method
+        binds the tested name under more than one type."""
+        if self.ctx is None:
+            return
+        internal = name.startswith("__")
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Dead Null Guard Elimination",
+                reason=(
+                    f"Test of '{name}' against None not folded: the method "
+                    f"binds '{name}' under more than one type, so its declared "
+                    f"type is not trusted"
+                ),
+                location=statement.origin,
+                suggestion="Give the bindings of the name different names",
+                variable=None if internal else name,
+                method=self._method_name,
+            )
+        )
+
     def _unassigned_reads(
         self, statement: frog_ast.Statement, expression: frog_ast.ASTNode
     ) -> list[tuple[str, str]]:
@@ -275,7 +461,7 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
         return scope.unassigned_reads(expression)
 
     def _report_unassigned(
-        self, if_stmt: frog_ast.IfStatement, what: str, read: tuple[str, str]
+        self, if_stmt: frog_ast.Statement, what: str, read: tuple[str, str]
     ) -> None:
         if self.ctx is None:
             return
@@ -397,7 +583,8 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
                         )
                         if sig.name == field_access.name:
                             return not isinstance(
-                                sig.return_type, frog_ast.OptionalType
+                                self._resolve_alias(sig.return_type),
+                                frog_ast.OptionalType,
                             )
         return False
 

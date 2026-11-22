@@ -3683,6 +3683,69 @@ def test_dead_null_guard_near_miss_describes_renamed_local() -> None:
     assert "__a" not in misses[0].reason
 
 
+def _dead_null_guard_game_misses(source: str) -> list[NearMiss]:
+    ctx = PipelineContext(
+        variables={},
+        proof_let_types=NameTypeMap(),
+        proof_namespace={},
+        subsets_pairs=[],
+    )
+    DeadNullGuardElimination().apply(frog_parser.parse_game(source), ctx)
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Dead Null Guard Elimination"
+    ]
+
+
+def test_dead_null_guard_near_miss_none_test_name_bound_twice() -> None:
+    """A test against None outside a guard is folded only when the operand's
+    declared type is trusted; `w` is bound as `Int?` and as `Int`."""
+    misses = _dead_null_guard_game_misses("""
+        Game G() {
+            Bool Test(Int? w, Bool c) {
+                if (c) {
+                    Int w = 1;
+                }
+                return c && w != None;
+            }
+        }
+        """)
+    assert len(misses) == 1
+    assert misses[0].variable == "w"
+    assert misses[0].method == "Test"
+    assert "under more than one type" in misses[0].reason
+
+
+def test_dead_null_guard_near_miss_none_test_unassigned_read() -> None:
+    """The same caution as for guards: `r` may be unassigned when Query runs
+    before Store."""
+    misses = _dead_null_guard_game_misses("""
+        Game G() {
+            Bool r;
+            Void Store(Bool v) { r = v; }
+            Bool Query(Bool c) {
+                return c && r != None;
+            }
+        }
+        """)
+    assert len(misses) == 1
+    assert misses[0].method == "Query"
+    assert "compares with None" in misses[0].reason
+    assert "reads 'r', which may be unassigned" in misses[0].reason
+
+
+def test_dead_null_guard_no_near_miss_when_none_test_folds() -> None:
+    misses = _dead_null_guard_game_misses("""
+        Game G() {
+            Bool Test(Int x, Bool c) {
+                return c && x != None;
+            }
+        }
+        """)
+    assert not misses
+
+
 def _dead_null_guard_tuple_misses(body: str, rename: bool = False) -> list[NearMiss]:
     ctx = PipelineContext(
         variables={},
@@ -5668,11 +5731,31 @@ def test_near_miss_merge_bare_declaration_mentioned_in_between() -> None:
     assert "between the declaration and the assignment" in misses[0].reason
 
 
+def test_near_miss_merge_bare_declaration_two_branches() -> None:
+    misses = _merge_bare_declaration_misses(
+        "Int v;\nif (b) {\nv = a;\nreturn v;\n} else {\nv = 1;\nreturn v;\n}"
+    )
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert "more than one branch" in misses[0].reason
+
+
+def test_near_miss_merge_bare_declaration_branch_reads_default() -> None:
+    misses = _merge_bare_declaration_misses(
+        "Int v;\nif (b) {\nInt w = v;\nv = a;\nreturn v + w;\n}\nreturn 0;"
+    )
+    assert len(misses) == 1
+    assert misses[0].variable == "v"
+    assert "between the declaration and the assignment" in misses[0].reason
+
+
 @pytest.mark.parametrize(
     "body",
     [
         # No top-level assignment to merge with.
         "Int v;\nif (b) {\nv = a;\n} else {\nv = 0;\n}\nreturn v;",
+        # Read after the if: the declaration must stay outside it.
+        "Int v;\nif (b) {\nv = a;\n}\nreturn v;",
         # The branches are the first write; the later assignment an update.
         "Int v;\nif (b) {\nv = a;\n} else {\nv = 0;\n}\nv = v + 1;\nreturn v;",
         # A draw is the first write.

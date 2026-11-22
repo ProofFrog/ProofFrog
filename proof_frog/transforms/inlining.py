@@ -37,6 +37,7 @@ from ._base import (
     may_return_before,
 )
 from ._coercion import coercing_store_names_for, note_coercing_store
+from .alpha_rename import block_binder_names
 from ._definedness import (
     calls_game_method,
     initialize_unassigned_fields,
@@ -6690,6 +6691,16 @@ class MergeBareDeclaration(TransformPass):
     same program. Inlining a method with an early return leaves exactly this
     shape once all but one of the result variable's assignments have been
     removed, and the merged form is what the rest of the pipeline expects.
+
+    The assignment may also sit in one branch of a later ``if``:
+    ``T v; ... if (c) { ... v = e; ... } ...`` becomes
+    ``... if (c) { ... T v = e; ... } ...`` when that branch holds every
+    mention of ``v`` after the declaration (no condition of the ``if``, no
+    other branch and no later statement mentions it) and does not bind
+    ``v`` itself; the branch is searched the same way, so the assignment
+    may sit in nested ``if`` branches. A path that skips the branch never
+    reads ``v``, and a path through it reaches the assignment before any
+    mention. Loop bodies are not entered.
     """
 
     name = "Merge Bare Declaration"
@@ -6729,41 +6740,96 @@ class _MergeBareDeclarationTransformer(BlockTransformer):
         for index, statement in enumerate(statements):
             if not isinstance(statement, frog_ast.VariableDeclaration):
                 continue
-            name = statement.name
-            for later in range(index + 1, len(statements)):
-                candidate = statements[later]
-                if _is_plain_assignment_to(candidate, name):
-                    assert isinstance(candidate, frog_ast.Assignment)
-                    if name in referenced_variable_names(candidate.value):
-                        self._note_not_merged(
-                            name,
-                            "the assigned value reads the variable, i.e. the "
-                            "declaration's default value",
-                        )
-                        break
-                    merged = frog_ast.Assignment(
-                        copy.deepcopy(statement.type),
-                        frog_ast.Variable(name),
-                        candidate.value,
-                    )
-                    return frog_ast.Block(
-                        statements[:index]
-                        + statements[index + 1 : later]
-                        + [merged]
-                        + statements[later + 1 :]
-                    )
-                if name in referenced_variable_names(candidate):
-                    # Near miss only for a read of the default value before
-                    # the assignment; a statement that writes the variable
-                    # is its first write, and a later assignment an update.
-                    if not reassigns_or_rebinds({name}, candidate) and any(
-                        _is_plain_assignment_to(rest, name)
-                        for rest in statements[later + 1 :]
-                    ):
-                        self._note_not_merged(
-                            name,
-                            "a statement between the declaration and the "
-                            "assignment reads the variable",
-                        )
-                    break
+            merged = self._merge_into(
+                statement.name, statement.type, statements[index + 1 :]
+            )
+            if merged is not None:
+                return frog_ast.Block(statements[:index] + merged)
         return block
+
+    def _merge_into(
+        self,
+        name: str,
+        the_type: frog_ast.Type,
+        statements: list[frog_ast.Statement],
+    ) -> list[frog_ast.Statement] | None:
+        """*statements* with the first assignment to *name* turned into a
+        declaration of type *the_type*, or None when the declaration's
+        default value might be read (or the assignment is not found)."""
+        for later, candidate in enumerate(statements):
+            if _is_plain_assignment_to(candidate, name):
+                assert isinstance(candidate, frog_ast.Assignment)
+                if name in referenced_variable_names(candidate.value):
+                    self._note_not_merged(
+                        name,
+                        "the assigned value reads the variable, i.e. the "
+                        "declaration's default value",
+                    )
+                    return None
+                merged = frog_ast.Assignment(
+                    copy.deepcopy(the_type),
+                    frog_ast.Variable(name),
+                    candidate.value,
+                )
+                return statements[:later] + [merged] + statements[later + 1 :]
+            if name not in referenced_variable_names(candidate):
+                continue
+            rest = statements[later + 1 :]
+            if isinstance(candidate, frog_ast.IfStatement):
+                branch = self._sole_branch(name, candidate, rest)
+                if branch is not None:
+                    inner = self._merge_into(
+                        name, the_type, list(candidate.blocks[branch].statements)
+                    )
+                    if inner is None:
+                        return None
+                    blocks = list(candidate.blocks)
+                    blocks[branch] = frog_ast.Block(inner)
+                    new_if = frog_ast.IfStatement(list(candidate.conditions), blocks)
+                    return statements[:later] + [new_if] + rest
+            # Near miss only for a read of the default value before the
+            # assignment; a statement that writes the variable is its first
+            # write, and a later assignment an update.
+            if not reassigns_or_rebinds({name}, candidate) and any(
+                _is_plain_assignment_to(other, name) for other in rest
+            ):
+                self._note_not_merged(
+                    name,
+                    "a statement between the declaration and the "
+                    "assignment reads the variable",
+                )
+            return None
+        return None
+
+    def _sole_branch(
+        self,
+        name: str,
+        statement: frog_ast.IfStatement,
+        rest: list[frog_ast.Statement],
+    ) -> int | None:
+        """The index of the only branch of *statement* that mentions *name*,
+        when no condition of *statement*, no other branch and no statement
+        of *rest* (those after it) mentions *name*, and that branch does not
+        bind *name*; otherwise None."""
+        if any(name in referenced_variable_names(other) for other in rest):
+            return None
+        if any(
+            name in referenced_variable_names(condition)
+            for condition in statement.conditions
+        ):
+            return None
+        branches = [
+            position
+            for position, branch in enumerate(statement.blocks)
+            if name in referenced_variable_names(branch)
+        ]
+        if len(branches) != 1:
+            self._note_not_merged(
+                name,
+                "every use is inside one if statement, but in more than one "
+                "branch of it",
+            )
+            return None
+        if name in block_binder_names(statement.blocks[branches[0]]):
+            return None
+        return branches[0]

@@ -1,6 +1,9 @@
 """Tests for MergeBareDeclaration."""
 
-from proof_frog import frog_parser
+import pytest
+
+from proof_frog import frog_ast, frog_parser
+from proof_frog.proof_engine import ProofEngine
 from proof_frog.transforms._base import PipelineContext
 from proof_frog.transforms.inlining import MergeBareDeclaration
 from proof_frog.visitors import NameTypeMap
@@ -38,3 +41,149 @@ def test_no_merge_when_assignment_reads_the_default() -> None:
 def test_no_merge_when_assigned_in_a_branch() -> None:
     before, after = _lines("Int v;\nif (b) {\nv = a;\n} else {\nv = 0;\n}\nreturn v;")
     assert after == before
+
+
+# ---------------------------------------------------------------------------
+# The assignment inside one branch of a later if
+# ---------------------------------------------------------------------------
+
+
+def test_merges_into_the_branch_holding_every_use() -> None:
+    _, after = _lines("Int v;\nif (b) {\nv = a;\nreturn v;\n}\nreturn 0;")
+    assert after == ["if (b) {\nInt v = a;\nreturn v;\n}", "return 0;"]
+
+
+def test_merges_past_statements_in_the_block_and_the_branch() -> None:
+    _, after = _lines(
+        "Int v;\nInt w = a + 1;\nif (b) {\nInt x = w;\nv = x;\nreturn v;\n}\n"
+        "return w;"
+    )
+    assert after == [
+        "Int w = a + 1;",
+        "if (b) {\nInt x = w;\nInt v = x;\nreturn v;\n}",
+        "return w;",
+    ]
+
+
+def test_merges_into_an_else_if_branch() -> None:
+    _, after = _lines(
+        "Int v;\nif (b) {\nreturn 1;\n} else if (a == 2) {\nv = a;\nreturn v;\n}\n"
+        "return 0;"
+    )
+    assert after == [
+        "if (b) {\nreturn 1;\n} else if (a == 2) {\nInt v = a;\nreturn v;\n}",
+        "return 0;",
+    ]
+
+
+def test_merges_into_an_else_branch() -> None:
+    _, after = _lines("Int v;\nif (b) {\nreturn 1;\n} else {\nv = a;\nreturn v;\n}")
+    assert after == ["if (b) {\nreturn 1;\n} else {\nInt v = a;\nreturn v;\n}"]
+
+
+def _game(body: str) -> frog_ast.Game:
+    return frog_parser.parse_game(f"Game T() {{\n Int f(Int a, Bool b) {{\n{body}\n}}\n}}")
+
+
+def test_merges_through_nested_ifs() -> None:
+    game = _game("Int v;\nif (b) {\nif (a == 1) {\nv = a;\nreturn v;\n}\n}\nreturn 0;")
+    expected = _game("if (b) {\nif (a == 1) {\nInt v = a;\nreturn v;\n}\n}\nreturn 0;")
+    assert MergeBareDeclaration().apply(game, _ctx()) == expected
+
+
+def test_merges_an_optional_declaration() -> None:
+    # The shape inlining a decapsulation leaves: the result variable is
+    # assigned and read only in the branch that returns it.
+    _, after = _lines("Int? v;\nif (b) {\nv = a;\nreturn v != None;\n}\nreturn 0;")
+    assert after == ["if (b) {\nInt? v = a;\nreturn v != None;\n}", "return 0;"]
+
+
+def test_no_merge_when_read_after_the_if() -> None:
+    # Moved into the branch, the declaration would no longer cover the read
+    # after the if, which sees the default when b is false.
+    before, after = _lines("Int v;\nif (b) {\nv = a;\n}\nreturn v;")
+    assert after == before
+
+
+def test_no_merge_when_a_condition_reads_the_variable() -> None:
+    # The condition reads the default value before any assignment.
+    before, after = _lines("Int v;\nif (v == a) {\nv = a;\nreturn v;\n}\nreturn 0;")
+    assert after == before
+
+
+def test_no_merge_when_a_later_condition_reads_the_variable() -> None:
+    before, after = _lines(
+        "Int v;\nif (b) {\nv = a;\nreturn v;\n} else if (v == 0) {\nreturn 1;\n}\n"
+        "return 0;"
+    )
+    assert after == before
+
+
+def test_no_merge_when_two_branches_use_the_variable() -> None:
+    before, after = _lines(
+        "Int v;\nif (b) {\nv = a;\nreturn v;\n} else {\nv = 1;\nreturn v;\n}"
+    )
+    assert after == before
+
+
+def test_no_merge_when_the_branch_reads_the_default() -> None:
+    # w holds the declaration's default value.
+    before, after = _lines(
+        "Int v;\nif (b) {\nInt w = v;\nv = a;\nreturn v + w;\n}\nreturn 0;"
+    )
+    assert after == before
+
+
+def test_no_merge_when_the_branch_rebinds_the_variable() -> None:
+    # Merging would declare v twice in one block.
+    before, after = _lines(
+        "Int v;\nif (b) {\nv = a;\nInt v = 2;\nreturn v;\n}\nreturn 0;"
+    )
+    assert after == before
+
+
+def test_no_merge_into_a_loop_body() -> None:
+    # A loop body runs many times; only if-branches are entered.
+    before, after = _lines("Int v;\nfor (Int i = 0 to a) {\nv = i;\n}\nreturn 0;")
+    assert after == before
+
+
+def test_no_merge_when_the_branch_assigns_inside_a_loop() -> None:
+    before, after = _lines(
+        "Int v;\nif (b) {\nfor (Int i = 0 to a) {\nv = i;\n}\nreturn v;\n}\n"
+        "return 0;"
+    )
+    assert after == before
+
+
+@pytest.mark.parametrize("optional", [False, True])
+def test_engine_identifies_branch_result_with_its_guard(optional: bool) -> None:
+    """The shape an inlined decapsulation leaves: the result is assigned
+    and tested only in the branch that returns. Merged into the branch, the
+    None test folds when `a` is not optional, and the game is `return b;`.
+    With `a` optional, f(None, true) is false on the left and true on the
+    right, so the engine must keep the games apart."""
+    a_type = "Int?" if optional else "Int"
+    left = f"""
+        Game G() {{
+            Bool f({a_type} a, Bool b) {{
+                Int? v;
+                if (b) {{
+                    v = a;
+                    return v != None;
+                }}
+                return false;
+            }}
+        }}
+    """
+    right = f"""
+        Game G() {{
+            Bool f({a_type} a, Bool b) {{
+                return b;
+            }}
+        }}
+    """
+    result = ProofEngine().check_equivalent(
+        frog_parser.parse_game(left), frog_parser.parse_game(right)
+    )
+    assert result.valid is not optional

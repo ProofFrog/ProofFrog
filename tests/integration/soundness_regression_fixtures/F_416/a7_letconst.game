@@ -1,0 +1,15 @@
+// Target pass: Dead Null Guard Elimination (None-test folding, gap23 change A).
+// Left reports whether the parameter c is None; Right always reports false.
+Game Left(BitString<8>? c) {
+    Bool Test() {
+        return c == None;
+    }
+}
+
+Game Right(BitString<8>? c) {
+    Bool Test() {
+        return false;
+    }
+}
+
+export as A7LetConst;

@@ -1,0 +1,31 @@
+// Pre-existing-class probe for the a7 mechanism (else-less guard form, runs on HEAD too).
+// Left counts the calls to Hit made while c is None; Right never counts.
+// Distinguisher (c = None): Hit(); Get() returns 1 on Left, 0 on Right.
+Game Left(BitString<8>? c) {
+    Int count;
+    Void Initialize() {
+        count = 0;
+    }
+    Void Hit() {
+        if (c == None) {
+            count = count + 1;
+        }
+    }
+    Int Get() {
+        return count;
+    }
+}
+
+Game Right(BitString<8>? c) {
+    Int count;
+    Void Initialize() {
+        count = 0;
+    }
+    Void Hit() {
+    }
+    Int Get() {
+        return count;
+    }
+}
+
+export as A7GGuard;

@@ -1,0 +1,16 @@
+// Real answers C.Check on a fixed element x; Ideal always answers false.
+import 'Checker.primitive';
+
+Game Real(Checker C, C.Elem x) {
+    Bool Test() {
+        return C.Check(x);
+    }
+}
+
+Game Ideal(Checker C, C.Elem x) {
+    Bool Test() {
+        return false;
+    }
+}
+
+export as ConstPair;

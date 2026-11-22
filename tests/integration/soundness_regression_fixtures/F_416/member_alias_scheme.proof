@@ -1,0 +1,25 @@
+// Target: Dead Null Guard Elimination, F-416 fix (_resolve_alias), gap1 review item D.
+// Hypothesis: a let constant typed with a scheme member alias (C.Elem, a FieldAccess type)
+// is not read through the alias: C.Elem = K = BitString<8>?, but the FieldAccess type is
+// not syntactically optional, so `c == None` folds to false.
+// Distinguisher (c = None): Test() returns true on Real, false on Ideal.
+// Expected if sound: Proof Failed.
+import 'Checker.primitive';
+import 'NoneCheck.scheme';
+import 'ConstPair.game';
+
+proof:
+
+let:
+    Set K = BitString<8>?;
+    NoneCheck C = NoneCheck(K);
+    C.Elem c;
+
+assume:
+
+theorem:
+    ConstPair(C, c);
+
+games:
+    ConstPair(C, c).Real against ConstPair(C, c).Adversary;
+    ConstPair(C, c).Ideal against ConstPair(C, c).Adversary;

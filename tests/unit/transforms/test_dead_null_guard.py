@@ -2,6 +2,7 @@
 
 import pytest
 from proof_frog import frog_ast, visitors, frog_parser
+from proof_frog.proof_engine import ProofEngine
 from proof_frog.transforms._base import PipelineContext
 from proof_frog.transforms.types import (
     DeadNullGuardElimination,
@@ -89,8 +90,9 @@ class TestPreservesRealNullGuards:
         result = DeadNullGuardEliminator(type_map).transform(game)
         assert result == game
 
-    def test_preserves_guard_with_else_block(self) -> None:
-        """If-else is not a simple guard pattern — preserve it."""
+    def test_guard_with_else_block_folds_condition(self) -> None:
+        """An if-else is not removed as a guard, but its test of a
+        non-nullable variable folds to false (TestNoneTestFolding)."""
         game = frog_parser.parse_game("""
             Game G() {
                 BitString<8> Test() {
@@ -103,9 +105,21 @@ class TestPreservesRealNullGuards:
                 }
             }
             """)
+        expected = frog_parser.parse_game("""
+            Game G() {
+                BitString<8> Test() {
+                    BitString<8> x = 0^8;
+                    if (false) {
+                        return 0^8;
+                    } else {
+                        return x;
+                    }
+                }
+            }
+            """)
         type_map = visitors.build_game_type_map(game)
         result = DeadNullGuardEliminator(type_map).transform(game)
-        assert result == game
+        assert result == expected
 
     def test_preserves_non_null_comparison(self) -> None:
         """if (x == y) is not a null guard — preserve it."""
@@ -770,3 +784,223 @@ class TestUnassignedReads:
             """)
         assert "[i, s] == None" not in out
         assert "[i, r] == None" in out
+
+
+class TestNoneTestFolding:
+    """A test `e == None` (or `e != None`) whose operand can never be None
+    folds to false (true) wherever it occurs: in an if with an else, an else
+    if, a return, a conjunction.  A value of a non-optional type is never
+    None (FROGLANG_REFERENCE.md section 6.8), and an unassigned variable holds
+    a value of its type, not None (section 6.9).  The operand qualifies by
+    the rules that hold at every point of the method: a variable declared
+    with a non-optional type (and bound under no other type), a tuple literal
+    that makes no call, or a call of a primitive method whose return type is
+    not optional.  Inlining a method with a `T?` parameter at a call passing
+    a `T` produces such tests."""
+
+    @pytest.mark.parametrize(
+        "statement, folded",
+        [
+            pytest.param("return x != None;", "return true;", id="return-not-equals"),
+            pytest.param("return None == x;", "return false;", id="return-none-left"),
+            pytest.param("return c && x != None;", "return c && true;", id="conjunct"),
+            pytest.param(
+                "if (c) { return false; } else if (x == None) { return true; }"
+                " return c;",
+                "if (c) { return false; } else if (false) { return true; }"
+                " return c;",
+                id="else-if",
+            ),
+            pytest.param(
+                "Bool b = x == None; return b;",
+                "Bool b = false; return b;",
+                id="assignment",
+            ),
+            pytest.param(
+                "if (c) { return x == None; } return c;",
+                "if (c) { return false; } return c;",
+                id="nested-block",
+            ),
+            pytest.param(
+                "return [x, c] != None;", "return true;", id="call-free-tuple"
+            ),
+        ],
+    )
+    def test_folds(self, statement: str, folded: str) -> None:
+        template = """
+            Game G() {{
+                Bool Test(BitString<8> x, Bool c) {{
+                    {body}
+                }}
+            }}
+            """
+        out, ctx = _apply_pass(template.format(body=statement))
+        assert out == str(frog_parser.parse_game(template.format(body=folded)))
+        assert not ctx.near_misses
+
+    def test_optional_variable_not_folded(self) -> None:
+        """An optional value may be None: `v != None` stays."""
+        out, _ = _apply_pass("""
+            Game G() {
+                Bool Test(BitString<8>? v) {
+                    return v != None;
+                }
+            }
+            """)
+        assert "v != None" in out
+
+    def test_tuple_with_call_not_folded(self) -> None:
+        """Folding would drop the call; a tuple that makes one is left."""
+        primitive = frog_parser.parse_primitive_file("""
+            Primitive P() {
+                Int Eval(Int x);
+            }
+            """)
+        ctx = PipelineContext(
+            variables={},
+            proof_let_types=visitors.NameTypeMap(),
+            proof_namespace={"P": primitive},
+            subsets_pairs=[],
+        )
+        game = frog_parser.parse_game("""
+            Game G() {
+                Bool Test(Int x) {
+                    return [P.Eval(x), x] != None;
+                }
+            }
+            """)
+        assert "!= None" in str(DeadNullGuardElimination().apply(game, ctx))
+
+    @pytest.mark.parametrize(
+        "return_type, folds",
+        [("Int", True), ("Int?", False)],
+    )
+    def test_primitive_call(self, return_type: str, folds: bool) -> None:
+        primitive = frog_parser.parse_primitive_file(f"""
+            Primitive P() {{
+                {return_type} Eval(Int x);
+            }}
+            """)
+        ctx = PipelineContext(
+            variables={},
+            proof_let_types=visitors.NameTypeMap(),
+            proof_namespace={"P": primitive},
+            subsets_pairs=[],
+        )
+        game = frog_parser.parse_game("""
+            Game G() {
+                Bool Test(Int x, Bool c) {
+                    return c && P.Eval(x) != None;
+                }
+            }
+            """)
+        out = str(DeadNullGuardElimination().apply(game, ctx))
+        assert ("!= None" not in out) == folds
+
+    def test_game_call_not_folded(self) -> None:
+        """A game's oracle may change state; folding would drop the call."""
+        stateful = frog_parser.parse_game("""
+            Game P() {
+                Int count;
+                Int Eval(Int x) {
+                    count = count + 1;
+                    return count;
+                }
+            }
+            """)
+        ctx = PipelineContext(
+            variables={},
+            proof_let_types=visitors.NameTypeMap(),
+            proof_namespace={"P": stateful},
+            subsets_pairs=[],
+        )
+        game = frog_parser.parse_game("""
+            Game G() {
+                Bool Test(Int x) {
+                    return P.Eval(x) != None;
+                }
+            }
+            """)
+        assert "!= None" in str(DeadNullGuardElimination().apply(game, ctx))
+
+    def test_name_bound_under_two_types_not_folded(self) -> None:
+        """The method's type map has one type per name; with `v` bound as
+        `Int?` (the parameter) and `Int` (the inner local) the map's type is
+        wrong at the return, where `v` is the optional parameter."""
+        out, ctx = _apply_pass("""
+            Game G() {
+                Bool Test(Int? v, Bool c) {
+                    if (c) {
+                        Int v = 1;
+                    }
+                    return v != None;
+                }
+            }
+            """)
+        assert "v != None" in out
+        assert any(
+            "under more than one type" in nm.reason
+            and nm.transform_name == "Dead Null Guard Elimination"
+            for nm in ctx.near_misses
+        )
+
+    def test_unassigned_read_not_folded(self) -> None:
+        """The same caution as for guards: a field another oracle assigns
+        may be unassigned here."""
+        out, ctx = _apply_pass("""
+            Game G() {
+                Bool r;
+                Void Store(Bool v) { r = v; }
+                Bool Query(Bool c) {
+                    return c && r != None;
+                }
+            }
+            """)
+        assert "r != None" in out
+        assert any(
+            "reads 'r', which may be unassigned" in nm.reason
+            for nm in ctx.near_misses
+        )
+
+
+def _engine_equal(left: str, right: str) -> bool:
+    return (
+        ProofEngine()
+        .check_equivalent(frog_parser.parse_game(left), frog_parser.parse_game(right))
+        .valid
+    )
+
+
+class TestNoneTestFoldingEndToEnd:
+    """The engine identifies a game with the None tests folded away when the
+    tested value is not optional, and keeps the games apart when it is."""
+
+    @pytest.mark.parametrize(
+        "body, folded",
+        [
+            pytest.param(
+                "if (x == None) { return c; } else { return !c; }",
+                "return !c;",
+                id="if-else",
+            ),
+            pytest.param("return c && x != None;", "return c;", id="conjunct"),
+        ],
+    )
+    @pytest.mark.parametrize("optional", [False, True])
+    def test_equal_only_when_not_optional(
+        self, body: str, folded: str, optional: bool
+    ) -> None:
+        """With `x` optional, Test(None, c) tells the games apart."""
+        x_type = "BitString<8>?" if optional else "BitString<8>"
+        template = """
+            Game G() {{
+                Bool Test({x_type} x, Bool c) {{
+                    {body}
+                }}
+            }}
+            """
+        equal = _engine_equal(
+            template.format(x_type=x_type, body=body),
+            template.format(x_type=x_type, body=folded),
+        )
+        assert equal == (not optional)

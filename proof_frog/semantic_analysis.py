@@ -1567,6 +1567,37 @@ def _block_always_returns(block: frog_ast.Block) -> bool:
     return isinstance(block.statements[-1], frog_ast.ReturnStatement)
 
 
+def _type_children(the_type: frog_ast.ASTNode) -> list[frog_ast.ASTNode]:
+    """The types *the_type* is built from: the components of a product (or
+    of a tuple of types), the element type of a set, array or optional, a
+    map's key and value types, a function's domain and range. A length,
+    modulus, size or group is an expression and is not listed."""
+    if isinstance(the_type, frog_ast.ProductType):
+        return list(the_type.types)
+    if isinstance(the_type, frog_ast.Tuple):
+        return list(the_type.values)
+    if isinstance(the_type, frog_ast.OptionalType):
+        return [the_type.the_type]
+    if isinstance(the_type, frog_ast.SetType):
+        return [] if the_type.parameterization is None else [the_type.parameterization]
+    if isinstance(the_type, frog_ast.MapType):
+        return [the_type.key_type, the_type.value_type]
+    if isinstance(the_type, frog_ast.ArrayType):
+        return [the_type.element_type]
+    if isinstance(the_type, frog_ast.FunctionType):
+        return [the_type.domain_type, the_type.range_type]
+    return []
+
+
+def _holds_optional(the_type: PossibleType | frog_ast.ASTNode) -> bool:
+    """True if *the_type* is, or is built from, an optional type or None."""
+    if isinstance(the_type, (frog_ast.OptionalType, frog_ast.NoneExpression)):
+        return True
+    if not isinstance(the_type, frog_ast.ASTNode):
+        return False
+    return any(_holds_optional(child) for child in _type_children(the_type))
+
+
 def _extract_subsets_pairs(
     instantiated_scheme: frog_ast.Instantiable,
 ) -> list[tuple[PossibleType, PossibleType]]:
@@ -1963,15 +1994,66 @@ class CheckTypeVisitor(VariableTypeVisitor):
         # Pre-extract equality/subsets pairs from requires clauses so they
         # are available during method body type checking.
         for req in scheme.requirements:
-            self._extract_requires_pairs(req)
+            self._extract_requires_pairs(req, scheme)
 
-    def _extract_requires_pairs(self, expr: frog_ast.Expression) -> None:
+    def _optional_requirement_side(
+        self, side: frog_ast.Type, scheme: Optional[frog_ast.Scheme]
+    ) -> Optional[frog_ast.Type]:
+        """The optional type or literal None that *side* of a type
+        requirement is, stands for or is built from (``Set<BitString<8>?>``
+        included): through the scheme's own ``Set`` aliases (not yet visited
+        when the requirements are read), then through ``let:`` and member
+        aliases. None otherwise."""
+        aliases: dict[str, frog_ast.Type] = {}
+        for field in scheme.fields if scheme is not None else []:
+            if field.type == frog_ast.SetType() and isinstance(
+                field.value, frog_ast.Type
+            ):
+                aliases[field.name] = field.value
+        return self._optional_part(side, aliases, frozenset())
+
+    def _optional_part(
+        self,
+        node: frog_ast.ASTNode,
+        aliases: dict[str, frog_ast.Type],
+        seen: frozenset[str],
+    ) -> Optional[frog_ast.Type]:
+        """The first optional type or None in *node*, read through *aliases*
+        and the visitor's aliases, then in the types it is built from."""
+        current: PossibleType | frog_ast.ASTNode = node
+        while (
+            isinstance(current, frog_ast.Variable)
+            and current.name in aliases
+            and current.name not in seen
+        ):
+            seen = seen | {current.name}
+            current = aliases[current.name]
+        resolved = (
+            self._resolve_type_alias(current)
+            if isinstance(current, frog_ast.Type)
+            else current
+        )
+        for candidate in (current, resolved):
+            if isinstance(candidate, (frog_ast.OptionalType, frog_ast.NoneExpression)):
+                return candidate
+        for candidate in (current, resolved):
+            if not isinstance(candidate, frog_ast.ASTNode):
+                continue
+            for child in _type_children(candidate):
+                found = self._optional_part(child, aliases, seen)
+                if found is not None:
+                    return found
+        return None
+
+    def _extract_requires_pairs(
+        self, expr: frog_ast.Expression, scheme: Optional[frog_ast.Scheme] = None
+    ) -> None:
         """Recursively extract pairs from requires expressions."""
         if not isinstance(expr, frog_ast.BinaryOperation):
             return
         if expr.operator == frog_ast.BinaryOperators.AND:
-            self._extract_requires_pairs(expr.left_expression)
-            self._extract_requires_pairs(expr.right_expression)
+            self._extract_requires_pairs(expr.left_expression, scheme)
+            self._extract_requires_pairs(expr.right_expression, scheme)
         elif expr.operator in (
             frog_ast.BinaryOperators.SUBSETS,
             frog_ast.BinaryOperators.EQUALS,
@@ -1991,6 +2073,21 @@ class CheckTypeVisitor(VariableTypeVisitor):
                 self.expression_equality_pairs.append((left, right))
                 return
             if isinstance(left, frog_ast.Type) and isinstance(right, frog_ast.Type):
+                # F-422: a pair makes its two types compatible both ways, so a
+                # requirement with an optional side would let a value that may
+                # be None into a variable of an abstract set, which the engine
+                # reads as never None. Refuse it, and record no pair.
+                for side in (left, right):
+                    optional = self._optional_requirement_side(side, scheme)
+                    if optional is not None:
+                        via = f" ({side})" if str(side) != str(optional) else ""
+                        self.print_error(
+                            expr,
+                            f"The requirement {expr} involves the optional type"
+                            f" {optional}{via}: a type requirement may not"
+                            " involve an optional type",
+                        )
+                        return
                 self.subsets_pairs.append((left, right))
                 # Warn when a == constraint has the abstract type on the
                 # right, since the type normalizer only fires when the
@@ -3790,6 +3887,11 @@ def compare_types(
     # asserts the sets are interchangeable in context.
     if subsets_pairs:
         for sub_type, super_type in subsets_pairs:
+            # F-422 (defense in depth): a pair with a side that holds an
+            # optional type (`Set<BitString<8>?>` included) is refused where
+            # the requirement is read; never let one make types compatible.
+            if _holds_optional(sub_type) or _holds_optional(super_type):
+                continue
             if (value_type == sub_type and declared_type == super_type) or (
                 value_type == super_type and declared_type == sub_type
             ):

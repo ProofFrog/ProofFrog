@@ -1,0 +1,8 @@
+// A Holder whose element set is optional, and whose producer returns None.
+import 'Holder.primitive';
+Scheme OptHolder() extends Holder {
+    Set Elem = BitString<8>?;
+    Elem Get() {
+        return None;
+    }
+}

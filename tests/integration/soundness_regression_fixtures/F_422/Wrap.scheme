@@ -1,0 +1,8 @@
+// A Holder that forwards to another Holder.
+import 'Holder.primitive';
+Scheme Wrap(Holder R) extends Holder {
+    Set Elem = R.Elem;
+    Elem Get() {
+        return R.Get();
+    }
+}

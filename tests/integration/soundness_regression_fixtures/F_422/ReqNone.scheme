@@ -1,0 +1,26 @@
+// Task5 review r3 (pre-existing control for r2): `requires P.Elem subsets Opt`
+// with Opt an optional type lets the scheme store None in a P.Elem variable.
+// Check tests the variable against None through an inlined helper; Check2
+// returns false.
+import 'Conv2.primitive';
+import 'Src.primitive';
+Scheme ReqNone(Src P) extends Conv2 {
+    requires P.Elem subsets Opt;
+    Set Opt = BitString<8>?;
+
+    Bool Check(Bool b, BitString<8>? y) {
+        P.Elem v = P.Pick();
+        if (b) {
+            v = y;
+        }
+        return this.IsNone(v);
+    }
+
+    Bool Check2(Bool b, BitString<8>? y) {
+        return false;
+    }
+
+    Bool IsNone(Opt a2) {
+        return a2 == None;
+    }
+}

@@ -1,0 +1,19 @@
+// Attack r5 (see ReqH.scheme). UNSOUND if "Proof Succeeded":
+// Test(true, None): Left true (v = None), Right false.
+import 'Conv2.primitive';
+import 'Src.primitive';
+import 'Holder.primitive';
+import 'OptHolder.scheme';
+import 'ReqH.scheme';
+import 'r3.game';
+proof:
+let:
+    Set K;
+    Src P = Src(K);
+    OptHolder Q = OptHolder();
+    ReqH C = ReqH(P, Q);
+theorem:
+    R3(C);
+games:
+    R3(C).Left against R3(C).Adversary;
+    R3(C).Right against R3(C).Adversary;

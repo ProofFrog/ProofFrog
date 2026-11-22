@@ -725,6 +725,16 @@ CASES = [
      "a game's own Set E = None; with y == None for y : E"),
     ("F-421", "rednone.proof", "type_error", "type checker",
      "None passed to a reduction's Set parameter in a step"),
+    ("F-422", "r3.proof", "type_error", "type checker",
+     "requires P.Elem subsets Opt with Set Opt = BitString<8>? let an optional "
+     "value into a variable of the abstract set P.Elem, read as never None"),
+    ("F-422", "r4.proof", "type_error", "type checker",
+     "the same with an else-less guard"),
+    ("F-422", "r5.proof", "type_error", "type checker",
+     "requires P.Elem subsets Q.Elem, optional only once Q is instantiated "
+     "with a scheme whose Elem is BitString<8>?"),
+    ("F-422", "r6.proof", "type_error", "type checker",
+     "the same through a forwarding scheme"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),
@@ -915,6 +925,26 @@ CASES = [
 
 # (finding, proof file) -> the error a type_error case must fail with.
 TYPE_ERROR = {
+    ("F-422", "r3.proof"): (
+        "error: The requirement K subsets BitString<8>? involves the optional"
+        " type BitString<8>?: a type requirement may not involve an optional"
+        " type"
+    ),
+    ("F-422", "r4.proof"): (
+        "error: The requirement K subsets BitString<8>? involves the optional"
+        " type BitString<8>?: a type requirement may not involve an optional"
+        " type"
+    ),
+    ("F-422", "r5.proof"): (
+        "error: The requirement K subsets BitString<8>? involves the optional"
+        " type BitString<8>?: a type requirement may not involve an optional"
+        " type"
+    ),
+    ("F-422", "r6.proof"): (
+        "error: The requirement K subsets BitString<8>? involves the optional"
+        " type BitString<8>?: a type requirement may not involve an optional"
+        " type"
+    ),
     ("F-421", "ng.proof"): (
         "error: The set E is defined as None, which is a value, not a type"
     ),

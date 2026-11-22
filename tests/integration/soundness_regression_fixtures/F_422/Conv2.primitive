@@ -1,0 +1,5 @@
+// Task5 review r2: two checks over an optional input.
+Primitive Conv2() {
+    Bool Check(Bool b, BitString<8>? y);
+    Bool Check2(Bool b, BitString<8>? y);
+}

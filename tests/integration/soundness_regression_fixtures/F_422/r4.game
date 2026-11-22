@@ -1,0 +1,17 @@
+// Task5 review r4: guard form of r3 (else-less if (v == None) removed).
+// Target: Dead Null Guard Elimination, else-less guard removal (Case 1).
+// Same route as r2: `if (v == None) { return true; } return false;` with v : K
+// is removed. Distinguisher: Test(true, None): Left true, Right false.
+// UNSOUND if the proof is accepted.
+import 'Conv2.primitive';
+Game Left(Conv2 C) {
+    Bool Test(Bool b, BitString<8>? y) {
+        return C.Check(b, y);
+    }
+}
+Game Right(Conv2 C) {
+    Bool Test(Bool b, BitString<8>? y) {
+        return C.Check2(b, y);
+    }
+}
+export as R4;

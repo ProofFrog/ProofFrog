@@ -1,0 +1,25 @@
+// Attack r5: a requirement between two abstract member aliases, which
+// becomes `K subsets BitString<8>?` only once Q is instantiated with
+// OptHolder.
+import 'Conv2.primitive';
+import 'Src.primitive';
+import 'Holder.primitive';
+Scheme ReqH(Src P, Holder Q) extends Conv2 {
+    requires P.Elem subsets Q.Elem;
+
+    Bool Check(Bool b, BitString<8>? y) {
+        P.Elem v = P.Pick();
+        if (b) {
+            v = Q.Get();
+        }
+        return this.IsNone(v);
+    }
+
+    Bool Check2(Bool b, BitString<8>? y) {
+        return false;
+    }
+
+    Bool IsNone(P.Elem? a2) {
+        return a2 == None;
+    }
+}

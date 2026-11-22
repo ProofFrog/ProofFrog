@@ -1004,3 +1004,106 @@ class TestNoneTestFoldingEndToEnd:
             template.format(x_type=x_type, body=folded),
         )
         assert equal == (not optional)
+
+
+class TestRedundantNullConjunct:
+    """G6: in a conjunction, `y != None` after an earlier conjunct `x == y`
+    (or `y == x`) is true whenever it is evaluated when `x` is never None:
+    the earlier conjunct made `y` equal to a value that is not None. It is
+    dropped when `y` is the same call-free expression without map or array
+    reads in both places, so both occurrences have the same value."""
+
+    _TEMPLATE = """
+        Game G() {{
+            Bool Test(BitString<8> x, BitString<8>? y, Bool c, Map<Int, BitString<8>?> M) {{
+                {body}
+            }}
+        }}
+        """
+
+    @pytest.mark.parametrize(
+        "statement, folded",
+        [
+            pytest.param("return x == y && y != None;", "return x == y;", id="x-eq-y"),
+            pytest.param("return y == x && y != None;", "return y == x;", id="y-eq-x"),
+            pytest.param(
+                "return x == y && c && y != None;",
+                "return x == y && c;",
+                id="conjunct-between",
+            ),
+            pytest.param(
+                "return c && x == y && None != y;",
+                "return c && x == y;",
+                id="none-on-left",
+            ),
+        ],
+    )
+    def test_folds(self, statement: str, folded: str) -> None:
+        out, _ = _apply_pass(self._TEMPLATE.format(body=statement))
+        assert out == str(frog_parser.parse_game(self._TEMPLATE.format(body=folded)))
+
+    @pytest.mark.parametrize(
+        "statement",
+        [
+            # The test comes first: with y None it short-circuits, and the
+            # equality would be evaluated after the fold.
+            pytest.param("return y != None && x == y;", id="test-first"),
+            # Disjunction: `x == y || y != None` is true when y is any
+            # non-None value.
+            pytest.param("return x == y || y != None;", id="disjunction"),
+            # x may be None: x == y holds with both None.
+            pytest.param("return y == M[0] && y != None;", id="other-side-optional"),
+            # A map read in y: kept (Review Focus 4).
+            pytest.param("return x == M[0] && M[0] != None;", id="map-read"),
+            # Different expressions.
+            pytest.param("return x == y && M[1] != None;", id="different-y"),
+        ],
+    )
+    def test_not_folded(self, statement: str) -> None:
+        out, _ = _apply_pass(self._TEMPLATE.format(body=statement))
+        assert out == str(frog_parser.parse_game(self._TEMPLATE.format(body=statement)))
+
+    def test_call_in_y_not_folded(self) -> None:
+        """Two calls of a non-deterministic method may differ: dropping the
+        second changes the probability."""
+        primitive = frog_parser.parse_primitive_file("""
+            Primitive P() {
+                BitString<8>? Eval(Int i);
+            }
+            """)
+        ctx = PipelineContext(
+            variables={},
+            proof_let_types=visitors.NameTypeMap(),
+            proof_namespace={"F": primitive},
+            subsets_pairs=[],
+        )
+        game = frog_parser.parse_game("""
+            Game G() {
+                Bool Test(BitString<8> x) {
+                    return x == F.Eval(1) && F.Eval(1) != None;
+                }
+            }
+            """)
+        assert DeadNullGuardElimination().apply(game, ctx) == game
+
+    @pytest.mark.parametrize("optional", [False, True])
+    def test_engine_identifies_only_when_x_is_not_optional(self, optional: bool) -> None:
+        x_type = "BitString<8>?" if optional else "BitString<8>"
+        left = f"""
+            Game G() {{
+                Bool Test({x_type} x, BitString<8>? y) {{
+                    return x == y && y != None;
+                }}
+            }}
+            """
+        right = f"""
+            Game G() {{
+                Bool Test({x_type} x, BitString<8>? y) {{
+                    return x == y;
+                }}
+            }}
+            """
+        result = ProofEngine().check_equivalent(
+            frog_parser.parse_game(left), frog_parser.parse_game(right)
+        )
+        assert result.valid is not optional

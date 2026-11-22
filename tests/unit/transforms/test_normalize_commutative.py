@@ -249,3 +249,101 @@ def test_f260_deterministic_call_still_reorders() -> None:
         proof_namespace=_det_namespace()
     ).transform(method)
     assert result == expected
+
+
+# ---------------------------------------------------------------------------
+# G1: abstract primitive calls touch no game state, so they reorder
+# ---------------------------------------------------------------------------
+
+
+def _primitive_namespace():
+    prim = frog_parser.parse_primitive_file(
+        """
+        Primitive P(Int n) {
+            Int KeyGen();
+            BitString<n> Samp();
+            deterministic Int det(Int x);
+        }
+        """
+    )
+    return {"F": prim}
+
+
+def test_g1_reorders_equality_with_nondeterministic_primitive_call() -> None:
+    """An abstract primitive call touches no game state (FROGLANG_REFERENCE,
+    evaluation order), so moving it past another operand changes nothing:
+    `F.KeyGen() != v` and `v != F.KeyGen()` are the same program."""
+    method = frog_parser.parse_method(
+        "Bool f(Int v) {\n return F.KeyGen() != v;\n}"
+    )
+    expected = frog_parser.parse_method(
+        "Bool f(Int v) {\n return v != F.KeyGen();\n}"
+    )
+    result = NormalizeCommutativeChainsTransformer(
+        proof_namespace=_primitive_namespace()
+    ).transform(method)
+    assert result == expected
+
+
+def test_g1_reorders_xor_chain_with_primitive_calls() -> None:
+    method = frog_parser.parse_method(
+        "BitString<n> f(BitString<n> a) {\n return F.Samp() + a;\n}"
+    )
+    expected = frog_parser.parse_method(
+        "BitString<n> f(BitString<n> a) {\n return a + F.Samp();\n}"
+    )
+    result = NormalizeCommutativeChainsTransformer(
+        proof_namespace=_primitive_namespace()
+    ).transform(method)
+    assert result == expected
+
+
+def test_g1_reorders_with_let_function_call() -> None:
+    from proof_frog.visitors import NameTypeMap
+    from proof_frog import frog_ast
+
+    lets = NameTypeMap()
+    lets.set("H", frog_ast.FunctionType(frog_ast.IntType(), frog_ast.IntType()))
+    method = frog_parser.parse_method("Bool f(Int a) {\n return H(a) == a;\n}")
+    expected = frog_parser.parse_method("Bool f(Int a) {\n return a == H(a);\n}")
+    result = NormalizeCommutativeChainsTransformer(
+        proof_namespace=_primitive_namespace(), proof_let_types=lets
+    ).transform(method)
+    assert result == expected
+
+
+def test_g1_keeps_order_with_challenger_call() -> None:
+    """A challenger call may read or write the challenger's state: with a
+    primitive call beside it the chain keeps its order (F-260)."""
+    for source in (
+        # Sorting would put the variable first (Variable < FuncCall).
+        "Bool f(Int k) {\n return challenger.Get() == k;\n}",
+        # The flattened chain [challenger.Get(), F.KeyGen(), k] would sort.
+        "Int f(Int k) {\n return challenger.Get() + F.KeyGen() + k;\n}",
+    ):
+        method = frog_parser.parse_method(source)
+        result = NormalizeCommutativeChainsTransformer(
+            proof_namespace=_primitive_namespace()
+        ).transform(method)
+        assert result == method, source
+
+
+def test_g1_keeps_order_with_uninlined_scheme_call() -> None:
+    """A scheme method left uninlined is not an abstract primitive call: it
+    is treated as touching state."""
+    scheme = frog_parser.parse_scheme_file(
+        """
+        Scheme S() extends P {
+            Int Enc(Int k) {
+                return k;
+            }
+        }
+        """
+    )
+    namespace = _primitive_namespace()
+    namespace["T"] = scheme
+    method = frog_parser.parse_method("Bool f(Int k) {\n return T.Enc(k) == k;\n}")
+    result = NormalizeCommutativeChainsTransformer(proof_namespace=namespace).transform(
+        method
+    )
+    assert result == method

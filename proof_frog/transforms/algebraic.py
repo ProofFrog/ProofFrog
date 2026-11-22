@@ -2050,9 +2050,11 @@ class NormalizeCommutativeChainsTransformer(Transformer):
         self,
         proof_namespace: frog_ast.Namespace | None = None,
         proof_let_types: NameTypeMap | None = None,
+        ctx: PipelineContext | None = None,
     ) -> None:
         self._proof_namespace: frog_ast.Namespace = proof_namespace or {}
         self._proof_let_types = proof_let_types
+        self._ctx = ctx
 
     def transform_binary_operation(
         self, expr: frog_ast.BinaryOperation
@@ -2070,10 +2072,43 @@ class NormalizeCommutativeChainsTransformer(Transformer):
         # (`challenger.Inc() + challenger.Get()`) does not: swapping it past
         # another call changes which side effect runs first, so two genuinely
         # distinguishable expressions would canonicalize to the same form.
-        # Decline to reorder any chain containing a non-deterministic call.
-        if has_nondeterministic_call(
-            transformed, self._proof_namespace, self._proof_let_types
+        # An abstract primitive call or a `let:` Function call touches no game
+        # state (FROGLANG_REFERENCE, evaluation order; `evaluation_order.py`
+        # relies on the same rule), even when it is non-deterministic: each
+        # draws its own coins, so evaluating it before or after another
+        # operand gives the same joint distribution. Decline to reorder only
+        # a chain holding a call that may touch state: a `challenger.` call, a
+        # scheme or game method left uninlined, or anything unresolved.
+        if (
+            transformed.operator not in _COMMUTATIVE_ASSOCIATIVE_OPS
+            and transformed.operator not in _COMMUTATIVE_ONLY_OPS
         ):
+            return transformed
+        stateful = _stateful_call(
+            transformed, self._proof_namespace, self._proof_let_types
+        )
+        if stateful is not None:
+            if self._ctx is not None:
+                self._ctx.near_misses.append(
+                    NearMiss(
+                        transform_name="Normalize Commutative Chains",
+                        reason=(
+                            f"operands of '{transformed.operator.value}' were not"
+                            f" put in canonical order because '{stateful}' is"
+                            " not a primitive method call or a let: Function"
+                            " call, so it may touch state and its position may"
+                            " matter"
+                        ),
+                        location=transformed.origin,
+                        suggestion=(
+                            "bind the call to a local before the expression"
+                            " if its order relative to the other operands"
+                            " does not matter"
+                        ),
+                        variable=None,
+                        method=None,
+                    )
+                )
             return transformed
 
         # Commutative + associative: flatten and sort the full chain.
@@ -2109,7 +2144,38 @@ class NormalizeCommutativeChains(TransformPass):
         return NormalizeCommutativeChainsTransformer(
             proof_namespace=ctx.proof_namespace,
             proof_let_types=ctx.proof_let_types,
+            ctx=ctx,
         ).transform(game)
+
+
+def _stateful_call(
+    expr: frog_ast.Expression,
+    proof_namespace: frog_ast.Namespace,
+    proof_let_types: NameTypeMap | None,
+) -> frog_ast.FuncCall | None:
+    """The first call in *expr* that may touch game state, or None.
+
+    A method call on a ``let:`` entry that resolves to a ``Primitive``
+    (instantiated, or abstract such as ``SymEnc E;``) and a call of a
+    ``let:`` entry of ``Function`` type touch no game state, deterministic or
+    not (SEMANTICS.md, ruling of 2026-06-28: abstract primitive calls are
+    stateless, with fresh coins and no side effects). Every other call (a
+    ``challenger.`` call, a scheme or game method, a call of a local or field
+    value, anything unresolved) may.
+    """
+
+    def touches_state(node: frog_ast.ASTNode) -> bool:
+        if not isinstance(node, frog_ast.FuncCall):
+            return False
+        if _lookup_primitive_method(node.func, proof_namespace) is not None:
+            return False
+        if proof_let_types is not None and isinstance(node.func, frog_ast.Variable):
+            if isinstance(proof_let_types.get(node.func.name), frog_ast.FunctionType):
+                return False
+        return True
+
+    found = SearchVisitor(touches_state).visit(expr)
+    return found if isinstance(found, frog_ast.FuncCall) else None
 
 
 class FlattenConcatChainTransformer(Transformer):

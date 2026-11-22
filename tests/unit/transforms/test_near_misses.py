@@ -6887,3 +6887,61 @@ def test_empty_field_no_near_miss_when_field_is_written() -> None:
     ctx = _make_ctx()
     assert EmptyCollectionField().apply(game, ctx) == game
     assert not _empty_field_misses(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Normalize Commutative Chains
+# ---------------------------------------------------------------------------
+
+
+def test_near_miss_commutative_chain_with_stateful_call() -> None:
+    from proof_frog.transforms.algebraic import NormalizeCommutativeChains
+
+    game = frog_parser.parse_game(
+        "Game T() {\n Bool f(Int k) {\n return challenger.Get() == k;\n }\n}"
+    )
+    ctx = _make_ctx()
+    assert NormalizeCommutativeChains().apply(game, ctx) == game
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Normalize Commutative Chains"
+    ]
+    assert len(misses) == 1
+    assert "challenger.Get()" in misses[0].reason
+
+
+def test_no_near_miss_commutative_chain_with_primitive_call() -> None:
+    from proof_frog.transforms.algebraic import NormalizeCommutativeChains
+
+    prim = frog_parser.parse_primitive_file(
+        "Primitive P() {\n Int KeyGen();\n}"
+    )
+    game = frog_parser.parse_game(
+        "Game T() {\n Bool f(Int k) {\n return F.KeyGen() == k;\n }\n}"
+    )
+    ctx = _make_ctx()
+    ctx.proof_namespace["F"] = prim
+    NormalizeCommutativeChains().apply(game, ctx)
+    assert not [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Normalize Commutative Chains"
+    ]
+
+
+def test_no_near_miss_commutative_chain_for_non_commutative_operator() -> None:
+    """Only `+`, `*`, `==` and `!=` are sorted, so a stateful call under `-`
+    is not a near miss of this pass."""
+    from proof_frog.transforms.algebraic import NormalizeCommutativeChains
+
+    game = frog_parser.parse_game(
+        "Game T() {\n Int f(Int k) {\n return challenger.Get() - k;\n }\n}"
+    )
+    ctx = _make_ctx()
+    NormalizeCommutativeChains().apply(game, ctx)
+    assert not [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Normalize Commutative Chains"
+    ]

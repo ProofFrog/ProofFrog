@@ -1,0 +1,32 @@
+// Positive control for attack_challenger.proof: a TRUE chain. Every game
+// runs Test with modulus c before counting c up: CtlPair's sides directly
+// (E and F both ModSFlat), the composed game through the challenger's Test
+// and Inc oracles. Expected: Proof Succeeded.
+import 'ModP.primitive';
+import 'ModSFlat.scheme';
+import 'CtlPair.game';
+import 'Ch.game';
+
+Reduction R1(ModP E) compose Ch(E) against CtlPair(E, E).Adversary {
+    Bool f(Int a, Bool b, Bool d) {
+        Bool r = challenger.Test(a, b, d);
+        challenger.Inc();
+        return r;
+    }
+}
+
+proof:
+
+let:
+    ModSFlat E = ModSFlat();
+
+assume:
+    Ch(E);
+
+theorem:
+    CtlPair(E, E);
+
+games:
+    CtlPair(E, E).Left against CtlPair(E, E).Adversary;
+    Ch(E).Real compose R1(E) against CtlPair(E, E).Adversary;
+    CtlPair(E, E).Right against CtlPair(E, E).Adversary;

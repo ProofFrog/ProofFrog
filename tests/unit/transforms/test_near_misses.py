@@ -6887,3 +6887,59 @@ def test_empty_field_no_near_miss_when_field_is_written() -> None:
     ctx = _make_ctx()
     assert EmptyCollectionField().apply(game, ctx) == game
     assert not _empty_field_misses(ctx)
+
+
+# ---------------------------------------------------------------------------
+# F-420: a local that a type names keeps its value when the value reads a
+# variable the game changes.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "pass_, body",
+    [
+        (
+            RedundantCopy(),
+            "Int k = c; ModInt<k> v = a; c = c + 1; return v == v;",
+        ),
+        (
+            InlineSingleUseVariable(),
+            "Int k = c + 1; ModInt<k> v = a; c = c + 1; return v == v;",
+        ),
+        (
+            InlineMultiUsePureExpression(),
+            "Int k = c + 1; ModInt<k> v = a; ModInt<k> w = a + a; "
+            "c = c + 1; return v == w;",
+        ),
+    ],
+)
+def test_type_snapshot_near_miss(pass_: TransformPass, body: str) -> None:
+    game = frog_parser.parse_game(
+        "Game G() { Int c = 2; Bool f(Int a) { " + body + " } }"
+    )
+    ctx = _make_ctx()
+    assert pass_.apply(game, ctx) == game
+    misses = [nm for nm in ctx.near_misses if nm.variable == "k"]
+    assert misses, ctx.near_misses
+    assert misses[0].transform_name == pass_.name
+    assert "a type names it" in misses[0].reason
+
+
+@pytest.mark.parametrize(
+    "pass_, body",
+    [
+        (RedundantCopy(), "Int k = c; ModInt<k> v = a; return v == v;"),
+        (
+            InlineSingleUseVariable(),
+            "Int k = c + 1; ModInt<k> v = a; return v == v;",
+        ),
+    ],
+)
+def test_type_snapshot_forwards_a_fixed_value(pass_: TransformPass, body: str) -> None:
+    """``c`` never changes: forwarding it into the type is fine."""
+    game = frog_parser.parse_game(
+        "Game G() { Int c = 2; Bool f(Int a) { " + body + " } }"
+    )
+    ctx = _make_ctx()
+    assert pass_.apply(game, ctx) != game
+    assert not [nm for nm in ctx.near_misses if nm.variable == "k"]

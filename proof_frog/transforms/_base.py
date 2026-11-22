@@ -8,14 +8,22 @@ from __future__ import annotations
 import dataclasses
 import warnings
 from abc import ABC, abstractmethod
+from collections import Counter
 from dataclasses import dataclass
-from typing import Callable, Optional, Sequence
+from typing import Any, Callable, Iterator, Optional, Sequence
 
 from sympy import Symbol
 
 from .. import frog_ast
 from ..frog_ast import SourceOrigin
-from ..visitors import NameTypeMap, SearchVisitor, referenced_variable_names
+from ..visitors import (
+    NameTypeMap,
+    SearchVisitor,
+    lvalue_base_name,
+    referenced_variable_names,
+    type_position_names,
+    walk_children,
+)
 
 _MAX_FIXED_POINT_ITERATIONS = 200
 
@@ -296,6 +304,221 @@ def same_structure(left: object, right: object) -> bool:
     return bool(left == right)
 
 
+def _count_type_positions(node: Any, in_type: bool, counts: Counter[str]) -> None:
+    """Add to *counts* one for each ``Variable`` in a type position within
+    *node*, a length, modulus or size expression included."""
+    if isinstance(node, frog_ast.Variable):
+        if in_type:
+            counts[node.name] += 1
+        return
+    if isinstance(node, (list, tuple)):
+        for item in node:
+            _count_type_positions(item, in_type, counts)
+        return
+    if not isinstance(node, frog_ast.ASTNode):
+        return
+    for _, child, child_in_type in walk_children(node, in_type):
+        _count_type_positions(child, child_in_type, counts)
+
+
+def _statements(block: frog_ast.Block) -> Iterator[frog_ast.Statement]:
+    """Every statement in *block*, at any depth (inside nested blocks, ``if``
+    branches and loop bodies); expressions are not entered, since no
+    expression declares or writes a variable."""
+    for statement in block.statements:
+        yield statement
+        if isinstance(statement, frog_ast.Block):
+            yield from _statements(statement)
+        elif isinstance(statement, frog_ast.IfStatement):
+            for inner in statement.blocks:
+                yield from _statements(inner)
+        elif isinstance(statement, (frog_ast.NumericFor, frog_ast.GenericFor)):
+            yield from _statements(statement.block)
+
+
+def _scan_types_and_changes(
+    game: frog_ast.Game,
+) -> tuple[Counter[str], set[str]]:
+    """One walk of *game*: the count of each name in a type position (the
+    declared type of a field, parameter, local or ``for`` binder, a return
+    type, a draw's type and domain; a length, modulus or size inside one
+    included), and the names :func:`changing_names` describes. Only
+    statements are walked, and only the types in them entered, so the walk
+    stays cheap enough to run on every pass output (`apply_pass`)."""
+    counts: Counter[str] = Counter()
+    changed: set[str] = set()
+
+    def _count(node: Optional[frog_ast.ASTNode]) -> None:
+        if node is not None:
+            _count_type_positions(node, True, counts)
+
+    def _target(target: frog_ast.ASTNode) -> None:
+        if isinstance(target, frog_ast.Tuple):
+            for value in target.values:
+                _target(value)
+            return
+        base = lvalue_base_name(target)
+        if base is not None:
+            changed.add(base)
+
+    for field in game.fields:
+        _count(field.type)
+    for parameter in game.parameters:
+        _count(parameter.type)
+    for method in game.methods:
+        signature = method.signature
+        _count(signature.return_type)
+        for parameter in signature.parameters:
+            _count(parameter.type)
+        bindings: Counter[str] = Counter(p.name for p in signature.parameters)
+        for inner in _statements(method.block):
+            if isinstance(
+                inner, (frog_ast.Assignment, frog_ast.Sample, frog_ast.UniqueSample)
+            ):
+                _count(inner.the_type)
+                if inner.the_type is not None and isinstance(
+                    inner.var, frog_ast.Variable
+                ):
+                    bindings[inner.var.name] += 1
+                else:
+                    _target(inner.var)
+                if isinstance(inner, (frog_ast.Sample, frog_ast.UniqueSample)):
+                    _count(inner.sampled_from)
+                if (
+                    isinstance(inner, frog_ast.UniqueSample)
+                    and inner.surface_form == "uniq"
+                ):
+                    changed.update(referenced_variable_names(inner.unique_set))
+            elif isinstance(inner, frog_ast.VariableDeclaration):
+                _count(inner.type)
+                bindings[inner.name] += 1
+            elif isinstance(inner, frog_ast.NumericFor):
+                bindings[inner.name] += 1
+            elif isinstance(inner, frog_ast.GenericFor):
+                _count(inner.var_type)
+                bindings[inner.var_name] += 1
+            elif isinstance(inner, frog_ast.DestructuringBinding):
+                bindings.update(inner.names)
+        changed.update(name for name, count in bindings.items() if count > 1)
+    return counts, changed
+
+
+def changing_names(game: frog_ast.Game) -> set[str]:
+    """Names whose value may change while the game runs: a name written
+    other than by its declaration (an assignment or draw without a type, an
+    element write, a ``<-uniq`` insertion), or bound more than once in one
+    method (two typed declarations, a declaration and a parameter or
+    ``for`` binder). A field, a game parameter and a local bound once and
+    never written keep their value."""
+    return _scan_types_and_changes(game)[1]
+
+
+def changing_type_name_counts(game: frog_ast.Game) -> Counter[str]:
+    """For each name that occurs in a type position of *game* (a modulus,
+    length or size included) and whose value may change while the game runs
+    (:func:`changing_names`), the number of such occurrences.
+
+    The passes compare types by their text and read a store into a declared
+    variable as reading nothing of the variable's type, so a type must name
+    only values that stay fixed (F-420; F-367's rule for source files)."""
+    counts, changing = _scan_types_and_changes(game)
+    return Counter({name: count for name, count in counts.items() if name in changing})
+
+
+def type_snapshot_names(game: frog_ast.Game) -> frozenset[str]:
+    """Each name bound by a typed ``T v = e;`` in *game* that a type of the
+    game names (a modulus, length or size included) and whose value ``e``
+    reads a name the game changes (:func:`changing_names`).
+
+    The method inliner binds a callee parameter read in a type this way
+    (F-420); forwarding ``e`` into the type would name a changing variable
+    there, so the forwarding passes keep these variables."""
+    in_types = type_position_names(game)
+    if not in_types:
+        return frozenset()
+    changing = changing_names(game)
+    names: set[str] = set()
+
+    def _visit(inner: frog_ast.ASTNode) -> bool:
+        if (
+            isinstance(inner, frog_ast.Assignment)
+            and inner.the_type is not None
+            and isinstance(inner.var, frog_ast.Variable)
+            and inner.var.name in in_types
+            and referenced_variable_names(inner.value) & changing
+        ):
+            names.add(inner.var.name)
+        return False
+
+    SearchVisitor(_visit).visit(game)
+    return frozenset(names)
+
+
+def note_type_snapshot(
+    ctx: Optional[PipelineContext],
+    transform_name: str,
+    name: str,
+    location: Optional[SourceOrigin] = None,
+) -> None:
+    """Record that *transform_name* declined to forward *name*, a variable a
+    type names whose value reads a variable the game changes."""
+    if ctx is None:
+        return
+    ctx.near_misses.append(
+        NearMiss(
+            transform_name=transform_name,
+            reason=(
+                f"Cannot forward '{name}': a type names it, and its value reads "
+                f"a variable the game changes; a type must name only values "
+                f"that stay fixed"
+            ),
+            location=location,
+            suggestion=None,
+            variable=name,
+            method=None,
+        )
+    )
+
+
+def apply_pass(
+    pass_: "TransformPass", game: frog_ast.Game, ctx: PipelineContext
+) -> frog_ast.Game:
+    """Apply *pass_* to *game*, refusing an output that names a changing
+    variable in more type positions than *game* does.
+
+    Every pipeline runner applies passes through this function. A forwarding
+    pass that substitutes ``c`` for ``k`` in ``Int k = c; ModInt<k> v;`` when
+    the game writes ``c`` would let later passes move the write in front of a
+    store into ``v`` or merge the declaration with that store after the
+    write (F-420): the refused output is dropped, the game is kept, and a
+    near miss names the pass and the variable."""
+    result = pass_.apply(game, ctx)
+    if result is game:
+        return game
+    after = changing_type_name_counts(result)
+    if not after:
+        return result
+    before = changing_type_name_counts(game)
+    grown = sorted(name for name, count in after.items() if count > before[name])
+    if not grown:
+        return result
+    ctx.near_misses.append(
+        NearMiss(
+            transform_name=pass_.name,
+            reason=(
+                f"{pass_.name} would name {', '.join(repr(n) for n in grown)}, "
+                "a variable the game changes, in a type; a type must name "
+                "only values that stay fixed"
+            ),
+            location=None,
+            suggestion=None,
+            variable=grown[0],
+            method=None,
+        )
+    )
+    return game
+
+
 def run_pipeline(  # pylint: disable=too-many-arguments,too-many-positional-arguments
     game: frog_ast.Game,
     pipeline: list[TransformPass],
@@ -338,7 +561,7 @@ def run_pipeline(  # pylint: disable=too-many-arguments,too-many-positional-argu
             ):
                 continue
             pinned_before = frozenset(ctx.pinned_fields)
-            result = pass_.apply(new_game, ctx)
+            result = apply_pass(pass_, new_game, ctx)
             if result is new_game or same_structure(result, new_game):
                 # Keep the input object, so that every later pass (and the
                 # next iteration) can recognise an unchanged game by identity.
@@ -377,7 +600,7 @@ def run_standardization(
 ) -> frog_ast.Game:
     """Run standardization passes once (no fixed-point loop)."""
     for pass_ in pipeline:
-        game = pass_.apply(game, ctx)
+        game = apply_pass(pass_, game, ctx)
     return game
 
 
@@ -416,7 +639,7 @@ def run_pipeline_with_trace(
         new_game = game
         for pass_ in pipeline:
             before = new_game
-            new_game = pass_.apply(new_game, ctx)
+            new_game = apply_pass(pass_, new_game, ctx)
             if new_game != before:
                 transforms_applied.append(pass_.name)
         if new_game == game:
@@ -454,13 +677,13 @@ def run_pipeline_until(
 
     for pass_ in core_pipeline:
         before = game
-        game = pass_.apply(game, ctx)
+        game = apply_pass(pass_, game, ctx)
         if pass_.name == transform_name:
             return game, game != before, available_names
 
     for pass_ in std_pipeline:
         before = game
-        game = pass_.apply(game, ctx)
+        game = apply_pass(pass_, game, ctx)
         if pass_.name == transform_name:
             return game, game != before, available_names
 

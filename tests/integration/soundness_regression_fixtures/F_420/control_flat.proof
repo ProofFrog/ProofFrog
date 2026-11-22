@@ -1,0 +1,21 @@
+// Positive control for attack_merge_flat.proof: a TRUE equivalence.
+// ModSFlat.Test and ModSDirect.Test compute the same function, and both
+// games call Test before counting c up, so the declaration's modulus c is
+// the one the store sees in both. Expected: Proof Succeeded.
+import 'ModP.primitive';
+import 'ModSFlat.scheme';
+import 'ModSDirect.scheme';
+import 'CtlPair.game';
+
+proof:
+
+let:
+    ModSFlat E = ModSFlat();
+    ModSDirect F = ModSDirect();
+
+theorem:
+    CtlPair(E, F);
+
+games:
+    CtlPair(E, F).Left against CtlPair(E, F).Adversary;
+    CtlPair(E, F).Right against CtlPair(E, F).Adversary;

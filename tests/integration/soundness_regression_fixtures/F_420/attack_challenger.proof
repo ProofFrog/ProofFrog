@@ -1,0 +1,39 @@
+// Target: the method inliner (F-420), challenger route.
+// Hypothesis: the challenger's Test oracle calls E.Test(c, ...) with its
+// counter c, and its Inc oracle writes c. In Ch(E).Real compose R1(E), the
+// inliner inlines challenger.Test, then the scheme call, while
+// challenger.Inc() is not inlined yet: the game it looked at did not write
+// challenger@c, so k was substituted (ModInt<challenger@c> v;), and Merge
+// Bare Declaration later carried the declaration past the write. The
+// composed game (Test, then Inc) then canonicalized like ModPair.Right
+// (Inc, then Test).
+// Sound engine: hop 2 FAILS (first f(2, true, true): Ch(E).Real compose
+// R1(E) true, Right false); hop 1 holds. Unsound engine: Proof Succeeded.
+import 'ModP.primitive';
+import 'ModSFlat.scheme';
+import 'ModPair.game';
+import 'Ch.game';
+
+Reduction R1(ModP E) compose Ch(E) against ModPair(E).Adversary {
+    Bool f(Int a, Bool b, Bool d) {
+        Bool r = challenger.Test(a, b, d);
+        challenger.Inc();
+        return r;
+    }
+}
+
+proof:
+
+let:
+    ModSFlat E = ModSFlat();
+
+assume:
+    Ch(E);
+
+theorem:
+    ModPair(E);
+
+games:
+    ModPair(E).Left against ModPair(E).Adversary;
+    Ch(E).Real compose R1(E) against ModPair(E).Adversary;
+    ModPair(E).Right against ModPair(E).Adversary;

@@ -1,0 +1,20 @@
+// Test(k, a, b, d): stores a and a + a into two variables of ModInt<k> and
+// returns whether they are equal, i.e. whether a == 0 mod k. For k = 2 and
+// a = 2 that is true; for k = 3 it is false. The modulus k is read in two
+// declarations, so after inlining with k := c the copy of c is read twice.
+import 'ModP.primitive';
+
+Scheme ModSTwice() extends ModP {
+    Bool Test(Int k, Int a, Bool b, Bool d) {
+        ModInt<k> v;
+        ModInt<k> w;
+        Bool r = false;
+        if (false) {
+            r = v == w;
+        }
+        v = a;
+        w = a + a;
+        r = v == w;
+        return r;
+    }
+}

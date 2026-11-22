@@ -1216,13 +1216,21 @@ class InlineTransformer(Transformer):
     where an earlier inlined body's variables are in scope does not reuse
     their names (F-405)."""
 
-    def __init__(self, method_lookup: Dict[Tuple[str, str], frog_ast.Method]) -> None:
+    def __init__(
+        self,
+        method_lookup: Dict[Tuple[str, str], frog_ast.Method],
+        written_scope: Optional[frog_ast.ASTNode] = None,
+    ) -> None:
         self.blocks: list[frog_ast.Block] = []
         self.statement_index = 0
         self.method_lookup = method_lookup
         self.finished = False
         self._root: Optional[frog_ast.ASTNode] = None
         self._root_names: Optional[set[str]] = None
+        # Where to look for writes to an argument's names (F-420): the node
+        # transformed unless the caller transforms one method of a larger
+        # game (`ProofEngine.apply_reduction` and `challenger.Initialize`).
+        self._written_scope = written_scope
 
     def transform(self, node: T) -> T:
         if self._root is None:
@@ -1236,6 +1244,24 @@ class InlineTransformer(Transformer):
             assert self._root is not None
             self._root_names = mentioned_names(self._root)
         return self._root_names
+
+    def _reads_written_name(self, arg: frog_ast.Expression) -> bool:
+        """True if *arg* reads a name that the game writes or rebinds
+        anywhere (any method, any depth): the node being transformed (or the
+        *written_scope* given), and the bodies of the methods this inliner
+        inlines, whose writes reach the game only once they are inlined (a
+        reduction's `challenger.Inc()` after `challenger.Test(...)`). A
+        conservative test of whether the argument's value can change after
+        the call."""
+        names = referenced_variable_names(arg)
+        if not names:
+            return False
+        scope = self._written_scope if self._written_scope is not None else self._root
+        assert scope is not None
+        return reassigns_or_rebinds(names, scope) or any(
+            reassigns_or_rebinds(names, method)
+            for method in self.method_lookup.values()
+        )
 
     def transform_block(self, block: frog_ast.Block) -> frog_ast.Block:
         if self.finished:
@@ -1343,6 +1369,16 @@ class InlineTransformer(Transformer):
         # copy. Substituting the argument would turn the callee's write into a
         # write to the caller's variable (`x = 0^n;` becoming `y = 0^n;`, or
         # `X[k] = v;` writing the caller's map).
+        # F-420: a parameter read in a type of the callee's body (a modulus,
+        # a length, an array size) is bound when its argument reads a
+        # variable the game writes. A type is read when its declaration runs:
+        # after `ModInt<k> v;` every store into `v` reduces modulo the value
+        # `k` had then. Substituted, the type would name the game's variable
+        # (`ModInt<c> v;`), and a later store `v = a;` would read `c` in no
+        # way the passes see, so a write to `c` could be moved in front of
+        # the store or the declaration merged with the store after the write.
+        # Bound, the type names a variable nothing writes.
+        body_type_names = type_position_names(called_method.block)
         # The pipeline forwards a binding when it provably keeps its value.
         bindings: list[frog_ast.Statement] = []
         arguments: frog_ast.Namespace = {}
@@ -1351,6 +1387,7 @@ class InlineTransformer(Transformer):
                 type_contains_mod_int(param.type)
                 or not substitutable_argument(arg)
                 or reassigns_or_rebinds({param.name}, called_method.block)
+                or (param.name in body_type_names and self._reads_written_name(arg))
             ):
                 bound = fresh_name(fresh_prefix + param.name + fresh_suffix, taken)
                 bindings.append(

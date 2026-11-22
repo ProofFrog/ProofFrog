@@ -28,6 +28,7 @@ from . import hop_cache as hop_cache_module
 from .transforms._base import (
     NearMiss,
     PipelineContext,
+    changing_type_name_counts,
     deduplicate_near_misses,
     fresh_name,
     game_names,
@@ -1475,7 +1476,7 @@ class ProofEngine:
         for step in (current_step, next_step):
             try:
                 games.append(self._get_game_ast(step.challenger, step.reduction))
-            except InliningLimitError as e:
+            except UnresolvedGameError as e:
                 return f"{self._step_display(step)}: {e}"
         return games[0], games[1]
 
@@ -2234,7 +2235,8 @@ class ProofEngine:
                     + reduction_initialize.block
                 )
             reduction_initialize = visitors.InlineTransformer(
-                {("challenger", "Initialize"): challenger_initialize}
+                {("challenger", "Initialize"): challenger_initialize},
+                written_scope=reduced_game,
             ).transform(reduction_initialize)
             reduced_game.methods[0] = reduction_initialize
 
@@ -2315,7 +2317,14 @@ class ProofEngine:
                 current, lookup, namespace, let_types, composed_with
             )
 
-        return inline_calls(game, lookup, prepare=prepare)
+        game = inline_calls(game, lookup, prepare=prepare)
+        if not composed_later:
+            # Fail closed (F-420): a changing name in a type would let the
+            # passes move a write past a store that reads the type.
+            changing = changing_type_name_counts(game)
+            if changing:
+                raise ChangingTypeNameError(sorted(changing))
+        return game
 
     def _renamed_challenger(self, game: frog_ast.Game) -> frog_ast.Game:
         """*game*, an instantiated challenger, with its fields read as
@@ -3205,7 +3214,34 @@ class UnsupportedFieldInitializerError(Exception):
     """A field initializer the engine cannot run in Initialize (F-391)."""
 
 
-class InliningLimitError(Exception):
+class UnresolvedGameError(Exception):
+    """A proof step's game the engine cannot check: a hop that needs it
+    fails, with this error's message."""
+
+
+class ChangingTypeNameError(UnresolvedGameError):
+    """A game whose types name a variable that changes while the game runs,
+    after inlining (F-420).
+
+    The passes compare types by their text and read a store into a declared
+    variable as reading nothing of its type, so they rely on every name in a
+    type holding a fixed value (the type checker refuses anything else in
+    source files, F-367). The inliner keeps that true by binding a callee
+    parameter read in a type to a fresh variable, and the passes may not
+    break it (`apply_pass`); a game that comes out of inlining with such a
+    name anyway is not checked, so no pass can move a write past a store
+    that reads the type."""
+
+    def __init__(self, names: list[str]) -> None:
+        super().__init__(
+            f"after inlining, a type names {', '.join(names)}, which the game "
+            "changes; the engine checks a game only when the names in its "
+            "types hold fixed values (an engine limit)"
+        )
+        self.names = names
+
+
+class InliningLimitError(UnresolvedGameError):
     """A game whose method calls the engine did not finish inlining (F-404).
 
     The engine inlines one call per round, for at most

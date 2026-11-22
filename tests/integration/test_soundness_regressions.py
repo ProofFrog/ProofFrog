@@ -714,6 +714,26 @@ CASES = [
      "the same with an else-less guard, which released code removed"),
     ("F-419", "parent_control.proof", "accept", "lemma matching",
      "positive control: the constant stands for one of its own type"),
+    ("F-420", "attack_merge_flat.proof", "reject", "MergeBareDeclaration",
+     "inlining put a written field in a ModInt modulus (ModInt<c> v; for a "
+     "scheme's ModInt<k> v;), and the same-block merge carried the "
+     "declaration past c = c + 1;"),
+    ("F-420", "attack_merge_branch.proof", "reject", "MergeBareDeclaration",
+     "the same with the merge into one branch of a later if"),
+    ("F-420", "attack_merge_twice.proof", "reject", "method inliner",
+     "the same with the modulus read in two declarations; a forwarding "
+     "pass put c back into both types after the inliner bound k"),
+    ("F-420", "attack_challenger.proof", "reject", "method inliner",
+     "the scheme call inlined from a challenger oracle before the oracle "
+     "that writes the challenger's counter: the inliner did not look in the "
+     "bodies it had yet to inline"),
+    ("F-420", "control_challenger.proof", "accept", "method inliner",
+     "positive control: the same composed game against a pair that also "
+     "runs Test before counting up"),
+    ("F-420", "control_flat.proof", "accept", "method inliner",
+     "positive control: the bare declaration with a later store and the "
+     "declaration with the value, both before c changes, are identified "
+     "(the modulus bound to a variable nothing writes)"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),

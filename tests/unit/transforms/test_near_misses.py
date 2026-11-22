@@ -6887,3 +6887,34 @@ def test_empty_field_no_near_miss_when_field_is_written() -> None:
     ctx = _make_ctx()
     assert EmptyCollectionField().apply(game, ctx) == game
     assert not _empty_field_misses(ctx)
+
+
+# ---------------------------------------------------------------------------
+# G5: an optional tuple local initialized with a tuple literal splits only
+# when it is read element by element and never written again.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "body, reason",
+    [
+        (
+            "[Int, Int]? t = [a, a]; if (t == None) { return 0; } return t[0];",
+            "compared with None, or used whole",
+        ),
+        (
+            "[Int, Int]? t = [a, a]; t = [a, 1]; return t[0];",
+            "written or re-declared",
+        ),
+    ],
+)
+def test_expand_optional_tuple_local_near_miss(body: str, reason: str) -> None:
+    game = frog_parser.parse_game("Game G() { Int f(Int a) { " + body + " } }")
+    ctx = _make_ctx()
+    assert ExpandTuple().apply(game, ctx) == game
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Expand Tuples" and nm.variable == "t"
+    ]
+    assert misses and reason in misses[0].reason, ctx.near_misses

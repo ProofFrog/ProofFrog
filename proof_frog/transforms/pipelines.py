@@ -109,6 +109,7 @@ from .control_flow import (
     SimplifyIf,
     RemoveUnreachable,
     RemoveEmptyIf,
+    SinkDeclarationIntoBranch,
     FlagSetToAssignment,
 )
 from .types import DeadNullGuardElimination, SubsetTypeNormalization
@@ -199,6 +200,7 @@ CORE_PIPELINE: list[TransformPass] = [
     CollapseAssignment(),
     SimplifyReturn(),
     SinkUniformSample(),
+    SinkDeclarationIntoBranch(),
     SimplifyIf(),
     DeadNullGuardElimination(),
     SubsetTypeNormalization(),

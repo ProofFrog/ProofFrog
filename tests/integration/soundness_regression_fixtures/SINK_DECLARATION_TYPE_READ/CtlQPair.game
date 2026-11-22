@@ -1,0 +1,24 @@
+// Positive control: both sides run Test with modulus c before counting c up,
+// Left with E, Right with F. With E = ModSDecl3() and F = ModSDeclIn() the
+// two are the same function, so the games are interchangeable.
+import 'ModQ.primitive';
+
+Game Left(ModQ E, ModQ F) {
+    Int c = 2;
+    Bool f(Int a, Bool b) {
+        Bool r = E.Test(c, a, b);
+        c = c + 1;
+        return r;
+    }
+}
+
+Game Right(ModQ E, ModQ F) {
+    Int c = 2;
+    Bool f(Int a, Bool b) {
+        Bool r = F.Test(c, a, b);
+        c = c + 1;
+        return r;
+    }
+}
+
+export as CtlQPair;

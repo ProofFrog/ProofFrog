@@ -6887,3 +6887,46 @@ def test_empty_field_no_near_miss_when_field_is_written() -> None:
     ctx = _make_ctx()
     assert EmptyCollectionField().apply(game, ctx) == game
     assert not _empty_field_misses(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Sink Declaration Into Branch
+# ---------------------------------------------------------------------------
+
+
+def _sink_declaration_misses(body: str) -> list[NearMiss]:
+    from proof_frog.transforms.control_flow import SinkDeclarationIntoBranch
+
+    game = frog_parser.parse_game(
+        f"Game T() {{\n Int f(Int a, Bool b) {{\n{body}\n}}\n}}"
+    )
+    ctx = _make_ctx()
+    assert SinkDeclarationIntoBranch().apply(game, ctx) == game
+    return [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Sink Declaration Into Branch"
+    ]
+
+
+def test_near_miss_sink_declaration_stateful_value() -> None:
+    misses = _sink_declaration_misses(
+        "Int x = challenger.Get();\nif (b) {\nreturn x;\n}\nreturn 0;"
+    )
+    assert len(misses) == 1
+    assert misses[0].variable == "x"
+    assert "challenger.Get()" in misses[0].reason
+
+
+def test_near_miss_sink_declaration_write_in_between() -> None:
+    misses = _sink_declaration_misses(
+        "Int x = a + 1;\na = 5;\nif (b) {\nreturn x;\n}\nreturn a;"
+    )
+    assert len(misses) == 1
+    assert "writes or rebinds" in misses[0].reason
+
+
+def test_no_near_miss_sink_declaration_two_branches() -> None:
+    assert not _sink_declaration_misses(
+        "Int x = a + 1;\nif (b) {\nreturn x;\n} else {\nreturn x + 1;\n}"
+    )

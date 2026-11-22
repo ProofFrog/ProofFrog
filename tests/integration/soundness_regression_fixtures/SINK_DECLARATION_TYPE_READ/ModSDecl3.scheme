@@ -1,0 +1,19 @@
+// Test(k, a, b): when b holds, returns whether a is 0 mod k (v == v + v).
+// The if (false) block mentions v too, so Sink Declaration Into Branch does
+// not move v before Branch Elimination removes that block (after
+// Topological Sorting has placed the caller's write to k's argument).
+import 'ModQ.primitive';
+
+Scheme ModSDecl3() extends ModQ {
+    Bool Test(Int k, Int a, Bool b) {
+        ModInt<k> v = a;
+        Bool r = false;
+        if (false) {
+            r = v == v;
+        }
+        if (b) {
+            r = v == v + v;
+        }
+        return r;
+    }
+}

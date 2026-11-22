@@ -1,5 +1,0 @@
-// Support for d5: a primitive whose method returns its member alias Elem = K.
-Primitive Source(Set K) {
-    Set Elem = K;
-    Elem Get();
-}

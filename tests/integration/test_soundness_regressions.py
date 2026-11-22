@@ -689,8 +689,8 @@ CASES = [
      "positive control: an alias of a non-optional type still folds"),
     ("F-416", "member_alias_scheme.proof", "reject",
      "DeadNullGuardElimination",
-     "a let constant typed by a scheme's member alias C.Elem = K, K = T?, "
-     "was read as never None"),
+     "a let constant typed by a scheme's member alias C.Elem = T? was read "
+     "as never None"),
     ("F-416", "member_alias_primitive.proof", "reject",
      "DeadNullGuardElimination",
      "the same with a primitive's member alias P.Elem"),
@@ -700,6 +700,13 @@ CASES = [
     ("F-416", "member_alias_control.proof", "accept",
      "DeadNullGuardElimination",
      "positive control: a member alias of a non-optional type still folds"),
+    ("F-417", "a4_parent.proof", "type_error", "type checker",
+     "a lemma proved for an abstract Set K, whose values the engine reads as "
+     "never None, was used at K = BitString<8>?"),
+    ("F-417", "a5_guard_parent.proof", "type_error", "type checker",
+     "the same with an else-less guard, which released code removed"),
+    ("F-417", "a4_control.proof", "accept", "type checker",
+     "positive control: the same lemma used at a set without None"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),
@@ -890,6 +897,16 @@ CASES = [
 
 # (finding, proof file) -> the error a type_error case must fail with.
 TYPE_ERROR = {
+    ("F-417", "a4_parent.proof"): (
+        "error: Argument BitString<8>? for the Set parameter 'K' of NoneCheck"
+        " is the optional type BitString<8>?: a Set parameter may not be"
+        " instantiated with an optional type"
+    ),
+    ("F-417", "a5_guard_parent.proof"): (
+        "error: Argument BitString<8>? for the Set parameter 'K' of"
+        " NoneCheckGuard is the optional type BitString<8>?: a Set parameter"
+        " may not be instantiated with an optional type"
+    ),
     ("F-031", "attack4.proof"): (
         "error: Method Reset writes the scheme field 'used': a scheme field may"
         " not be written in a method body"

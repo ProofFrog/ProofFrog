@@ -367,3 +367,51 @@ def test_instantiation_still_rejects_different_literals_when_hashed() -> None:
         )
         assert isinstance(result, str)
         assert "does not match" in result
+
+
+def test_instantiation_rejects_optional_type_for_abstract_set() -> None:
+    """F-417: a lemma proved for an abstract set reads its values as never
+    None, so it holds only for sets without None."""
+    result = _instantiate(
+        "    Int n;\n    Set C;\n    KEM K = KEM(n, C);",
+        ["K"],
+        "    Int m;\n    KEM K2 = KEM(m, BitString<m>?);",
+        ["K2"],
+    )
+    assert isinstance(result, str)
+    assert "its set C would stand for the optional type BitString<m>?" in result
+
+
+def test_instantiation_rejects_optional_type_through_parent_alias() -> None:
+    result = _instantiate(
+        "    Int n;\n    Set C;\n    KEM K = KEM(n, C);",
+        ["K"],
+        "    Int m;\n    Set D = BitString<m>?;\n    KEM K2 = KEM(m, D);",
+        ["K2"],
+    )
+    assert isinstance(result, str)
+    assert "its set C would stand for the optional type BitString<m>?" in result
+
+
+def test_instantiation_rejects_optional_component_for_abstract_set() -> None:
+    """A set bound inside a product type: the product is not optional, but
+    the component the lemma's set stands for is."""
+    result = _instantiate(
+        "    Int n;\n    Set C;\n    KEM K = KEM(n, [C, Bool]);",
+        ["K"],
+        "    Int m;\n    KEM K2 = KEM(m, [BitString<m>?, Bool]);",
+        ["K2"],
+    )
+    assert isinstance(result, str)
+    assert "its set C would stand for the optional type BitString<m>?" in result
+
+
+def test_instantiation_binds_set_to_type_with_optional_component() -> None:
+    """A product with an optional component is not itself optional."""
+    result = _instantiate(
+        "    Int n;\n    Set C;\n    KEM K = KEM(n, C);",
+        ["K"],
+        "    Int m;\n    KEM K2 = KEM(m, [BitString<m>?, Bool]);",
+        ["K2"],
+    )
+    assert isinstance(result, advantage.LemmaInstantiation), result

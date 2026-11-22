@@ -490,6 +490,7 @@ Values of type `T?` are either a value of type `T` or `None`:
 - **Comparison**: `x == None` tests whether an optional value is null.
 - **Usage**: Typically used for operations that may fail, such as decryption returning `Message?` (where `None` indicates decryption failure).
 - **Default**: An optional variable declared without a value (`E.Ciphertext? ctStar;`) is `None` until assigned, the usual "not yet set" convention for a challenge value.
+- **A set is never optional**: a value of an abstract set `K` (a `Set K` parameter, a `let:` `Set K;`) is never `None`, so `x == None` for `x : K` is refused and the engine reads such a value as never `None`. A `Set` parameter (of a primitive, scheme, game or reduction) may therefore not be instantiated with an optional type: `NoneCheck(BitString<8>?)` is a type error, and so is an argument that stands for `T?` through a `let:` alias (`Set K = BitString<8>?;`) or a member alias (ruling of 2026-11-21, F-417). A product with an optional component (`[BitString<8>?, Bool]`) is not optional and may be passed. A `let:` alias of an optional type may still type a constant (`K c;`), and a parameter of type `T?` still takes an optional value.
 
 ### 6.9 Default Values and Total Expressions
 

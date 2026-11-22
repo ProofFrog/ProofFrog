@@ -1,0 +1,26 @@
+// Target pass: Dead Null Guard Elimination (None-test folding, gap23 change A), via lemma.
+// Hypothesis: a4_lemma.proof verifies for abstract K because `x == None` (x : K) folds to
+// false.  This proof uses the lemma at K = BitString<8>?.
+// Distinguisher for A4Pair(NoneCheck(BitString<8>?)): one call Test(None).  Real computes
+// Check(None) = IsNone(None) = (None == None) = true; Ideal returns false.
+// Expected: a type error (F-417): a Set parameter may not be instantiated with an optional type.
+import 'Checker.primitive';
+import 'NoneCheck.scheme';
+import 'a4_pair.game';
+
+proof:
+
+let:
+    NoneCheck C = NoneCheck(BitString<8>?);
+
+assume:
+
+lemma:
+    A4Pair(C) by 'a4_lemma.proof';
+
+theorem:
+    A4Pair(C);
+
+games:
+    A4Pair(C).Real against A4Pair(C).Adversary;
+    A4Pair(C).Ideal against A4Pair(C).Adversary;

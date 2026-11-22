@@ -939,7 +939,12 @@ class ProofEngine:
                 print(f"{Fore.RED}Lemma FAILED: {e}{Fore.RESET}")
                 raise FailedProof(f"Lemma {lemma.game} failed verification") from e
             match = _lemma_mismatch(
-                lemma_file, lemma_path, lemma, proof_file, proof_path
+                lemma_file,
+                lemma_path,
+                lemma,
+                proof_file,
+                proof_path,
+                self.proof_namespace,
             )
             if isinstance(match, str):
                 print(f"{Fore.RED}{match}{Fore.RESET}")
@@ -3388,6 +3393,7 @@ def _lemma_mismatch(  # pylint: disable=too-many-arguments,too-many-positional-a
     lemma: frog_ast.Lemma,
     proof_file: frog_ast.ProofFile,
     proof_path: str,
+    proof_namespace: Optional[frog_ast.Namespace] = None,
 ) -> advantage.LemmaInstantiation | str:
     """How a verified lemma file establishes its entry, or why it does not.
 
@@ -3427,6 +3433,7 @@ def _lemma_mismatch(  # pylint: disable=too-many-arguments,too-many-positional-a
         key_c.args,
         proof_file.lets,
         proof_file.sampled_let_names,
+        proof_namespace,
     )
     if isinstance(match, str):
         return (

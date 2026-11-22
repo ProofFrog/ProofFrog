@@ -1,0 +1,24 @@
+// Pre-existing-class probe for the a4 mechanism (guard form).
+// Distinguisher for A4Pair(NoneCheckGuard(BitString<8>?)): Test(None): Real returns true
+// (v = None, guard fires), Ideal returns false.
+// Expected: a type error (F-417): a Set parameter may not be instantiated with an optional type.
+import 'Checker.primitive';
+import 'NoneCheckGuard.scheme';
+import 'a4_pair.game';
+
+proof:
+
+let:
+    NoneCheckGuard C = NoneCheckGuard(BitString<8>?);
+
+assume:
+
+lemma:
+    A4Pair(C) by 'a5_guard_lemma.proof';
+
+theorem:
+    A4Pair(C);
+
+games:
+    A4Pair(C).Real against A4Pair(C).Adversary;
+    A4Pair(C).Ideal against A4Pair(C).Adversary;

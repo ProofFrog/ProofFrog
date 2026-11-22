@@ -5741,8 +5741,10 @@ def test_near_miss_merge_bare_declaration_two_branches() -> None:
 
 
 def test_near_miss_merge_bare_declaration_branch_reads_default() -> None:
+    # Above the if, the declaration first moves to the start of the branch
+    # (no near miss); there, the read of the default blocks the merge.
     misses = _merge_bare_declaration_misses(
-        "Int v;\nif (b) {\nInt w = v;\nv = a;\nreturn v + w;\n}\nreturn 0;"
+        "if (b) {\nInt v;\nInt w = v;\nv = a;\nreturn v + w;\n}\nreturn 0;"
     )
     assert len(misses) == 1
     assert misses[0].variable == "v"

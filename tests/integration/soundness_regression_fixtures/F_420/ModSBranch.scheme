@@ -1,0 +1,20 @@
+// Same as attack_mod/ModSBranch.scheme, but v is assigned once at the top level of
+// the if (b) branch, so Merge Bare Declaration MERGES the declaration with
+// that assignment (the 2026-11-21 branch form, already on main) instead of
+// moving it.
+import 'ModP.primitive';
+
+Scheme ModSBranch() extends ModP {
+    Bool Test(Int k, Int a, Bool b, Bool d) {
+        ModInt<k> v;
+        Bool r = false;
+        if (false) {
+            r = v == v;
+        }
+        if (b) {
+            v = a;
+            r = v == v + v;
+        }
+        return r;
+    }
+}

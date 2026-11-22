@@ -714,6 +714,17 @@ CASES = [
      "the same with an else-less guard, which released code removed"),
     ("F-419", "parent_control.proof", "accept", "lemma matching",
      "positive control: the constant stands for one of its own type"),
+    ("F-420", "attack_merge_flat.proof", "reject", "MergeBareDeclaration",
+     "inlining put a written field in a ModInt modulus (ModInt<c> v; for a "
+     "scheme's ModInt<k> v;), and the same-block merge carried the "
+     "declaration past c = c + 1;"),
+    ("F-420", "attack_merge_branch.proof", "reject", "MergeBareDeclaration",
+     "the same with the merge into one branch of a later if"),
+    ("F-420", "attack_move.proof", "reject", "MergeBareDeclaration",
+     "the same with the bare declaration moved to the start of the branch"),
+    ("F-420", "control_move.proof", "accept", "MergeBareDeclaration",
+     "positive control: the declaration above the if and at the start of "
+     "its only branch, with no write in between, are identified"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),

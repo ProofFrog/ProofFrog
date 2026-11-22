@@ -126,12 +126,15 @@ def test_no_merge_when_two_branches_use_the_variable() -> None:
     assert after == before
 
 
-def test_no_merge_when_the_branch_reads_the_default() -> None:
-    # w holds the declaration's default value.
-    before, after = _lines(
-        "Int v;\nif (b) {\nInt w = v;\nv = a;\nreturn v + w;\n}\nreturn 0;"
+def test_moves_when_the_branch_reads_the_default() -> None:
+    # w holds the declaration's default value, so the declaration cannot
+    # merge with the assignment; it moves, still bare, to the start of the
+    # only branch that mentions v, where v starts at its default either way.
+    game = _game("Int v;\nif (b) {\nInt w = v;\nv = a;\nreturn v + w;\n}\nreturn 0;")
+    expected = _game(
+        "if (b) {\nInt v;\nInt w = v;\nv = a;\nreturn v + w;\n}\nreturn 0;"
     )
-    assert after == before
+    assert MergeBareDeclaration().apply(game, _ctx()) == expected
 
 
 def test_no_merge_when_the_branch_rebinds_the_variable() -> None:
@@ -148,12 +151,99 @@ def test_no_merge_into_a_loop_body() -> None:
     assert after == before
 
 
-def test_no_merge_when_the_branch_assigns_inside_a_loop() -> None:
-    before, after = _lines(
+def test_moves_to_branch_start_above_a_loop() -> None:
+    # The assignment is in a loop body, which is never entered, so the
+    # declaration moves only to the start of the branch, above the loop.
+    game = _game(
         "Int v;\nif (b) {\nfor (Int i = 0 to a) {\nv = i;\n}\nreturn v;\n}\n"
         "return 0;"
     )
+    expected = _game(
+        "if (b) {\nInt v;\nfor (Int i = 0 to a) {\nv = i;\n}\nreturn v;\n}\n"
+        "return 0;"
+    )
+    assert MergeBareDeclaration().apply(game, _ctx()) == expected
+
+
+def test_moves_bare_declaration_to_start_of_branch() -> None:
+    # The branch holds every mention, but its first mention is a nested if
+    # that assigns v on one path only, so no assignment can carry the
+    # declaration; it moves to the start of the branch.
+    game = _game(
+        "Int v;\nif (b) {\nif (a == 1) {\nv = 1;\n}\nreturn v;\n}\nreturn 0;"
+    )
+    expected = _game(
+        "if (b) {\nInt v;\nif (a == 1) {\nv = 1;\n}\nreturn v;\n}\nreturn 0;"
+    )
+    assert MergeBareDeclaration().apply(game, _ctx()) == expected
+
+
+def test_moves_into_an_else_branch() -> None:
+    game = _game(
+        "Int v;\nif (b) {\nreturn 0;\n} else {\nif (a == 1) {\nv = 1;\n}\n"
+        "return v;\n}"
+    )
+    expected = _game(
+        "if (b) {\nreturn 0;\n} else {\nInt v;\nif (a == 1) {\nv = 1;\n}\n"
+        "return v;\n}"
+    )
+    assert MergeBareDeclaration().apply(game, _ctx()) == expected
+
+
+def test_no_move_when_an_else_if_condition_reads_the_variable() -> None:
+    # The else-if condition reads the default on the path that skips the
+    # first branch, so the declaration must stay above the if.
+    before, after = _lines(
+        "Int v;\nif (b) {\nif (a == 1) {\nv = 1;\n}\nreturn v;\n} "
+        "else if (v == 0) {\nreturn 1;\n}\nreturn 0;"
+    )
     assert after == before
+
+
+def test_no_move_when_read_after_the_if() -> None:
+    before, after = _lines(
+        "Int v;\nif (b) {\nif (a == 1) {\nv = 1;\n}\n}\nreturn v;"
+    )
+    assert after == before
+
+
+def test_no_move_when_the_branch_redeclares_the_variable() -> None:
+    before, after = _lines(
+        "Int v;\nif (b) {\nif (a == 1) {\nInt v = 1;\nreturn v;\n}\nreturn 0;\n}"
+        "\nreturn 0;"
+    )
+    assert after == before
+
+
+def test_move_records_no_near_miss() -> None:
+    game = _game(
+        "Int v;\nif (b) {\nif (a == 1) {\nv = 1;\n}\nreturn v;\n}\nreturn 0;"
+    )
+    ctx = _ctx()
+    MergeBareDeclaration().apply(game, ctx)
+    assert not [
+        nm for nm in ctx.near_misses if nm.transform_name == "Merge Bare Declaration"
+    ]
+
+
+def test_engine_identifies_top_level_and_branch_declarations() -> None:
+    """Two games that differ only in where `Int v;` sits, above the if or
+    at the start of the only branch that mentions v, are the same program."""
+    body = "if (a == 1) {{\nv = 1;\n}}\nreturn v + 1;"
+    left = (
+        "Game G() {\n Int f(Int a, Bool b) {\nInt v;\nif (b) {\n"
+        + body.format()
+        + "\n}\nreturn 0;\n}\n}"
+    )
+    right = (
+        "Game G() {\n Int f(Int a, Bool b) {\nif (b) {\nInt v;\n"
+        + body.format()
+        + "\n}\nreturn 0;\n}\n}"
+    )
+    result = ProofEngine().check_equivalent(
+        frog_parser.parse_game(left), frog_parser.parse_game(right)
+    )
+    assert result.valid
 
 
 @pytest.mark.parametrize("optional", [False, True])
@@ -187,3 +277,30 @@ def test_engine_identifies_branch_result_with_its_guard(optional: bool) -> None:
         frog_parser.parse_game(left), frog_parser.parse_game(right)
     )
     assert result.valid is not optional
+
+
+# ---------------------------------------------------------------------------
+# F-420: never past a write to a name the declared type reads
+# ---------------------------------------------------------------------------
+
+
+def test_no_merge_past_a_write_to_a_type_name() -> None:
+    """Inlining can put a written variable in a type (a scheme method's
+    `ModInt<k> v;` called with a field the game writes). Merged after
+    `a = a + 1;`, the store would reduce modulo the new value."""
+    before, after = _lines("ModInt<a> v;\na = a + 1;\nv = 2;\nreturn 0;")
+    assert after == before
+
+
+def test_no_move_past_a_write_to_a_type_name() -> None:
+    before, after = _lines(
+        "ModInt<a> v;\na = a + 1;\nif (b) {\nif (a == 1) {\nv = 1;\n}\nreturn 0;\n}"
+        "\nreturn 0;"
+    )
+    assert after == before
+
+
+def test_no_merge_past_a_rebinding_of_a_type_name() -> None:
+    """A local of the type's name in between would capture the type."""
+    before, after = _lines("BitString<a> v;\nInt a = 5;\nv = 0^a;\nreturn 0;")
+    assert after == before

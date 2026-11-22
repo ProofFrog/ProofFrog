@@ -1,0 +1,20 @@
+// ModS.Test with the declaration already at the start of the if (b)
+// branch (and without the if (false) block, which never runs). The same
+// function as ModS.Test.
+import 'ModP.primitive';
+
+Scheme ModSIn() extends ModP {
+    Bool Test(Int k, Int a, Bool b, Bool d) {
+        Bool r = false;
+        if (b) {
+            ModInt<k> v;
+            if (d) {
+                v = a;
+            } else {
+                v = a + 1;
+            }
+            r = v == v + v;
+        }
+        return r;
+    }
+}

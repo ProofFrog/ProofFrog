@@ -1,0 +1,16 @@
+// Same-block form (since #308): the declaration and the assignment are in
+// one block, with the blocker in between.
+import 'ModP.primitive';
+
+Scheme ModSFlat() extends ModP {
+    Bool Test(Int k, Int a, Bool b, Bool d) {
+        ModInt<k> v;
+        Bool r = false;
+        if (false) {
+            r = v == v;
+        }
+        v = a;
+        r = v == v + v;
+        return r;
+    }
+}

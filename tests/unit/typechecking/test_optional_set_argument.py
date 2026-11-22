@@ -282,3 +282,60 @@ games:
 """,
     )
     semantic_analysis.check_well_formed(frog_parser.parse_file(path), path)
+
+
+# ---------------------------------------------------------------------------
+# F-421: None is a value, not a type
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "lets, message",
+    [
+        pytest.param(
+            "NoneCheck C = NoneCheck(None);",
+            "Argument None for the Set parameter 'K' of NoneCheck is None, which"
+            " is a value, not a type",
+            id="scheme_argument",
+        ),
+        pytest.param(
+            "Checker C = Checker(None);",
+            "Argument None for the Set parameter 'K' of Checker is None, which is"
+            " a value, not a type",
+            id="primitive_argument",
+        ),
+        pytest.param(
+            "Set K = None;\nNoneCheck C = NoneCheck(BitString<8>);",
+            "The set K is defined as None, which is a value, not a type",
+            id="let_alias",
+        ),
+    ],
+)
+def test_none_as_a_set_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], lets: str, message: str
+) -> None:
+    with pytest.raises(semantic_analysis.FailedTypeCheck):
+        _check_proof(tmp_path, _CHECK_PROOF.format(lets=_indent(lets)))
+    assert message in capsys.readouterr().err
+
+
+def test_none_as_a_scheme_set_member_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (tmp_path / "Checker.primitive").write_text(_CHECKER)
+    scheme = tmp_path / "NoneMember.scheme"
+    scheme.write_text(
+        "import 'Checker.primitive';\n"
+        "Scheme NoneMember() extends Checker {\n"
+        "    Set Elem = None;\n"
+        "    Bool Check(Elem x) {\n"
+        "        return true;\n"
+        "    }\n"
+        "}\n"
+    )
+    with pytest.raises(semantic_analysis.FailedTypeCheck):
+        semantic_analysis.check_well_formed(
+            frog_parser.parse_scheme_file(str(scheme)), str(scheme)
+        )
+    assert "The set Elem is defined as None" in capsys.readouterr().err
+

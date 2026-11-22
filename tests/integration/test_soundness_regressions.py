@@ -714,6 +714,17 @@ CASES = [
      "the same with an else-less guard, which released code removed"),
     ("F-419", "parent_control.proof", "accept", "lemma matching",
      "positive control: the constant stands for one of its own type"),
+    ("F-421", "n1.proof", "type_error", "type checker",
+     "a let: alias Set K = None; made values of K read as never None, though "
+     "the only value of the type None is None"),
+    ("F-421", "n2.proof", "type_error", "type checker",
+     "NoneCheck(None): None accepted as the argument of a Set parameter"),
+    ("F-421", "n3.proof", "type_error", "type checker",
+     "the same with an else-less guard (accepted by v0.6.0)"),
+    ("F-421", "ng.proof", "type_error", "type checker",
+     "a game's own Set E = None; with y == None for y : E"),
+    ("F-421", "rednone.proof", "type_error", "type checker",
+     "None passed to a reduction's Set parameter in a step"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),
@@ -904,6 +915,24 @@ CASES = [
 
 # (finding, proof file) -> the error a type_error case must fail with.
 TYPE_ERROR = {
+    ("F-421", "ng.proof"): (
+        "error: The set E is defined as None, which is a value, not a type"
+    ),
+    ("F-421", "rednone.proof"): (
+        "error: Argument None for the Set parameter 'K2' of R is None, which"
+        " is a value, not a type"
+    ),
+    ("F-421", "n1.proof"): (
+        "error: The set K is defined as None, which is a value, not a type"
+    ),
+    ("F-421", "n2.proof"): (
+        "error: Argument None for the Set parameter 'K' of NoneCheck is None,"
+        " which is a value, not a type"
+    ),
+    ("F-421", "n3.proof"): (
+        "error: Argument None for the Set parameter 'K' of NoneCheckGuard is"
+        " None, which is a value, not a type"
+    ),
     ("F-417", "a4_parent.proof"): (
         "error: Argument BitString<8>? for the Set parameter 'K' of NoneCheck"
         " is the optional type BitString<8>?: a Set parameter may not be"

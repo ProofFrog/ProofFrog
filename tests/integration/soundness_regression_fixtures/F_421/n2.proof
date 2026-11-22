@@ -1,0 +1,19 @@
+// Task5 review n2 (pre-existing on main; same root cause as n1).
+// Target: Dead Null Guard Elimination (None-test fold, main a785b07).
+// Hypothesis: `None` is accepted as the argument of the Set parameter K of
+// NoneCheck (F-417's check refuses only an OptionalType). Check(x) = IsNone(x)
+// inlines to `x == None` with x : None-the-type, read as never None, folded to
+// false. The only value of type None is None, so Real.Test returns true and
+// Ideal.Test false. UNSOUND if "Proof Succeeded".
+import 'Checker.primitive';
+import 'NoneCheck.scheme';
+import 'a4_pair.game';
+proof:
+let:
+    NoneCheck C = NoneCheck(None);
+assume:
+theorem:
+    A4Pair(C);
+games:
+    A4Pair(C).Real against A4Pair(C).Adversary;
+    A4Pair(C).Ideal against A4Pair(C).Adversary;

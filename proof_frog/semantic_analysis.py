@@ -2787,6 +2787,22 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
     def leave_field(self, field: frog_ast.Field) -> None:
         super().leave_field(field)
+        if (
+            field.type == frog_ast.SetType()
+            and isinstance(field.value, frog_ast.Type)
+            and isinstance(
+                self._resolve_type_alias(field.value), frog_ast.NoneExpression
+            )
+        ):
+            # F-421: `None` is a value, not a type. The AST class of the
+            # literal also counts as a Type, so `Set K = None;` passed the
+            # Type check below, and values of K were then read as never None.
+            self.print_error(
+                field,
+                f"The set {field.name} is defined as None, which is a value,"
+                " not a type",
+            )
+            return
         if field.value:
             the_type = self.get_type_from_ast(field.value)
             if not self.check_types(field.type, the_type):
@@ -3401,6 +3417,18 @@ class CheckTypeVisitor(VariableTypeVisitor):
         if param.type != frog_ast.SetType() or not isinstance(arg_type, frog_ast.Type):
             return
         resolved = self._resolve_type_alias(arg_type)
+        if isinstance(resolved, frog_ast.NoneExpression) or isinstance(
+            self._resolve_type_alias(arg) if isinstance(arg, frog_ast.Type) else arg,
+            frog_ast.NoneExpression,
+        ):
+            # F-421: the literal None is a value, not a type, although its AST
+            # class also counts as a Type.
+            self.print_error(
+                location,
+                f"Argument {arg} for the Set parameter '{param.name}' of"
+                f" {scheme.name} is None, which is a value, not a type",
+            )
+            return
         if isinstance(resolved, frog_ast.OptionalType):
             self.print_error(
                 location,

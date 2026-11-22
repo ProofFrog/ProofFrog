@@ -1,0 +1,24 @@
+// Probe: None passed to a reduction's Set parameter in a step.
+import 'Checker.primitive';
+import 'NoneCheckGuard.scheme';
+import 'a4_pair.game';
+
+Reduction R(Set K2, Checker C2) compose A4Pair(C2) against A4Pair(C2).Adversary {
+    Bool Test(C2.Elem x) {
+        return challenger.Test(x);
+    }
+}
+
+proof:
+let:
+    Set K;
+    NoneCheckGuard C = NoneCheckGuard(K);
+assume:
+    A4Pair(C);
+theorem:
+    A4Pair(C);
+games:
+    A4Pair(C).Real against A4Pair(C).Adversary;
+    A4Pair(C).Real compose R(None, C) against A4Pair(C).Adversary;
+    A4Pair(C).Ideal compose R(None, C) against A4Pair(C).Adversary;
+    A4Pair(C).Ideal against A4Pair(C).Adversary;

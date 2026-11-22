@@ -369,6 +369,22 @@ def test_instantiation_still_rejects_different_literals_when_hashed() -> None:
         assert "does not match" in result
 
 
+def _instantiate_nodes(
+    lemma_lets: str,
+    lemma_args: list[str],
+    parent_lets: str,
+    parent_args: list[frog_ast.Expression],
+):
+    return advantage.lemma_instantiation(
+        [frog_ast.Variable(a) for a in lemma_args],
+        _lets(lemma_lets),
+        frozenset(),
+        parent_args,
+        _lets(parent_lets),
+        frozenset(),
+    )
+
+
 def test_instantiation_rejects_optional_type_for_abstract_set() -> None:
     """F-417: a lemma proved for an abstract set reads its values as never
     None, so it holds only for sets without None."""
@@ -414,4 +430,112 @@ def test_instantiation_binds_set_to_type_with_optional_component() -> None:
         "    Int m;\n    KEM K2 = KEM(m, [BitString<m>?, Bool]);",
         ["K2"],
     )
+    assert isinstance(result, advantage.LemmaInstantiation), result
+
+
+def test_instantiation_rejects_constant_of_a_wider_type() -> None:
+    """F-419: the lemma holds for every c of type J; with J = Bool, the
+    parent's c2 of type Bool? may be None, which no c of type Bool is."""
+    result = _instantiate_nodes(
+        "    Set J;\n    J c;",
+        ["J", "c"],
+        "    Bool? c2;",
+        [frog_ast.BoolType(), frog_ast.Variable("c2")],
+    )
+    assert isinstance(result, str)
+    assert "its constant c of type J would stand for c2 of type Bool?" in result
+
+
+def test_instantiation_rejects_constant_of_a_wider_type_bound_first() -> None:
+    """The same, with the constant matched before the set it is typed by."""
+    result = _instantiate_nodes(
+        "    Set J;\n    J c;",
+        ["c", "J"],
+        "    Bool? c2;",
+        [frog_ast.Variable("c2"), frog_ast.BoolType()],
+    )
+    assert isinstance(result, str)
+
+
+def test_instantiation_rejects_set_bound_to_optional_through_a_constant() -> None:
+    """A set that only a constant's type binds: J would stand for Bool?."""
+    result = _instantiate_nodes(
+        "    Set J;\n    J c;",
+        ["c"],
+        "    Bool? c2;",
+        [frog_ast.Variable("c2")],
+    )
+    assert isinstance(result, str)
+    assert "its set J would stand for the optional type Bool?" in result
+
+
+def test_instantiation_rejects_constant_bound_to_other_expression() -> None:
+    result = _instantiate_nodes(
+        "    Set J;\n    J c;",
+        ["J", "c"],
+        "",
+        [frog_ast.BoolType(), frog_ast.NoneExpression()],
+    )
+    assert isinstance(result, str)
+    assert "its constant c would stand for None" in result
+
+
+def test_instantiation_maps_constant_of_the_same_type() -> None:
+    result = _instantiate_nodes(
+        "    Set J;\n    J c;",
+        ["J", "c"],
+        "    Bool c2;",
+        [frog_ast.BoolType(), frog_ast.Variable("c2")],
+    )
+    assert isinstance(result, advantage.LemmaInstantiation), result
+    assert {k: str(v) for k, v in result.name_map.items()} == {
+        "J": "Bool",
+        "c": "c2",
+    }
+
+
+def test_instantiation_binds_through_a_constant_type() -> None:
+    """A constant's type binds the lemma names it mentions."""
+    result = _instantiate(
+        "    Int n;\n    BitString<n> b;",
+        ["b"],
+        "    Int m;\n    BitString<m> b2;",
+        ["b2"],
+    )
+    assert isinstance(result, advantage.LemmaInstantiation), result
+    assert {k: str(v) for k, v in result.name_map.items()} == {"b": "b2", "n": "m"}
+
+
+def test_instantiation_reads_parent_constant_type_through_alias() -> None:
+    result = _instantiate(
+        "    Int n;\n    BitString<n> b;",
+        ["b"],
+        "    Int m;\n    Set K = BitString<m>;\n    K b2;",
+        ["b2"],
+    )
+    assert isinstance(result, advantage.LemmaInstantiation), result
+
+
+def test_instantiation_maps_int_constant_to_integer_expression() -> None:
+    """An Int constant may stand for an integer expression of the parent:
+    every such expression is an Int."""
+    result = _instantiate_nodes(
+        "    Int n;\n    KEM K = KEM(n);",
+        ["K"],
+        "    Int m;\n    KEM K2 = KEM(m + 1);",
+        [frog_ast.Variable("K2")],
+    )
+    assert isinstance(result, advantage.LemmaInstantiation), result
+    assert str(result.name_map["n"]) == "m + 1"
+    literal = _instantiate_nodes(
+        "    Int n;\n    KEM K = KEM(n);",
+        ["K"],
+        "    KEM K2 = KEM(128);",
+        [frog_ast.Variable("K2")],
+    )
+    assert isinstance(literal, advantage.LemmaInstantiation), literal
+
+
+def test_instantiation_maps_group_constant() -> None:
+    result = _instantiate("    Group G;", ["G"], "    Group H;", ["H"])
     assert isinstance(result, advantage.LemmaInstantiation), result

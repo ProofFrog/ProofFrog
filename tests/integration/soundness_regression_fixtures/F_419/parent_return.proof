@@ -1,0 +1,25 @@
+// F-419: lemma matching bound the lemma's constant c : J to the parent's c2 : Bool?
+// (with J = Bool) without comparing their types, so the lemma covered a c2 that may
+// be None. Distinguisher (c2 = None): Test() returns true on Real, false on Ideal.
+// Expected if sound: Proof Failed (the lemma entry is refused).
+import 'NonePrim.primitive';
+import 'IsNoneS.scheme';
+import 'CPair.game';
+
+proof:
+
+let:
+    Bool? c2;
+    IsNoneS S2 = IsNoneS(Bool);
+
+assume:
+
+lemma:
+    CPair(Bool, S2, c2) by 'lemma_return.proof';
+
+theorem:
+    CPair(Bool, S2, c2);
+
+games:
+    CPair(Bool, S2, c2).Real against CPair(Bool, S2, c2).Adversary;
+    CPair(Bool, S2, c2).Ideal against CPair(Bool, S2, c2).Adversary;

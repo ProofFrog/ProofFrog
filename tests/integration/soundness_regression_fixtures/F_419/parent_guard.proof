@@ -1,0 +1,23 @@
+// F-419, guard form (accepted on main 10ed21c too): as parent_return.proof, with the
+// lemma lemma_guard.proof. Expected if sound: Proof Failed (the lemma entry is refused).
+import 'NonePrim.primitive';
+import 'IsNoneG.scheme';
+import 'CPair.game';
+
+proof:
+
+let:
+    Bool? c2;
+    IsNoneG S2 = IsNoneG(Bool);
+
+assume:
+
+lemma:
+    CPair(Bool, S2, c2) by 'lemma_guard.proof';
+
+theorem:
+    CPair(Bool, S2, c2);
+
+games:
+    CPair(Bool, S2, c2).Real against CPair(Bool, S2, c2).Adversary;
+    CPair(Bool, S2, c2).Ideal against CPair(Bool, S2, c2).Adversary;

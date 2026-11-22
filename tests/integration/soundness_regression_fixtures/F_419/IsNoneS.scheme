@@ -1,0 +1,9 @@
+import 'NonePrim.primitive';
+
+Scheme IsNoneS(Set A) extends NonePrim {
+    Set Elem = A;
+
+    Bool IsNone(Elem? v) {
+        return v == None;
+    }
+}

@@ -1,0 +1,21 @@
+// F-419 lemma (verifies), guard form: IsNoneG's else-less guard `if (v == None)` on
+// `Elem? v = c` with c : J is removed as dead, so Real and Ideal agree.
+import 'NonePrim.primitive';
+import 'IsNoneG.scheme';
+import 'CPair.game';
+
+proof:
+
+let:
+    Set J;
+    J c;
+    IsNoneG S = IsNoneG(J);
+
+assume:
+
+theorem:
+    CPair(J, S, c);
+
+games:
+    CPair(J, S, c).Real against CPair(J, S, c).Adversary;
+    CPair(J, S, c).Ideal against CPair(J, S, c).Adversary;

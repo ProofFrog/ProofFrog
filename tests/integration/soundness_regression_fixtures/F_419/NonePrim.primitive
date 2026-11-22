@@ -1,0 +1,4 @@
+Primitive NonePrim(Set A) {
+    Set Elem = A;
+    Bool IsNone(Elem? v);
+}

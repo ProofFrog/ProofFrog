@@ -785,9 +785,13 @@ def lemma_instantiation(  # pylint: disable=too-many-arguments,too-many-position
     arguments, abstract lemma parameters binding as above). Returns the
     match, or a reason why the entry is not an instance.
 
-    An abstract set may not stand for an optional type (F-417), read
-    through the parent's set aliases and, given *parent_namespace* (the
-    parent's proof namespace), through member aliases.
+    An abstract constant (``J c;``, ``Int n;``, not a set, primitive or
+    scheme) must stand for a parent ``let:`` constant whose declared type
+    matches its own, the lemma names in it binding as above (F-419); an
+    ``Int`` constant may also stand for an integer expression. An abstract
+    set may not stand for an optional type (F-417), read through the
+    parent's set aliases and, given *parent_namespace* (the parent's proof
+    namespace), through member aliases.
     """
     # pylint: disable=too-many-return-statements
     lemmas = {let.name: let for let in lemma_lets}
@@ -810,12 +814,42 @@ def lemma_instantiation(  # pylint: disable=too-many-arguments,too-many-position
         name_map[name] = image
         return None
 
+    def match_constant_type(
+        name: str, let: frog_ast.Field, image: frog_ast.ASTNode
+    ) -> Optional[str]:
+        # The lemma holds for every value of the constant's type, so the
+        # parent's value must have that type (F-419): `J c;` matched to a
+        # parent `Bool? c2` with J = Bool covers no c2 that is None. A set,
+        # and an abstract primitive or scheme, is no such constant.
+        if let.type == frog_ast.SetType() or (
+            isinstance(let.type, frog_ast.Variable) and let.type.name not in lemmas
+        ):
+            return None
+        if isinstance(image, frog_ast.Variable) and image.name in parents:
+            parent_type = _parent_alias_value(parents[image.name].type, parents)
+            err = match(let.type, parent_type)
+            if err is None:
+                return None
+            return (
+                f"its constant {name} of type {let.type} would stand for"
+                f" {image} of type {parent_type} ({err})"
+            )
+        if let.type == frog_ast.IntType() and _is_integer_expression(image, parents):
+            return None
+        return (
+            f"its constant {name} would stand for {image}, which is not a"
+            " let: constant of this proof"
+        )
+
     def match_let(name: str, image: frog_ast.ASTNode) -> Optional[str]:
         let = lemmas.get(name)
         if let is None:
             return f"{name} is not a let: parameter of the lemma"
         if abstract(name):
-            return bind(name, image)
+            err = bind(name, image)
+            if err is not None:
+                return err
+            return match_constant_type(name, let, image)
         if name in lemma_sampled:
             # Independently sampled lemma parameters must stay independent:
             # each maps to its own sampled parent parameter of the same type.
@@ -907,7 +941,7 @@ def lemma_instantiation(  # pylint: disable=too-many-arguments,too-many-position
     # `x == None` for `x : K`, and the engine folds such tests), so the
     # lemma says nothing about a set with None in it (F-417). The type
     # checker refuses an optional argument for a Set parameter; a set the
-    # match binds inside a type is checked here.
+    # match binds inside a type or through a constant's type is checked here.
     for name, image in name_map.items():
         if not abstract(name) or lemmas[name].type != frog_ast.SetType():
             continue
@@ -938,6 +972,34 @@ def _parent_alias_value(
         assert value is not None
         the_type = value
     return the_type
+
+
+# The operators that take two Ints to an Int.
+_INTEGER_OPERATORS = frozenset(
+    frog_ast.BinaryOperators(symbol) for symbol in ("+", "-", "*", "/", "^")
+)
+
+
+def _is_integer_expression(
+    node: frog_ast.ASTNode, parents: Mapping[str, frog_ast.Field]
+) -> bool:
+    """Whether *node* is an Int built from integer literals and the parent's
+    ``Int`` constants with ``+ - * / ^`` and unary minus."""
+    if isinstance(node, frog_ast.Integer):
+        return True
+    if isinstance(node, frog_ast.Variable):
+        let = parents.get(node.name)
+        return let is not None and let.type == frog_ast.IntType()
+    if isinstance(node, frog_ast.UnaryOperation):
+        return node.operator == frog_ast.UnaryOperators.MINUS and (
+            _is_integer_expression(node.expression, parents)
+        )
+    if isinstance(node, frog_ast.BinaryOperation):
+        return node.operator in _INTEGER_OPERATORS and all(
+            _is_integer_expression(side, parents)
+            for side in (node.left_expression, node.right_expression)
+        )
+    return False
 
 
 def _optional_type_image(

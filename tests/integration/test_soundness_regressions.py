@@ -707,6 +707,13 @@ CASES = [
      "the same with an else-less guard, which released code removed"),
     ("F-417", "a4_control.proof", "accept", "type checker",
      "positive control: the same lemma used at a set without None"),
+    ("F-419", "parent_return.proof", "reject", "lemma matching",
+     "a lemma's constant c : J stood for a parent constant of type Bool?, "
+     "with J = Bool, so the lemma covered a value that may be None"),
+    ("F-419", "parent_guard.proof", "reject", "lemma matching",
+     "the same with an else-less guard, which released code removed"),
+    ("F-419", "parent_control.proof", "accept", "lemma matching",
+     "positive control: the constant stands for one of its own type"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),

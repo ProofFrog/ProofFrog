@@ -1,0 +1,22 @@
+// F-419 lemma (verifies): for an abstract set J and a constant c : J, a value of J is
+// never None, so the inlined test IsNone(c) = (c == None) folds to false and Real
+// and Ideal agree.
+import 'NonePrim.primitive';
+import 'IsNoneS.scheme';
+import 'CPair.game';
+
+proof:
+
+let:
+    Set J;
+    J c;
+    IsNoneS S = IsNoneS(J);
+
+assume:
+
+theorem:
+    CPair(J, S, c);
+
+games:
+    CPair(J, S, c).Real against CPair(J, S, c).Adversary;
+    CPair(J, S, c).Ideal against CPair(J, S, c).Adversary;

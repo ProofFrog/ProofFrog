@@ -1,0 +1,13 @@
+import 'NonePrim.primitive';
+
+Scheme IsNoneG(Set A) extends NonePrim {
+    Set Elem = A;
+
+    Bool IsNone(Elem? v) {
+        Bool r = false;
+        if (v == None) {
+            r = true;
+        }
+        return r;
+    }
+}

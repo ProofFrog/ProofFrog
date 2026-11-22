@@ -1,0 +1,16 @@
+// Real reports whether the constant c is None; Ideal always answers false.
+import 'NonePrim.primitive';
+
+Game Real(Set A, NonePrim S, A? c) {
+    Bool Test() {
+        return S.IsNone(c);
+    }
+}
+
+Game Ideal(Set A, NonePrim S, A? c) {
+    Bool Test() {
+        return false;
+    }
+}
+
+export as CPair;

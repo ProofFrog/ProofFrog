@@ -1,0 +1,24 @@
+// F-419 positive control: the lemma used at c2 : Bool, a constant of the lemma's own
+// type J = Bool. c2 is never None, so Real and Ideal agree.
+// Expected (sound engine): Proof Succeeded.
+import 'NonePrim.primitive';
+import 'IsNoneS.scheme';
+import 'CPair.game';
+
+proof:
+
+let:
+    Bool c2;
+    IsNoneS S2 = IsNoneS(Bool);
+
+assume:
+
+lemma:
+    CPair(Bool, S2, c2) by 'lemma_return.proof';
+
+theorem:
+    CPair(Bool, S2, c2);
+
+games:
+    CPair(Bool, S2, c2).Real against CPair(Bool, S2, c2).Adversary;
+    CPair(Bool, S2, c2).Ideal against CPair(Bool, S2, c2).Adversary;

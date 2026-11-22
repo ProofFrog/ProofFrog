@@ -1,0 +1,5 @@
+// A primitive whose member alias Elem is the optional type BitString<8>?.
+Primitive OptSource() {
+    Set Elem = BitString<8>?;
+    Elem Get();
+}

@@ -3,7 +3,7 @@
 // pass must read through the alias.
 // Expected if sound: Proof Failed. Distinguisher (c = None): Test() returns true on Real, false on Ideal.
 import 'Checker.primitive';
-import 'NoneCheck.scheme';
+import 'OptCheck.scheme';
 import 'ConstPair.game';
 
 proof:
@@ -11,7 +11,7 @@ proof:
 let:
     Set K = BitString<8>?;
     K c;
-    NoneCheck C = NoneCheck(K);
+    OptCheck C = OptCheck();
 
 assume:
 

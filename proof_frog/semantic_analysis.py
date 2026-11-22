@@ -3314,6 +3314,9 @@ class CheckTypeVisitor(VariableTypeVisitor):
             arg_t = arg_types[index]
             if isinstance(arg_t, frog_ast.Type):
                 param_bindings[param.name] = arg_t  # type: ignore[assignment]
+            self._check_set_argument_not_optional(
+                location, scheme, param, args[index], arg_t
+            )
 
         # The argument types decide whether a parameter stores its argument
         # with a change of value (an Int into a ModInt, F-374), which
@@ -3378,6 +3381,33 @@ class CheckTypeVisitor(VariableTypeVisitor):
 
         self._instantiation_cache[cache_key] = instantiated_scheme
         return instantiated_scheme
+
+    def _check_set_argument_not_optional(  # pylint: disable=too-many-arguments,too-many-positional-arguments
+        self,
+        location: frog_ast.ASTNode,
+        scheme: frog_ast.Instantiable,
+        param: frog_ast.Parameter,
+        arg: frog_ast.Expression,
+        arg_type: PossibleType,
+    ) -> None:
+        """Refuse an optional type as the argument of a bare ``Set``
+        parameter (F-417, ruling of 2026-11-21).
+
+        A value of an abstract set is never None: the checker refuses
+        ``x == None`` for ``x : K``, and Dead Null Guard Elimination reads such
+        a value as never None. A lemma proved for an abstract ``K`` therefore
+        holds only for sets without None, so no ``Set`` may stand for ``T?``.
+        The argument is read through ``let:`` and member aliases."""
+        if param.type != frog_ast.SetType() or not isinstance(arg_type, frog_ast.Type):
+            return
+        resolved = self._resolve_type_alias(arg_type)
+        if isinstance(resolved, frog_ast.OptionalType):
+            self.print_error(
+                location,
+                f"Argument {arg} for the Set parameter '{param.name}' of"
+                f" {scheme.name} is the optional type {resolved}: a Set"
+                " parameter may not be instantiated with an optional type",
+            )
 
     def _get_file_name_from_instantiable(self, name: str) -> str:
         return (

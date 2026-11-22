@@ -1,0 +1,23 @@
+// F-417 positive control: a4_lemma.proof used at K = BitString<8>, a set without None.
+// Check(x) = (x == None) is false for every x : BitString<8>, so Real and Ideal agree.
+// Expected (sound engine): Proof Succeeded.
+import 'Checker.primitive';
+import 'NoneCheck.scheme';
+import 'a4_pair.game';
+
+proof:
+
+let:
+    NoneCheck C = NoneCheck(BitString<8>);
+
+assume:
+
+lemma:
+    A4Pair(C) by 'a4_lemma.proof';
+
+theorem:
+    A4Pair(C);
+
+games:
+    A4Pair(C).Real against A4Pair(C).Adversary;
+    A4Pair(C).Ideal against A4Pair(C).Adversary;

@@ -1,0 +1,17 @@
+// Target pass: Dead Null Guard Elimination (None-test folding, gap23 change A).
+// Real answers Check(x); Ideal always answers false.
+import 'Checker.primitive';
+
+Game Real(Checker C) {
+    Bool Test(C.Elem x) {
+        return C.Check(x);
+    }
+}
+
+Game Ideal(Checker C) {
+    Bool Test(C.Elem x) {
+        return false;
+    }
+}
+
+export as A4Pair;

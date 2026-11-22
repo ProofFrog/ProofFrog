@@ -1,0 +1,22 @@
+// Pre-existing-class probe for the a4 mechanism (guard form, runs on HEAD too).
+// Hypothesis: for an abstract K, the else-less guard `if (v == None)` on `Elem? v = x`
+// (x : K) is removed because x's type K is not syntactically optional.  True only for sets K
+// without None; a5_guard_parent.proof instantiates it at K = BitString<8>?.
+import 'Checker.primitive';
+import 'NoneCheckGuard.scheme';
+import 'a4_pair.game';
+
+proof:
+
+let:
+    Set K;
+    NoneCheckGuard C = NoneCheckGuard(K);
+
+assume:
+
+theorem:
+    A4Pair(C);
+
+games:
+    A4Pair(C).Real against A4Pair(C).Adversary;
+    A4Pair(C).Ideal against A4Pair(C).Adversary;

@@ -1,0 +1,24 @@
+// Target pass: Dead Null Guard Elimination (None-test folding, gap23 change A).
+// Hypothesis: for an abstract K, the inlined test `x == None` (x : K, from the helper's
+// Elem? parameter) folds to false, since K is not syntactically optional.  The lemma is
+// then true only for sets K that do not contain None; a4_parent.proof instantiates it at
+// K = BitString<8>?, where it is false.
+// Expected if sound: either this lemma fails, or the parent refuses the instantiation.
+import 'Checker.primitive';
+import 'NoneCheck.scheme';
+import 'a4_pair.game';
+
+proof:
+
+let:
+    Set K;
+    NoneCheck C = NoneCheck(K);
+
+assume:
+
+theorem:
+    A4Pair(C);
+
+games:
+    A4Pair(C).Real against A4Pair(C).Adversary;
+    A4Pair(C).Ideal against A4Pair(C).Adversary;

@@ -1,18 +1,17 @@
 // Target: Dead Null Guard Elimination (released else-less guard path), F-416 fix, gap1 item D.
-// Hypothesis: as d2, the let constant c has the FieldAccess type C.Elem, and C.Elem stands for
-// K = BitString<8>?. _resolve_alias reads only a bare Variable through the let definitions, so
-// the guard `if (c == None) { count = count + 1; }` is removed as dead.
+// Hypothesis: as member_alias_scheme, the let constant c has the FieldAccess type C.Elem, and
+// C.Elem stands for BitString<8>?. Unless the pass reads the member alias, the guard
+// `if (c == None) { count = count + 1; }` is removed as dead.
 // Distinguisher (c = None): Hit(); Get() returns 1 on Left, 0 on Right.
 // Expected if sound: Proof Failed.
 import 'Checker.primitive';
-import 'NoneCheck.scheme';
+import 'OptCheck.scheme';
 import 'a7g_guard.game';
 
 proof:
 
 let:
-    Set K = BitString<8>?;
-    NoneCheck C = NoneCheck(K);
+    OptCheck C = OptCheck();
     C.Elem c;
 
 assume:

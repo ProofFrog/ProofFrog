@@ -769,6 +769,7 @@ def lemma_instantiation(  # pylint: disable=too-many-arguments,too-many-position
     parent_args: Sequence[frog_ast.Expression],
     parent_lets: Sequence[frog_ast.Field],
     parent_sampled: frozenset[str] | set[str],
+    parent_namespace: Optional[frog_ast.Namespace] = None,
 ) -> LemmaInstantiation | str:
     """Match a lemma's theorem arguments against a parent entry's arguments.
 
@@ -783,6 +784,10 @@ def lemma_instantiation(  # pylint: disable=too-many-arguments,too-many-position
     same ``P``, and the ``ai`` are matched structurally against its
     arguments, abstract lemma parameters binding as above). Returns the
     match, or a reason why the entry is not an instance.
+
+    An abstract set may not stand for an optional type (F-417), read
+    through the parent's set aliases and, given *parent_namespace* (the
+    parent's proof namespace), through member aliases.
     """
     # pylint: disable=too-many-return-statements
     lemmas = {let.name: let for let in lemma_lets}
@@ -898,7 +903,84 @@ def lemma_instantiation(  # pylint: disable=too-many-arguments,too-many-position
                 f"its parameter {name} would stand for {image}, which depends on"
                 f" the sampled {', '.join(sorted(used))}"
             )
+    # A value of an abstract set is never None (the type checker refuses
+    # `x == None` for `x : K`, and the engine folds such tests), so the
+    # lemma says nothing about a set with None in it (F-417). The type
+    # checker refuses an optional argument for a Set parameter; a set the
+    # match binds inside a type is checked here.
+    for name, image in name_map.items():
+        if not abstract(name) or lemmas[name].type != frog_ast.SetType():
+            continue
+        optional = _optional_type_image(image, parents, parent_namespace)
+        if optional is not None:
+            return (
+                f"its set {name} would stand for the optional type {optional},"
+                " and a set may not be an optional type"
+            )
     return LemmaInstantiation(name_map, callees)
+
+
+def _parent_alias_value(
+    the_type: frog_ast.ASTNode, parents: Mapping[str, frog_ast.Field]
+) -> frog_ast.ASTNode:
+    """*the_type* read through the parent's ``let:`` set aliases
+    (``Set K = BitString<m>;``), repeatedly."""
+    seen: set[str] = set()
+    while (
+        isinstance(the_type, frog_ast.Variable)
+        and the_type.name not in seen
+        and the_type.name in parents
+        and parents[the_type.name].type == frog_ast.SetType()
+        and isinstance(parents[the_type.name].value, frog_ast.Type)
+    ):
+        seen.add(the_type.name)
+        value = parents[the_type.name].value
+        assert value is not None
+        the_type = value
+    return the_type
+
+
+def _optional_type_image(
+    image: frog_ast.ASTNode,
+    parents: Mapping[str, frog_ast.Field],
+    namespace: Optional[frog_ast.Namespace],
+) -> Optional[frog_ast.OptionalType]:
+    """The optional type *image* is or stands for, read through the parent's
+    ``let:`` set aliases and, given the parent's proof namespace, through a
+    member alias of an instantiated scheme or primitive; None otherwise."""
+    seen: set[str] = set()
+    current = image
+    while str(current) not in seen:
+        seen.add(str(current))
+        if isinstance(current, frog_ast.OptionalType):
+            return current
+        aliased = _parent_alias_value(current, parents)
+        if aliased is not current:
+            current = aliased
+            continue
+        if namespace is None:
+            return None
+        if isinstance(current, frog_ast.Variable):
+            definition = namespace.get(current.name)
+            if not isinstance(definition, frog_ast.Type):
+                return None
+            current = definition
+        elif isinstance(current, frog_ast.FieldAccess) and isinstance(
+            current.the_object, frog_ast.Variable
+        ):
+            instantiable = namespace.get(current.the_object.name)
+            if not isinstance(instantiable, (frog_ast.Primitive, frog_ast.Scheme)):
+                return None
+            member = next(
+                (f.value for f in instantiable.fields if f.name == current.name),
+                None,
+            )
+            if not isinstance(member, frog_ast.Type):
+                return None
+            current = member
+        else:
+            return None
+    return None
 
 
 def _walk_ast(node: object) -> list[frog_ast.ASTNode]:

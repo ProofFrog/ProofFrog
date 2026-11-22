@@ -1,0 +1,16 @@
+// Check(x) reports whether x is None, through a helper that takes an optional Elem.
+// Elem is the optional type BitString<8>? itself (a Set parameter may not be
+// instantiated with an optional type, F-417).
+import 'Checker.primitive';
+
+Scheme OptCheck() extends Checker {
+    Set Elem = BitString<8>?;
+
+    Bool Check(Elem x) {
+        return this.IsNone(x);
+    }
+
+    Bool IsNone(Elem? v) {
+        return v == None;
+    }
+}

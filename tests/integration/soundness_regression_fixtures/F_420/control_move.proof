@@ -1,0 +1,21 @@
+// Positive control for attack_mod.proof: a TRUE equivalence. ModSTop.Test and
+// ModSIn.Test differ only in where `ModInt<k> v;` sits, and both games
+// call Test before counting c up.
+// The move is meant to identify these. Expected: Proof Succeeded.
+import 'ModP.primitive';
+import 'ModSTop.scheme';
+import 'ModSIn.scheme';
+import 'CtlPair.game';
+
+proof:
+
+let:
+    ModSTop E = ModSTop();
+    ModSIn F = ModSIn();
+
+theorem:
+    CtlPair(E, F);
+
+games:
+    CtlPair(E, F).Left against CtlPair(E, F).Adversary;
+    CtlPair(E, F).Right against CtlPair(E, F).Adversary;

@@ -6701,6 +6701,15 @@ class MergeBareDeclaration(TransformPass):
     may sit in nested ``if`` branches. A path that skips the branch never
     reads ``v``, and a path through it reaches the assignment before any
     mention. Loop bodies are not entered.
+
+    When that branch holds every mention but no assignment in it can carry
+    the declaration (its first mention reads the default, sits in a loop, or
+    is a nested ``if`` using ``v`` in several branches), the bare ``T v;``
+    itself moves to the start of the branch, as deep as the search reaches.
+    A path that skips the branch never mentions ``v``, and a path through it
+    starts the branch with ``v`` at its default either way, so only the
+    scope changes. Two games that differ only in where such a declaration
+    sits then reach the same canonical form.
     """
 
     name = "Merge Bare Declaration"
@@ -6755,8 +6764,24 @@ class _MergeBareDeclarationTransformer(BlockTransformer):
     ) -> list[frog_ast.Statement] | None:
         """*statements* with the first assignment to *name* turned into a
         declaration of type *the_type*, or None when the declaration's
-        default value might be read (or the assignment is not found)."""
+        default value might be read (or the assignment is not found).
+
+        F-420: the declaration may not pass a statement that writes or
+        rebinds a name its type reads. The type checker refuses a type length
+        or modulus naming a written variable (F-367), but inlining can create
+        one: a scheme method's `ModInt<k> v;` over its own parameter `k`
+        becomes `ModInt<c> v;` for an argument `c` the game writes. Carried
+        past `c = c + 1;`, the type would change.
+        """
+        type_names = referenced_variable_names(the_type)
         for later, candidate in enumerate(statements):
+            if type_names and reassigns_or_rebinds(type_names, candidate):
+                self._note_not_merged(
+                    name,
+                    f"'{candidate}' writes or rebinds a name the declared type"
+                    f" '{the_type}' reads",
+                )
+                return None
             if _is_plain_assignment_to(candidate, name):
                 assert isinstance(candidate, frog_ast.Assignment)
                 if name in referenced_variable_names(candidate.value):
@@ -6778,11 +6803,25 @@ class _MergeBareDeclarationTransformer(BlockTransformer):
             if isinstance(candidate, frog_ast.IfStatement):
                 branch = self._sole_branch(name, candidate, rest)
                 if branch is not None:
+                    misses_before = (
+                        len(self.ctx.near_misses) if self.ctx is not None else 0
+                    )
                     inner = self._merge_into(
                         name, the_type, list(candidate.blocks[branch].statements)
                     )
                     if inner is None:
-                        return None
+                        # No assignment in the branch can carry the
+                        # declaration. Move it, still bare, to the start of
+                        # the branch: a path that skips the branch never
+                        # mentions the variable, and a path through it
+                        # starts the branch with the variable at its default
+                        # either way. The attempt's near misses are dropped,
+                        # since the declaration did move.
+                        if self.ctx is not None:
+                            del self.ctx.near_misses[misses_before:]
+                        inner = [
+                            frog_ast.VariableDeclaration(copy.deepcopy(the_type), name)
+                        ] + list(candidate.blocks[branch].statements)
                     blocks = list(candidate.blocks)
                     blocks[branch] = frog_ast.Block(inner)
                     new_if = frog_ast.IfStatement(list(candidate.conditions), blocks)

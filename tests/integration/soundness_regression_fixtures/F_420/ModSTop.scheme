@@ -1,0 +1,19 @@
+// ModS.Test without the if (false) block: the declaration sits above the
+// if (b) branch with nothing in between. The same function as ModSIn.Test.
+import 'ModP.primitive';
+
+Scheme ModSTop() extends ModP {
+    Bool Test(Int k, Int a, Bool b, Bool d) {
+        ModInt<k> v;
+        Bool r = false;
+        if (b) {
+            if (d) {
+                v = a;
+            } else {
+                v = a + 1;
+            }
+            r = v == v + v;
+        }
+        return r;
+    }
+}

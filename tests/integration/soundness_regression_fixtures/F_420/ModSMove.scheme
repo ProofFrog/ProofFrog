@@ -1,0 +1,28 @@
+// Test(k, a, b, d): when b holds, stores a (d true) or a + 1 (d false)
+// into v : ModInt<k>, and returns whether v == v + v, i.e. whether the
+// stored value is 0 mod k. For k = 2 and a = 2 that is true; for k = 3,
+// a = 2, d = true it is false. The if (false) block mentions v too, so
+// Merge Bare Declaration does not touch v in the first pipeline iteration;
+// Branch Elimination removes that block later in the iteration. The nested
+// if assigns v in both branches, so the declaration cannot merge with an
+// assignment and is moved, bare, into the if (b) branch.
+import 'ModP.primitive';
+
+Scheme ModSMove() extends ModP {
+    Bool Test(Int k, Int a, Bool b, Bool d) {
+        ModInt<k> v;
+        Bool r = false;
+        if (false) {
+            r = v == v;
+        }
+        if (b) {
+            if (d) {
+                v = a;
+            } else {
+                v = a + 1;
+            }
+            r = v == v + v;
+        }
+        return r;
+    }
+}

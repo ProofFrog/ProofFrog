@@ -1,0 +1,26 @@
+// Target: Merge Bare Declaration, the move of a bare declaration into the
+// only branch that mentions it (2026-11-22).
+// Hypothesis: the move evaluates the declaration's type at a later point.
+// Inlining ModSMove.Test substitutes the field c for the parameter k, so the
+// game holds `ModInt<c> v;`. Topological Sorting places `c = c + 1;`
+// between that declaration and `if (b) { ... }` while the if (false) block
+// still blocks Merge Bare Declaration; once Branch Elimination removes the
+// block, the move carries `ModInt<c> v;` past the write, so the stores into
+// v reduce modulo the new c.
+// Sound engine: the hop FAILS (first f(2, true, true): Left true, Right
+// false). Unsound engine: Proof Succeeded.
+import 'ModP.primitive';
+import 'ModSMove.scheme';
+import 'ModPair.game';
+
+proof:
+
+let:
+    ModSMove E = ModSMove();
+
+theorem:
+    ModPair(E);
+
+games:
+    ModPair(E).Left against ModPair(E).Adversary;
+    ModPair(E).Right against ModPair(E).Adversary;

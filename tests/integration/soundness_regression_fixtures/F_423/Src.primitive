@@ -1,0 +1,5 @@
+// Task5 review r1: an abstract element set.
+Primitive Src(Set K) {
+    Set Elem = K;
+    Elem Pick();
+}

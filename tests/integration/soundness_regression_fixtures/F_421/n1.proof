@@ -1,0 +1,11 @@
+// Task5 review n1 (see n1.game). UNSOUND if "Proof Succeeded".
+import 'n1.game';
+proof:
+let:
+    Set K = None;
+    K c;
+theorem:
+    N1(K, c);
+games:
+    N1(K, c).Left against N1(K, c).Adversary;
+    N1(K, c).Right against N1(K, c).Adversary;

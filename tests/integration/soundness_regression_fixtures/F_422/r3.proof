@@ -1,0 +1,15 @@
+// Task5 review r3 (see r3.game). UNSOUND if "Proof Succeeded".
+import 'Conv2.primitive';
+import 'Src.primitive';
+import 'ReqNone.scheme';
+import 'r3.game';
+proof:
+let:
+    Set K;
+    Src P = Src(K);
+    ReqNone C = ReqNone(P);
+theorem:
+    R3(C);
+games:
+    R3(C).Left against R3(C).Adversary;
+    R3(C).Right against R3(C).Adversary;

@@ -1,0 +1,17 @@
+// Attack v1: a let: Set alias whose value is a *value* (the constant c, of
+// type BitString<8>?), not a type. The type checker reads K as the type of c
+// (BitString<8>?), so `K d;` may hold None; the engine resolves K to the name
+// c, which is not syntactically optional, and judges d never None.
+// UNSOUND if "Proof Succeeded": with d = None, Test() is true in Left and
+// false in Right.
+import 'v1.game';
+proof:
+let:
+    BitString<8>? c;
+    Set K = c;
+    K d;
+theorem:
+    V1(d);
+games:
+    V1(d).Left against V1(d).Adversary;
+    V1(d).Right against V1(d).Adversary;

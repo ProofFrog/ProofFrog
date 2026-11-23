@@ -946,6 +946,10 @@ def lemma_instantiation(  # pylint: disable=too-many-arguments,too-many-position
         if not abstract(name) or lemmas[name].type != frog_ast.SetType():
             continue
         optional = _optional_type_image(image, parents, parent_namespace)
+        if isinstance(optional, frog_ast.NoneExpression):
+            return (
+                f"its set {name} would stand for None, which is a value, not a" " type"
+            )
         if optional is not None:
             return (
                 f"its set {name} would stand for the optional type {optional},"
@@ -1006,15 +1010,16 @@ def _optional_type_image(
     image: frog_ast.ASTNode,
     parents: Mapping[str, frog_ast.Field],
     namespace: Optional[frog_ast.Namespace],
-) -> Optional[frog_ast.OptionalType]:
-    """The optional type *image* is or stands for, read through the parent's
-    ``let:`` set aliases and, given the parent's proof namespace, through a
-    member alias of an instantiated scheme or primitive; None otherwise."""
+) -> Optional[frog_ast.OptionalType | frog_ast.NoneExpression]:
+    """The optional type, or the literal None (F-421), that *image* is or
+    stands for, read through the parent's ``let:`` set aliases and, given the
+    parent's proof namespace, through a member alias of an instantiated scheme
+    or primitive; None otherwise."""
     seen: set[str] = set()
     current = image
     while str(current) not in seen:
         seen.add(str(current))
-        if isinstance(current, frog_ast.OptionalType):
+        if isinstance(current, (frog_ast.OptionalType, frog_ast.NoneExpression)):
             return current
         aliased = _parent_alias_value(current, parents)
         if aliased is not current:

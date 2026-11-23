@@ -1,0 +1,17 @@
+// Task5 review r3 (pre-existing on main; same root cause as r2).
+// Target: Dead Null Guard Elimination, None-test fold (main, a785b07).
+// Same route as r2 without the conjunct: `v == None` with v : K folds to
+// false. Distinguisher: Test(true, None): Left true, Right false.
+// UNSOUND if the proof is accepted.
+import 'Conv2.primitive';
+Game Left(Conv2 C) {
+    Bool Test(Bool b, BitString<8>? y) {
+        return C.Check(b, y);
+    }
+}
+Game Right(Conv2 C) {
+    Bool Test(Bool b, BitString<8>? y) {
+        return C.Check2(b, y);
+    }
+}
+export as R3;

@@ -1,0 +1,8 @@
+import 'ng.game';
+proof:
+let:
+theorem:
+    NG();
+games:
+    NG().Left against NG().Adversary;
+    NG().Right against NG().Adversary;

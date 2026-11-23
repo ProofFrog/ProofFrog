@@ -1,0 +1,16 @@
+// Attack v2: a let: constant typed by a member alias whose value is a value
+// (P.Elem = c0, c0 : BitString<8>?). The type checker reads d as
+// BitString<8>?; the engine resolves P.Elem to the name c0 and judges d never
+// None. UNSOUND if "Proof Succeeded" (d = None: Left true, Right false).
+import 'OptP.primitive';
+import 'v1.game';
+proof:
+let:
+    BitString<8>? c0;
+    OptP P = OptP(c0);
+    P.Elem d;
+theorem:
+    V1(d);
+games:
+    V1(d).Left against V1(d).Adversary;
+    V1(d).Right against V1(d).Adversary;

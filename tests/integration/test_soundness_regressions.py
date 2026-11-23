@@ -714,6 +714,44 @@ CASES = [
      "the same with an else-less guard, which released code removed"),
     ("F-419", "parent_control.proof", "accept", "lemma matching",
      "positive control: the constant stands for one of its own type"),
+    ("F-421", "n1.proof", "type_error", "type checker",
+     "a let: alias Set K = None; made values of K read as never None, though "
+     "the only value of the type None is None"),
+    ("F-421", "n2.proof", "type_error", "type checker",
+     "NoneCheck(None): None accepted as the argument of a Set parameter"),
+    ("F-421", "n3.proof", "type_error", "type checker",
+     "the same with an else-less guard (accepted by v0.6.0)"),
+    ("F-421", "ng.proof", "type_error", "type checker",
+     "a game's own Set E = None; with y == None for y : E"),
+    ("F-421", "rednone.proof", "type_error", "type checker",
+     "None passed to a reduction's Set parameter in a step"),
+    ("F-422", "r3.proof", "type_error", "type checker",
+     "requires P.Elem subsets Opt with Set Opt = BitString<8>? let an optional "
+     "value into a variable of the abstract set P.Elem, read as never None"),
+    ("F-422", "r4.proof", "type_error", "type checker",
+     "the same with an else-less guard"),
+    ("F-422", "r5.proof", "type_error", "type checker",
+     "requires P.Elem subsets Q.Elem, optional only once Q is instantiated "
+     "with a scheme whose Elem is BitString<8>?"),
+    ("F-422", "r6.proof", "type_error", "type checker",
+     "the same through a forwarding scheme"),
+    ("F-423", "c7.proof", "type_error", "type checker",
+     "F-422 bypass: requires se subsets so; with value sides "
+     "se : Set<P.Elem> and so : Set<BitString<8>?> paired their types, so a "
+     "None element reached a P.Elem variable"),
+    ("F-423", "c7g.proof", "type_error", "type checker",
+     "the same with an else-less guard (accepted by v0.6.0)"),
+    ("F-423", "g6.proof", "type_error", "type checker",
+     "a game parameter c : BitString<8>? used as the type of a method "
+     "parameter (c y), read by the engine as an abstract never-None type"),
+    ("F-423", "g5.proof", "type_error", "type checker",
+     "a game's Set alias of a value (Set F = c;)"),
+    ("F-423", "v1.proof", "type_error", "type checker",
+     "a let: Set alias of a value (Set K = c;)"),
+    ("F-423", "v2.proof", "type_error", "type checker",
+     "a primitive's member alias of a value parameter (Set Elem = c;)"),
+    ("F-423", "v4.proof", "type_error", "type checker",
+     "a scheme's member alias of a value parameter (Set Elem = c;)"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),
@@ -904,6 +942,71 @@ CASES = [
 
 # (finding, proof file) -> the error a type_error case must fail with.
 TYPE_ERROR = {
+    ("F-422", "r3.proof"): (
+        "error: The requirement K subsets BitString<8>? involves the optional"
+        " type BitString<8>?: a type requirement may not involve an optional"
+        " type"
+    ),
+    ("F-422", "r4.proof"): (
+        "error: The requirement K subsets BitString<8>? involves the optional"
+        " type BitString<8>?: a type requirement may not involve an optional"
+        " type"
+    ),
+    ("F-422", "r5.proof"): (
+        "error: The requirement K subsets BitString<8>? involves the optional"
+        " type BitString<8>?: a type requirement may not involve an optional"
+        " type"
+    ),
+    ("F-422", "r6.proof"): (
+        "error: The requirement K subsets BitString<8>? involves the optional"
+        " type BitString<8>?: a type requirement may not involve an optional"
+        " type"
+    ),
+    ("F-423", "c7.proof"): (
+        "error: The requirement se subsets so0 relates se, a value of type"
+        " Set<K>: a type requirement relates types"
+    ),
+    ("F-423", "c7g.proof"): (
+        "error: The requirement se subsets so0 relates se, a value of type"
+        " Set<K>: a type requirement relates types"
+    ),
+    ("F-423", "g6.proof"): (
+        "error: c0 is a value of type BitString<8>?, not a type"
+    ),
+    ("F-423", "g5.proof"): (
+        "error: The set F is defined as c0: c0 is a value of type"
+        " BitString<8>?, not a type"
+    ),
+    ("F-423", "v1.proof"): (
+        "error: The set K is defined as c: c is a value of type BitString<8>?,"
+        " not a type"
+    ),
+    ("F-423", "v2.proof"): (
+        "error: The set Elem is defined as c0: c0 is a value of type"
+        " BitString<8>?, not a type"
+    ),
+    ("F-423", "v4.proof"): (
+        "error: The set Elem is defined as c0: c0 is a value of type"
+        " BitString<8>?, not a type"
+    ),
+    ("F-421", "ng.proof"): (
+        "error: The set E is defined as None, which is a value, not a type"
+    ),
+    ("F-421", "rednone.proof"): (
+        "error: Argument None for the Set parameter 'K2' of R is None, which"
+        " is a value, not a type"
+    ),
+    ("F-421", "n1.proof"): (
+        "error: The set K is defined as None, which is a value, not a type"
+    ),
+    ("F-421", "n2.proof"): (
+        "error: Argument None for the Set parameter 'K' of NoneCheck is None,"
+        " which is a value, not a type"
+    ),
+    ("F-421", "n3.proof"): (
+        "error: Argument None for the Set parameter 'K' of NoneCheckGuard is"
+        " None, which is a value, not a type"
+    ),
     ("F-417", "a4_parent.proof"): (
         "error: Argument BitString<8>? for the Set parameter 'K' of NoneCheck"
         " is the optional type BitString<8>?: a Set parameter may not be"

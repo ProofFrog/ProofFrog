@@ -1,0 +1,14 @@
+// Probe: a game-level Set alias field defined as None.
+Game Left() {
+    Set E = None;
+    Bool Test(E y) {
+        return y == None;
+    }
+}
+Game Right() {
+    Set E = None;
+    Bool Test(E y) {
+        return false;
+    }
+}
+export as NG;

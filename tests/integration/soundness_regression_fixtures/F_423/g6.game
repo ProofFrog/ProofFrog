@@ -1,0 +1,17 @@
+// Attack g6: a value name (c : BitString<8>?) written directly as a type.
+// The type checker reads the type `c` as the type of c (BitString<8>?), so
+// `y == None` type checks and the adversary may pass None; the engine reads
+// the type name `c0` (after instantiation) as non-optional.
+// UNSOUND if a proof of Left == Right is accepted: Test(None) returns true
+// in Left, false in Right.
+Game Left(BitString<8>? c) {
+    Bool Test(c y) {
+        return y == None;
+    }
+}
+Game Right(BitString<8>? c) {
+    Bool Test(c y) {
+        return false;
+    }
+}
+export as G6;

@@ -1,0 +1,5 @@
+// Attack v2: a primitive whose element set is a value parameter.
+Primitive OptP(BitString<8>? c) {
+    Set Elem = c;
+    Elem Pick();
+}

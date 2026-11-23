@@ -1,0 +1,19 @@
+// Task5 review n1. Target: Dead Null Guard Elimination, redundant `y != None`
+// conjunct. Hypothesis: `None` is accepted as the argument of a `Set`
+// parameter (frog_ast.NoneExpression is also a Type, and compare_types lets a
+// `Set` slot hold any Type); the F-417 check refuses only an OptionalType.
+// The pass reads `K` = None as a non-optional type, so `c == y && y != None`
+// folds to `c == y`, though the only value of type None is None.
+// Distinguisher: Test(None): Left returns false (c == None, y != None fails),
+// Right returns true. UNSOUND if the proof is accepted.
+Game Left(Set K, K c) {
+    Bool Test(K? y) {
+        return c == y && y != None;
+    }
+}
+Game Right(Set K, K c) {
+    Bool Test(K? y) {
+        return c == y;
+    }
+}
+export as N1;

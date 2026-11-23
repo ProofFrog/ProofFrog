@@ -1,0 +1,14 @@
+// Attack v4 (see ValCheck.scheme). UNSOUND if "Proof Succeeded":
+// Test(None) returns true in Real (C.Elem is BitString<8>?), false in Ideal.
+import 'Checker.primitive';
+import 'ValCheck.scheme';
+import 'a4_pair.game';
+proof:
+let:
+    BitString<8>? c0;
+    ValCheck C = ValCheck(c0);
+theorem:
+    A4Pair(C);
+games:
+    A4Pair(C).Real against A4Pair(C).Adversary;
+    A4Pair(C).Ideal against A4Pair(C).Adversary;

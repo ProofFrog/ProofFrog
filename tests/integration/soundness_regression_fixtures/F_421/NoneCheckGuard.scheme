@@ -1,0 +1,16 @@
+// Check(x) reports whether x is None, written as an else-less guard on an optional copy
+// (the shape Dead Null Guard Elimination already removed before the gap23 change).
+import 'Checker.primitive';
+
+Scheme NoneCheckGuard(Set K) extends Checker {
+    Set Elem = K;
+
+    Bool Check(Elem x) {
+        Elem? v = x;
+        Bool r = false;
+        if (v == None) {
+            r = true;
+        }
+        return r;
+    }
+}

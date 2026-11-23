@@ -1,0 +1,10 @@
+// Attack g5 (see g5.game). UNSOUND if "Proof Succeeded".
+import 'g5.game';
+proof:
+let:
+    BitString<8>? c0;
+theorem:
+    G5(c0);
+games:
+    G5(c0).Left against G5(c0).Adversary;
+    G5(c0).Right against G5(c0).Adversary;

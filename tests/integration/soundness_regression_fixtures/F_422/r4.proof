@@ -1,0 +1,15 @@
+// Task5 review r4 (see r4.game). UNSOUND if "Proof Succeeded".
+import 'Conv2.primitive';
+import 'Src.primitive';
+import 'ReqGuard.scheme';
+import 'r4.game';
+proof:
+let:
+    Set K;
+    Src P = Src(K);
+    ReqGuard C = ReqGuard(P);
+theorem:
+    R4(C);
+games:
+    R4(C).Left against R4(C).Adversary;
+    R4(C).Right against R4(C).Adversary;

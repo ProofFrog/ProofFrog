@@ -1,0 +1,5 @@
+// A primitive with an abstract element set and one producer.
+Primitive Holder(Set H) {
+    Set Elem = H;
+    Elem Get();
+}

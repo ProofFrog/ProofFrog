@@ -1,0 +1,5 @@
+// A primitive with one test on elements of an abstract set K.
+Primitive Checker(Set K) {
+    Set Elem = K;
+    Bool Check(Elem x);
+}

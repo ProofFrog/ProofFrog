@@ -539,3 +539,16 @@ def test_instantiation_maps_int_constant_to_integer_expression() -> None:
 def test_instantiation_maps_group_constant() -> None:
     result = _instantiate("    Group G;", ["G"], "    Group H;", ["H"])
     assert isinstance(result, advantage.LemmaInstantiation), result
+
+
+def test_instantiation_rejects_none_for_abstract_set() -> None:
+    """F-421: `None` is a value, not a type; a lemma proved for an abstract
+    set reads its values as never None."""
+    result = _instantiate(
+        "    Int n;\n    Set C;\n    KEM K = KEM(n, C);",
+        ["K"],
+        "    Int m;\n    KEM K2 = KEM(m, None);",
+        ["K2"],
+    )
+    assert isinstance(result, str)
+    assert "its set C would stand for None" in result

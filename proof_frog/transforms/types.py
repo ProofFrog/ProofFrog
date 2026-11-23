@@ -8,6 +8,7 @@ annotated types.
 from __future__ import annotations
 
 import copy
+import functools
 from typing import Optional
 
 from .. import frog_ast
@@ -161,6 +162,8 @@ class _NoneTestFolder(Transformer):
         self, binary_op: frog_ast.BinaryOperation
     ) -> frog_ast.Expression:
         new_op = self._transform_children(binary_op)
+        if new_op.operator == frog_ast.BinaryOperators.AND:
+            return self._drop_redundant_null_conjuncts(new_op)
         if new_op.operator not in (
             frog_ast.BinaryOperators.EQUALS,
             frog_ast.BinaryOperators.NOTEQUALS,
@@ -177,6 +180,95 @@ class _NoneTestFolder(Transformer):
                 new_op.operator == frog_ast.BinaryOperators.NOTEQUALS
             )
         return new_op
+
+    def _drop_redundant_null_conjuncts(
+        self, conjunction: frog_ast.BinaryOperation
+    ) -> frog_ast.Expression:
+        """Drop each conjunct `y != None` that follows a conjunct `x == y` (or
+        `y == x`) with `x` never None.
+
+        A conjunct runs only when every earlier one was true, so when it runs
+        `y` equals the value of `x`, which is not None: the test is true. `y`
+        must make no call and read no map or array, so that both occurrences
+        have the same value; the test must come after the equality, so the
+        fold adds no evaluation.
+        """
+        conjuncts = _flatten_conjunction(conjunction)
+        kept: list[frog_ast.Expression] = []
+        for conjunct in conjuncts:
+            subject = _not_none_subject(conjunct)
+            if subject is not None and any(
+                self._equates_never_none_with(earlier, subject) for earlier in kept
+            ):
+                if not _reads_only_variables(subject):
+                    self.owner.note_unfolded_null_conjunct(subject)
+                else:
+                    continue
+            kept.append(conjunct)
+        if len(kept) == len(conjuncts):
+            return conjunction
+        return functools.reduce(
+            lambda left, right: frog_ast.BinaryOperation(
+                frog_ast.BinaryOperators.AND, left, right
+            ),
+            kept,
+        )
+
+    def _equates_never_none_with(
+        self, conjunct: frog_ast.Expression, subject: frog_ast.Expression
+    ) -> bool:
+        if not (
+            isinstance(conjunct, frog_ast.BinaryOperation)
+            and conjunct.operator == frog_ast.BinaryOperators.EQUALS
+        ):
+            return False
+        for side, other in (
+            (conjunct.left_expression, conjunct.right_expression),
+            (conjunct.right_expression, conjunct.left_expression),
+        ):
+            if other == subject and self.owner.can_fold_none_test(
+                self.statement, side, False
+            ):
+                return True
+        return False
+
+
+def _flatten_conjunction(expr: frog_ast.Expression) -> list[frog_ast.Expression]:
+    """The conjuncts of an `&&` chain, in evaluation order."""
+    if (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator == frog_ast.BinaryOperators.AND
+    ):
+        return _flatten_conjunction(expr.left_expression) + _flatten_conjunction(
+            expr.right_expression
+        )
+    return [expr]
+
+
+def _not_none_subject(expr: frog_ast.Expression) -> Optional[frog_ast.Expression]:
+    """The `y` of `y != None` or `None != y`, else None."""
+    if not (
+        isinstance(expr, frog_ast.BinaryOperation)
+        and expr.operator == frog_ast.BinaryOperators.NOTEQUALS
+    ):
+        return None
+    if isinstance(expr.right_expression, frog_ast.NoneExpression):
+        return expr.left_expression
+    if isinstance(expr.left_expression, frog_ast.NoneExpression):
+        return expr.right_expression
+    return None
+
+
+def _reads_only_variables(expr: frog_ast.Expression) -> bool:
+    """No call, map or array read, or slice anywhere in *expr*."""
+    return (
+        SearchVisitor(
+            lambda node: isinstance(
+                node, (frog_ast.FuncCall, frog_ast.ArrayAccess, frog_ast.Slice)
+            )
+        ).visit(expr)
+        is None
+    )
 
 
 class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
@@ -386,6 +478,29 @@ class DeadNullGuardEliminator(MethodScopedTypeMapMixin, BlockTransformer):
                 else:
                     written_locals[name] = (statement, write)
         return frog_ast.Block(new_statements)
+
+    def note_unfolded_null_conjunct(self, subject: frog_ast.Expression) -> None:
+        """Record a near miss for a `y != None` conjunct kept after an equality
+        with a value that is never None, because `y` makes a call or reads a
+        map or array, so its two occurrences may differ."""
+        if self.ctx is None:
+            return
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Dead Null Guard Elimination",
+                reason=(
+                    f"'{subject} != None' was kept after an equality with a value"
+                    f" that is never None, because '{subject}' makes a call or"
+                    " reads a map or array, so its two occurrences may differ"
+                ),
+                location=None,
+                suggestion=(
+                    "bind the value to a local and compare the local in both" " places"
+                ),
+                variable=None,
+                method=None,
+            )
+        )
 
     def can_fold_none_test(
         self,

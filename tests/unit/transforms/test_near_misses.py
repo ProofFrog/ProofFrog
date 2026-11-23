@@ -6887,3 +6887,27 @@ def test_empty_field_no_near_miss_when_field_is_written() -> None:
     ctx = _make_ctx()
     assert EmptyCollectionField().apply(game, ctx) == game
     assert not _empty_field_misses(ctx)
+
+
+# ---------------------------------------------------------------------------
+# Dead Null Guard Elimination: a redundant `y != None` conjunct (G6)
+# ---------------------------------------------------------------------------
+
+
+def test_near_miss_null_conjunct_with_map_read() -> None:
+    from proof_frog.transforms.types import DeadNullGuardElimination
+
+    game = frog_parser.parse_game(
+        "Game T() {\n Bool f(BitString<8> x, Map<Int, BitString<8>?> M) {\n"
+        " return x == M[0] && M[0] != None;\n }\n}"
+    )
+    ctx = _make_ctx()
+    assert DeadNullGuardElimination().apply(game, ctx) == game
+    misses = [
+        nm
+        for nm in ctx.near_misses
+        if nm.transform_name == "Dead Null Guard Elimination"
+        and "two occurrences" in nm.reason
+    ]
+    assert len(misses) == 1
+    assert "M[0]" in misses[0].reason

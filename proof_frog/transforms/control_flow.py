@@ -1604,13 +1604,27 @@ class RemoveEmptyIfTransformer(BlockTransformer):
     Such a statement writes nothing and continues at the same point on every
     path, so only the evaluation of its conditions could be observable. It is
     removed when that evaluation has no effect: no call (a method may be
-    non-deterministic, a random function lazily sampled) and no map/array
-    indexing (an absent-key read). Otherwise the statement is kept and a
-    near-miss recorded.
+    non-deterministic, a random function lazily sampled) other than a call of
+    a ``deterministic`` method of an instantiated primitive, which draws no
+    coins and touches no game state, and no map/array indexing (an absent-key
+    read). Otherwise the statement is kept and a near-miss recorded.
     """
 
     def __init__(self, ctx: PipelineContext) -> None:
         self.ctx = ctx
+
+    def _is_deterministic_primitive_call(self, node: frog_ast.ASTNode) -> bool:
+        """A call of a ``deterministic`` method of an instantiated primitive.
+
+        Such a call draws no coins and touches no game state
+        (FROGLANG_REFERENCE, evaluation order), so evaluating it has no
+        effect. Its arguments are separate nodes of the walk and are checked
+        on their own.
+        """
+        if not isinstance(node, frog_ast.FuncCall):
+            return False
+        method = _lookup_primitive_method(node.func, self.ctx.proof_namespace)
+        return method is not None and method.deterministic
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         kept: list[frog_ast.Statement] = []
@@ -1630,6 +1644,7 @@ class RemoveEmptyIfTransformer(BlockTransformer):
                         node,
                         (frog_ast.FuncCall, frog_ast.ArrayAccess, frog_ast.Slice),
                     )
+                    and not self._is_deterministic_primitive_call(node)
                 ),
                 None,
             )

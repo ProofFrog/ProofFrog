@@ -26,6 +26,7 @@ from ..visitors import (
     AllConstantFieldAccesses,
     GetTypeMapVisitor,
     lvalue_base_name,
+    reassigns_or_rebinds,
     referenced_variable_names,
 )
 from ._base import (
@@ -214,7 +215,7 @@ class ExpandTupleTransformer(Transformer):
         self,
         reason: str,
         suggestion: str | None,
-        variable: str,
+        variable: str | None,
         location: frog_ast.SourceOrigin | None = None,
     ) -> None:
         if self.ctx is None:
@@ -443,6 +444,85 @@ class ExpandTupleTransformer(Transformer):
             return False
         return True
 
+    def _can_expand_optional_local(
+        self, block: frog_ast.Block, stmt_idx: int, name: str
+    ) -> bool:
+        """Whether ``[T0, T1]? name = [e0, e1];`` at *stmt_idx* of *block*
+        may be split: the rest of the block mentions *name*, writes and
+        re-declares it nowhere, and reads it only as ``name[i]`` at a constant
+        index in range; and the local does not escape the block (G5)."""
+        rest = frog_ast.Block(list(block.statements[stmt_idx + 1 :]))
+        if not self._has_reference(name, rest):
+            return False
+        statement = block.statements[stmt_idx]
+        assert isinstance(statement, frog_ast.Assignment)
+        assert isinstance(statement.the_type, frog_ast.OptionalType)
+        assert isinstance(statement.the_type.the_type, frog_ast.ProductType)
+        # Alpha Rename has usually given the local an internal `__aN__` name
+        # by now, which means nothing to the author and never appears in the
+        # canonical diff: describe the local by its declaration and leave
+        # `variable` unset, or the diagnostics drop the near miss.
+        internal = name.startswith("__")
+        subject = (
+            f"a local of type '{statement.the_type}' initialized to "
+            f"'{statement.value}'"
+            if internal
+            else f"optional tuple local '{name}'"
+        )
+        variable = None if internal else name
+        suggestion = (
+            "Bind the tuple's elements to locals, or declare it with the tuple "
+            "type instead of the optional one"
+        )
+        if reassigns_or_rebinds({name}, rest):
+            self._near_miss(
+                reason=(
+                    f"{subject} was not split into components: it is written "
+                    "or re-declared after its declaration"
+                ),
+                suggestion=suggestion,
+                variable=variable,
+            )
+            return False
+        arity = len(statement.the_type.the_type.types)
+        element_reads = 0
+
+        def _count_element_read(node: frog_ast.ASTNode) -> bool:
+            nonlocal element_reads
+            if (
+                isinstance(node, frog_ast.ArrayAccess)
+                and isinstance(node.the_array, frog_ast.Variable)
+                and node.the_array.name == name
+                and isinstance(node.index, frog_ast.Integer)
+                and 0 <= node.index.num < arity
+            ):
+                element_reads += 1
+            return False
+
+        SearchVisitor(_count_element_read).visit(rest)
+        if element_reads != _count_var_refs(rest, name):
+            self._near_miss(
+                reason=(
+                    f"{subject} was not split into components: it is used "
+                    "other than through element reads at constant indices "
+                    "(compared with None, or used whole)"
+                ),
+                suggestion=suggestion,
+                variable=variable,
+            )
+            return False
+        if self._local_escapes_block(block, name):
+            self._near_miss(
+                reason=(
+                    f"{subject} was not split into components: it is "
+                    "referenced outside the block that declares it"
+                ),
+                suggestion="Declare the local in the block where it is used",
+                variable=variable,
+            )
+            return False
+        return True
+
     def _can_expand_field(
         self,
         game: frog_ast.Game,
@@ -640,6 +720,31 @@ class ExpandTupleTransformer(Transformer):
                     stmt_values[index],
                 )
                 for index, the_type in enumerate(unfolded_types)
+            ], (statement.var.name, components)
+        # An optional tuple local initialized with a tuple literal holds a
+        # tuple, never None: split like a product local when nothing writes
+        # or re-declares it and it is read only element by element (G5).
+        if (
+            not self.bare_locals_only
+            and isinstance(statement, frog_ast.Assignment)
+            and isinstance(statement.the_type, frog_ast.OptionalType)
+            and isinstance(statement.the_type.the_type, frog_ast.ProductType)
+            and isinstance(statement.var, frog_ast.Variable)
+            and len(frog_ast.tuple_literal_values(statement.value) or [])
+            == len(statement.the_type.the_type.types)
+            and self._can_expand_optional_local(block, stmt_idx, statement.var.name)
+        ):
+            product = statement.the_type.the_type
+            optional_values = frog_ast.tuple_literal_values(statement.value)
+            assert optional_values is not None
+            components = self._mint(statement.var.name, len(product.types))
+            return [
+                frog_ast.Assignment(
+                    the_type,
+                    frog_ast.Variable(components[index]),
+                    optional_values[index],
+                )
+                for index, the_type in enumerate(product.types)
             ], (statement.var.name, components)
         # A bare product-typed declaration ``[T0, T1] v;`` (issue #255)
         # is split into per-component declarations; the later

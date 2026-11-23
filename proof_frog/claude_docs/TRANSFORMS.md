@@ -107,7 +107,7 @@ The field-level RF rewrites (UniqueRFSimplification, FreshInputRFToUniform, Chal
 | GroupElemSimplification | Group algebra identities: power-of-power, `g^0`/`g^1`, identity element rules, and `(a * b)^e` = `a^e * b^e` (likewise for `/`) when `e` makes no call. |
 | GroupElemCancellation | Cancels matching terms in GroupElem multiply/divide chains (`x * m / x` = `m`). |
 | GroupElemExponentCombination | Combines same-base exponentiations: `g^a * g^b` = `g^(a+b)`. |
-| NormalizeCommutativeChains | Sorts operands of commutative chains by structural key; also normalizes `==`/`!=` operand order. |
+| NormalizeCommutativeChains | Sorts operands of commutative chains by structural key; also normalizes `==`/`!=` operand order. Declines (near miss) a chain holding a call that may touch state (a `challenger.` call, a scheme or game method left uninlined, anything unresolved, F-260); abstract primitive calls and `let:` `Function` calls touch no game state, so they reorder even when non-deterministic. |
 | FlattenConcatChain | Left-associates `\|\|` chains; sound under both Boolean OR and BitString concatenation. |
 | ReflexiveComparison | Simplifies `x == x` to `true` and `x != x` to `false`. |
 | InjectiveEqualitySimplify | Rewrites `f(a1,...) == f(b1,...)` to `(a1==b1) && ...` when `f` is `deterministic injective`. An operand may be a local bound once to such a call, or a field assigned once in `Initialize`, outside the method being rewritten; it is resolved to its call only when every value the call reads, including one read only through a member access (`M` in `F.Enc(\|M.keys\|)`), is unchanged at the comparison. |

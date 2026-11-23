@@ -1,0 +1,4 @@
+// A primitive with one Boolean query.
+Primitive ModQ() {
+    Bool Test(Int k, Int a, Bool b);
+}

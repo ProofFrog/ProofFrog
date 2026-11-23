@@ -714,6 +714,15 @@ CASES = [
      "the same with an else-less guard, which released code removed"),
     ("F-419", "parent_control.proof", "accept", "lemma matching",
      "positive control: the constant stands for one of its own type"),
+    ("SINK-DECLARATION-TYPE-READ", "attack.proof", "reject",
+     "SinkDeclarationIntoBranch",
+     "inlining put a written field in a ModInt modulus (ModInt<c> v = a;), and "
+     "the sink moved the declaration past c = c + 1; (F-420's class, caught "
+     "before release)"),
+    ("SINK-DECLARATION-TYPE-READ", "control.proof", "accept",
+     "SinkDeclarationIntoBranch",
+     "positive control: the declaration before the if and in its only branch, "
+     "with no write in between, are identified"),
     ("MEMBER-READ-IF-CONDITION-ALIAS", "stale_definition.proof", "reject",
      "IfConditionAliasSubstitution",
      "a field read only via M.keys escaped the Initialize-only check"),

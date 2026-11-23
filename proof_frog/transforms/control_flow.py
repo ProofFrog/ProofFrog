@@ -1656,6 +1656,154 @@ class RemoveEmptyIfTransformer(BlockTransformer):
         return frog_ast.Block(kept)
 
 
+class SinkDeclarationIntoBranchTransformer(BlockTransformer):
+    """Moves ``T x = e;`` into the only branch of a later ``if`` that uses ``x``.
+
+    Let ``S_i`` be ``T x = e;`` and ``S_j`` the first later statement of the
+    same block that mentions ``x``. When ``S_j`` is an ``if`` with exactly one
+    branch mentioning ``x`` (no condition, no other branch and no statement
+    after it mentions ``x``, and that branch binds no ``x``), ``S_i`` moves to
+    the start of that branch provided that evaluating ``e`` there, and only
+    on paths into the branch, gives the same value and has no effect:
+
+    - every call in ``e`` touches no game state (a method of an instantiated
+      primitive or a ``let:`` ``Function``; FROGLANG_REFERENCE, evaluation
+      order), so evaluating ``e`` has no effect and its value depends only on
+      the names it reads and its own coins;
+    - no statement between ``S_i`` and ``S_j`` writes or rebinds a name ``e``
+      reads (``reassigns_or_rebinds``, any depth), and neither those
+      statements nor the conditions of ``S_j`` make a call that may touch
+      state (which could write a field ``e`` reads).
+
+    Then the names ``e`` reads hold the same values at the branch's start as
+    at ``S_i``, a path that skips the branch never uses ``x``, and a path into
+    it computes ``x`` from the same values. Draws are left to Sink Uniform
+    Sample, which checks their domains.
+    """
+
+    def __init__(self, ctx: PipelineContext) -> None:
+        self.ctx = ctx
+
+    def _stateful_call(self, node: frog_ast.ASTNode) -> frog_ast.FuncCall | None:
+        """The first call in *node* that may touch game state, or None."""
+
+        def touches_state(candidate: frog_ast.ASTNode) -> bool:
+            if not isinstance(candidate, frog_ast.FuncCall):
+                return False
+            if _lookup_primitive_method(candidate.func, self.ctx.proof_namespace):
+                return False
+            if isinstance(candidate.func, frog_ast.Variable) and isinstance(
+                self.ctx.proof_let_types.get(candidate.func.name),
+                frog_ast.FunctionType,
+            ):
+                return False
+            return True
+
+        found = SearchVisitor(touches_state).visit(node)
+        return found if isinstance(found, frog_ast.FuncCall) else None
+
+    def _note(self, name: str, reason: str) -> None:
+        self.ctx.near_misses.append(
+            NearMiss(
+                transform_name="Sink Declaration Into Branch",
+                reason=f"'{name}' is used only in one branch of a later if but"
+                f" was not moved into it: {reason}",
+                location=None,
+                suggestion=None,
+                variable=name,
+                method=None,
+            )
+        )
+
+    def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
+        statements = list(block.statements)
+        for index, statement in enumerate(statements):
+            if not (
+                isinstance(statement, frog_ast.Assignment)
+                and statement.the_type is not None
+                and isinstance(statement.var, frog_ast.Variable)
+            ):
+                continue
+            sunk = self._sink(index, statement, statements)
+            if sunk is not None:
+                return frog_ast.Block(sunk)
+        return block
+
+    def _sink(
+        self,
+        index: int,
+        statement: frog_ast.Assignment,
+        statements: list[frog_ast.Statement],
+    ) -> list[frog_ast.Statement] | None:
+        assert isinstance(statement.var, frog_ast.Variable)
+        name = statement.var.name
+        target_index = next(
+            (
+                later
+                for later in range(index + 1, len(statements))
+                if name in referenced_variable_names(statements[later])
+            ),
+            None,
+        )
+        if target_index is None:
+            return None
+        target = statements[target_index]
+        if not isinstance(target, frog_ast.IfStatement):
+            return None
+        rest = statements[target_index + 1 :]
+        if any(name in referenced_variable_names(later) for later in rest):
+            return None
+        if any(
+            name in referenced_variable_names(condition)
+            for condition in target.conditions
+        ):
+            return None
+        branches = [
+            position
+            for position, branch in enumerate(target.blocks)
+            if name in referenced_variable_names(branch)
+        ]
+        if len(branches) != 1:
+            return None
+        branch = branches[0]
+        if name in block_binder_names(target.blocks[branch]):
+            return None
+        call = self._stateful_call(statement.value)
+        if call is not None:
+            self._note(name, f"its value calls '{call}', which may touch state")
+            return None
+        # The declared type is read too (F-420's class): inlining a scheme
+        # method's `ModInt<k> x = a;` with a written game field `c` for `k`
+        # gives `ModInt<c> x = a;`, and moved past `c = c + 1;` the store would
+        # reduce `a` modulo the new value.
+        assert statement.the_type is not None
+        reads = referenced_variable_names(statement.value) | referenced_variable_names(
+            statement.the_type
+        )
+        passed = statements[index + 1 : target_index]
+        for between in passed:
+            if reassigns_or_rebinds(reads, between):
+                self._note(
+                    name, f"'{between}' writes or rebinds a name its value reads"
+                )
+                return None
+            call = self._stateful_call(between)
+            if call is not None:
+                self._note(name, f"'{call}' in between may write state its value reads")
+                return None
+        for condition in target.conditions:
+            call = self._stateful_call(condition)
+            if call is not None:
+                self._note(
+                    name, f"the if condition calls '{call}', which may touch state"
+                )
+                return None
+        blocks = list(target.blocks)
+        blocks[branch] = frog_ast.Block([statement] + list(blocks[branch].statements))
+        moved = frog_ast.IfStatement(list(target.conditions), blocks)
+        return statements[:index] + passed + [moved] + rest
+
+
 def _walk_nodes(node: object) -> list[frog_ast.ASTNode]:
     """Every AST node reachable from *node* (including itself)."""
     found: list[frog_ast.ASTNode] = []
@@ -4515,6 +4663,17 @@ class RemoveEmptyIf(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return RemoveEmptyIfTransformer(ctx).transform(game)
+
+
+class SinkDeclarationIntoBranch(TransformPass):
+    """``T x = e; ... if (c) { ... x ... }`` -> ``... if (c) { T x = e; ... }``
+    when only that branch uses ``x`` and evaluating ``e`` there changes
+    nothing (see :class:`SinkDeclarationIntoBranchTransformer`)."""
+
+    name = "Sink Declaration Into Branch"
+
+    def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
+        return SinkDeclarationIntoBranchTransformer(ctx).transform(game)
 
 
 class RemoveUnreachable(TransformPass):

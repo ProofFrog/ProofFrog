@@ -1,0 +1,17 @@
+// Attack on Sink Declaration Into Branch: the declared type ModInt<c> reads
+// the field c, which a statement between the declaration and the if writes.
+import 'ModQ.primitive';
+import 'ModSDecl3.scheme';
+import 'ModQPair.game';
+
+proof:
+
+let:
+    ModSDecl3 E = ModSDecl3();
+
+theorem:
+    ModQPair(E);
+
+games:
+    ModQPair(E).Left against ModQPair(E).Adversary;
+    ModQPair(E).Right against ModQPair(E).Adversary;

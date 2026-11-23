@@ -1,0 +1,18 @@
+// Positive control for attack_sink_modint3 (uses ModSDecl, no if (false) block).proof: a TRUE equivalence.
+import 'ModQ.primitive';
+import 'ModSDecl.scheme';
+import 'ModSDeclIn.scheme';
+import 'CtlQPair.game';
+
+proof:
+
+let:
+    ModSDecl E = ModSDecl();
+    ModSDeclIn F = ModSDeclIn();
+
+theorem:
+    CtlQPair(E, F);
+
+games:
+    CtlQPair(E, F).Left against CtlQPair(E, F).Adversary;
+    CtlQPair(E, F).Right against CtlQPair(E, F).Adversary;

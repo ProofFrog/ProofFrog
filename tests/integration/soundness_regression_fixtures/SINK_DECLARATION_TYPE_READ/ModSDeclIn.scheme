@@ -1,0 +1,15 @@
+// ModSDecl3.Test with the declaration already at the start of the if (b)
+// branch and without the if (false) block, which never runs. The same
+// function as ModSDecl3.Test.
+import 'ModQ.primitive';
+
+Scheme ModSDeclIn() extends ModQ {
+    Bool Test(Int k, Int a, Bool b) {
+        Bool r = false;
+        if (b) {
+            ModInt<k> v = a;
+            r = v == v + v;
+        }
+        return r;
+    }
+}

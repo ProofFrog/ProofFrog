@@ -1,0 +1,14 @@
+// Test(k, a, b): when b holds, returns whether a is 0 mod k (v == v + v).
+// v is a typed declaration used only in the if (b) branch.
+import 'ModQ.primitive';
+
+Scheme ModSDecl() extends ModQ {
+    Bool Test(Int k, Int a, Bool b) {
+        ModInt<k> v = a;
+        Bool r = false;
+        if (b) {
+            r = v == v + v;
+        }
+        return r;
+    }
+}

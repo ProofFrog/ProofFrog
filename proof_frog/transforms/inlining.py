@@ -35,6 +35,8 @@ from ._base import (
     NearMiss,
     _lookup_primitive_method,
     may_return_before,
+    note_type_snapshot,
+    type_snapshot_names,
 )
 from ._coercion import coercing_store_names_for, note_coercing_store
 from .alpha_rename import block_binder_names
@@ -326,8 +328,11 @@ class RedundantCopyTransformer(BlockTransformer):
         self,
         coercing: frozenset[str] = frozenset(),
         ctx: PipelineContext | None = None,
+        snapshots: frozenset[str] = frozenset(),
     ) -> None:
         self.coercing = coercing
+        # F-420: locals a type names whose value reads a changing variable.
+        self.snapshots = snapshots
         self.ctx = ctx
 
     def _transform_block_wrapper(
@@ -358,6 +363,11 @@ class RedundantCopyTransformer(BlockTransformer):
             # F-356: `ModInt<q> v = w;` with `w : Int` holds `w mod q`.
             if copy_name in self.coercing:
                 note_coercing_store(
+                    self.ctx, "Remove Redundant Copies", copy_name, statement.origin
+                )
+                continue
+            if copy_name in self.snapshots:
+                note_type_snapshot(
                     self.ctx, "Remove Redundant Copies", copy_name, statement.origin
                 )
                 continue
@@ -497,9 +507,12 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
         self,
         ctx: PipelineContext | None = None,
         coercing: frozenset[str] = frozenset(),
+        snapshots: frozenset[str] = frozenset(),
     ) -> None:
         self.ctx = ctx
         self.coercing = coercing
+        # F-420: locals a type names whose value reads a changing variable.
+        self.snapshots = snapshots
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
         for index, statement in enumerate(block.statements):
@@ -521,6 +534,11 @@ class InlineSingleUseVariableTransformer(BlockTransformer):
             if var_name in self.coercing:
                 note_coercing_store(
                     self.ctx, "Inline Single-Use Variable", var_name, statement.origin
+                )
+                continue
+            if var_name in self.snapshots:
+                note_type_snapshot(
+                    self.ctx, "Inline Single-Use Variables", var_name, statement.origin
                 )
                 continue
 
@@ -924,11 +942,14 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
         function_var_names: set[str] | None = None,
         coercing: frozenset[str] = frozenset(),
         ctx: PipelineContext | None = None,
+        snapshots: frozenset[str] = frozenset(),
     ) -> None:
         super().__init__()
         self._function_var_names = function_var_names or set()
         # F-356: names some store converts into a ModInt.
         self._coercing = coercing
+        # F-420: locals a type names whose value reads a changing variable.
+        self._snapshots = snapshots
         self.ctx = ctx
 
     def _transform_block_wrapper(self, block: frog_ast.Block) -> frog_ast.Block:
@@ -947,6 +968,14 @@ class InlineMultiUsePureExpressionTransformer(BlockTransformer):
 
             if var_name in self._coercing:
                 note_coercing_store(
+                    self.ctx,
+                    "Inline Multi-Use Pure Expressions",
+                    var_name,
+                    statement.origin,
+                )
+                continue
+            if var_name in self._snapshots:
+                note_type_snapshot(
                     self.ctx,
                     "Inline Multi-Use Pure Expressions",
                     var_name,
@@ -1933,7 +1962,9 @@ class RedundantCopy(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return RedundantCopyTransformer(
-            coercing_store_names_for(game, ctx), ctx
+            coercing_store_names_for(game, ctx),
+            ctx,
+            snapshots=type_snapshot_names(game),
         ).transform(game)
 
 
@@ -1953,7 +1984,9 @@ class InlineSingleUseVariable(TransformPass):
 
     def apply(self, game: frog_ast.Game, ctx: PipelineContext) -> frog_ast.Game:
         return InlineSingleUseVariableTransformer(
-            ctx, coercing_store_names_for(game, ctx)
+            ctx,
+            coercing_store_names_for(game, ctx),
+            snapshots=type_snapshot_names(game),
         ).transform(game)
 
 
@@ -2625,6 +2658,7 @@ class InlineMultiUsePureExpression(TransformPass):
             function_var_names=function_var_names,
             coercing=coercing_store_names_for(game, ctx),
             ctx=ctx,
+            snapshots=type_snapshot_names(game),
         ).transform(game)
 
 

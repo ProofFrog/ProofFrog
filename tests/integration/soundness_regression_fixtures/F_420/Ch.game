@@ -1,0 +1,25 @@
+// A challenger pair whose Test oracle calls E.Test with its counter c and
+// whose Inc oracle counts c up. Both sides are the same.
+import 'ModP.primitive';
+
+Game Real(ModP E) {
+    Int c = 2;
+    Bool Test(Int a, Bool b, Bool d) {
+        return E.Test(c, a, b, d);
+    }
+    Void Inc() {
+        c = c + 1;
+    }
+}
+
+Game Ideal(ModP E) {
+    Int c = 2;
+    Bool Test(Int a, Bool b, Bool d) {
+        return E.Test(c, a, b, d);
+    }
+    Void Inc() {
+        c = c + 1;
+    }
+}
+
+export as Ch;

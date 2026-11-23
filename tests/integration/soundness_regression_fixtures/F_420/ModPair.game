@@ -1,0 +1,25 @@
+// Left runs Test with modulus c before counting c up, Right after.
+// First call f(2, true, true): Left uses ModInt<2>, stores 2 = 0 and
+// returns true; Right uses ModInt<3>, stores 2, 2 + 2 = 1, returns false.
+// Distinguishable with advantage 1.
+import 'ModP.primitive';
+
+Game Left(ModP E) {
+    Int c = 2;
+    Bool f(Int a, Bool b, Bool d) {
+        Bool r = E.Test(c, a, b, d);
+        c = c + 1;
+        return r;
+    }
+}
+
+Game Right(ModP E) {
+    Int c = 2;
+    Bool f(Int a, Bool b, Bool d) {
+        c = c + 1;
+        Bool r = E.Test(c, a, b, d);
+        return r;
+    }
+}
+
+export as ModPair;

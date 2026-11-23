@@ -1,0 +1,23 @@
+// Target: the method inliner and the forwarding passes (F-420).
+// Hypothesis: as attack_merge_flat.proof, with the modulus read in two
+// declarations (ModInt<k> v; ModInt<k> w;). Inlining substituted c for k;
+// once the inliner bound k to a copy of c, Remove Redundant Copies still
+// put c back into both types, and Topological Sorting and Merge Bare
+// Declaration then carried the declarations past c = c + 1;.
+// Sound engine: the hop FAILS (first f(2, true, true): Left true, Right
+// false). Unsound engine: Proof Succeeded.
+import 'ModP.primitive';
+import 'ModSTwice.scheme';
+import 'ModPair.game';
+
+proof:
+
+let:
+    ModSTwice E = ModSTwice();
+
+theorem:
+    ModPair(E);
+
+games:
+    ModPair(E).Left against ModPair(E).Adversary;
+    ModPair(E).Right against ModPair(E).Adversary;

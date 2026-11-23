@@ -1,0 +1,24 @@
+// Target: Merge Bare Declaration, the MERGE (already on main), in
+// the branch form (2026-11-21): `v = a;` at the top of the if (b) branch.
+// Hypothesis: as attack_mod/attack_mod.proof, but the declaration is merged
+// with its assignment instead of moved: after Topological Sorting places
+// `c = c + 1;` between `ModInt<c> v;` (c substituted for ModSBranch.Test's
+// parameter k by inlining) and the assignment, the merge yields
+// `ModInt<c> v = a;` after the write, reducing a modulo the new c.
+// Sound engine: the hop FAILS (first f(2, true, true): Left true, Right
+// false). Unsound engine: Proof Succeeded.
+import 'ModP.primitive';
+import 'ModSBranch.scheme';
+import 'ModPair.game';
+
+proof:
+
+let:
+    ModSBranch E = ModSBranch();
+
+theorem:
+    ModPair(E);
+
+games:
+    ModPair(E).Left against ModPair(E).Adversary;
+    ModPair(E).Right against ModPair(E).Adversary;

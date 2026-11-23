@@ -1,0 +1,11 @@
+// Test(k, a, b, d) with the store in the declaration: returns whether
+// a == 0 mod k. The same function as ModSFlat.Test.
+import 'ModP.primitive';
+
+Scheme ModSDirect() extends ModP {
+    Bool Test(Int k, Int a, Bool b, Bool d) {
+        ModInt<k> v = a;
+        Bool r = v == v + v;
+        return r;
+    }
+}
